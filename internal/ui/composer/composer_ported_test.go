@@ -270,13 +270,19 @@ func TestView_CostYieldsToTheConnectionLightWhenNarrow(t *testing.T) {
 	}
 }
 
-// statusThemedModel builds a composer with the real (unicode) glyph set resolved, which
-// the status-row tests need: newModel()'s minimal set has no Waiting or Async glyph.
+// statusThemedModel builds a composer the status-row tests can assert exact glyphs
+// against: newModel()'s minimal set has no Waiting or Async glyph, and theme.Resolve()
+// picks the ASCII fallback under DAINTREE_ASCII=1 or a non-UTF locale — which would fail
+// these tests for an environment reason rather than a behavioural one. The three glyphs
+// this row spends are therefore pinned explicitly; the ASCII path gets its own test.
 func statusThemedModel() Model {
 	m := newModel()
 	th := theme.Resolve()
 	th.Mode = theme.ModeDark
 	th.Color = theme.PaletteFor(theme.ModeDark)
+	th.Glyphs.Async = "●"
+	th.Glyphs.Waiting = "◷"
+	th.Glyphs.Bullet = "·"
 	m.SetTheme(th)
 	return m
 }
@@ -302,15 +308,19 @@ func TestView_SupervisionCountsOnTheMCPRow(t *testing.T) {
 		name     string
 		timers   int
 		watchers int
-		want     string // "" → no supervision segment at all
+		want     string   // "" → no supervision segment at all
+		absent   []string // nouns that must NOT appear (a zero category is omitted, not zeroed)
 	}{
-		{"idle", 0, 0, ""},
-		{"one timer", 1, 0, "◷ 1 timer"},
-		{"several timers", 3, 0, "◷ 3 timers"},
-		{"one watcher", 0, 1, "◷ 1 watcher"},
-		{"several watchers", 0, 2, "◷ 2 watchers"},
-		{"one of each", 1, 1, "◷ 1 timer · 1 watcher"},
-		{"both plural", 2, 3, "◷ 2 timers · 3 watchers"},
+		{"idle", 0, 0, "", []string{"timer", "watcher"}},
+		{"one timer", 1, 0, "◷ 1 timer", []string{"watcher"}},
+		{"several timers", 3, 0, "◷ 3 timers", []string{"watcher"}},
+		{"one watcher", 0, 1, "◷ 1 watcher", []string{"timer"}},
+		{"several watchers", 0, 2, "◷ 2 watchers", []string{"timer"}},
+		{"one of each", 1, 1, "◷ 1 timer · 1 watcher", nil},
+		{"both plural", 2, 3, "◷ 2 timers · 3 watchers", nil},
+		// Negative counts cannot arrive from production (they come from len()), but the
+		// formatter must not render "-1 timers" if one ever did.
+		{"negative counts", -1, -4, "", []string{"timer", "watcher"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -323,29 +333,64 @@ func TestView_SupervisionCountsOnTheMCPRow(t *testing.T) {
 			if row == "" {
 				t.Fatalf("no MCP row in:\n%s", frame)
 			}
+			for _, noun := range tc.absent {
+				if strings.Contains(row, noun) {
+					t.Errorf("a zero/negative category was still named (%q): %q", noun, row)
+				}
+			}
 			if tc.want == "" {
 				// Hidden entirely at zero — the segment APPEARING is the signal, so an
-				// idle session must not gain a glyph, a "0", or a stray separator.
-				if strings.Contains(row, "◷") || strings.Contains(row, "timer") || strings.Contains(row, "watcher") {
-					t.Errorf("idle session grew a supervision segment: %q", row)
+				// idle session must not gain a glyph, a "0", or a trailing separator. The
+				// row is pinned EXACTLY here, because a substring check would happily pass
+				// on a dangling "● MCP · ".
+				if got := strings.TrimRight(row, " "); got != "● MCP" {
+					t.Errorf("idle status row is not bare: %q", got)
 				}
 				return
 			}
 			if !strings.Contains(row, tc.want) {
-				t.Errorf("want %q on the MCP row, got %q", tc.want, row)
+				// Fatal: the ordering checks below index on "◷" and would report a
+				// nonsense second failure once it is absent.
+				t.Fatalf("want %q on the MCP row, got %q", tc.want, row)
 			}
 			// It belongs beside the connection light, not on the key-hints row.
 			if strings.Contains(hintLineC(frame), "◷") {
 				t.Errorf("supervision leaked onto the hint row: %q", hintLineC(frame))
 			}
 			// The connection light keeps the left anchor; supervision follows it.
-			if !strings.HasPrefix(strings.TrimLeft(row, " "), "●") {
-				t.Errorf("the connection light lost its left anchor: %q", row)
-			}
-			if strings.Index(row, "●") > strings.Index(row, "◷") {
-				t.Errorf("supervision rendered before the connection light: %q", row)
+			if !strings.HasPrefix(row, "● MCP · "+tc.want) {
+				t.Errorf("want the row to open %q, got %q", "● MCP · "+tc.want, row)
 			}
 		})
+	}
+}
+
+// With the connection light hidden the supervision segment becomes the left anchor
+// itself — no leading separator, no cell of padding standing in for the missing MCP
+// label. Unreachable from the production caller (which always reports a connection
+// state), but it is a real branch in statusRow and cheap to pin.
+func TestView_SupervisionAnchorsTheRowWhenMCPIsHidden(t *testing.T) {
+	m := statusThemedModel()
+	for _, cost := range []string{"", "$0.0052"} {
+		frame := stripAnsiC(m.View(ViewParams{
+			Width: 80, MCPStatus: MCPHidden, Cost: cost,
+			TimerCount: 1, WatcherCount: 2,
+		}))
+		var row string
+		for _, line := range strings.Split(frame, "\n") {
+			if strings.Contains(line, "◷") {
+				row = line
+			}
+		}
+		if row == "" {
+			t.Fatalf("cost=%q: no supervision row in:\n%s", cost, frame)
+		}
+		if !strings.HasPrefix(row, "◷ 1 timer · 2 watchers") {
+			t.Errorf("cost=%q: supervision is not the left anchor: %q", cost, row)
+		}
+		if cost != "" && !strings.HasSuffix(strings.TrimRight(row, " "), cost) {
+			t.Errorf("cost=%q: the bill left the right edge: %q", cost, row)
+		}
 	}
 }
 
@@ -354,22 +399,25 @@ func TestView_SupervisionCountsOnTheMCPRow(t *testing.T) {
 // counts, at nonzero counts, and when the counts change under it.
 func TestView_SupervisionDoesNotChangeComposerHeight(t *testing.T) {
 	m := statusThemedModel()
-	base := ViewParams{Width: 80, MCPStatus: MCPConnected, Cost: "$0.0052"}
 
-	idle := m.View(base)
+	idle := m.View(ViewParams{Width: 80, MCPStatus: MCPConnected, Cost: "$0.0052"})
 	oneTimer := m.View(ViewParams{Width: 80, MCPStatus: MCPConnected, Cost: "$0.0052", TimerCount: 1})
 	both := m.View(ViewParams{Width: 80, MCPStatus: MCPConnected, Cost: "$0.0052", TimerCount: 4, WatcherCount: 7})
+
+	// Prove the counts actually rendered FIRST: an implementation that ignored them
+	// outright would keep every height below identical and pass vacuously.
+	if !strings.Contains(stripAnsiC(oneTimer), "◷ 1 timer") {
+		t.Fatalf("the single count never rendered:\n%s", stripAnsiC(oneTimer))
+	}
+	if !strings.Contains(stripAnsiC(both), "◷ 4 timers · 7 watchers") {
+		t.Fatalf("the combined counts never rendered:\n%s", stripAnsiC(both))
+	}
 
 	if strings.Count(idle, "\n") != strings.Count(oneTimer, "\n") {
 		t.Error("showing a supervision count changed the composer height")
 	}
 	if strings.Count(oneTimer, "\n") != strings.Count(both, "\n") {
 		t.Error("changing the supervision counts changed the composer height")
-	}
-	// Zero counts must leave the frame byte-identical to one that never knew about
-	// supervision at all — an idle session stays exactly as quiet as it was.
-	if idle != m.View(ViewParams{Width: 80, MCPStatus: MCPConnected, Cost: "$0.0052", TimerCount: 0, WatcherCount: 0}) {
-		t.Error("zero counts perturbed the idle frame")
 	}
 }
 
@@ -381,6 +429,7 @@ func TestView_SupervisionDoesNotChangeComposerHeight(t *testing.T) {
 func TestView_StatusRowDropsCostThenSupervisionWhenNarrow(t *testing.T) {
 	m := statusThemedModel()
 	const cost = "$0.0052"
+	const segment = "◷ 1 timer · 2 watchers"
 	render := func(w int) string {
 		return stripAnsiC(m.View(ViewParams{
 			Width: w, MCPStatus: MCPConnected, Cost: cost,
@@ -390,47 +439,63 @@ func TestView_StatusRowDropsCostThenSupervisionWhenNarrow(t *testing.T) {
 
 	// Wide: all three facts share the row, the bill against the right edge.
 	wide := mcpRowOf(render(100))
-	if !strings.Contains(wide, "● MCP") || !strings.Contains(wide, "◷ 1 timer · 2 watchers") {
+	if !strings.HasPrefix(wide, "● MCP · "+segment) {
 		t.Fatalf("wide row is missing a segment: %q", wide)
 	}
-	if !strings.HasSuffix(strings.TrimRight(wide, " "), cost) {
-		t.Fatalf("the bill is not at the right edge: %q", wide)
+	if !strings.HasSuffix(wide, cost) || ansiWidth(wide) != 100 {
+		t.Fatalf("the bill is not at the right edge of a full-width row: %q", wide)
 	}
 
-	// Sweep down. Track the phase transitions and assert they only ever go one way.
-	costGone, supGone := false, false
+	// Sweep down. Assertions run against the WHOLE frame rather than a row located by
+	// its "MCP" text: below the width that fits the connection label, that search finds
+	// nothing and every check on it silently degrades to a no-op on "".
+	costGone, supGone, sawMiddlePhase := false, false, false
 	for w := 100; w >= 1; w-- {
-		row := mcpRowOf(render(w))
-		hasCost := strings.Contains(row, cost)
-		hasSup := strings.Contains(row, "◷")
+		frame := render(w)
+		hasCost := strings.Contains(frame, cost)
+		hasSup := strings.Contains(frame, "◷")
 
 		if hasCost && costGone {
-			t.Fatalf("width %d: the bill came back after being dropped: %q", w, row)
+			t.Fatalf("width %d: the bill came back after being dropped:\n%s", w, frame)
 		}
 		if hasSup && supGone {
-			t.Fatalf("width %d: supervision came back after being dropped: %q", w, row)
+			t.Fatalf("width %d: supervision came back after being dropped:\n%s", w, frame)
+		}
+		switch {
+		case hasSup && !hasCost:
+			// The phase that proves the priority is an ORDER and not a single cliff:
+			// supervision outliving the bill by at least one column.
+			sawMiddlePhase = true
+		case !hasSup && hasCost:
+			t.Fatalf("width %d: the bill outlived supervision:\n%s", w, frame)
 		}
 		if !hasCost {
 			costGone = true
+			// Atomic: the bill is dropped whole, never left as a stub like "$0.00…".
+			if strings.Contains(frame, "$") {
+				t.Fatalf("width %d: a partial bill survived:\n%s", w, frame)
+			}
 		}
 		if !hasSup {
 			supGone = true
-			// Monotonic: supervision is only dropped once the bill already is.
-			if hasCost {
-				t.Fatalf("width %d: the bill outlived supervision: %q", w, row)
-			}
 		}
 		// Never squeezed: a supervision segment that renders at all renders whole.
-		if hasSup && !strings.Contains(row, "◷ 1 timer · 2 watchers") {
-			t.Fatalf("width %d: supervision was truncated mid-segment: %q", w, row)
+		if hasSup && !strings.Contains(frame, segment) {
+			t.Fatalf("width %d: supervision was truncated mid-segment:\n%s", w, frame)
 		}
-		// The row must never exceed the width it was given.
-		if got := ansiWidth(row); got > w {
-			t.Fatalf("width %d: status row overflowed to %d cells: %q", w, got, row)
+		// No line of the frame may exceed the width it was given, at ANY width — this is
+		// the part the "MCP"-anchored search used to stop checking.
+		for i, line := range strings.Split(frame, "\n") {
+			if got := ansiWidth(line); got > w {
+				t.Fatalf("width %d: line %d overflowed to %d cells: %q", w, i, got, line)
+			}
 		}
 	}
 	if !costGone || !supGone {
 		t.Fatal("the sweep never got narrow enough to drop both — the test proves nothing")
+	}
+	if !sawMiddlePhase {
+		t.Fatal("the bill and supervision dropped at the same width — priority is a cliff, not an order")
 	}
 
 	// The connection light is the last thing standing.

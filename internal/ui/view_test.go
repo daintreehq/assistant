@@ -181,7 +181,7 @@ func TestComposerView_UsesDashboardSupervisionCounts(t *testing.T) {
 		// it instead of Watchers would be a plausible slip that this leaves exposed.
 		Agents: nil,
 	}
-	out := ansi.Strip(m.composerView(m.usableWidth()))
+	out := ansi.Strip(m.composerView(m.contentW()))
 	if !strings.Contains(out, "◷ 1 timer · 2 watchers") {
 		t.Errorf("supervision counts missing from the composer:\n%s", out)
 	}
@@ -198,9 +198,44 @@ func TestComposerView_DoesNotCountAsyncAsSupervision(t *testing.T) {
 			{ID: "asy_2", Status: "settling"},
 		},
 	}
-	out := ansi.Strip(m.composerView(m.usableWidth()))
+	out := ansi.Strip(m.composerView(m.contentW()))
 	if strings.Contains(out, "◷") || strings.Contains(out, "timer") || strings.Contains(out, "watcher") {
 		t.Errorf("live async work rendered as supervision:\n%s", out)
+	}
+}
+
+// The supervision segment must obey the live footer's width contract through the FULL
+// View() assembly — indentation, gutter and all — at every golden width. The ops-deck
+// width test cannot cover this: viewOperations returns from footer() before the composer
+// is ever rendered, so the counts it seeds never reach the status row.
+func TestViewWidths_HomeWithSupervision(t *testing.T) {
+	for _, w := range goldenWidths {
+		m := testModel(w)
+		m.dashboard = Dashboard{
+			Timers: []domain.TimerRecord{
+				{Title: "nightly digest", FireAt: 1_000_000_000_000},
+				{Title: "retry the failed push", FireAt: 1_000_000_060_000},
+			},
+			Watchers: []domain.WatcherRecord{
+				{ID: "wch_1", Status: "active"},
+				{ID: "wch_2", Status: "active"},
+				{ID: "wch_3", Status: "paused"},
+			},
+		}
+		v := m.View()
+		assertNoOverflow(t, "home+supervision@"+itoa(w), v.Content, m.usableWidth())
+		assertNoForbiddenEscapes(t, "home+supervision@"+itoa(w), v.Content)
+	}
+
+	// The widest golden width is comfortably enough for the whole segment, so this also
+	// pins that the counts reach the real frame rather than only the direct composer call.
+	m := testModel(goldenWidths[len(goldenWidths)-1])
+	m.dashboard = Dashboard{
+		Timers:   []domain.TimerRecord{{Title: "nightly digest", FireAt: 1_000_000_000_000}},
+		Watchers: []domain.WatcherRecord{{ID: "wch_1", Status: "active"}},
+	}
+	if out := ansi.Strip(m.View().Content); !strings.Contains(out, "◷ 1 timer · 1 watcher") {
+		t.Errorf("supervision missing from the assembled frame:\n%s", out)
 	}
 }
 
