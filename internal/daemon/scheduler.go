@@ -712,7 +712,15 @@ func (s *Scheduler) fireTimer(ctx context.Context, rec domain.TimerRecord, now i
 		return
 	}
 	if terminal {
-		_, _ = s.deps.Store.RevokeGrantsByActor(rec.ID, now)
+		// DEFER the revoke past the dispatch below. A terminal claim is the LAST fire, and
+		// revoking inline here would retire the grant before the call_safe_tool payload that
+		// needs it: ConsumeGrant only matches rows with revokedAt IS NULL, so a one-shot timer
+		// (terminal on its very first fire) could never spend the grant it was given. The call
+		// came back CONFIRMATION_REQUIRED and dispatch published a blocked item offering to
+		// authorize a timer that had already fired — a remediation that cannot work. Deferring
+		// keeps the grant live for exactly the fire it was minted for and still retires it
+		// before fireTimer returns, including on the panic path (defer runs while unwinding).
+		defer func() { _, _ = s.deps.Store.RevokeGrantsByActor(rec.ID, now) }()
 	}
 
 	// A long closure collapses every missed repeat into this one fire; surface how

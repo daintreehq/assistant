@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/daintreehq/assistant/internal/daemon"
 	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/tools"
 )
@@ -64,5 +65,70 @@ func TestTimerScopedGrantSucceedsThroughDaemonAdapter(t *testing.T) {
 	denied, _ := adapter.Dispatch(context.Background(), domain.ActorTimer, "tmr_other", "test.grantable", "{}")
 	if denied.Ok || denied.Error.Code != "CONFIRMATION_REQUIRED" {
 		t.Fatalf("an unrelated timer id must be denied (CONFIRMATION_REQUIRED), got %+v", denied)
+	}
+}
+
+// TestOneShotTimerSpendsItsGrantThroughTheRealScheduler is the cross-layer proof for
+// issue #333. The test above dispatches through the adapter directly, which skips
+// fireTimer entirely — so it stayed green while the headline workflow the tool's own
+// description recommends (one one-shot timer whose call_safe_tool payload runs a
+// confirm-required tool, plus a timer-scoped grant) could not succeed at all: the
+// terminal claim revoked the grant before the dispatch that needed it. This drives a
+// REAL scheduler over the REAL store and registry, so the ordering is covered
+// end-to-end rather than at the seam below it.
+func TestOneShotTimerSpendsItsGrantThroughTheRealScheduler(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+
+	ran := 0
+	tool := grantTestTool()
+	tool.Handle = func(_ context.Context, _ json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
+		ran++
+		return tools.Ok("did the thing", nil)
+	}
+	if err := a.Registry.Register(tool); err != nil {
+		t.Fatalf("register test tool: %v", err)
+	}
+
+	const timerID = "tmr_oneshot"
+	riskJSON := `["project"]`
+	if _, err := a.Store.InsertGrant(domain.AutomationGrantRecord{
+		ActorID:                timerID,
+		ActorType:              domain.AutomationGrantActorType(domain.ActorTimer),
+		AllowedRiskClassesJson: &riskJSON,
+		ExpiresAt:              domain.NowMS() + 600_000,
+		MaxUses:                5,
+	}); err != nil {
+		t.Fatalf("insert grant: %v", err)
+	}
+	// No repeat block ⇒ TERMINAL on the very first fire, which is exactly the case
+	// that used to lose its grant.
+	if _, err := a.Store.InsertTimer(domain.TimerRecord{
+		ID: timerID, Title: "spawn at fire time", FireAt: 1, Status: "scheduled",
+		PayloadType: "call_safe_tool",
+		PayloadJson: `{"type":"call_safe_tool","toolCall":{"toolName":"test.grantable","args":{}}}`,
+	}); err != nil {
+		t.Fatalf("insert timer: %v", err)
+	}
+
+	s := daemon.NewScheduler(daemon.SchedulerDeps{
+		Store:    a.Store,
+		Queue:    daemonQueueAdapter{q: a.Queue},
+		Registry: daemonRegistryAdapter{app: a},
+	})
+	s.Tick(context.Background(), 1_000)
+
+	if ran != 1 {
+		t.Fatalf("the confirm-required payload must run exactly once on a grant-backed one-shot fire, ran %d times", ran)
+	}
+	// And the authority must not outlive the timer: a fired one-shot never fires
+	// again, so leaving a live grant behind would be a standing permission nobody
+	// can spend or see.
+	live, err := a.Store.ListGrants(timerID, domain.NowMS())
+	if err != nil {
+		t.Fatalf("list grants: %v", err)
+	}
+	if len(live) != 0 {
+		t.Errorf("a terminal fire must revoke the timer's grants afterwards, %d still live", len(live))
 	}
 }
