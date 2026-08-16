@@ -46,7 +46,11 @@ var mutatingGrantRisks = map[domain.RiskClass]bool{
 type Store interface {
 	InsertGrant(ctx context.Context, rec domain.AutomationGrantRecord) (string, error)
 	ListGrants(ctx context.Context, actorID string) ([]domain.AutomationGrantRecord, error)
-	RevokeGrant(ctx context.Context, id string) (bool, error)
+	// RevokeGrant withdraws a grant by id. found reports whether the id exists at
+	// all; didRevoke reports whether this call took live authority away (false for a
+	// grant that was already revoked, has expired, or is out of uses). Only !found is
+	// an error for the caller — revoking is idempotent by design.
+	RevokeGrant(ctx context.Context, id string) (found, didRevoke bool, err error)
 }
 
 // Deps is the dependency set for the grant family.
@@ -319,7 +323,7 @@ var revokeSchema = json.RawMessage(`{
 func newRevokeTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "grant.revoke",
-		Description: "Revoke an automation grant by its grt_… id, immediately withdrawing that actor's pre-authorization to run confirm-required tools unattended — the next watcher/timer/wake call that needed it becomes a blocked pending-approval inbox item instead. Interactive main actor only (else GRANT_ACTOR_FORBIDDEN); an unknown id fails GRANT_NOT_FOUND. Use it when the user calls off unattended work.",
+		Description: "Revoke an automation grant by its grt_… id, immediately withdrawing that actor's pre-authorization to run confirm-required tools unattended — the next watcher/timer/wake call that needed it becomes a blocked pending-approval inbox item instead. Interactive main actor only (else GRANT_ACTOR_FORBIDDEN). Use it when the user calls off unattended work. Idempotent: only an unknown id fails GRANT_NOT_FOUND — an already-revoked, expired, or used-up grant returns alreadyRevoked:true, not an error, so a redundant revoke after timer.cancel is a no-op.",
 		Risk:        domain.RiskLocal,
 		Schema:      revokeSchema,
 		Decode:      tools.StrictDecoder(func() any { return &revokeArgs{} }),
@@ -338,14 +342,27 @@ func newRevokeTool(deps Deps) *tools.Tool {
 			if deps.Store == nil {
 				return tools.Fail(codeGrantNotFound, "grant.revoke: no such grant: "+a.ID, tools.Unrecoverable())
 			}
-			ok, err := deps.Store.RevokeGrant(ctx, a.ID)
+			found, didRevoke, err := deps.Store.RevokeGrant(ctx, a.ID)
 			if err != nil {
 				return tools.Fail(domain.CodeInternal, "grant.revoke: "+err.Error())
 			}
-			if !ok {
+			// Only a genuinely unknown id is a failure. A grant that is already inert —
+			// explicitly revoked, expired, or out of uses — satisfies the request
+			// ("make sure this authority is gone") exactly as well as one this call just
+			// withdrew, so it succeeds. The old code failed both cases identically, which
+			// turned the redundant revoke after a timer.cancel/watcher.cancel cascade into
+			// a red × the model then spent a round apologising for.
+			if !found {
 				return tools.Fail(codeGrantNotFound, "grant.revoke: no such grant: "+a.ID, tools.Unrecoverable())
 			}
-			return tools.Ok("Revoked grant "+a.ID+".", map[string]any{"id": a.ID})
+			// alreadyRevoked rides BOTH branches, never just the no-op one: a model that
+			// has to key off a field's PRESENCE reads absence as "unknown", so the flag is
+			// only load-bearing if it is always there to read.
+			if !didRevoke {
+				return tools.Ok("Grant "+a.ID+" was already inactive (revoked, expired, or out of uses) — nothing to withdraw.",
+					map[string]any{"id": a.ID, "alreadyRevoked": true})
+			}
+			return tools.Ok("Revoked grant "+a.ID+".", map[string]any{"id": a.ID, "alreadyRevoked": false})
 		},
 	}
 }

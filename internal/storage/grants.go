@@ -190,31 +190,92 @@ func (s *Store) ConsumeGrant(actorID string, actorType domain.AutomationGrantAct
 	return nil, nil
 }
 
-// RevokeGrant stamps revokedAt WHERE revokedAt IS NULL; reports whether changed.
-func (s *Store) RevokeGrant(id string, now int64) (bool, error) {
+// RevokeGrant withdraws a grant by id. found reports whether the id exists at all;
+// didRevoke reports whether THIS call took live authority away.
+//
+// The two are separate because "no such grant" and "the grant is right there and
+// already inert" are different answers, and one rows-affected count cannot tell
+// them apart — which is what made grant.revoke report a bogus GRANT_NOT_FOUND for a
+// grant that timer.cancel had already cascaded away.
+//
+// A found-but-inert grant (already revoked, expired, or out of uses) is REPORTED,
+// never written: revokedAt is an explicit-revoke marker ONLY (see
+// domain.AutomationGrantRecord), so stamping it on a grant that merely ran out of
+// time or uses would quietly change what revokedAt != nil means everywhere else it
+// is read. Nothing is lost by not writing — such a grant can never authorize again
+// on any path, since ListGrants and ConsumeGrant apply this same live predicate.
+//
+// Lookup + guarded update run in ONE transaction (single-conn store rules out
+// interleave), mirroring ConsumeGrant. Only tx-scoped statements inside: calling
+// s.GetGrant here would take the same single connection and deadlock.
+func (s *Store) RevokeGrant(id string, now int64) (found, didRevoke bool, err error) {
 	if now <= 0 {
 		now = s.now()
 	}
-	res, err := s.db.Exec(
-		"UPDATE automation_grants SET revokedAt = ? WHERE id = ? AND revokedAt IS NULL", now, id)
+	tx, err := s.db.Begin()
 	if err != nil {
-		return false, fmt.Errorf("revoke grant: %w", err)
+		return false, false, fmt.Errorf("begin revoke grant: %w", err)
+	}
+	var live int
+	err = tx.QueryRow(`
+		SELECT CASE WHEN revokedAt IS NULL AND expiresAt > ? AND usesRemaining > 0
+		            THEN 1 ELSE 0 END
+		  FROM automation_grants
+		 WHERE id = ?`, now, id).Scan(&live)
+	if errors.Is(err, sql.ErrNoRows) {
+		_ = tx.Rollback()
+		return false, false, nil
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		return false, false, fmt.Errorf("revoke grant lookup: %w", err)
+	}
+	if live == 0 {
+		// The row exists but holds no authority to withdraw. Report it; write nothing.
+		if cerr := tx.Commit(); cerr != nil {
+			_ = tx.Rollback()
+			return false, false, fmt.Errorf("commit revoke grant: %w", cerr)
+		}
+		return true, false, nil
+	}
+	res, err := tx.Exec(`
+		UPDATE automation_grants
+		   SET revokedAt = ?
+		 WHERE id = ? AND revokedAt IS NULL AND expiresAt > ? AND usesRemaining > 0`,
+		now, id, now)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, false, fmt.Errorf("revoke grant: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("revoke grant rows affected: %w", err)
+		_ = tx.Rollback()
+		return false, false, fmt.Errorf("revoke grant rows affected: %w", err)
 	}
-	return n > 0, nil
+	if cerr := tx.Commit(); cerr != nil {
+		_ = tx.Rollback()
+		return false, false, fmt.Errorf("commit revoke grant: %w", cerr)
+	}
+	return true, n > 0, nil
 }
 
-// RevokeGrantsByActor revokes all live grants for an actor; returns the count.
+// RevokeGrantsByActor withdraws every LIVE grant for an actor and returns how many
+// authorities that actually took away.
+//
+// The live predicate matches ListGrants / ConsumeGrant / RevokeGrant: a grant that
+// already expired or ran out of uses is SKIPPED, not stamped. Two reasons — revokedAt
+// is an explicit-revoke marker only, and this count is now model-visible (timer.cancel
+// and watcher.cancel report it as revokedGrants), so counting already-dead rows would
+// claim authority that was never there to withdraw.
 func (s *Store) RevokeGrantsByActor(actorID string, now int64) (int, error) {
 	if now <= 0 {
 		now = s.now()
 	}
-	res, err := s.db.Exec(
-		"UPDATE automation_grants SET revokedAt = ? WHERE actorId = ? AND revokedAt IS NULL",
-		now, actorID)
+	res, err := s.db.Exec(`
+		UPDATE automation_grants
+		   SET revokedAt = ?
+		 WHERE actorId = ? AND revokedAt IS NULL AND expiresAt > ? AND usesRemaining > 0`,
+		now, actorID, now)
 	if err != nil {
 		return 0, fmt.Errorf("revoke grants by actor: %w", err)
 	}

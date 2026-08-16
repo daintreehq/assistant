@@ -93,6 +93,12 @@ func TestCancel(t *testing.T) {
 	if len(st.revoked) != 1 || st.revoked[0] != "tmr_1" {
 		t.Fatalf("expected grant revoke for cancelled timer, got %v", st.revoked)
 	}
+	// The cascade has to be OBSERVABLE, not just performed: without revokedGrants in
+	// the result the model's only record of it is a sentence in the tool description,
+	// and it revokes the grant again — which used to fail.
+	if got := res.Result.(map[string]any)["revokedGrants"]; got != 1 {
+		t.Fatalf("expected revokedGrants=1 in the result, got %v", got)
+	}
 
 	res = tool.Handle(context.Background(), json.RawMessage(`{"id":"nope"}`), &tools.ToolContext{})
 	if res.Ok || res.Error.Code != codeTimerNotFound || res.Error.Recoverable {

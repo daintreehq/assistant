@@ -445,7 +445,7 @@ var cancelSchema = json.RawMessage(`{
 func newCancelTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "watcher.cancel",
-		Description: "Stop an ACTIVE watcher by its wch_… id: it stops checking, its automation grants are revoked, and any workflow ledger row it supervises closes as cancelled. Use it when the watched work is done or the user no longer wants it supervised. An already-ended watcher (condition_met/timeout/error/cancelled) returns WATCHER_NOT_FOUND — do not re-cancel. This NEVER touches the terminal: nothing is closed or killed.",
+		Description: "Stop an ACTIVE watcher by its wch_… id: it stops checking, its automation grants are revoked, and any workflow ledger row it supervises closes as cancelled. Use it when the watched work is done or the user no longer wants it supervised. An already-ended watcher (condition_met/timeout/error/cancelled) returns WATCHER_NOT_FOUND — do not re-cancel. This NEVER touches the terminal: nothing is closed or killed. The result reports revokedGrants: how many live grants that cascade withdrew (0 when the watcher held none) — they need no follow-up grant.revoke.",
 		Risk:        domain.RiskLocal,
 		Schema:      cancelSchema,
 		Decode:      tools.StrictDecoder(func() any { return &cancelArgs{} }),
@@ -475,7 +475,12 @@ func newCancelTool(deps Deps) *tools.Tool {
 			if err := deps.Store.CancelWatcher(context.Background(), a.ID, reasonUserCancelled); err != nil {
 				return tools.Fail(domain.CodeInternal, "watcher.cancel: "+err.Error())
 			}
-			_, _ = deps.Store.RevokeGrantsByActor(context.Background(), a.ID)
+			// Revoke the watcher's grants and REPORT how many. The count used to be dropped,
+			// leaving the model no observation of the cascade — so a follow-up grant.revoke
+			// looked like a fault rather than the no-op it is. Best-effort, like the ledger
+			// close below: the watcher is already cancelled, so a storage error here must
+			// not fail the call.
+			revokedGrants, _ := deps.Store.RevokeGrantsByActor(context.Background(), a.ID)
 			// If this watcher supervises a durable workflow run, close that row too —
 			// the daemon never re-checks a cancelled watcher, so the run would otherwise
 			// stay 'active' forever. Best-effort: a ledger failure never fails the cancel.
@@ -485,7 +490,8 @@ func newCancelTool(deps Deps) *tools.Tool {
 					"completedAt": domain.NowMS(),
 				})
 			}
-			return tools.Ok("Cancelled watcher "+a.ID+".", map[string]any{"id": a.ID})
+			return tools.Ok("Cancelled watcher "+a.ID+".",
+				map[string]any{"id": a.ID, "revokedGrants": revokedGrants})
 		},
 	}
 }

@@ -196,4 +196,8 @@ func TestWatcherCancelRevokesGrants(t *testing.T) {
 	if len(st.revokedActors) != 1 || st.revokedActors[0] != "wch_1" {
 		t.Fatalf("expected grant revoke for cancelled watcher, got %v", st.revokedActors)
 	}
+	// The cascade is only useful to the model if the result says it happened.
+	if got := res.Result.(map[string]any)["revokedGrants"]; got != 1 {
+		t.Fatalf("expected revokedGrants=1 in the result, got %v", got)
+	}
 }

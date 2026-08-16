@@ -170,6 +170,13 @@ func TestCancelStampsUserCancelledReason(t *testing.T) {
 	if st.revokedActor != "wch_1" {
 		t.Fatalf("revoked actor: got %q want wch_1", st.revokedActor)
 	}
+	// revokedGrants is UNCONDITIONAL: this store revokes nothing, and the field must
+	// still be there reading 0. A model that has to distinguish "no grants" from "key
+	// absent" is being asked to guess.
+	got, ok := res.Result.(map[string]any)["revokedGrants"]
+	if !ok || got != 0 {
+		t.Fatalf("revokedGrants must be present and 0, got %v (present=%v)", got, ok)
+	}
 }
 
 // Cancelling a supervisor that back-links a workflow run closes that ledger row

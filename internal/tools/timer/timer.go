@@ -304,7 +304,7 @@ var cancelSchema = json.RawMessage(`{
 func newCancelTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "timer.cancel",
-		Description: "Cancel a scheduled timer by its tmr_… id (from timer.list): it never fires again and any automation grant held by that timer actor is revoked. Use it when the reminder or scheduled tool call is no longer wanted. An unknown id fails TIMER_NOT_FOUND (unrecoverable). Local bookkeeping only — it never touches terminals or project state.",
+		Description: "Cancel a scheduled timer by its tmr_… id (from timer.list): it never fires again and any automation grant held by that timer actor is revoked. Use it when the reminder or scheduled tool call is no longer wanted. An unknown id fails TIMER_NOT_FOUND (unrecoverable). Local bookkeeping only — it never touches terminals or project state. The result reports revokedGrants: how many live grants that cascade withdrew (0 when the timer held none) — they need no follow-up grant.revoke.",
 		Risk:        domain.RiskLocal,
 		Schema:      cancelSchema,
 		Decode:      tools.StrictDecoder(func() any { return &cancelArgs{} }),
@@ -326,9 +326,15 @@ func newCancelTool(deps Deps) *tools.Tool {
 			if err := deps.Store.UpdateTimerStatus(context.Background(), a.ID, "cancelled"); err != nil {
 				return tools.Fail(domain.CodeInternal, "timer.cancel: "+err.Error())
 			}
-			// A cancelled timer keeps no grant — revoke any it held.
-			_, _ = deps.Store.RevokeGrantsByActor(context.Background(), a.ID)
-			return tools.Ok("Cancelled timer "+a.ID+".", map[string]any{"timerId": a.ID, "status": "cancelled"})
+			// A cancelled timer keeps no grant — revoke any it held, and REPORT how many.
+			// The cascade used to be invisible (the count was dropped on the floor), so the
+			// model's only record of it was a sentence in this description; it would then
+			// revoke the grant itself and read the resulting error as a real fault. An
+			// error here stays best-effort: the timer row is already cancelled, and failing
+			// the call over the side-effect would be a worse lie than a 0.
+			revokedGrants, _ := deps.Store.RevokeGrantsByActor(context.Background(), a.ID)
+			return tools.Ok("Cancelled timer "+a.ID+".",
+				map[string]any{"timerId": a.ID, "status": "cancelled", "revokedGrants": revokedGrants})
 		},
 	}
 }

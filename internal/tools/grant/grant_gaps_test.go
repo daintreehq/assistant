@@ -35,18 +35,25 @@ func (s *liveStore) ListGrants(_ context.Context, actorID string) ([]domain.Auto
 	return out, nil
 }
 
-func (s *liveStore) RevokeGrant(_ context.Context, id string) (bool, error) {
+func (s *liveStore) RevokeGrant(_ context.Context, id string) (found, didRevoke bool, err error) {
+	now := domain.NowMS()
 	for i := range s.grants {
 		g := &s.grants[i]
-		// A live grant: not revoked, has uses remaining. Revoking zeroes it.
-		if g.ID == id && g.RevokedAt == nil && g.UsesRemaining > 0 {
-			now := domain.NowMS()
-			g.RevokedAt = &now
-			g.UsesRemaining = 0
-			return true, nil
+		if g.ID != id {
+			continue
 		}
+		// Live = not revoked, not expired, uses remaining — the same predicate the real
+		// store applies. Revoking stamps revokedAt and NOTHING else: the real store never
+		// zeroes usesRemaining (exhaustion and revocation are separate states), and an
+		// inert grant is reported rather than written.
+		if g.RevokedAt == nil && g.ExpiresAt > now && g.UsesRemaining > 0 {
+			stamp := now
+			g.RevokedAt = &stamp
+			return true, true, nil
+		}
+		return true, false, nil
 	}
-	return false, nil
+	return false, false, nil
 }
 
 func mainCtx() *tools.ToolContext {
@@ -107,8 +114,8 @@ func TestGrantCreateRejectsOverLongTTLNoGhostRow(t *testing.T) {
 	}
 }
 
-// grant.revoke is main-only, idempotent (second revoke 404s), and a revoked
-// grant has zero uses remaining.
+// grant.revoke is main-only and idempotent: revoking twice SUCCEEDS both times,
+// the second reporting alreadyRevoked. Only an id with no grant at all is an error.
 func TestGrantRevokeForbiddenNonMainAndIdempotent(t *testing.T) {
 	st := &liveStore{}
 	create := find(Tools(Deps{Store: st}), "grant.create")
@@ -125,16 +132,65 @@ func TestGrantRevokeForbiddenNonMainAndIdempotent(t *testing.T) {
 		t.Fatalf("expected GRANT_ACTOR_FORBIDDEN, got %+v", denied)
 	}
 
-	if r := revoke.Handle(context.Background(), decode(t, revoke, `{"id":"`+id+`"}`), mainCtx()); !r.Ok {
-		t.Fatalf("first revoke: %+v", r.Error)
+	first := revoke.Handle(context.Background(), decode(t, revoke, `{"id":"`+id+`"}`), mainCtx())
+	if !first.Ok {
+		t.Fatalf("first revoke: %+v", first.Error)
 	}
-	// Revoked grant carries zero uses remaining.
-	if st.grants[0].UsesRemaining != 0 {
-		t.Fatalf("revoked grant should have 0 uses remaining, got %d", st.grants[0].UsesRemaining)
+	// alreadyRevoked is present on BOTH branches, so the model reads a value rather
+	// than inferring meaning from a missing key.
+	if got := first.Result.(map[string]any)["alreadyRevoked"]; got != false {
+		t.Fatalf("first revoke should report alreadyRevoked=false, got %v", got)
 	}
-	// Second revoke finds nothing live → 404.
+	if st.grants[0].RevokedAt == nil {
+		t.Fatalf("first revoke should stamp revokedAt")
+	}
+	// Revocation and exhaustion are separate states — revoking must not drain uses.
+	if st.grants[0].UsesRemaining != 3 {
+		t.Fatalf("revoke must not touch usesRemaining, got %d", st.grants[0].UsesRemaining)
+	}
+
+	// The second revoke is the bug this test now pins: the grant is right there, in
+	// exactly the state asked for. That is a success, not a GRANT_NOT_FOUND — the red
+	// × it used to produce cost a whole model round explaining a non-problem.
 	again := revoke.Handle(context.Background(), decode(t, revoke, `{"id":"`+id+`"}`), mainCtx())
-	if again.Ok || again.Error.Code != codeGrantNotFound {
-		t.Fatalf("expected GRANT_NOT_FOUND on second revoke, got %+v", again)
+	if !again.Ok {
+		t.Fatalf("second revoke must succeed, got %+v", again.Error)
+	}
+	if got := again.Result.(map[string]any)["alreadyRevoked"]; got != true {
+		t.Fatalf("second revoke should report alreadyRevoked=true, got %v", got)
+	}
+
+	// An id with no grant behind it is still a real failure.
+	missing := revoke.Handle(context.Background(), decode(t, revoke, `{"id":"grt_nope"}`), mainCtx())
+	if missing.Ok || missing.Error.Code != codeGrantNotFound {
+		t.Fatalf("expected GRANT_NOT_FOUND for an unknown id, got %+v", missing)
+	}
+}
+
+// A grant that went inert on its own — expired, or out of uses, but never explicitly
+// revoked — is the other half of the same bug: grant.revoke reported it as missing.
+func TestGrantRevokeSucceedsOnExpiredAndExhaustedGrants(t *testing.T) {
+	now := domain.NowMS()
+	st := &liveStore{grants: []domain.AutomationGrantRecord{
+		{ID: "grt_expired", ActorID: "wch_1", ActorType: domain.GrantActorWatcher,
+			ExpiresAt: now - 1, MaxUses: 3, UsesRemaining: 3},
+		{ID: "grt_used", ActorID: "wch_1", ActorType: domain.GrantActorWatcher,
+			ExpiresAt: now + 60_000, MaxUses: 1, UsesRemaining: 0},
+	}}
+	revoke := find(Tools(Deps{Store: st}), "grant.revoke")
+
+	for _, id := range []string{"grt_expired", "grt_used"} {
+		res := revoke.Handle(context.Background(), decode(t, revoke, `{"id":"`+id+`"}`), mainCtx())
+		if !res.Ok {
+			t.Fatalf("%s: revoking an inert grant must succeed, got %+v", id, res.Error)
+		}
+		if got := res.Result.(map[string]any)["alreadyRevoked"]; got != true {
+			t.Fatalf("%s: want alreadyRevoked=true, got %v", id, got)
+		}
+	}
+	for i := range st.grants {
+		if st.grants[i].RevokedAt != nil {
+			t.Fatalf("%s: an inert grant must not be stamped revoked", st.grants[i].ID)
+		}
 	}
 }

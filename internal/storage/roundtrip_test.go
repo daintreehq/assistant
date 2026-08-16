@@ -75,14 +75,24 @@ func TestRevokeGrantIdempotentAndByActorCount(t *testing.T) {
 		return g
 	}
 	g := mk("wch_solo")
-	if ok, _ := s.RevokeGrant(g.ID, now); !ok {
-		t.Fatalf("first revoke should change a row")
+	if found, didRevoke, _ := s.RevokeGrant(g.ID, now); !found || !didRevoke {
+		t.Fatalf("first revoke should find and change the row, got found=%v didRevoke=%v", found, didRevoke)
 	}
 	if c, _ := s.ConsumeGrant("wch_solo", domain.GrantActorWatcher, "git.commit", domain.RiskGit, now); c != nil {
 		t.Fatalf("revoked grant must not consume")
 	}
-	if ok, _ := s.RevokeGrant(g.ID, now); ok {
-		t.Fatalf("second revoke is a no-op (idempotent)")
+	// The second revoke is the case that used to be indistinguishable from a typo'd
+	// id: the row is right there, already in the requested state. found stays true so
+	// the tool can answer "already revoked" instead of "no such grant".
+	if found, didRevoke, _ := s.RevokeGrant(g.ID, now); !found || didRevoke {
+		t.Fatalf("second revoke: want found=true didRevoke=false, got found=%v didRevoke=%v", found, didRevoke)
+	}
+	// The revokedAt stamp from the FIRST revoke must survive the second call verbatim.
+	if again, _ := s.GetGrant(g.ID); again.RevokedAt == nil || *again.RevokedAt != now {
+		t.Fatalf("second revoke must not restamp revokedAt, got %v", again.RevokedAt)
+	}
+	if found, _, _ := s.RevokeGrant("grt_does_not_exist", now); found {
+		t.Fatalf("an unknown id must report found=false")
 	}
 
 	mk("wch_x")
@@ -96,6 +106,73 @@ func TestRevokeGrantIdempotentAndByActorCount(t *testing.T) {
 	}
 	if got, _ := s.ListGrants("wch_y", now); len(got) != 1 {
 		t.Fatalf("wch_y grant must survive")
+	}
+}
+
+// A grant that is dead by EXPIRY or by EXHAUSTION — never explicitly revoked — is
+// reported, never written. revokedAt is an explicit-revoke marker only
+// (domain.AutomationGrantRecord), so neither revoke path may stamp it, and neither
+// may count such a grant as authority it withdrew.
+func TestRevokeGrantReportsInertGrantsWithoutStampingThem(t *testing.T) {
+	now := int64(10_000_000)
+	s := openTest(t, now)
+	mk := func(id, actor string, over func(*domain.AutomationGrantRecord)) domain.AutomationGrantRecord {
+		r := domain.AutomationGrantRecord{
+			ID: id, ActorID: actor, ActorType: domain.GrantActorWatcher,
+			AllowedRiskClassesJson: strPtr(`["git"]`), ExpiresAt: now + 60_000, MaxUses: 3, CreatedAt: now,
+		}
+		if over != nil {
+			over(&r)
+		}
+		g, err := s.InsertGrant(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+
+	expired := mk("g_expired", "wch_dead", func(r *domain.AutomationGrantRecord) { r.ExpiresAt = now - 1 })
+	// Exhaustion has to be earned: InsertGrant defaults usesRemaining to maxUses, so a
+	// one-use grant is drained by consuming it. (The expired grant above is not live,
+	// so ConsumeGrant can only pick this one.)
+	exhausted := mk("g_used", "wch_dead", func(r *domain.AutomationGrantRecord) { r.MaxUses = 1 })
+	if c, _ := s.ConsumeGrant("wch_dead", domain.GrantActorWatcher, "git.commit", domain.RiskGit, now); c == nil || c.ID != exhausted.ID || c.UsesRemaining != 0 {
+		t.Fatalf("setup: g_used should consume to 0 uses, got %+v", c)
+	}
+
+	for _, g := range []domain.AutomationGrantRecord{expired, exhausted} {
+		found, didRevoke, err := s.RevokeGrant(g.ID, now)
+		if err != nil {
+			t.Fatalf("%s: %v", g.ID, err)
+		}
+		if !found || didRevoke {
+			t.Fatalf("%s: want found=true didRevoke=false, got found=%v didRevoke=%v", g.ID, found, didRevoke)
+		}
+		got, _ := s.GetGrant(g.ID)
+		if got.RevokedAt != nil {
+			t.Fatalf("%s: an inert grant must NOT be stamped revoked, got %v", g.ID, *got.RevokedAt)
+		}
+	}
+
+	// A live grant for the same actor, so the cascade has something real to withdraw.
+	mk("g_live", "wch_dead", nil)
+	n, err := s.RevokeGrantsByActor("wch_dead", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 1, not 3: the count is model-visible as timer.cancel/watcher.cancel's
+	// revokedGrants, so it must mean "authority actually withdrawn".
+	if n != 1 {
+		t.Fatalf("revokeGrantsByActor should count only the live grant, want 1 got %d", n)
+	}
+	for _, id := range []string{"g_expired", "g_used"} {
+		got, _ := s.GetGrant(id)
+		if got.RevokedAt != nil {
+			t.Fatalf("%s: cascade must not stamp an already-inert grant", id)
+		}
+	}
+	if got, _ := s.GetGrant("g_live"); got.RevokedAt == nil {
+		t.Fatalf("g_live: cascade must revoke the live grant")
 	}
 }
 
