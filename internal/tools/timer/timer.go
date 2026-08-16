@@ -125,15 +125,20 @@ var scheduleSchema = json.RawMessage(`{
       "additionalProperties": false,
       "required": ["type"],
       "properties": {
-        "type": { "type": "string", "enum": ["enqueue", "call_safe_tool"] },
-        "message": { "type": "string" },
+        "type": {
+          "type": "string",
+          "enum": ["enqueue", "call_safe_tool"],
+          "description": "\"enqueue\" posts an inbox item and runs nothing; \"call_safe_tool\" dispatches toolCall.toolName. Neither wakes you: a timer never buys you a turn, and a call_safe_tool that SUCCEEDS files an info-severity event below the inbox threshold — you are shown its failures, not its successes."
+        },
+        "message": { "type": "string", "description": "Reminder text for \"enqueue\" (defaults to the timer title). Ignored by \"call_safe_tool\"." },
         "toolCall": {
           "type": "object",
           "additionalProperties": false,
           "required": ["toolName"],
+          "description": "Required by \"call_safe_tool\", ignored by \"enqueue\". For a confirm-required target, call grant.create AFTER this tool returns, passing actorType \"timer\" and actorId set to the returned tmr_… id; the grant stays usable on the fire that consumes it.",
           "properties": {
-            "toolName": { "type": "string", "minLength": 1 },
-            "args": { "type": "object", "additionalProperties": true }
+            "toolName": { "type": "string", "minLength": 1, "description": "Exact registered tool name — any tool in your inventory, not a restricted subset. Use \"agentTask.spawnForEdits\" to spawn a terminal at fire time." },
+            "args": { "type": "object", "additionalProperties": true, "description": "Arguments passed to toolName; omitted becomes {}." }
           }
         }
       }
@@ -153,8 +158,14 @@ var scheduleSchema = json.RawMessage(`{
 
 func newScheduleTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
-		Name:        "timer.schedule",
-		Description: "Schedule a durable timer that fires once (fireAt ISO-8601 or delayMs) or repeats (repeat.everyMs plus maxRuns/until). payload.type \"enqueue\" posts message to the attention inbox; \"call_safe_tool\" runs toolCall.toolName — a MUTATING tool there needs a grant.create for that tmr_… actor or the call lands as a blocked approval. Timers keep firing after the assistant closes; missed occurrences catch up. Returns the timer id.",
+		Name: "timer.schedule",
+		// "call_safe_tool" is named first and the "not a safe subset" correction is kept
+		// inside the first ~256 bytes on purpose: that prefix is what the model sees while
+		// scanning its tool index, and believing the name was a curated allowlist is the
+		// exact misreading this description exists to kill (issue #333). Sentence 1 is
+		// byte-identical to the previous text because capabilityref's firstSentence() feeds
+		// docs/generated/TOOLS.md from it — changing it would strand the generated doc.
+		Description: "Schedule a durable timer that fires once (fireAt ISO-8601 or delayMs) or repeats (repeat.everyMs plus maxRuns/until). payload.type \"call_safe_tool\" runs toolCall.toolName — ANY registered tool, not a safe subset: use agentTask.spawnForEdits to create the terminal AT fire time, not early, then grant.create (actorType \"timer\", actorId = the returned tmr_… id) or a confirm-required call is blocked. \"enqueue\" only posts message to the inbox and runs nothing. Neither payload wakes you. Timers keep firing after the assistant closes; missed occurrences catch up. Returns the timer id.",
 		Risk:        domain.RiskLocal,
 		Schema:      scheduleSchema,
 		Decode:      tools.StrictDecoder(func() any { return &scheduleArgs{} }),
