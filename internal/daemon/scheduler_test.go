@@ -276,6 +276,12 @@ func TestScheduler_RepeatCatchUp_CallSafeTool(t *testing.T) {
 	if !strings.Contains(got, "166 occurrences were skipped") {
 		t.Errorf("call_safe_tool catch-up must report collapsed occurrences, got %q", got)
 	}
+	// payload.type's description tells the model a SUCCESSFUL call files info, which is
+	// below the operations deck's attention filter — i.e. it will not see the result.
+	// That is a promise about observable behaviour, so pin the severity it rests on.
+	if sev := queue.published[0].Severity; sev != domain.SeverityInfo {
+		t.Errorf("a successful call_safe_tool must publish at info severity, got %q", sev)
+	}
 }
 
 func TestScheduler_RepeatMaxRunsDone(t *testing.T) {

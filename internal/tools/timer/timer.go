@@ -128,14 +128,14 @@ var scheduleSchema = json.RawMessage(`{
         "type": {
           "type": "string",
           "enum": ["enqueue", "call_safe_tool"],
-          "description": "\"enqueue\" posts an inbox item and runs nothing; \"call_safe_tool\" dispatches toolCall.toolName. Neither wakes you: a timer never buys you a turn, and a call_safe_tool that SUCCEEDS files an info-severity event below the inbox threshold — you are shown its failures, not its successes."
+          "description": "\"enqueue\" posts an inbox item and runs nothing; \"call_safe_tool\" dispatches toolCall.toolName. A timer's own event never wakes you. Success files info (below the deck's attention filter), an ordinary failure error, a confirmation-required denial blocked."
         },
         "message": { "type": "string", "description": "Reminder text for \"enqueue\" (defaults to the timer title). Ignored by \"call_safe_tool\"." },
         "toolCall": {
           "type": "object",
           "additionalProperties": false,
           "required": ["toolName"],
-          "description": "Required by \"call_safe_tool\", ignored by \"enqueue\". For a confirm-required target, call grant.create AFTER this tool returns, passing actorType \"timer\" and actorId set to the returned tmr_… id; the grant stays usable on the fire that consumes it.",
+          "description": "Required by \"call_safe_tool\", ignored by \"enqueue\".",
           "properties": {
             "toolName": { "type": "string", "minLength": 1, "description": "Exact registered tool name — any tool in your inventory, not a restricted subset. Use \"agentTask.spawnForEdits\" to spawn a terminal at fire time." },
             "args": { "type": "object", "additionalProperties": true, "description": "Arguments passed to toolName; omitted becomes {}." }
@@ -165,7 +165,15 @@ func newScheduleTool(deps Deps) *tools.Tool {
 		// exact misreading this description exists to kill (issue #333). Sentence 1 is
 		// byte-identical to the previous text because capabilityref's firstSentence() feeds
 		// docs/generated/TOOLS.md from it — changing it would strand the generated doc.
-		Description: "Schedule a durable timer that fires once (fireAt ISO-8601 or delayMs) or repeats (repeat.everyMs plus maxRuns/until). payload.type \"call_safe_tool\" runs toolCall.toolName — ANY registered tool, not a safe subset: use agentTask.spawnForEdits to create the terminal AT fire time, not early, then grant.create (actorType \"timer\", actorId = the returned tmr_… id) or a confirm-required call is blocked. \"enqueue\" only posts message to the inbox and runs nothing. Neither payload wakes you. Timers keep firing after the assistant closes; missed occurrences catch up. Returns the timer id.",
+		//
+		// Two deliberate hedges, both load-bearing: the gates parenthetical, because
+		// "ANY registered tool" describes what DISPATCHES, not what is permitted to run;
+		// and "grantable", because a confirm-required tool can also be ungrantable
+		// (daintree.call), where grant.create cannot unblock it. "A timer's OWN event"
+		// is scoped on purpose too — a dispatched tool may create a watcher or async
+		// operation whose later event does wake, so the flat "timers never wake you"
+		// would be false. 580 runes, inside toolbudget_test's 600 ordinary budget.
+		Description: "Schedule a durable timer that fires once (fireAt ISO-8601 or delayMs) or repeats (repeat.everyMs plus maxRuns/until). payload.type \"call_safe_tool\" runs toolCall.toolName — ANY registered tool, not a safe subset (tier/confirm gates still apply): use agentTask.spawnForEdits to spawn AT fire time, then grant.create (actorType \"timer\", actorId = the returned timerId) for a grantable confirm-required target. \"enqueue\" only posts message and runs nothing. A timer's own event never wakes you. Timers persist after the assistant closes; missed occurrences catch up. Returns timerId.",
 		Risk:        domain.RiskLocal,
 		Schema:      scheduleSchema,
 		Decode:      tools.StrictDecoder(func() any { return &scheduleArgs{} }),

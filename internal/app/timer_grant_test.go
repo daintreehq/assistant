@@ -92,13 +92,14 @@ func TestOneShotTimerSpendsItsGrantThroughTheRealScheduler(t *testing.T) {
 
 	const timerID = "tmr_oneshot"
 	riskJSON := `["project"]`
-	if _, err := a.Store.InsertGrant(domain.AutomationGrantRecord{
+	grant, err := a.Store.InsertGrant(domain.AutomationGrantRecord{
 		ActorID:                timerID,
 		ActorType:              domain.AutomationGrantActorType(domain.ActorTimer),
 		AllowedRiskClassesJson: &riskJSON,
 		ExpiresAt:              domain.NowMS() + 600_000,
 		MaxUses:                5,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("insert grant: %v", err)
 	}
 	// No repeat block ⇒ TERMINAL on the very first fire, which is exactly the case
@@ -120,6 +121,14 @@ func TestOneShotTimerSpendsItsGrantThroughTheRealScheduler(t *testing.T) {
 
 	if ran != 1 {
 		t.Fatalf("the confirm-required payload must run exactly once on a grant-backed one-shot fire, ran %d times", ran)
+	}
+	// The grant was genuinely SPENT, not merely present: exactly one of the five uses
+	// is gone. Without this, "ran once" could in principle be satisfied by some future
+	// path that skipped the grant check entirely.
+	if got, err := a.Store.GetGrant(grant.ID); err != nil {
+		t.Fatalf("get grant: %v", err)
+	} else if got.UsesRemaining != 4 {
+		t.Errorf("the fire must consume exactly one grant use (5 → 4), got %d remaining", got.UsesRemaining)
 	}
 	// And the authority must not outlive the timer: a fired one-shot never fires
 	// again, so leaving a live grant behind would be a standing permission nobody
