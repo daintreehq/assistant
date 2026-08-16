@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -224,11 +225,108 @@ func TestParseAvailableAgentsUnionsTextAndStructuredRows(t *testing.T) {
 	if !ok || !complete || !availabilityComplete || len(rows) != 2 {
 		t.Fatalf("union = rows:%+v complete:%v availability:%v ok:%v", rows, complete, availabilityComplete, ok)
 	}
-	if rows[0].ID != "text-agent" || rows[0].DisplayName != "Text Agent" || rows[0].Pinned == nil || !*rows[0].Pinned {
-		t.Fatalf("structured update dropped text fields: %+v", rows[0])
-	}
-	if rows[1].ID != "structured-agent" {
+	// Both rows carry an empty source, so the canonical (source, id) order puts the
+	// structured-only row ahead of the merged text row regardless of which channel saw
+	// each id first.
+	if rows[0].ID != "structured-agent" {
 		t.Fatalf("structured-only row missing: %+v", rows)
+	}
+	if rows[1].ID != "text-agent" || rows[1].DisplayName != "Text Agent" || rows[1].Pinned == nil || !*rows[1].Pinned {
+		t.Fatalf("structured update dropped text fields: %+v", rows[1])
+	}
+}
+
+// The roster rides the cacheable startup block, so an unchanged registry must serialize
+// byte-identically no matter what order Daintree's discovery happened to report. Every
+// fixture field is deliberately anti-correlated with the expected sequence: sorting by id
+// alone, by display name, by availability, or by (source, displayName) / (source,
+// availability) each yields a DIFFERENT order. So the literal wantOrder pins the real key,
+// where merely proving the permutations agree with each other would also accept a sort on
+// the wrong field.
+func TestParseAvailableAgentsProducesStablePayloadAcrossDiscoveryOrder(t *testing.T) {
+	const (
+		builtinZ = `{"id":"z-built-in","displayName":"Alpha display","source":"built-in","availability":"blocked"}`
+		userA    = `{"id":"a-user","displayName":"Bravo display","source":"user","availability":"missing"}`
+		builtinB = `{"id":"b-built-in","displayName":"Zulu display","source":"built-in","availability":"ready"}`
+		pluginA  = `{"id":"a-plugin","displayName":"Middle display","source":"plugin","availability":"unauthenticated"}`
+
+		pluginWithoutSource = `{"id":"a-plugin","displayName":"Middle display","availability":"unauthenticated"}`
+		wantOrder           = "built-in/b-built-in,built-in/z-built-in,plugin/a-plugin,user/a-user"
+	)
+
+	textResult := func(rawRows ...string) mcp.CallResult {
+		return mcp.CallResult{
+			Text: `{"complete":true,"availabilityComplete":true,"agents":[` + strings.Join(rawRows, ",") + `]}`,
+		}
+	}
+
+	tests := []struct {
+		name string
+		res  mcp.CallResult
+	}{
+		{name: "forward", res: textResult(builtinZ, userA, builtinB, pluginA)},
+		{name: "reverse", res: textResult(pluginA, builtinB, userA, builtinZ)},
+		{name: "rotation", res: textResult(builtinB, pluginA, builtinZ, userA)},
+		{
+			// The split case proves the order is computed from MERGED field values, not from
+			// whatever each channel saw on its own: a-plugin arrives from text with no source
+			// at all, and only the structured channel supplies the "plugin" the primary key
+			// needs. The structured rows are ordered so the last thing that happens is that
+			// source patch, never a new id — otherwise a sorter that re-ran on every append
+			// would be re-sorting after the fix and would survive with the right answer.
+			name: "split across text and structured channels",
+			res: mcp.CallResult{
+				Text: `{"complete":true,"availabilityComplete":true,"agents":[` +
+					userA + `,` + builtinZ + `,` + pluginWithoutSource + `]}`,
+				StructuredContent: map[string]any{
+					"complete":             true,
+					"availabilityComplete": true,
+					"agents": []any{
+						map[string]any{
+							"id":           "b-built-in",
+							"displayName":  "Zulu display",
+							"source":       "built-in",
+							"availability": "ready",
+						},
+						map[string]any{"id": "a-plugin", "source": "plugin"},
+					},
+				},
+			},
+		},
+	}
+
+	var firstPayload []byte
+	for index, tc := range tests {
+		rows, complete, availabilityComplete, ok := parseAvailableAgents(tc.res)
+		if !ok || !complete || !availabilityComplete || len(rows) != 4 {
+			t.Fatalf("%s: parse = rows:%+v complete:%v availability:%v ok:%v", tc.name, rows, complete, availabilityComplete, ok)
+		}
+		keys := make([]string, len(rows))
+		for i, row := range rows {
+			keys[i] = row.Source + "/" + row.ID
+		}
+		if got := strings.Join(keys, ","); got != wantOrder {
+			t.Fatalf("%s: agent order = %q, want %q", tc.name, got, wantOrder)
+		}
+
+		// Marshal the whole carrier, not just the slice: the wire block is the unit that
+		// must stay byte-stable, and this also pins every derived per-row field.
+		payload, err := json.Marshal(prompts.AgentRosterContext{
+			Agents:               rows,
+			Complete:             complete,
+			AvailabilityComplete: availabilityComplete,
+			TotalCount:           len(rows),
+		})
+		if err != nil {
+			t.Fatalf("%s: marshal roster: %v", tc.name, err)
+		}
+		if index == 0 {
+			firstPayload = payload
+			continue
+		}
+		if string(payload) != string(firstPayload) {
+			t.Fatalf("%s: payload differs by discovery order:\nfirst: %s\n%s: %s", tc.name, firstPayload, tc.name, payload)
+		}
 	}
 }
 
