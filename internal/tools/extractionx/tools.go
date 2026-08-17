@@ -69,10 +69,19 @@ func (b *baseArgs) Validate() error {
 	if len(b.TerminalIDs) > 16 {
 		return fmt.Errorf("terminalIds must have at most 16 entries")
 	}
+	seen := make(map[string]struct{}, len(b.TerminalIDs))
 	for _, id := range b.TerminalIDs {
 		if strings.TrimSpace(id) == "" {
 			return fmt.Errorf("terminalIds entries must be non-empty")
 		}
+		// Reject duplicates, same as awaitAll. A repeated id feeds the SAME tail into the
+		// extraction twice and inflates the merged-tail count the result reports — and it
+		// survives here, because id resolution (which does dedupe) fails open on an
+		// unreadable roster and hands the ids straight back.
+		if _, dup := seen[id]; dup {
+			return fmt.Errorf("terminalIds must not contain duplicates (%q appears more than once)", id)
+		}
+		seen[id] = struct{}{}
 	}
 	if b.PollIntervalMs != nil && (*b.PollIntervalMs < 0 || *b.PollIntervalMs > 60_000) {
 		return fmt.Errorf("pollIntervalMs must be between 0 and 60000")
@@ -222,7 +231,7 @@ type extractArgs struct {
 // deliberately ABSENT from its properties because extraction rejects it
 // (rejectModelJudge) — the schema should make it ungenerable, not just documented.
 var sharedBaseProps = `
-    "terminalIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "maxItems": 16, "description": "Daintree terminal id(s) to read and extract from — full terminal-<uuid> ids exactly as listed (a unique prefix resolves as a fallback, but never invent or abbreviate ids)." },
+    "terminalIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "maxItems": 16, "uniqueItems": true, "description": "Daintree terminal id(s) to read and extract from — full terminal-<uuid> ids exactly as listed (a unique prefix resolves as a fallback, but never invent or abbreviate ids)." },
     "wait": {
       "type": "object",
       "maxProperties": 1,
@@ -232,7 +241,7 @@ var sharedBaseProps = `
         "stateIs": { "type": "string", "enum": ["idle", "working", "waiting", "directing", "completed", "exited"], "description": "Fires when the agent state equals this value exactly. Do NOT use stateIs:'waiting' to mean finished — pass {} instead (it confirms a real finish)." },
         "runtimeStatusIs": { "type": "string", "enum": ["running", "exited"], "description": "Fires on the coarse terminal runtime status." },
         "contains": { "type": "string", "minLength": 1, "description": "Fires when the terminal tail contains this literal substring (non-empty). Matches the COMBINED tail across multiple terminalIds." },
-        "regex": { "type": "string", "minLength": 1, "description": "Fires when the tail matches this Go/RE2 regular expression (must compile)." },
+        "regex": { "type": "string", "minLength": 1, "description": "Fires when the tail matches this Go/RE2 regular expression (must compile). Matches the COMBINED tail across multiple terminalIds, so it can straddle a terminal boundary." },
         "noOutputForMs": { "type": "integer", "minimum": 1, "description": "Fires once no NEW output has appeared for this many ms." },
         "all": { "type": "array", "minItems": 1, "items": { "type": "object", "minProperties": 1, "maxProperties": 1 }, "description": "AND — every nested condition (each the same one-key WatchCondition shape; modelJudge is not supported anywhere in the tree) must hold." },
         "any": { "type": "array", "minItems": 1, "items": { "type": "object", "minProperties": 1, "maxProperties": 1 }, "description": "OR — at least one nested condition (same one-key shape; no modelJudge anywhere) holds." },
@@ -256,9 +265,9 @@ var extractSchema = json.RawMessage(`{
 func newExtractTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.extract",
-		Description: "Over MULTIPLE terminalIds this MERGES every tail into ONE answer — never one answer per terminal. " +
+		Description: "Over MULTIPLE terminalIds, MERGES bounded tails via the small model into ONE plain-TEXT answer — never one per terminal. " +
 			"For a distinct answer per agent, or several named fields, use terminal.extract.json with an array schema keyed by terminalId. " +
-			"On a SINGLE terminalId it reads a bounded tail and extracts as plain TEXT with the small model — the default way to read what an agent said. " +
+			"On a SINGLE terminalId it is the default way to read what an agent said. " +
 			"PARALLEL: no-wait extract/.json calls batched in ONE reply run CONCURRENTLY — emit several independent extractions as one batch, not one per turn; the wait is roughly the slowest single call. A wait-bearing call is a barrier and runs serially. " +
 			"Omit `instruction` to use it as a finished/condition gate (booleans only, no extraction model call). " +
 			"A wait that observes the agent FINISH auto-retires that terminal's spawn-attached watcher (watchersRetired) — the completion is in your hands, so no notification follows. " +
@@ -337,7 +346,7 @@ func newExtractTool(deps Deps) tools.Tool {
 			}
 			note := ""
 			if extracted.truncated {
-				note = fmt.Sprintf("⚠ This result is cut off: the extraction model hit its maxTokens cap (currently %d) — the SOURCE agent's output is not necessarily incomplete. Do NOT re-extract with the same arguments; either raise maxTokens, or to relay text verbatim use terminal.read (raw scrollback, no model, no token cap).\n\n", base.maxTokens)
+				note = textTruncationNote(base.maxTokens)
 			}
 			result := map[string]any{
 				"terminalIds": base.terminalIDs, "format": "text", "attempts": poll.attempts,
@@ -461,6 +470,13 @@ func newExtractJSONTool(deps Deps) tools.Tool {
 
 /* --------------------------------- helpers -------------------------------- */
 
+// textTruncationNote is the summary prefix for an extraction the MODEL cut short at its
+// maxTokens cap. A function rather than an inline literal so the merge note's length
+// budget (below) can measure the real string instead of a copy that silently goes stale.
+func textTruncationNote(maxTokens int) string {
+	return fmt.Sprintf("⚠ This result is cut off: the extraction model hit its maxTokens cap (currently %d) — the SOURCE agent's output is not necessarily incomplete. Do NOT re-extract with the same arguments; either raise maxTokens, or to relay text verbatim use terminal.read (raw scrollback, no model, no token cap).\n\n", maxTokens)
+}
+
 // The remedy clause each extraction tool appends to the shared merge warning. They
 // differ because the way OUT of the ambiguity differs: text has no way to attribute an
 // answer, so the fix is one call per id; the json tool can attribute, so the fix is to
@@ -480,15 +496,18 @@ const (
 // three are honestly true of a one-terminal answer. Only the merge itself is missing,
 // so that is what gets reported, and only when it can actually mislead (len > 1).
 //
-// It lands in BOTH channels deliberately, from ONE string so they cannot drift. The
-// result map is the durable structured signal, but a big cohort extraction is exactly
-// the result that overruns MaxToolResultChars, and that path (SerializeToolResult)
-// replaces the whole map with a stub and keeps only the first TruncationSummaryChars of
-// the summary — so a map-only flag would disappear in the very case that motivated it.
-// Hence the warning leads the summary. It is also kept SHORT on purpose: at the schema's
-// maxItems (16) the text note plus the truncation note above it total 493 runes, so both
-// still fit whole inside TruncationSummaryChars (500) when a truncated cohort extraction
-// also overflows. Lengthening either one starts silently eating the other's remedy.
+// It lands in BOTH channels deliberately, from ONE string so they cannot drift. The map
+// is the structured signal, but it is not guaranteed to reach the model: once the
+// SERIALIZED result outgrows MaxToolResultChars, SerializeToolResult swaps the whole map
+// for a stub whose only view of it is a positional Preview slice — a flag near the end of
+// the map can fall outside that window, while the Summary is kept (truncated to
+// TruncationSummaryChars) unconditionally. The summary copy is the guaranteed channel,
+// which is why it LEADS.
+//
+// Kept short for that same reason: at the schema's maxItems (16) the text note plus the
+// truncation note beneath it total 493 runes, so both survive whole inside the 500-rune
+// summary cap. Lengthening either silently amputates the other's remedy — pinned by
+// TestMergeNote_LeavesRoomForTheTruncationNote.
 func noteMergedExtraction(result map[string]any, terminalIDs []string, remedy string) string {
 	if len(terminalIDs) <= 1 {
 		return ""

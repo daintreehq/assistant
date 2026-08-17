@@ -165,7 +165,7 @@ already drifted out of agreement with each other and with the binary.
 | `terminal.await.async` | local | supervisor | — | not needed | `daintree-mcp` | serial | — | Watch agent terminal(s) to completion ASYNCHRONOUSLY — the out-of-turn twin of terminal.awaitAll |
 | `terminal.summarize` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Read a bounded tail of a Daintree terminal and summarize it with the small model |
 | `terminal.read` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | Read a terminal's raw scrollback tail VERBATIM — no model, no summarization, no token cap |
-| `terminal.extract` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Over MULTIPLE terminalIds this MERGES every tail into ONE answer — never one answer per terminal |
+| `terminal.extract` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Over MULTIPLE terminalIds, MERGES bounded tails via the small model into ONE plain-TEXT answer — never one per terminal |
 | `terminal.extract.json` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Extract STRUCTURED JSON from one or more Daintree terminal tails with the small model |
 | `terminal.awaitAll` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | Wait for a COHORT of agent terminals to reach an idle prompt |
 | `terminal.focus` | ui | supervisor | — | not needed | `daintree-mcp` | serial | — | Bring ONE Daintree terminal to the front in the UI (forwards to Daintree's panel.focus with the terminal id as the pa… |

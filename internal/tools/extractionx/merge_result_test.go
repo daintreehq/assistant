@@ -109,6 +109,12 @@ func TestExtractTool_GateOnlyCohortOmitsMerged(t *testing.T) {
 	if _, present := m["merged"]; present {
 		t.Fatal("a gate-only call has no extracted answer, so merged must be absent")
 	}
+	if _, present := m["note"]; present {
+		t.Fatal("a gate-only call must not carry the merge note either")
+	}
+	if strings.Contains(res.Summary, "MERGED") {
+		t.Fatalf("a gate-only summary must stay unwarned, got %q", res.Summary)
+	}
 	if router.textCalled {
 		t.Fatal("a gate-only call must not invoke the extraction model")
 	}
@@ -140,6 +146,12 @@ func TestExtractJSONTool_MultiTerminalMarksMerged(t *testing.T) {
 	if !strings.Contains(note, "entry for every terminalId") {
 		t.Fatalf("the json remedy must ask for the per-id coverage check, got %q", note)
 	}
+	// This fixture DID attribute every terminal, so the warning has to stay conditional.
+	// Hardening it to an absolute claim ("covers only one terminal") would make the note
+	// a false statement in exactly this case, and nothing else would catch that.
+	if !strings.Contains(note, "may cover only one terminal") {
+		t.Fatalf("the note must hedge — the answer MAY be partial, not IS partial: %q", note)
+	}
 	if !strings.HasPrefix(res.Summary, note) {
 		t.Fatalf("summary must lead with the merge note, got %q", res.Summary)
 	}
@@ -163,22 +175,52 @@ func TestExtractJSONTool_SingleTerminalOmitsMerged(t *testing.T) {
 	if _, present := m["merged"]; present {
 		t.Fatal("merged must be absent for a single terminal")
 	}
+	if _, present := m["note"]; present {
+		t.Fatal("note must be absent for a single terminal")
+	}
 	if res.Summary != "Extracted JSON result." {
 		t.Fatalf("single-id json summary must be unchanged, got %q", res.Summary)
 	}
 }
 
-// Both warnings a text extraction can carry — merge scope, then the maxTokens truncation
-// note — have to survive together. An oversized result keeps only the first
-// TruncationSummaryChars of the summary, and that is exactly when a big cohort extraction
-// overflows, so a longer note would silently amputate the truncation remedy underneath it
-// rather than fail anywhere visible. Pinned at the schema's maxItems, the widest count.
+// When BOTH warnings apply, merge scope must come FIRST: "this may be about the wrong
+// terminal" outranks "there is more of the right output". Order is a deliberate contract,
+// and nothing else asserts it — the length test below is order-insensitive, so without
+// this a swap to note+mergeNote+text would pass the whole file.
+func TestExtractTool_MergeNotePrecedesTruncationNote(t *testing.T) {
+	reader := &cohortReader{seq: []map[string]TerminalStatusEntry{{
+		"t1": ent("waiting", "", "fact from t1"),
+		"t2": ent("waiting", "", "fact from t2"),
+	}}}
+	router := &routeRouter{textRes: "partial answer", textTruncated: true}
+	tool := newExtractTool(Deps{Reader: reader, Router: router})
+	res := tool.Handle(context.Background(),
+		json.RawMessage(`{"terminalIds":["t1","t2"],"instruction":"each fact","maxTokens":2000}`), nil)
+	if !res.Ok {
+		t.Fatalf("extract should succeed, got %+v", res.Error)
+	}
+	m := res.Result.(map[string]any)
+	if truncated, _ := m["truncated"].(bool); !truncated {
+		t.Fatalf("fixture must exercise the truncated path, got %+v", m)
+	}
+	mergeNote, _ := m["note"].(string)
+	want := mergeNote + "\n\n" + textTruncationNote(2000) + "partial answer"
+	if res.Summary != want {
+		t.Fatalf("merge note must lead the truncation note.\n got: %q\nwant: %q", res.Summary, want)
+	}
+}
+
+// Both warnings a text extraction can carry have to survive TOGETHER. An oversized result
+// keeps only the first TruncationSummaryChars of the summary, so a longer note would
+// silently amputate the other's remedy rather than fail anywhere visible. Measured against
+// the PRODUCTION truncation string (not a copy, which would go stale unnoticed) at the
+// schema's maxItems and the maximum maxTokens — the widest either can render.
 func TestMergeNote_LeavesRoomForTheTruncationNote(t *testing.T) {
 	ids := make([]string, 16) // terminalIds maxItems
 	for i := range ids {
-		ids[i] = "t"
+		ids[i] = fmt.Sprintf("t%d", i) // distinct: duplicates are now rejected
 	}
-	truncationNote := fmt.Sprintf("⚠ This result is cut off: the extraction model hit its maxTokens cap (currently %d) — the SOURCE agent's output is not necessarily incomplete. Do NOT re-extract with the same arguments; either raise maxTokens, or to relay text verbatim use terminal.read (raw scrollback, no model, no token cap).\n\n", 1024)
+	truncationNote := textTruncationNote(2000) // maxTokens maximum
 
 	for _, remedy := range []string{mergeRemedyText, mergeRemedyJSON} {
 		prefix := noteMergedExtraction(map[string]any{}, ids, remedy)
@@ -186,6 +228,22 @@ func TestMergeNote_LeavesRoomForTheTruncationNote(t *testing.T) {
 			t.Fatalf("merge note + truncation note = %d runes, over the %d-rune summary slice; shorten one",
 				n, domain.TruncationSummaryChars)
 		}
+	}
+}
+
+// A repeated id would feed the SAME tail in twice and inflate the merged-tail count the
+// result now reports. Id resolution dedupes, but it fails open on an unreadable roster, so
+// the bound has to be enforced at decode — and declared uniqueItems so it is ungenerable.
+func TestExtractTool_RejectsDuplicateTerminalIDs(t *testing.T) {
+	tool := newExtractTool(Deps{})
+	if _, err := tool.Decode(json.RawMessage(`{"terminalIds":["t1","t1"],"instruction":"x"}`)); err == nil {
+		t.Fatal("a duplicated terminalId must be rejected at decode")
+	}
+	if _, err := tool.Decode(json.RawMessage(`{"terminalIds":["t1","t2"],"instruction":"x"}`)); err != nil {
+		t.Fatalf("distinct ids must still decode: %v", err)
+	}
+	if !strings.Contains(string(extractSchema), `"uniqueItems": true`) {
+		t.Fatal("terminalIds must declare uniqueItems so the model cannot generate a duplicate")
 	}
 }
 
@@ -199,8 +257,23 @@ func TestExtractTool_DescriptionLeadsWithMerge(t *testing.T) {
 	if i := strings.Index(lead, ". "); i > 0 {
 		lead = lead[:i]
 	}
-	if !strings.Contains(lead, "MERGES") || !strings.Contains(lead, "MULTIPLE") {
+	if !strings.Contains(strings.ToUpper(lead), "MERGE") || !strings.Contains(lead, "MULTIPLE") {
 		t.Fatalf("the first sentence must lead with the multi-id merge, got %q", lead)
+	}
+	// The lead must also say what the merge is NOT. "MERGES tails into one answer" still
+	// reads like a convenience to a model shopping for a fan-out; the explicit denial is
+	// the part that stops the wrong call, so it cannot be edited away for brevity.
+	if !strings.Contains(lead, "never one per terminal") {
+		t.Fatalf("the lead must deny the per-terminal reading outright, got %q", lead)
+	}
+	// Whatever the old opener guaranteed for one-or-more terminals — a BOUNDED tail, plain
+	// TEXT, the small model — must stay true of the MULTI-id case too. Restating them only
+	// under "on a SINGLE terminalId" would quietly narrow the contract (toolbudget_test.go:
+	// a budget must never push a load-bearing rule out of a description).
+	for _, guarantee := range []string{"bounded", "small model", "plain-TEXT"} {
+		if !strings.Contains(lead, guarantee) {
+			t.Fatalf("the lead dropped the %q guarantee for multi-id calls: %q", guarantee, lead)
+		}
 	}
 	// firstSentence() in the capability-reference generator ellipsizes past 120 runes.
 	if n := len([]rune(lead)); n > 120 {
