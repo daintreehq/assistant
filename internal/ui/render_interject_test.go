@@ -82,7 +82,7 @@ func TestCards_RowsFitEveryWidth(t *testing.T) {
 	long := "please close every terminal you opened and summarize what each one did"
 	cards := map[string]func(w int) string{
 		"interjection": func(w int) string { return renderInterjection(th, long, w) },
-		"skill":        func(w int) string { return renderSkillCard(th, long, w) },
+		"skill":        func(w int) string { return renderSkillCard(th, []string{long, long}, w) },
 		"you":          func(w int) string { return renderUserMessage(th, long, w) },
 		"queued":       func(w int) string { return renderQueuedInjections(th, []string{long, long}, w, 99) },
 	}

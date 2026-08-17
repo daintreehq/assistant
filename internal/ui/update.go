@@ -372,10 +372,12 @@ func (m *Model) applyPumpEvent(ev pumpEvent) tea.Cmd {
 		}
 		m.pendingInjects = dropDeliveredInjection(m.pendingInjects, ev.text)
 	case pumpSkill:
-		// The backend loaded one or more skills for this round. Append an inline skill card
-		// per (trimmed, non-blank) title in chronological place; the round's response opens a
-		// fresh prose step after it. Seal live prose ONLY once we know a renderable card is
-		// being added, so a stray blank-title event can't force a spurious prose boundary.
+		// The backend loaded one or more skills for this round. Append one StepSkill per
+		// (trimmed, non-blank) title in chronological place — the renderer folds the
+		// contiguous run into ONE inline card, one row per skill — and the round's response
+		// opens a fresh prose step after it. Seal live prose ONLY once we know a renderable
+		// step is being added, so a stray blank-title event can't force a spurious prose
+		// boundary.
 		if t != nil {
 			sealed := false
 			for _, title := range ev.skills {
