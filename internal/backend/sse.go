@@ -165,8 +165,8 @@ type StreamCallbacks struct {
 	OnMeta func(StreamMeta)
 	// OnSkillLoaded fires as soon as a meta event reports newly-loaded skills,
 	// before the upstream model needs to produce content. Client.RespondStream
-	// de-duplicates identical refs across retry attempts, so callers can use this
-	// for immediate user feedback without producing duplicate cards.
+	// de-duplicates identical refs across retry attempts, so a retry cannot record the
+	// same load twice. DIAGNOSTIC ONLY — no consumer renders it in the transcript.
 	OnSkillLoaded func([]SkillRef)
 	// OnContent fires for each visible content fragment, in order.
 	OnContent func(string)

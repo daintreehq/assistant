@@ -1947,8 +1947,9 @@ func (s *Session) backendStatePtr() *string {
 // (best-effort) so a DIFFERENT process — the supervisor daemon picking this session
 // up after a detach, or the next cockpit after the daemon — replays the same token
 // instead of forcing the backend to re-run skill selection from scratch
-// mid-conversation. Newly-loaded skills travel through the eager OnSkillLoaded
-// callback instead, so their user-visible cue does not wait for model content.
+// mid-conversation. The round's skill outcome (meta.Skills) is deliberately NOT retained:
+// nothing in the CLI reports it to the user, and the debug trace already logs the active
+// and newly-loaded sets per round for selector tuning.
 func (s *Session) applyStreamMeta(m backend.StreamMeta) {
 	s.mu.Lock()
 	s.backendState = m.State
@@ -1961,19 +1962,15 @@ func (s *Session) applyStreamMeta(m backend.StreamMeta) {
 	}
 }
 
-// emitSkillLoads surfaces newly-loaded runbooks as a dedicated SkillLoaded event,
-// which the cockpit folds into the running turn as an inline "Skill loaded" card.
-// It is fed by StreamCallbacks.OnSkillLoaded as soon as the SSE meta arrives, without
-// waiting for the first model token. Best-effort and informational only; the prelude
-// is NEVER replayed into client history.
-func (s *Session) emitSkillLoads(refs []backend.SkillRef) bool {
+// skillLabels renders skill refs to display labels, preferring the title and falling
+// back to the id. A ref with NEITHER is malformed — dropped rather than surfaced as a
+// blank row.
+func skillLabels(refs []backend.SkillRef) []string {
 	if len(refs) == 0 {
-		return false
+		return nil
 	}
-	titles := make([]string, 0, len(refs))
+	labels := make([]string, 0, len(refs))
 	for _, ref := range refs {
-		// Prefer the title; fall back to the id. A ref with NEITHER is malformed —
-		// skip it rather than surface a bare card.
 		label := strings.TrimSpace(ref.Title)
 		if label == "" {
 			label = strings.TrimSpace(ref.ID)
@@ -1981,8 +1978,31 @@ func (s *Session) emitSkillLoads(refs []backend.SkillRef) bool {
 		if label == "" {
 			continue
 		}
-		titles = append(titles, label)
+		labels = append(labels, label)
 	}
+	return labels
+}
+
+// emitSkillLoads surfaces newly-loaded runbooks as a dedicated SkillLoaded event, fed
+// by StreamCallbacks.OnSkillLoaded as soon as the SSE meta arrives. It is a
+// DIAGNOSTIC/AUTOMATION signal only — the durable run log, the --json stream, and the
+// debug trace consume it; nothing folds it into the live conversation, and the one place
+// it reaches a human is an explicit `/explain <run>` replay of that run's timeline.
+//
+// It used to draw an inline "Skill loaded" card, and there used to be a /skills command.
+// Both were removed: backend skill selection is prompt-assembly machinery, not a decision
+// the user takes or can reverse, so there is no affordance to attach the information to.
+// The card named only the NewlyLoaded delta (never what was retained, dropped by the cap,
+// or paired in as a domain foundation), so across rounds it read as the assistant changing
+// its mind while hiding what it changed from — and once selection became a ~10ms
+// in-process classifier it no longer explained a wait, which was its original job.
+//
+// The "skill" VOCABULARY — a visible "Skill loaded" event, the /skills command — is
+// deliberately left free for user-authored *assistant* skills, which are intent-driven
+// and will want it. Selector tuning reads the debug trace (backend.respond.meta logs the
+// active and newly-loaded sets per round), not the product UI.
+func (s *Session) emitSkillLoads(refs []backend.SkillRef) bool {
+	titles := skillLabels(refs)
 	if len(titles) == 0 {
 		return false
 	}

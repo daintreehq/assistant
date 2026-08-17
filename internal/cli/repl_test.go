@@ -86,17 +86,36 @@ func newSink(tty bool) (*consoleSink, *bytes.Buffer) {
 	return &consoleSink{r: r, diagnostics: r, tty: tty}, &buf
 }
 
-// The one-line skill cue pluralizes on the batch size, matching the cockpit card.
-func TestConsoleSinkSkillLoadedPluralizes(t *testing.T) {
+// Backend skill selection writes NOTHING to the console transcript, matching the cockpit.
+// It is prompt-assembly machinery, not a step in the operator's narrative; the run log /
+// --json stream / debug trace keep the signal. Pinned so the cue is not reintroduced by
+// reflex.
+func TestConsoleSinkSkillLoadedIsSilent(t *testing.T) {
 	s, buf := newSink(false)
 	s.SkillLoaded([]string{"Orchestrate agents"})
-	if got := buf.String(); !strings.Contains(got, "Skill loaded: Orchestrate agents") {
-		t.Fatalf("single skill must read singular: %q", got)
-	}
-	buf.Reset()
 	s.SkillLoaded([]string{"Orchestrate agents", "Plain worktree"})
-	if got := buf.String(); !strings.Contains(got, "Skills loaded: Orchestrate agents, Plain worktree") {
-		t.Fatalf("multiple skills must read plural: %q", got)
+	if got := buf.String(); got != "" {
+		t.Fatalf("skill loads must print nothing, got %q", got)
+	}
+}
+
+// …and a load arriving MID-ANSWER must not break the streamed answer in two. The old
+// visible cue called closeAnswer() before printing, which was right for it and wrong for
+// a silent event: keeping that call would end the open paragraph and start a second one
+// with no visible cause. So the answer must read as one continuous block.
+func TestConsoleSinkSkillLoadedDoesNotSplitAnswer(t *testing.T) {
+	s, buf := newSink(false)
+	s.AssistantToken("before ")
+	s.SkillLoaded([]string{"Orchestrate agents"})
+	if !s.answerOpen {
+		t.Fatal("a silent skill load closed the open answer")
+	}
+	s.AssistantToken("after")
+	s.AssistantEnd("", "")
+
+	got := buf.String()
+	if !strings.Contains(got, "before after") {
+		t.Fatalf("the answer was split by a mid-stream skill load: %q", got)
 	}
 }
 

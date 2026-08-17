@@ -4,8 +4,6 @@
 package cli
 
 import (
-	"strings"
-
 	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/cli/render"
 	"github.com/daintreehq/assistant/internal/domain"
@@ -99,16 +97,14 @@ func (s *consoleSink) Interjection(text string) {
 	s.r.Info("you (mid-turn): " + text)
 }
 
-// SkillLoaded prints a one-line capability cue so the console transcript shows the
-// runbook(s) the backend loaded for this turn.
-func (s *consoleSink) SkillLoaded(titles []string) {
-	s.closeAnswer()
-	label := "Skill loaded"
-	if len(titles) > 1 {
-		label = "Skills loaded"
-	}
-	s.r.Info(label + ": " + strings.Join(titles, ", "))
-}
+// SkillLoaded is DELIBERATELY silent, matching the cockpit: which runbooks the backend
+// selected is prompt-assembly machinery, not a step in the operator's narrative. See
+// Session.emitSkillLoads.
+//
+// Note it does NOT call closeAnswer. The old visible cue had to, to terminate the open
+// answer paragraph before printing; doing it for a silent event would split one streamed
+// answer into two paragraphs for no visible reason.
+func (s *consoleSink) SkillLoaded([]string) {}
 
 // ToolBatch / ToolState / ToolProgress are live-footer-only; the console prints
 // concrete tool calls + results, not the per-call substep stream.

@@ -117,8 +117,6 @@ func HandleUICommandWithProgress(ctx context.Context, line string, a *app.App, p
 		// /approvals before this handler — see ui.onSubmit). The REPL has no interactive
 		// per-call approvals, so this surface only explains where the command applies.
 		return UICommandResult{Handled: true, Title: "Approvals", Text: "Session tool approvals are managed in the cockpit. Press A (bounded) or F (forever this session) on an approval prompt; run /approvals there to list or clear them."}
-	case "skills":
-		return UICommandResult{Handled: true, Title: "Skills", Text: skillsText(ctx, a, rest)}
 	case "memory":
 		return UICommandResult{Handled: true, Title: "Memory", Text: memoryText(a, rest)}
 	case "compact":
@@ -557,7 +555,7 @@ func noArgUsage(name string, rest []string) string {
 		return ""
 	}
 	switch name {
-	case "status", "timers", "watchers", "grants", "launches", "models", "skills",
+	case "status", "timers", "watchers", "grants", "launches", "models",
 		"compact", "clear", "doctor", "reconnect", "help", "quit":
 		return "Usage: /" + name
 	default:
@@ -656,17 +654,6 @@ func tierDivergenceNote(a *app.App) string {
 	return "\nThis applies to the current session only; next launch reverts to " +
 		string(a.InitialTier) + ". Set DAINTREE_ASSISTANT_TIER=" + string(a.Tier()) +
 		" to make it stick."
-}
-
-// skillsText powers /skills. Skill selection is now SERVER-OWNED: the Daintree
-// backend's selector picks and injects the right runbook(s) per turn, and surfaces
-// the active set in each response's skills metadata. There is no local skill
-// catalog to browse or load, so this command is informational only.
-func skillsText(_ context.Context, _ *app.App, _ []string) string {
-	return "Skills are managed by the Daintree backend.\n" +
-		"The backend's selector picks and injects the right runbook(s) automatically each turn — " +
-		"there is no local skill catalog to browse, find, or load. Newly-loaded skills are surfaced " +
-		"in the conversation as they are applied."
 }
 
 // memoryText powers /memory: bare/list shows the pinned-first memory store, and

@@ -196,7 +196,7 @@ func (c *controller) discardPendingInjections() {
 }
 
 // runCommand executes a slash command off the loop and reports CommandCompleteMsg.
-// Some commands (compact, skills find) hit the model, so this must not block Update —
+// Some commands (compact, memory distill) hit the model, so this must not block Update —
 // their stage labels stream back through the pump (CommandProgress) so the composer's
 // busy cue narrates the silent stretches instead of looking idle for the whole run.
 func (c *controller) runCommand(parent context.Context, line string) tea.Cmd {

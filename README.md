@@ -314,9 +314,12 @@ injection are **server-owned**. The Daintree backend's selector classifies the
 conversation, picks the relevant runbook(s) for the turn, and injects their bodies into
 the prompt before generation. It returns a `skills` block + an opaque signed `state`
 token in the first SSE `meta` event, flushed before the upstream model connects. The CLI
-immediately surfaces de-duplicated `newly_loaded` refs as skill cards and stores+replays
-the opaque state token (including on a full-request retry, so the already-visible
-selection is reused). This is the entire client-side "keep skills loaded" mechanism —
+stores+replays the opaque state token (including on a full-request retry, so the same
+selection is reused) and shows the user nothing: backend skill selection is prompt
+assembly, not a decision they take, so it enters no conversation and has no `/skills`
+command; the debug trace, run log and `--json` stream carry every load, and `/explain
+<run>` replays them in that run's timeline. This is the entire
+client-side "keep skills loaded" mechanism —
 the backend is stateless and recovers the active set from the token, not from the message
 history. The CLI also keeps two local run-tracking tools — `skill.run.get` and
 `skill.step.advance`. There is **no** local skill catalog and no `skill.find`/`skill.load`.
@@ -420,8 +423,10 @@ scanner that fires on the repository's own documentation gets switched off.
   Tea. Tools never render, the watcher engine never paints, and the model loop never
   writes to stdout — it emits through an `agent.EventSink` consumed by the cockpit's
   event pump or the console / JSONL sink.
-- Workflows, skills, and persistent memory are implemented tool surfaces (`workflow.*`,
-  `skill.*`, `memory.*`). Future phases target Daintree-owned watch-sets over MCP, which
+- Workflows and persistent memory are implemented tool surfaces (`workflow.*`,
+  `memory.*`); of the skill layer only run-tracking is local (`skill.run.get` /
+  `skill.step.advance`) — selection and injection are the backend's.
+  Future phases target Daintree-owned watch-sets over MCP, which
   would let supervision tick without the assistant open.
 
 ## License

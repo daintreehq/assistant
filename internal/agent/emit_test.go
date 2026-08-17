@@ -77,8 +77,8 @@ type eagerSkillBackend struct{}
 func (eagerSkillBackend) RespondStream(_ context.Context, _ backend.RespondRequest, cb backend.StreamCallbacks) (backend.RespondResult, error) {
 	refs := []backend.SkillRef{
 		{ID: "multi_agent", Title: "Multi-agent orchestration"},
-		{ID: "fallback_skill"}, // no title: the card falls back to the id
-		{},                     // malformed refs never produce a blank card
+		{ID: "fallback_skill"}, // no title: the label falls back to the id
+		{},                     // malformed refs never produce a blank label
 	}
 	meta := backend.StreamMeta{
 		Model:  "daintree-assistant",
@@ -107,6 +107,11 @@ func (eagerSkillBackend) RunTask(context.Context, backend.TaskRequest) (backend.
 	return backend.TaskResult{}, nil
 }
 
+// The skill event still fires BEFORE the first token, even though nothing renders it.
+// The contract is now DIAGNOSTIC rather than visual: it is what lets a debug log time
+// selection separately from generation (backend.respond.skill_cue landing ahead of the
+// content stream), which is the trace a selector regression is read from. Emitting it
+// late would collapse those two costs into one indistinguishable span.
 func TestEmitSkillLoadBeforeFirstToken(t *testing.T) {
 	sink := &orderSink{}
 	r := &fakeRouter{results: []models.ChatResult{{Content: "unused"}}}

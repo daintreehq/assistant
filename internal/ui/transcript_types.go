@@ -38,7 +38,6 @@ const (
 	StepTool
 	StepNote
 	StepInterject // a message the user typed mid-turn, folded into the running turn
-	StepSkill     // a server-side skill load, folded into the running turn as a card (Text = skill name)
 )
 
 // ActivityState is the per-tool lifecycle the activity tree renders.
@@ -214,9 +213,9 @@ func (t *TurnCell) activeProseStep() int {
 		if t.Steps[i].Kind == StepProse {
 			return i
 		}
-		// A tool/note/interjection/skill step between us and the last prose means prose has
+		// A tool/note/interjection step between us and the last prose means prose has
 		// resumed: the caller must open a NEW StepProse rather than merging.
-		if t.Steps[i].Kind == StepTool || t.Steps[i].Kind == StepNote || t.Steps[i].Kind == StepInterject || t.Steps[i].Kind == StepSkill {
+		if t.Steps[i].Kind == StepTool || t.Steps[i].Kind == StepNote || t.Steps[i].Kind == StepInterject {
 			return -1
 		}
 	}

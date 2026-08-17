@@ -215,13 +215,22 @@ the visible conversation, the local tool inventory, and the opaque
 backend `state` token) with a
 token callback → the FIRST
 SSE `meta` event carries the refreshed state token + the server's `skills` block and is
-flushed as soon as selection finishes, before the upstream model connects. The CLI emits
-new skill cards immediately through `OnSkillLoaded`, while committed state handling stays
-on the retry-safe deferred `OnMeta` callback; a full-request retry adopts the eager meta's
-signed state so the backend reuses that already-visible selection. **Skill selection is
+flushed as soon as selection finishes, before the upstream model connects. `OnSkillLoaded`
+carries the newly-loaded refs eagerly to the diagnostic sinks, while committed state
+handling stays on the retry-safe deferred `OnMeta` callback; a full-request retry adopts
+the eager meta's signed state so the backend reuses that selection. **Skill selection is
 server-owned**: the backend's selector picks/injects runbook bodies before it calls the
 upstream model, so the runbook is in hand for that same generation; the CLI just stores the
-state token and surfaces newly-loaded titles. On tool calls, announce the whole batch
+state token. **Backend skill loads never enter the conversation** — no card, no cue, in the
+cockpit or the classic REPL (pinned by `internal/ui/render_skill_test.go`). They are prompt
+assembly, not a step the operator takes, and the delta the old card showed was misleading
+besides (never what was retained, capped, or auto-paired as a foundation). There is **no
+`/skills` command** either — a standing "what's active?" reveal is the same information with
+the same missing affordance. The one place a load reaches a human is the explicit
+`/explain <run>` timeline, beside that run's tool calls; the debug trace, run log and
+`--json` stream keep the full signal, and `backend.respond.meta` is where selector tuning
+reads it. The "skill" VOCABULARY — a visible "Skill loaded" event, the `/skills` name — is
+held in reserve for future user-authored ASSISTANT skills, which are intent-driven. On tool calls, announce the whole batch
 (`ToolBatch`) then `registry.Dispatch()` each in the safe sequence, feed results back and
 re-`RespondStream` (replaying the state token).
 `Dispatch` = validate args → tier gate (`safety.Decide`) → confirmation/grant → run handler →

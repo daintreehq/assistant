@@ -109,11 +109,16 @@ type EventSink interface {
 	Interjection(text string)
 
 	// SkillLoaded reports that the backend's selector loaded one or more runbooks for
-	// THIS round (the NewlyLoaded set from the stream's first meta event). The cockpit
-	// folds it into the running turn as an inline "Skill loaded" card in chronological
-	// place — a calm capability cue, not the human's words nor a system note; the durable
-	// log records it. titles are human-readable skill names (the id is the fallback when a
-	// ref has no title). Never emitted with an empty slice.
+	// THIS round (the NewlyLoaded set from the stream's first meta event). titles are
+	// human-readable skill names (the id is the fallback when a ref has no title). Never
+	// emitted with an empty slice.
+	//
+	// DIAGNOSTIC ONLY — no sink may fold it into the running conversation. The durable run
+	// log, the --json stream and the debug trace consume it; the cockpit, console and host
+	// sinks deliberately drop it, and there is no command that reports the active set. The
+	// ONE place it reaches a human is the explicit `/explain <run>` timeline, alongside
+	// that run's tool calls and errors — a retrospective diagnostic view the user asked
+	// for, not the live transcript. See Session.emitSkillLoads for why.
 	SkillLoaded(titles []string)
 
 	// ToolBatch announces every parsed tool call as queued BEFORE sequential

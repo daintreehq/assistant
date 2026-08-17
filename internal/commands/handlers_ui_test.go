@@ -608,16 +608,22 @@ func TestUIClearRejectedDuringActiveTurn(t *testing.T) {
 	}
 }
 
-// TestUISkillsInformational: skill selection is now SERVER-OWNED — there is no local
-// catalog to browse, find, or load, so /skills is a static informational card.
-func TestUISkillsInformational(t *testing.T) {
+// There is no /skills command. Backend skill selection is prompt-assembly machinery the
+// user neither approves nor steers, so the CLI reports it nowhere — not in the transcript,
+// not behind a command (see agent.Session.emitSkillLoads). The NAME is deliberately kept
+// free for future user-authored assistant skills, which are intent-driven and will want
+// it for list/create/edit. Pinned so it is not re-added out of reflex.
+func TestUISkillsCommandDoesNotExist(t *testing.T) {
 	a := newOfflineApp(t)
-	r := ui(a, "/skills")
-	if !r.Handled || r.Title != "Skills" || !strings.Contains(r.Text, "Daintree backend") {
-		t.Fatalf("/skills not handled as the backend-managed info card: %+v", r)
+	// An unrecognized command is still "handled" — as the Unknown-command card — so the
+	// assertion is on the TITLE, not on Handled.
+	if r := ui(a, "/skills"); r.Title != "Unknown command" {
+		t.Fatalf("/skills resolves to a real command again: %+v", r)
 	}
-	if r := ui(a, "/skills load anything"); r.Title != "Usage" || r.Text != "Usage: /skills" {
-		t.Fatalf("/skills arguments should be rejected: %+v", r)
+	for _, c := range COMMAND_REGISTRY {
+		if c.Name == "skills" {
+			t.Fatalf("the skills command is back in the registry: %+v", c)
+		}
 	}
 }
 

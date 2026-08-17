@@ -222,8 +222,10 @@ Bubble Tea has no "subscribe to a channel" primitive, so the cockpit uses the **
 pump that never blocks the render loop.
 
 A **token coalescer** sits in the pump: streamed assistant tokens are buffered and flushed
-on a short tick (16–33 ms) or immediately before any non-token event, so the footer
-repaints at a sane rate without a typewriter delay. **No artificial typing effect** —
+on a short tick (16–33 ms) or immediately before any non-token event the pump FORWARDS, so
+the footer repaints at a sane rate without a typewriter delay. (A sink method the cockpit
+deliberately drops — `SkillLoaded` — never reaches `emit` at all, so it neither renders nor
+disturbs the token boundary.) **No artificial typing effect** —
 flush coalesced tokens straight through.
 
 ## 8. Liveness: explicit RunPhase, ordered TurnSteps

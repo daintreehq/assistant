@@ -251,8 +251,9 @@ func (s *Session) traceBackendRawMeta(runID, turnID string, round int, m backend
 }
 
 // traceBackendSkillCue records when the eager, de-duplicated skill-loaded event has
-// actually been handed to the UI/output sinks. It only exists for rounds that surface
-// at least one newly-loaded skill.
+// actually been handed to the output sinks (none of which renders it live — see
+// EventSink.SkillLoaded). Timestamping it here is what lets a log separate SELECTION
+// latency from generation latency. Only exists for rounds with a newly-loaded skill.
 func (s *Session) traceBackendSkillCue(runID, turnID string, round int, refs []backend.SkillRef) {
 	s.safeTrace("backend.respond.skill_cue", func() map[string]any {
 		return map[string]any{

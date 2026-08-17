@@ -1,8 +1,6 @@
 package ui
 
 import (
-	"strings"
-
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/daintreehq/assistant/internal/agent"
@@ -371,27 +369,6 @@ func (m *Model) applyPumpEvent(ev pumpEvent) tea.Cmd {
 			t.Steps = append(t.Steps, TurnStep{Kind: StepInterject, Text: ev.text})
 		}
 		m.pendingInjects = dropDeliveredInjection(m.pendingInjects, ev.text)
-	case pumpSkill:
-		// The backend loaded one or more skills for this round. Append one StepSkill per
-		// (trimmed, non-blank) title in chronological place — the renderer folds the
-		// contiguous run into ONE inline card, one row per skill — and the round's response
-		// opens a fresh prose step after it. Seal live prose ONLY once we know a renderable
-		// step is being added, so a stray blank-title event can't force a spurious prose
-		// boundary.
-		if t != nil {
-			sealed := false
-			for _, title := range ev.skills {
-				title = strings.TrimSpace(title)
-				if title == "" {
-					continue
-				}
-				if !sealed {
-					t.sealProse()
-					sealed = true
-				}
-				t.Steps = append(t.Steps, TurnStep{Kind: StepSkill, Text: title})
-			}
-		}
 	case pumpBatch:
 		if t != nil {
 			for _, c := range ev.batch {

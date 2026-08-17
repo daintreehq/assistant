@@ -82,7 +82,6 @@ func TestCards_RowsFitEveryWidth(t *testing.T) {
 	long := "please close every terminal you opened and summarize what each one did"
 	cards := map[string]func(w int) string{
 		"interjection": func(w int) string { return renderInterjection(th, long, w) },
-		"skill":        func(w int) string { return renderSkillCard(th, []string{long, long}, w) },
 		"you":          func(w int) string { return renderUserMessage(th, long, w) },
 		"queued":       func(w int) string { return renderQueuedInjections(th, []string{long, long}, w, 99) },
 	}
@@ -104,26 +103,30 @@ func TestCards_RowsFitEveryWidth(t *testing.T) {
 // gluing them together.
 func TestStepInterject_GapSurvivesANonRenderingStep(t *testing.T) {
 	th := darkTheme()
+	// The step AFTER the ghost is a tool, not more prose: appendProse MERGES consecutive
+	// prose into one step, so an interject → blank-prose → prose sequence cannot arise at
+	// runtime, and a fixture that can't happen proves nothing.
+	const toolName = "terminal.list"
 	turn := &TurnCell{
 		ID:    "turn_ij_ghost",
 		State: TurnComplete,
 		Steps: []TurnStep{
 			{Kind: StepInterject, Text: "close them"},
 			{Kind: StepProse, Text: "   "}, // renders nothing
-			{Kind: StepSkill, Text: "Tear down a workspace safely"},
+			{Kind: StepTool, Activity: &Activity{ID: "t1", Name: toolName, State: ActDone}},
 		},
 	}
 	lines := strings.Split(stripAnsi(renderTurnSteps(th, markdown.New(th), turn, 0, -1, 72, 70, false, 0, 1, false)), "\n")
-	card := -1
+	next := -1
 	for i, ln := range lines {
-		if strings.Contains(ln, "Skill loaded") {
-			card = i
+		if strings.Contains(ln, toolName) {
+			next = i
 		}
 	}
-	if card < 1 {
-		t.Fatalf("could not locate the skill card: %q", lines)
+	if next < 1 {
+		t.Fatalf("could not locate the step following the card: %q", lines)
 	}
-	if strings.TrimSpace(lines[card-1]) != "" {
+	if strings.TrimSpace(lines[next-1]) != "" {
 		t.Errorf("a non-rendering step swallowed the blank owed below the mid-turn card: %q", lines)
 	}
 }

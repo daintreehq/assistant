@@ -79,8 +79,9 @@ reconstructs the turn timeline from the debug log and reports, per model round:
 - `gapBeforeMs` — prior round's done → this request (tool execution + CLI bookkeeping)
 - `rawMetaMs` — request → the SSE meta arriving at the client (selector + backend
   pre-stream work)
-- `skillCueMs` — request → the eager, de-duplicated `Skill loaded` cue reaching the
-  output sinks (absent when the round loads no new skill)
+- `skillCueMs` — request → the eager, de-duplicated skill-loaded event reaching the
+  output sinks (absent when the round loads no new skill). Nothing renders it to the
+  user; the mark exists to separate SELECTION latency from generation latency
 - `committedMetaMs` — request → retry-safe metadata/state adoption; this normally
   coincides with first content, or with successful completion on a tool-call-only round
 - `firstTokenMs` — request → first visible content delta (absent on tool-call-only rounds)

@@ -845,9 +845,10 @@ type StreamDone struct {
 // First-class skills block
 // --------------------------------------------------------------------------
 
-// SkillsBlock is the dynamic-skill outcome for a turn. The CLI surfaces ONLY the
-// NewlyLoaded refs through the eager OnSkillLoaded callback; Active, Prelude, and
-// Selector are decoded off the wire but not rendered. The backend no longer
+// SkillsBlock is the dynamic-skill outcome for a turn. NONE of it is folded into the
+// conversation: NewlyLoaded rides the eager OnSkillLoaded callback to the diagnostic sinks
+// (run log, --json, debug trace), Selector is read by the debug trace, and Active/Prelude
+// are decoded off the wire but unused — nothing reports the active set. The backend no longer
 // injects anything into the upstream transcript — a newly-active skill reaches
 // the model as its body in a "# Loaded skills" system message (plain context),
 // so Prelude is now vestigial metadata the client neither replays nor renders.
@@ -866,9 +867,8 @@ type SkillRef struct {
 	Title string `json:"title"`
 }
 
-// Prelude is optional skill-load metadata the backend still emits. The client
-// decodes but does NOT render it (the "Skill loaded" card is built from
-// NewlyLoaded titles); it is vestigial pending a coordinated server-side drop.
+// Prelude is optional skill-load metadata the backend still emits. The client decodes
+// but never replays or renders it; it is vestigial pending a coordinated server-side drop.
 type Prelude struct {
 	ToolExecutions []PreludeExecution `json:"tool_executions"`
 }

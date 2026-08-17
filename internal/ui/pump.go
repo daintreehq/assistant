@@ -38,8 +38,6 @@ type pumpEvent struct {
 	phase domain.RunPhase
 	// tool batch
 	batch []agent.BatchedToolCall
-	// skill load (newly-loaded runbook titles for this round)
-	skills []string
 	// tool state
 	toolID    string
 	toolState agent.ToolState
@@ -77,7 +75,6 @@ const (
 	pumpEnd
 	pumpCancelled
 	pumpInterject // a mid-turn user message folded into the running turn
-	pumpSkill     // a server-side skill load folded into the running turn as a card
 	pumpPhase
 	pumpBatch
 	pumpToolState
@@ -232,12 +229,13 @@ func (p *eventPump) Interjection(text string) {
 	p.emit(pumpEvent{kind: pumpInterject, text: text})
 }
 
-// SkillLoaded forwards a server-side skill load (flushing buffered tokens first so the
-// card lands after any prose that streamed before this round's meta). The reducer folds
-// it into the running turn as an inline card.
-func (p *eventPump) SkillLoaded(titles []string) {
-	p.emit(pumpEvent{kind: pumpSkill, skills: titles})
-}
+// SkillLoaded is DELIBERATELY inert in the cockpit. Backend skill selection is
+// prompt-assembly machinery the user neither approves nor steers, so it gets no
+// transcript real estate; the durable run log, --json stream and debug trace still carry
+// every load. Inert rather than an emit-with-no-render: emit() drains the token
+// coalescer, so forwarding a skill load would still perturb the prose flush boundary for
+// something that draws nothing. See Session.emitSkillLoads for the full rationale.
+func (p *eventPump) SkillLoaded([]string) {}
 
 func (p *eventPump) ToolBatch(calls []agent.BatchedToolCall) {
 	p.emit(pumpEvent{kind: pumpBatch, batch: calls})

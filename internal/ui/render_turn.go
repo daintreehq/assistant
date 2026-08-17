@@ -37,7 +37,7 @@ func renderUserMessage(th theme.Theme, text string, width int) string {
 	// the block (inlineLabel=false): the turn-opening card is the widest thing on the
 	// screen, so a floating anchor reads as a heading for the exchange rather than as
 	// the card's first row.
-	return renderCard(th, th.UserMessageSurface(), "YOU", strings.Split(text, "\n"), width, false, true)
+	return renderCard(th, th.UserMessageSurface(), "YOU", strings.Split(text, "\n"), width, false)
 }
 
 // userMsgHeadLines / userMsgTailLines bound a long YOU-card paste: a message of more
@@ -72,9 +72,12 @@ func renderHiddenRule(g theme.GlyphSet, hidden, width int) string {
 }
 
 // renderCard draws the cockpit's ONE card idiom: a labelled body where every body row is
-// a left accent bar (▏) butted against a contiguous fill block. It backs all three cards —
-// the turn-opening "YOU" message, the human's mid-turn message, and the inline "Skill
-// loaded" note — so their geometry can never drift apart, and any width fix lands once.
+// a left accent bar (▏) butted against a contiguous fill block. It backs both cards — the
+// turn-opening "YOU" message and the human's mid-turn message — so their geometry can
+// never drift apart, and any width fix lands once.
+//
+// Every card carries HUMAN-typed text, which is why the long-body head/tail trim below is
+// unconditional: a giant paste must never bury the turn in scrollback.
 //
 // inlineLabel picks the label's home. false puts it on its OWN bare line above the block
 // (the turn-opening YOU card: a heading for the whole exchange, faint and unbold, because
@@ -112,11 +115,7 @@ func cardInner(width int) int {
 	return inner
 }
 
-// collapse gates the long-body head/tail trim below. The skill card passes FALSE — its
-// contract is one visible row per skill, however many the backend loads, so a "lines
-// hidden" trim would defeat the card's whole point. Cards that carry pasted human text
-// (YOU, interjection) pass true so a giant paste can't bury the turn in scrollback.
-func renderCard(th theme.Theme, surface theme.UserMessageSurface, label string, lines []string, width int, inlineLabel, collapse bool) string {
+func renderCard(th theme.Theme, surface theme.UserMessageSurface, label string, lines []string, width int, inlineLabel bool) string {
 	g := th.Glyphs
 	barStyle := th.Muted()
 	if surface.Bar != nil {
@@ -212,7 +211,7 @@ func renderCard(th theme.Theme, surface theme.UserMessageSurface, label string, 
 	// collapse only when it hides at least 2 lines (len > head+tail+1) — replacing a
 	// single hidden line with a one-row rule would save nothing. The rule itself rides
 	// the same fill block (renderHiddenRule), so the card stays one contiguous surface.
-	if collapse && len(lines) > userMsgHeadLines+userMsgTailLines+1 {
+	if len(lines) > userMsgHeadLines+userMsgTailLines+1 {
 		for _, para := range lines[:userMsgHeadLines] {
 			writeParagraph(para)
 		}
@@ -372,9 +371,9 @@ func renderTurnPreamble(th theme.Theme, t *TurnCell, width int, markerActive, sh
 // the SAME md.Render call and trims only the mutable tail — so the un-flushed remainder sits in
 // the footer tail until it settles and is never double-committed.
 //
-// Tool and skill grouping are computed over the sub-range; the incremental flush only
-// ever passes a range that begins and ends on a group boundary (see finalizedStepCount),
-// so neither a branch tree nor a skill card is ever split across the flush frontier.
+// Tool grouping is computed over the sub-range; the incremental flush only ever passes a
+// range that begins and ends on a group boundary (see finalizedStepCount), so a branch
+// tree is never split across the flush frontier.
 func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, to, width, contentW int, expanded bool, spinnerFrame int, now int64, withholdGrowingLast bool) string {
 	steps := t.Steps
 	if to < 0 || to > len(steps) {
@@ -403,13 +402,13 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 	for li := range sub {
 		step := sub[li]
 		g := from + li
-		// A blank line AFTER a "block" step — a tool group, a skill card, OR the human's
-		// mid-turn message — separates the function-call ledger / card from the prose or note
-		// that follows it. The blank rides the FOLLOWING step (a leading blank) so it survives
-		// the flush boundary: when the block flushes alone, the blank flushes with the prose
-		// later, keeping spacing identical across streaming and seal (a TRAILING blank would be
+		// A blank line AFTER a "block" step — a tool group OR the human's mid-turn message —
+		// separates the function-call ledger / card from the prose or note that follows it.
+		// The blank rides the FOLLOWING step (a leading blank) so it survives the flush
+		// boundary: when the block flushes alone, the blank flushes with the prose later,
+		// keeping spacing identical across streaming and seal (a TRAILING blank would be
 		// stripped by the final TrimRight and lost).
-		afterBlock := prevRendered == StepTool || prevRendered == StepSkill || prevRendered == StepInterject
+		afterBlock := prevRendered == StepTool || prevRendered == StepInterject
 		switch step.Kind {
 		case StepProse:
 			withhold := withholdGrowingLast && g == lastIdx
@@ -449,11 +448,9 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 		case StepInterject:
 			if rendered := renderInterjection(th, step.Text, width); rendered != "" {
 				// The human's mid-turn message is the ONE step that takes a blank line above it
-				// unconditionally — not just after a block (afterBlock), the way a skill card
-				// does. A skill card belongs to the round below it, so gluing it to the content
-				// above reads correctly; a message typed while the model was streaming is a hard
-				// break in the narrative, and butted against the paragraph above it, it read as
-				// one more line of the model's own prose.
+				// unconditionally, not just after a block (afterBlock): a message typed while the
+				// model was streaming is a hard break in the narrative, and butted against the
+				// paragraph above it, it read as one more line of the model's own prose.
 				//
 				// UNCONDITIONAL, including as the turn's first step: an injection folds in at the
 				// TOP of a round, so it can land before any prose or tool step exists, and the
@@ -465,36 +462,6 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 				b.WriteString(rendered)
 				b.WriteByte('\n')
 				prevRendered = StepInterject
-			}
-		case StepSkill:
-			// A contiguous run of skill steps renders as ONE card — a single pluralizing
-			// "Skill(s) loaded" anchor with one row per skill — so a round that loads
-			// several runbooks doesn't stack a two-row card (plus separator blank) per
-			// skill. Only the run's FIRST step emits the card; the rest already have their
-			// row on screen, and skip silently (prevRendered was set by the first step, so
-			// separator state holds). The card is a function of the WHOLE run (the anchor
-			// counts it), so the flush window never cuts a run mid-way: finalizedStepCount
-			// finalizes a skill run only once closed, the same atomic-commit contract tool
-			// groups follow.
-			if li > 0 && sub[li-1].Kind == StepSkill {
-				continue
-			}
-			var titles []string
-			for j := li; j < len(sub) && sub[j].Kind == StepSkill; j++ {
-				titles = append(titles, sub[j].Text)
-			}
-			if rendered := renderSkillCard(th, titles, width); rendered != "" {
-				// The card carries the SAME asymmetric spacing as the "YOU" message card it
-				// mirrors: a blank line BELOW (afterBlock on the next step) but NONE above, so
-				// it reads as linked to whatever precedes it (the ◆ DAINTREE marker, at the
-				// start of a turn) rather than floating in its own gap. The only leading blank
-				// is the block-separator one a tool group / preceding card needs (afterBlock).
-				if afterBlock {
-					b.WriteByte('\n')
-				}
-				b.WriteString(rendered)
-				b.WriteByte('\n')
-				prevRendered = StepSkill
 			}
 		}
 	}
@@ -787,7 +754,7 @@ func renderInterjection(th theme.Theme, text string, width int) string {
 	if strings.TrimSpace(text) == "" {
 		return ""
 	}
-	return renderCard(th, th.InterjectionSurface(), interjectLabel, strings.Split(text, "\n"), width, true, true)
+	return renderCard(th, th.InterjectionSurface(), interjectLabel, strings.Split(text, "\n"), width, true)
 }
 
 // queuedPreviewMax bounds how many queued messages the footer card lists. Beyond it the
@@ -850,7 +817,7 @@ func renderQueuedInjections(th theme.Theme, texts []string, width, maxRows int) 
 	if label == "" {
 		return ""
 	}
-	return renderCard(th, th.InterjectionSurface(), label, shown, width, true, true)
+	return renderCard(th, th.InterjectionSurface(), label, shown, width, true)
 }
 
 // flattenToRow collapses a message to a single line: every newline (and any run of
@@ -858,46 +825,6 @@ func renderQueuedInjections(th theme.Theme, texts []string, width, maxRows int) 
 // of the fixed bottom band instead of its full height.
 func flattenToRow(s string) string {
 	return strings.Join(strings.Fields(s), " ")
-}
-
-// renderSkillCard renders a contiguous run of server-side skill loads as ONE compact
-// inline card folded into the running turn: a quiet "Skill loaded" / "Skills loaded"
-// anchor over one row per skill, all riding a pale blue/turquoise fill block that butts
-// up against a left accent bar (▏ — the same surface idiom the YOU card uses, so it
-// reads as a distinct, calm capability cue rather than the model's prose or a system
-// note). The backend now loads skills eagerly, so a round routinely brings several at
-// once — one two-row card per skill drowned the transcript, hence one shared anchor and
-// one line each.
-//
-// Each name occupies EXACTLY one row: truncated with an ellipsis, never wrapped. The
-// anchor pluralizes on the run's size, so the WHOLE render is a function of the complete
-// run — which is why the flush treats a skill run atomically (finalizedStepCount commits
-// it only once CLOSED by a non-skill step, exactly like a tool run): no card row reaches
-// scrollback while the run could still grow, so the committed rows can never be
-// invalidated by a later skill. Like the YOU card, every row is a fixed bar+block width
-// so a committed card never wraps a frozen scrollback row on resize.
-func renderSkillCard(th theme.Theme, titles []string, width int) string {
-	inner := cardInner(width)
-	rows := make([]string, 0, len(titles))
-	for _, title := range titles {
-		// flattenToRow also collapses any stray newline in a title so the one-row
-		// guarantee survives whatever the backend sends.
-		title = flattenToRow(title)
-		if title == "" {
-			continue
-		}
-		rows = append(rows, truncateCells(title, inner))
-	}
-	if len(rows) == 0 {
-		return ""
-	}
-	// Row 1 is the anchor — plural when the run brought more than one skill; each
-	// following row is one skill's name.
-	label := "Skill loaded"
-	if len(rows) > 1 {
-		label = "Skills loaded"
-	}
-	return renderCard(th, th.SkillLoadedSurface(), label, rows, width, true, false)
 }
 
 // noteGlyph maps a note level to (glyph, tone):

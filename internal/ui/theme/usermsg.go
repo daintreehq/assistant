@@ -76,33 +76,3 @@ func (t Theme) InterjectionSurface() UserMessageSurface {
 	}
 	return s
 }
-
-// SkillLoadedSurface resolves the colors for the inline "Skill loaded" card — the same
-// left-bar-over-fill idiom as the YOU card, but tinted a calm blue/turquoise so a
-// server-side capability load reads as its own distinct, quiet event (neither the human's
-// words nor a system note). It reuses UserMessageSurface (a generic bar/text/fill/label
-// set). As there, a nil Fill means "no background fill" (ansi/none): 16-color backgrounds
-// clash unpredictably, and no-color mode leans on the dim bar alone.
-func (t Theme) SkillLoadedSurface() UserMessageSurface {
-	switch t.Mode {
-	case ModeLight:
-		return UserMessageSurface{
-			Bar:   lipgloss.Color("#3BA5C0"), // teal-blue line
-			Text:  lipgloss.Color("#1F3A44"), // dark teal text
-			Fill:  lipgloss.Color("#E2F1F8"), // very pale blue block
-			Label: lipgloss.Color("#3A7E8C"), // quieter teal anchor
-		}
-	case ModeANSI:
-		// Cyan bar, no fill (16-color backgrounds clash unpredictably).
-		return UserMessageSurface{Bar: lipgloss.Color("6"), Text: nil, Fill: nil, Label: nil}
-	case ModeNone:
-		return UserMessageSurface{Bar: nil, Text: nil, Fill: nil, Label: nil}
-	default: // ModeDark
-		return UserMessageSurface{
-			Bar:   lipgloss.Color("#5EEAD4"), // turquoise line on the block
-			Text:  lipgloss.Color("#CBEAEC"), // light cyan-grey, easy on the fill
-			Fill:  lipgloss.Color("#173A42"), // subtle dark teal-blue block
-			Label: lipgloss.Color("#7FCDD6"), // brighter teal anchor for "Skill loaded"
-		}
-	}
-}

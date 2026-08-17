@@ -293,12 +293,13 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 	//   - OnRawMeta is intentionally observational and remains per-attempt. It may
 	//     fire more than once so latency/debug instrumentation sees the real transport
 	//     timeline; it must never adopt state or produce user-visible effects.
-	//   - OnSkillLoaded is intentionally EAGER: a successful selector result is useful
-	//     feedback before the upstream model connects or emits a token. The same request
-	//     can be retried after receiving meta, so identical skill refs are de-duplicated
-	//     across attempts before reaching the caller. A failed attempt's signed state is
+	//   - OnSkillLoaded is intentionally EAGER: a selector result is worth recording before
+	//     the upstream model connects or emits a token, so a trace shows selection latency
+	//     separately from generation. The same request can be retried after receiving meta,
+	//     so identical skill refs are de-duplicated across attempts before reaching the
+	//     caller — one load, one record. A failed attempt's signed state is
 	//     also adopted into the next POST so the backend reuses that selection instead of
-	//     selecting a different skill after the first one is already visible.
+	//     paying for a second selector run that could land somewhere else.
 	//   - OnContent is the retry BOUNDARY: once any visible token has reached the
 	//     caller the turn is committed (a replay would duplicate on-screen text), so we
 	//     only retry failures that arrive before the first content fragment.
@@ -307,7 +308,7 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 	//     and forward it exactly once — from the attempt that commits (first content) or
 	//     when the loop returns. If the terminal/cancelled attempt dies before meta, the
 	//     last received (and retry-adopted) meta is forwarded so its signed state is not
-	//     lost after its eager skill cue was already shown.
+	//     lost after selection has already been paid for and recorded.
 	//
 	// (OnToolCallDelta is intentionally NOT a boundary — see its doc on StreamCallbacks:
 	// callers must treat the returned ToolCalls as authoritative, since a pre-content
@@ -442,8 +443,8 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 			return result, serr
 		}
 		// Selection already completed if this attempt delivered meta. Pin that signed
-		// outcome into the next request before replaying the turn: the eager skill card
-		// is now visible, so a full-request retry must reuse the same active set rather
+		// outcome into the next request before replaying the turn: selection has already
+		// been paid for, so a full-request retry must reuse the same active set rather
 		// than rerun a selector that could choose something different. OnMeta remains
 		// deferred; adopting the opaque token here is transport bookkeeping only.
 		if pendingMeta != nil && pendingMeta.State != "" {

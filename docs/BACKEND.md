@@ -498,8 +498,12 @@ with something unparseable (usually a provider or compatibility problem).
   and a current object carries id/path/branch/issue/PR/status/last-commit fields.
 - **Skills are server-owned.** No `skill.find` / `skill.load` (reserved + rejected). The
   backend's selector picks and injects runbooks and returns a `skills` block. The CLI
-  immediately surfaces its `newly_loaded` refs as skill cards and keeps only the local
-  run-tracking tools `skill.run.get` / `skill.step.advance` (the backend prompt drives them).
+  folds NONE of it into the conversation, and there is no `/skills` command. Backend skill
+  selection is prompt-assembly machinery the user neither approves nor steers, so
+  `newly_loaded` feeds the debug trace, the durable run log and the `--json` stream — and
+  surfaces to a human only in an explicit `/explain <run>` replay. The CLI keeps only the
+  local run-tracking tools
+  `skill.run.get` / `skill.step.advance` (the backend prompt drives them).
 - **Opaque state token.** `meta.state` is stored verbatim and replayed on the next request;
   the CLI never inspects, signs, or mutates it. A missing token is valid for a new session.
 - **One `turn_id` per user request** across the whole tool-call loop; `round` increments

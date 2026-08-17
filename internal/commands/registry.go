@@ -40,7 +40,6 @@ var COMMAND_REGISTRY = []CommandMeta{
 	{Name: "login", Syntax: "/login", Palette: "sign in · switch endpoint", Help: "sign in again: official, custom, or local backend"},
 	{Name: "permissions", Syntax: "/permissions [tier]", Palette: "supervisor | operator | system", Help: "show or set tier (supervisor|operator|system)"},
 	{Name: "approvals", Syntax: "/approvals [clear]", Palette: "cockpit tool approvals", Help: "cockpit session approvals; clear resets them"},
-	{Name: "skills", Syntax: "/skills", Palette: "how skills work (backend-managed)", Help: "explain server-owned skill selection (no local catalog)"},
 	{Name: "memory", Syntax: "/memory [sub]", Palette: "list · pin · unpin · forget", Help: "list | pin <id> | unpin <id> | forget <id>"},
 	{Name: "compact", Syntax: "/compact", Palette: "summarize the conversation", Help: "summarize + reset the conversation"},
 	{Name: "clear", Syntax: "/clear", Palette: "reset the conversation", Help: "drop the conversation — start fresh"},
