@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"time"
@@ -498,6 +499,13 @@ func (c *Client) respondStreamOnce(ctx context.Context, body []byte, cb StreamCa
 	attemptCtx, cancelAttempt := context.WithCancel(ctx)
 	defer cancelAttempt()
 
+	// Client-side latency marks for THIS attempt. The backend's own timings begin when
+	// the request lands, so without these the difference between a client-measured round
+	// and the server's total is one opaque number covering dial, TLS, upload and the
+	// flight home. See transport.go.
+	marks := newTransportRecorder()
+	attemptCtx = httptrace.WithClientTrace(attemptCtx, marks.trace())
+
 	httpReq, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, c.baseURL+"/v1/daintree/respond", bytes.NewReader(body))
 	if err != nil {
 		return RespondResult{}, fmt.Errorf("backend: build respond request: %w", err)
@@ -506,12 +514,20 @@ func (c *Client) respondStreamOnce(ctx context.Context, body []byte, cb StreamCa
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		return RespondResult{}, &Error{Code: "connect", Message: "could not reach assistant backend: " + err.Error()}
+		// Marks even here: a transport failure that got as far as a TLS handshake before
+		// dying is a completely different diagnosis from a refused socket, and only the
+		// marks tell them apart. A truly refused connection records nothing, which is
+		// the honest answer rather than a row of zeroes.
+		return RespondResult{Transport: marks.result()},
+			&Error{Code: "connect", Message: "could not reach assistant backend: " + err.Error()}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return RespondResult{}, c.readErrorResponse(resp)
+		// A 502/503 unambiguously reached the wire — it HAS a first byte. Dropping its
+		// marks would leave the log implying the opposite.
+		out := RespondResult{Transport: marks.result()}
+		return out, c.readErrorResponse(resp)
 	}
 
 	idle := c.streamIdleTimeout
@@ -529,6 +545,9 @@ func (c *Client) respondStreamOnce(ctx context.Context, body []byte, cb StreamCa
 	requestID := safeRequestID(resp.Header.Get(requestIDHeader))
 
 	result, perr := parseRespondStream(&idleResetReader{r: resp.Body, reset: watchdog.Reset}, cb)
+	// Stamped on every exit below, success or failure: a stream that died halfway is
+	// exactly when "did we even reach them, and how long did that take" is worth asking.
+	result.Transport = marks.result()
 	if perr != nil && watchdog.Fired() && ctx.Err() == nil {
 		return result, &Error{
 			Code:      "stream_idle_timeout",

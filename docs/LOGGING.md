@@ -84,8 +84,8 @@ first-token timing + aggregate stats.
 | `backend.respond.raw_meta` | each HTTP attempt's SSE meta arrives | `backendRequestId` `model` `newlyLoadedCount`; transport observation only, so a retried logical round can contain more than one |
 | `backend.respond.skill_cue` | eager skill-loaded cue reaches the sinks | `skills`; absent when no new skill is surfaced and de-duplicated across retries |
 | `backend.respond.meta` | retry-safe meta commits | `backendRequestId` `model` `promptVersion` `catalogRevision` `stateSha` `warnings`; `skills` = `{active, newlyLoaded, selector{ran,degraded,taskType,confidence,reason}}`; normally fires with first content or successful tool-only completion |
-| `backend.respond.done` | round completed | `durationMs` `firstTokenMs` `contentChars` `contentPreview` `finishReason` `toolCallCount` `toolCalls[]` (id + name + args preview/hash) `usage` `cost` `reasoningPresent` |
-| `backend.respond.error` | non-cancel respond failure | `durationMs` `error` |
+| `backend.respond.done` | round completed | `durationMs` `firstTokenMs` `retries` `contentChars` `contentPreview` `finishReason` `toolCallCount` `toolCalls[]` (id + name + args preview/hash) `usage` `cost` `reasoningPresent`; the backend's own phase breakdown as `server*Ms` and our transport marks as `client*Ms` (see below) |
+| `backend.respond.error` | non-cancel respond failure | `durationMs` `retries` `error`; whichever `client*Ms` transport marks the dead attempt got as far as taking (all absent ⇒ nothing reached the wire) |
 
 `request` = what the backend was **shown**; `meta` = what it **decided** (incl. which
 skill it loaded — the surface that says "fix the selector, not the tool"); `done` = what
@@ -99,6 +99,91 @@ by reading a log, and because `selector` is the share prompt work can actually m
 Read it next to `usage.cachedTokens / usage.promptTokens`: the prompt-cache hit ratio is
 what the backend's byte-stable prompt assembly buys, and a collapse in it is the first
 symptom of a regression that costs the user money directly.
+
+#### Where a slow turn went
+
+`done` also carries the backend's SERVER-side phase breakdown — wall clock measured
+around real awaits, so each figure includes the queueing and network the user waited
+through. They render as flat inline keys rather than a nested block on purpose: "where
+does the time go" is answered by grepping a whole session's `done` lines and sorting a
+column.
+
+| key | meaning |
+|---|---|
+| `serverSelectionMs` | the skill-selector call, incl. a parse-repair round trip |
+| `serverDocsMs` | the documentation lookup, when the selector asked for one |
+| `serverPreparationMs` | request in → upstream request built (selection, docs, state, assembly) |
+| `serverUpstreamOpenMs` | request in → the model's first event. Mostly prefill |
+| `serverThinkingMs` | first chain-of-thought fragment → first visible token |
+| `serverFirstOutputMs` | request in → first visible token. The headline |
+| `serverGenerationMs` | first visible token → complete |
+| `serverTotalMs` | the whole server-side wait |
+
+The backend's clock starts when the request lands and stops when the response completes,
+so the rest of the round is ours. `clientOverheadMs` is that remainder, and the
+`client*Ms` marks (`net/http/httptrace`, `internal/backend/transport.go`) attribute it.
+`clientConnectMs`, `clientRequestSentMs` and `clientFirstByteMs` are elapsed from the
+start of the HTTP call so they nest; `clientDnsMs` and `clientTlsMs` are each that
+*stage's own* duration, because that is what the hooks bracket.
+
+| key | meaning |
+|---|---|
+| `clientConnectMs` | call start → a usable connection. Near zero when pooled |
+| `clientConnReused` | whether the connection came from the pool |
+| `clientDnsMs` | the name lookup's own duration |
+| `clientTlsMs` | the handshake's own duration |
+| `clientRequestSentMs` | call start → the transport reporting our request written |
+| `clientFirstByteMs` | call start → the first response byte |
+| `clientOverheadMs` | `durationMs - serverTotalMs`: everything outside the server's own clock |
+
+**Every one of these is absent when the stage did not happen** — same rule as the server
+phases, and it is load-bearing on failures: an attempt that connected and uploaded and
+then died reports no `clientFirstByteMs` at all, rather than a `0` that would read as the
+fastest response ever recorded. A pooled connection reports no `clientDnsMs`/`clientTlsMs`.
+Marks are absent *entirely* only when nothing reached the wire (a refused socket); a 4xx/5xx
+carries them, because a status line is a first byte.
+
+**`clientRequestSentMs` is not "when they had it"** — and not reliably even "when the
+kernel had it all". The hook fires before the transport's final flush, and a whole turn's
+prompt usually fits in the send buffer: a warm round measured `clientRequestSentMs=0`
+while shipping ~200 KB. Treat it as a lower bound on our own send time. The honest
+network figure is `(clientFirstByteMs - clientRequestSentMs) - serverPreparationMs`:
+that leaves the round trip *including* upload transmission, which is where a large
+uncached prompt shows up.
+
+A session's FIRST turn pays dial + DNS + TLS and every later one does not, so compare
+like with like — check `clientConnReused` before concluding anything got slower. (A
+connection re-dialled mid-call because the pooled one had gone stale reports the
+connection that actually carried the request, not the discarded one.)
+
+Four things to know before drawing a conclusion from them:
+
+1. **An absent key means the phase did not happen** — it is never zero-filled. A round
+   with no `serverSelectionMs` skipped the selector (the normal shape for a
+   tool-continuation round); a `serverSelectionMs=0` would be a selector that answered
+   instantly, which is a different fact. `serverThinkingMs` is absent on every normal
+   turn because the whole interactive surface is non-thinking; seeing it means that
+   posture changed.
+2. **They do not sum to `serverTotalMs`.** The phases overlap by design — a speculative
+   upstream stream opens while the selector is still running, so `serverSelectionMs` and
+   `serverUpstreamOpenMs` can cover the same wall clock. Read each as a duration, never
+   as a slice of a partition.
+3. **Two readings that look like bugs and aren't.** A small `serverUpstreamOpenMs` next
+   to a large `serverSelectionMs` means a winning speculation hid the open, not a fast
+   model. And a non-streamed call reports no `serverUpstreamOpenMs` at all: one await
+   covers opening and generating, so the whole upstream wait lands in
+   `serverFirstOutputMs`.
+4. **`durationMs` and `serverTotalMs` measure different spans.** `durationMs` is
+   client-observed and covers every retried attempt plus its backoff sleeps;
+   `serverTotalMs` covers the winning attempt only. That is what `retries` is for — and
+   why `clientOverheadMs` is emitted ONLY when `retries` is absent, rather than reporting
+   an abandoned attempt as transport.
+
+The split that answers "is it the network, us, the backend, or the model" is
+`clientFirstByteMs` (getting there and back) vs `serverPreparationMs` (the backend's own
+work, fixed in the backend repo) vs `serverUpstreamOpenMs` (prefill, moved by
+prompt-cache hits — read it against `usage.cachedTokens`) vs `serverGenerationMs` (the
+model writing, moved only by output length or a model change).
 
 ### Tools
 | event | when | key fields |

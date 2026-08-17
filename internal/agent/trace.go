@@ -304,11 +304,108 @@ func (s *Session) traceBackendMeta(runID, turnID string, round int, m backend.St
 	})
 }
 
+// timingKeys maps the backend's server-side phase breakdown onto flat, INLINE trace
+// keys. Inline rather than a nested block (the shape `usage` and `cost` use) because
+// this is the one payload you read ACROSS rounds: "where did the wait go" is answered
+// by grepping a whole session's done lines and sorting a column, and a ten-line
+// indented JSON block per round makes that miserable. The `server` prefix is not
+// decoration — it is what keeps `serverTotalMs` from being confused with the
+// client-observed `durationMs` sitting next to it on the same line.
+//
+// A nil phase is OMITTED, never zero-filled. That is the backend's contract (it
+// serializes with exclude_none) and the whole reason these are pointers: a selector
+// that did not run must not read in the log like one that answered instantly.
+func timingKeys(t *backend.TurnTimings) []struct {
+	key string
+	val *int
+} {
+	return []struct {
+		key string
+		val *int
+	}{
+		{"serverSelectionMs", t.SelectionMs},
+		{"serverDocsMs", t.DocsMs},
+		{"serverPreparationMs", t.PreparationMs},
+		{"serverUpstreamOpenMs", t.UpstreamOpenMs},
+		{"serverThinkingMs", t.ThinkingMs},
+		{"serverFirstOutputMs", t.FirstOutputMs},
+		{"serverGenerationMs", t.GenerationMs},
+		{"serverTotalMs", t.TotalMs},
+	}
+}
+
+// addBackendTimings writes the server-reported phase breakdown into a done event, plus
+// the one figure only the CLIENT can know: how much of the round the backend does not
+// account for. That derived number is gated on retries == 0 deliberately — a retried
+// round's durationMs spans every attempt and its backoff sleeps, while the backend's
+// total covers only the winning attempt, so subtracting them there would report the
+// abandoned attempt as transport overhead. Better absent than confidently wrong.
+func addBackendTimings(fields map[string]any, t *backend.TurnTimings, durationMs int64, retries int) {
+	if !t.Any() {
+		return
+	}
+	for _, p := range timingKeys(t) {
+		if p.val != nil {
+			fields[p.key] = *p.val
+		}
+	}
+	if t.TotalMs != nil && retries == 0 {
+		// Everything outside the server's own clock: the dial, our upload, the flight
+		// home, and our decode of the stream. addTransportMarks then attributes it —
+		// this is the total the client* keys break down.
+		//
+		// A negative result is OMITTED rather than clamped to zero, because clamping
+		// would present a broken measurement as a real one. It happens for two reasons:
+		// the two clocks start at different instants (ours before the request is even
+		// serialized), so a fast round can land a millisecond "negative"; and durationMs
+		// comes from wall-clock time, so an NTP step mid-round can move it arbitrarily.
+		if overhead := durationMs - int64(*t.TotalMs); overhead >= 0 {
+			fields["clientOverheadMs"] = overhead
+		}
+	}
+}
+
+// addTransportMarks writes the client-side latency of the attempt: how long until we
+// had a connection, until our request was on the wire, and until the first byte came
+// back. This is the half of a turn the backend's own timings cannot see — its clock
+// starts when the request lands — and without it the difference between a
+// client-measured round and the server's total is one unattributable number.
+//
+// EVERY mark is written only when it was actually taken. A failed attempt produces a
+// partial set on purpose (a DNS failure resolves nothing and connects to nothing), so a
+// zero-filled field would report a stage that never ran — and `clientFirstByteMs=0` on
+// a request that never got a response would read as the fastest round ever recorded.
+// Same absent-is-not-zero rule the server's phases follow.
+func addTransportMarks(fields map[string]any, m *backend.TransportMarks) {
+	if m == nil {
+		return
+	}
+	if m.Reused != nil {
+		fields["clientConnReused"] = *m.Reused
+	}
+	for key, val := range map[string]*int64{
+		"clientConnectMs":     m.ConnectMs,
+		"clientDnsMs":         m.DNSMs,
+		"clientTlsMs":         m.TLSMs,
+		"clientRequestSentMs": m.RequestSentMs,
+		"clientFirstByteMs":   m.FirstByteMs,
+	} {
+		if val != nil {
+			fields[key] = *val
+		}
+	}
+}
+
 // traceBackendDone records a completed respond round: timing (round + first token),
 // produced content/reasoning sizes and a preview, the tool calls the model asked for
 // (id + name + bounded args + args hash), the finish reason, and usage. Per-token
 // deltas are deliberately NOT logged — only the aggregate.
-func (s *Session) traceBackendDone(runID, turnID string, round int, result backend.RespondResult, durationMs, firstTokenMs int64) {
+//
+// durationMs and firstTokenMs are CLIENT-observed and span every retried attempt; the
+// server<Phase>Ms keys are the backend's own breakdown of the winning attempt. Keeping
+// both is the point: the gap between them is the transport, and neither side can see it
+// alone.
+func (s *Session) traceBackendDone(runID, turnID string, round int, result backend.RespondResult, durationMs, firstTokenMs int64, retries int) {
 	s.safeTrace("backend.respond.done", func() map[string]any {
 		calls := make([]map[string]any, 0, len(result.Message.ToolCalls))
 		for _, tc := range result.Message.ToolCalls {
@@ -338,6 +435,14 @@ func (s *Session) traceBackendDone(runID, turnID string, round int, result backe
 		if firstTokenMs > 0 {
 			fields["firstTokenMs"] = firstTokenMs
 		}
+		// Retry count first: it is the caveat that makes durationMs readable at all. A
+		// 40-second round that retried twice is a transport story, not a slow model, and
+		// without this the two are indistinguishable on the done line.
+		if retries > 0 {
+			fields["retries"] = retries
+		}
+		addBackendTimings(fields, result.Timings, durationMs, retries)
+		addTransportMarks(fields, result.Transport)
 		// Cost, when the backend reported it. Logged per round rather than only in the
 		// session total because "why was that turn expensive?" is a question you answer
 		// by reading a log — and because the selector share is the one number prompt
@@ -366,18 +471,31 @@ func (s *Session) traceBackendDone(runID, turnID string, round int, result backe
 
 // traceBackendError records a terminal respond failure (a non-cancel error — cancel
 // is a clean stop, logged as turn.end status=cancelled).
-func (s *Session) traceBackendError(runID, turnID string, round int, durationMs int64, err error) {
+func (s *Session) traceBackendError(runID, turnID string, round int, durationMs int64, retries int, marks *backend.TransportMarks, err error) {
 	if err == nil {
 		return
 	}
 	s.safeTrace("backend.respond.error", func() map[string]any {
-		return map[string]any{
+		fields := map[string]any{
 			"runId":      runID,
 			"turnId":     turnID,
 			"round":      round,
 			"durationMs": durationMs,
 			"error":      err.Error(),
 		}
+		// The retry tally is what makes a long durationMs here legible: a round that
+		// burned a minute across nine attempts and backoff sleeps is a transport story,
+		// not one slow call, and the two are otherwise identical on this line.
+		if retries > 0 {
+			fields["retries"] = retries
+		}
+		// The failing attempt's client-side marks, when it got far enough to have any.
+		// This is where they matter MOST: a mid-stream death 30 s in reads completely
+		// differently once you can see we connected in 200 ms and had a first byte at
+		// 2 s. A failure that never reached the wire carries none, which is itself the
+		// answer.
+		addTransportMarks(fields, marks)
+		return fields
 	})
 }
 

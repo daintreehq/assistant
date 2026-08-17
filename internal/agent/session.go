@@ -929,10 +929,13 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		// plain bools (like gotToken) are race-free. The flip is suppressed once a
 		// visible token has arrived: Generating is the more specific state and must
 		// never regress to Thinking on a trailing reasoning fragment.
-		// retryNoticeShown latches the once-per-round retry cue (see OnRetry below).
+		// retryNoticeShown latches the once-per-round retry cue (see OnRetry below), and
+		// retryCount tallies the attempts behind it for the trace — a round's wall clock
+		// is unreadable without knowing how many attempts it covers.
 		// Race-free for the same reason as thinkingShown: RespondStream runs its retry
 		// loop and its stream callbacks synchronously on THIS goroutine.
 		retryNoticeShown := false
+		retryCount := 0
 		thinkingShown := false
 		markThinking := func() {
 			if thinkingShown || gotToken {
@@ -947,6 +950,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 				s.traceBackendRawMeta(runID, turnID, iter, m)
 			},
 			OnRetry: func(info backend.RetryInfo) {
+				retryCount++
 				// The retry budget now rides out a backend restart (~a minute of wall
 				// clock), so say so ONCE per round. Without any cue the cockpit shows
 				// an unchanged spinner and a retried turn is indistinguishable from a
@@ -1005,7 +1009,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 				s.events.AssistantCancelled("")
 				return domain.CancelledReply
 			}
-			s.traceBackendError(runID, turnID, iter, domain.NowMS()-roundStartMS, serr)
+			s.traceBackendError(runID, turnID, iter, domain.NowMS()-roundStartMS, retryCount, result.Transport, serr)
 			return s.classifyBackendError(serr)
 		}
 
@@ -1013,7 +1017,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		if firstTokenMS > 0 {
 			firstTokenLatency = firstTokenMS - roundStartMS
 		}
-		s.traceBackendDone(runID, turnID, iter, result, domain.NowMS()-roundStartMS, firstTokenLatency)
+		s.traceBackendDone(runID, turnID, iter, result, domain.NowMS()-roundStartMS, firstTokenLatency, retryCount)
 
 		calls := backendToolCalls(result.Message.ToolCalls)
 

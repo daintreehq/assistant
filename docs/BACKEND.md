@@ -352,6 +352,42 @@ after the response and can cost more than the turn that triggered it. It is off 
 default and forbidden in production, so no beta tester is exposed — but a local developer
 who enables it will see dashboard spend that no field here accounts for.
 
+### Phase timings
+
+Alongside `cost`, the `/respond` body and the terminal SSE `done` event carry
+`timings` — where the request's wall clock went, measured server-side around real
+awaits: `selection_ms`, `docs_ms`, `preparation_ms`, `upstream_open_ms`, `thinking_ms`,
+`first_output_ms`, `generation_ms`, `total_ms`. It rides the terminal event for the same
+reason cost does: `meta` is emitted *before* the model is opened — which is what makes
+meta useful — so it cannot know generation or total.
+
+The CLI decodes it as `backend.TurnTimings` (all fields `*int`) and writes it to the
+debug log on `backend.respond.done` as flat `server*Ms` keys; nothing renders it to the
+user. Three rules it implements, mirroring the cost block's:
+
+1. **Absent means the phase did not happen, never 0.** The backend serializes with
+   `exclude_none`, so a skipped selector is a *missing* key — and decoding it as zero
+   would merge it with a selector that answered instantly. Hence pointers, and hence
+   `TurnTimings.Any()` for "did this backend report anything at all".
+2. **They do not sum to `total_ms`.** Phases overlap by design: a speculative stream
+   opens while the selector is still running, so `selection_ms` and `upstream_open_ms`
+   can cover the same wall clock.
+3. **`total_ms` is the winning attempt only.** A retried respond call measures per
+   attempt, exactly as it bills per attempt — which is why the log gates its derived
+   `clientOverheadMs` on a round having made no retry.
+
+The CLI measures the other half itself. The server's clock starts when the request lands
+and stops when the response completes, so the dial, the TLS handshake, our upload and
+the flight home are invisible to it — on the first real turn against the deployed
+backend that was 934 ms of a 7.9 s round, and it was *constant* across the round (the
+gap at first token and at completion matched to 2 ms), which is the signature of a fixed
+pre-request cost rather than a slow stream. `internal/backend/transport.go` captures it
+with `net/http/httptrace` (`TransportMarks` on `RespondResult`, populated per attempt so
+a retried call reports the winning one), and the same log line carries both halves.
+
+See [`docs/LOGGING.md`](LOGGING.md#where-a-slow-turn-went) for the log keys and how to
+read them, and the backend's `docs/DAINTREE_API.md` § Phase timings for the contract.
+
 ### The upstream-failure taxonomy
 
 The backend used to collapse every upstream 401/402/403/404 and every 5xx into one

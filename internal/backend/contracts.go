@@ -19,6 +19,7 @@ package backend
 
 import (
 	"encoding/json"
+	"math"
 
 	"github.com/daintreehq/assistant/internal/credentials"
 )
@@ -576,12 +577,15 @@ type RespondResponse struct {
 	FinishReason    string         `json:"finish_reason"`
 	Usage           Usage          `json:"usage"`
 	// Cost is the whole request's spend. Absent ⇒ unknown, never free. See TurnCost.
-	Cost            *TurnCost   `json:"cost"`
-	Skills          SkillsBlock `json:"skills"`
-	State           string      `json:"state"`
-	CatalogRevision string      `json:"catalog_revision"`
-	PromptVersion   string      `json:"prompt_version"`
-	Warnings        []string    `json:"warnings"`
+	Cost *TurnCost `json:"cost"`
+	// Timings is where the request's wall clock went, by phase. Absent ⇒ the backend
+	// does not report timings. See TurnTimings.
+	Timings         *TurnTimings `json:"timings"`
+	Skills          SkillsBlock  `json:"skills"`
+	State           string       `json:"state"`
+	CatalogRevision string       `json:"catalog_revision"`
+	PromptVersion   string       `json:"prompt_version"`
+	Warnings        []string     `json:"warnings"`
 }
 
 // RespondMessage is the assistant message in a non-streaming response.
@@ -650,6 +654,130 @@ func (c *TurnCost) IsComplete() bool {
 	return *c.Complete
 }
 
+// TurnTimings is where a request's wall clock went, by phase, measured SERVER-side
+// around real awaits (so each figure includes the queueing and network the user
+// actually waited through, not the provider's own latency accounting).
+//
+// Every field is a POINTER, and that is the contract rather than Go pedantry. The
+// backend serializes with exclude_none, so a phase that did not happen is a MISSING
+// key — never 0. A selector that never ran and a selector that answered instantly are
+// different facts, and decoding the first as zero merges them into a lie that reads
+// like a measurement. PreparationMs and TotalMs are the two the backend promises on
+// every turn; they are pointers anyway so that a backend WITHOUT this block (the
+// deployed one, until this ships) cannot produce a log line claiming a 0 ms turn.
+//
+// The phases do NOT sum to TotalMs. They overlap deliberately: a speculative upstream
+// stream opens while the selector is still running, so SelectionMs and UpstreamOpenMs
+// can cover the same wall clock. Read each as "how long did this part take", never as
+// a partition — and never render them as a stacked bar.
+type TurnTimings struct {
+	// SelectionMs is the skill-selector call, including a parse-repair round trip when
+	// one ran. Absent on a tool-continuation round, where selection is skipped by
+	// design — so its absence across a turn's later rounds is the healthy shape.
+	SelectionMs *int `json:"selection_ms"`
+	// DocsMs is the documentation lookup, when the selector asked for one.
+	DocsMs *int `json:"docs_ms"`
+	// PreparationMs is request-in → upstream request built: selection, docs, state
+	// verification and prompt assembly. The share of the wait the backend owns outright,
+	// and the number to read against UpstreamOpenMs when asking where a slow turn went.
+	PreparationMs *int `json:"preparation_ms"`
+	// UpstreamOpenMs is request-in → the model's first event; mostly prefill. A SMALL
+	// value next to a large SelectionMs means a winning speculation hid the open, not a
+	// fast model. Absent on a non-streamed call, where one await covers opening and
+	// generating and splitting it would be a guess presented as a measurement.
+	UpstreamOpenMs *int `json:"upstream_open_ms"`
+	// ThinkingMs is the first chain-of-thought fragment → the first visible token.
+	// Absent on every normal turn: the whole interactive surface is non-thinking. A
+	// value here means that posture changed.
+	ThinkingMs *int `json:"thinking_ms"`
+	// FirstOutputMs is request-in → the first visible token. The headline number — what
+	// a user means by "it started answering".
+	FirstOutputMs *int `json:"first_output_ms"`
+	// GenerationMs is the first visible token → complete. Pure generation.
+	GenerationMs *int `json:"generation_ms"`
+	// TotalMs is the whole server-side wait for this ONE request. A retried round bills
+	// and measures per attempt, so this covers the winning attempt only — which is why a
+	// client-observed round duration can legitimately exceed it.
+	TotalMs *int `json:"total_ms"`
+}
+
+// Any reports whether the block carries at least one measured phase. A backend that
+// sends `timings` but populates nothing (or an older one that omits it entirely) must
+// not produce an empty timings record in a log or a caller's accounting.
+func (t *TurnTimings) Any() bool {
+	if t == nil {
+		return false
+	}
+	return t.SelectionMs != nil || t.DocsMs != nil || t.PreparationMs != nil ||
+		t.UpstreamOpenMs != nil || t.ThinkingMs != nil || t.FirstOutputMs != nil ||
+		t.GenerationMs != nil || t.TotalMs != nil
+}
+
+// UnmarshalJSON decodes the block and NEVER returns an error. That is not laziness
+// about malformed input — it is the whole point.
+//
+// These numbers are telemetry. They arrive on the terminal `done` event, which the SSE
+// parser decodes strictly: one `json.Unmarshal` failure anywhere in that event aborts
+// the stream, and the turn — already generated, already streamed to the user, already
+// BILLED to their key — fails. Letting a diagnostic field have that power is
+// indefensible, and the failure is not hypothetical: every field is a `*int`, so the
+// backend dropping a single `round()` and reporting `5775.3` would kill every turn,
+// as would any future string-valued field. A phase we cannot parse is reported the same
+// way as a phase that did not happen — absent — which is exactly the right answer.
+//
+// Fields are parsed INDEPENDENTLY, so one bad value costs only its own phase rather
+// than the whole block.
+func (t *TurnTimings) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		// Not even an object (`"timings": "soon"`, an array, a number). Nothing to
+		// salvage; leave every phase absent.
+		return nil
+	}
+	for key, target := range map[string]**int{
+		"selection_ms":     &t.SelectionMs,
+		"docs_ms":          &t.DocsMs,
+		"preparation_ms":   &t.PreparationMs,
+		"upstream_open_ms": &t.UpstreamOpenMs,
+		"thinking_ms":      &t.ThinkingMs,
+		"first_output_ms":  &t.FirstOutputMs,
+		"generation_ms":    &t.GenerationMs,
+		"total_ms":         &t.TotalMs,
+	} {
+		v, ok := raw[key]
+		if !ok {
+			continue
+		}
+		if ms, ok := parseMillis(v); ok {
+			*target = &ms
+		}
+	}
+	return nil
+}
+
+// parseMillis reads one millisecond figure, tolerating a float where an int is
+// expected (the backend rounds today, but a refactor that stops rounding must cost a
+// number's precision, not the user's turn). Reports false for anything that is not a
+// finite number in range.
+func parseMillis(raw json.RawMessage) (int, bool) {
+	var n json.Number
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return 0, false
+	}
+	f, err := n.Float64()
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, false
+	}
+	// A NEGATIVE duration is not a slow phase, it is a broken clock or a wrong sign, and
+	// logging it would put an impossible measurement next to real ones. Converting an
+	// out-of-range float to int is separately implementation-defined in Go, so bound the
+	// top too rather than log whatever the hardware happens to produce.
+	if f < 0 || f > math.MaxInt32 {
+		return 0, false
+	}
+	return int(math.Round(f)), true
+}
+
 // --------------------------------------------------------------------------
 // Streaming event payloads (named SSE events: meta / delta / done / error)
 // --------------------------------------------------------------------------
@@ -707,6 +835,10 @@ type StreamDone struct {
 	// Cost rides the TERMINAL event because that is the earliest it can be known:
 	// OpenRouter reports a stream's usage only in its final chunk. Absent ⇒ unknown.
 	Cost *TurnCost `json:"cost"`
+	// Timings rides the terminal event for the same reason cost does: `meta` is emitted
+	// BEFORE the model is opened — which is exactly what makes meta useful — so it
+	// cannot know generation or total. A client logging a turn reads this, never meta.
+	Timings *TurnTimings `json:"timings"`
 }
 
 // --------------------------------------------------------------------------
@@ -798,6 +930,17 @@ type RespondResult struct {
 	// Cost is the turn's total spend, carried up from the terminal `done` event. nil
 	// when the backend reported none — the caller must not read that as zero.
 	Cost *TurnCost
+	// Timings is the server-side phase breakdown, carried up from the terminal `done`
+	// event. On a RETRIED call it describes the WINNING attempt only (each attempt is a
+	// separate request with its own clock), so a client-measured round duration that
+	// exceeds Timings.TotalMs is the expected shape, not a contradiction.
+	Timings *TurnTimings
+	// Transport is the CLIENT-side latency of the attempt that produced this result:
+	// dial, TLS, upload, first byte back. It is the other half of Timings — the part
+	// measured before the server's clock starts and after it stops — and the two are
+	// meant to be read together. nil when the attempt never reached the wire. See
+	// transport.go.
+	Transport *TransportMarks
 }
 
 // HasToolCalls reports whether the assistant asked to run any tools.

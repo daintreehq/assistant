@@ -326,6 +326,7 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 			result.FinishReason = dn.FinishReason
 			result.Usage = dn.Usage
 			result.Cost = dn.Cost
+			result.Timings = dn.Timings
 			doneSeen = true
 		case sseEventError:
 			var env Envelope
