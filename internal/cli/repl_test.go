@@ -86,6 +86,20 @@ func newSink(tty bool) (*consoleSink, *bytes.Buffer) {
 	return &consoleSink{r: r, diagnostics: r, tty: tty}, &buf
 }
 
+// The one-line skill cue pluralizes on the batch size, matching the cockpit card.
+func TestConsoleSinkSkillLoadedPluralizes(t *testing.T) {
+	s, buf := newSink(false)
+	s.SkillLoaded([]string{"Orchestrate agents"})
+	if got := buf.String(); !strings.Contains(got, "Skill loaded: Orchestrate agents") {
+		t.Fatalf("single skill must read singular: %q", got)
+	}
+	buf.Reset()
+	s.SkillLoaded([]string{"Orchestrate agents", "Plain worktree"})
+	if got := buf.String(); !strings.Contains(got, "Skills loaded: Orchestrate agents, Plain worktree") {
+		t.Fatalf("multiple skills must read plural: %q", got)
+	}
+}
+
 func TestOneShotConsoleSinkSeparatesDiagnosticsAndTracksCancellation(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	s := newOneShotConsoleSink(render.New(&stdout), render.New(&stderr))

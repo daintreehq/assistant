@@ -112,12 +112,10 @@ func cardInner(width int) int {
 	return inner
 }
 
-// collapse gates the long-body head/tail trim below. It must be FALSE for any card whose
-// line set can still GROW after earlier rows were flushed to scrollback (the skill card:
-// a run split by the flush frontier commits its first rows, then more skills append).
-// The trim is a function of the TOTAL line count, so crossing the threshold would rewrite
-// rows the flush already committed — breaking the byte-exact flush↔seal prefix. Cards
-// whose text is fixed at fold-in (YOU, interjection) pass true.
+// collapse gates the long-body head/tail trim below. The skill card passes FALSE — its
+// contract is one visible row per skill, however many the backend loads, so a "lines
+// hidden" trim would defeat the card's whole point. Cards that carry pasted human text
+// (YOU, interjection) pass true so a giant paste can't bury the turn in scrollback.
 func renderCard(th theme.Theme, surface theme.UserMessageSurface, label string, lines []string, width int, inlineLabel, collapse bool) string {
 	g := th.Glyphs
 	barStyle := th.Muted()
@@ -374,9 +372,9 @@ func renderTurnPreamble(th theme.Theme, t *TurnCell, width int, markerActive, sh
 // the SAME md.Render call and trims only the mutable tail — so the un-flushed remainder sits in
 // the footer tail until it settles and is never double-committed.
 //
-// Tool grouping is computed over the sub-range; the incremental flush only ever passes a
-// range that begins and ends on a tool-group boundary (see finalizedStepCount), so a
-// branch tree is never split across the flush frontier.
+// Tool and skill grouping are computed over the sub-range; the incremental flush only
+// ever passes a range that begins and ends on a group boundary (see finalizedStepCount),
+// so neither a branch tree nor a skill card is ever split across the flush frontier.
 func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, to, width, contentW int, expanded bool, spinnerFrame int, now int64, withholdGrowingLast bool) string {
 	steps := t.Steps
 	if to < 0 || to > len(steps) {
@@ -469,14 +467,15 @@ func renderTurnSteps(th theme.Theme, md *markdown.Renderer, t *TurnCell, from, t
 				prevRendered = StepInterject
 			}
 		case StepSkill:
-			// A contiguous run of skill steps renders as ONE card — a single "Skill loaded"
-			// anchor with one row per skill — so a round that loads several runbooks doesn't
-			// stack a two-row card (plus separator blank) per skill. Only the run's FIRST
-			// step emits the card; the rest already have their row on screen, and skip
-			// silently (prevRendered was set by the first step, so separator state holds).
-			// Grouping over `sub` is safe across the flush frontier: a window that cuts the
-			// run mid-way renders a strict row-prefix of the full card (renderSkillCard rows
-			// are count-independent), exactly like a growing prose step.
+			// A contiguous run of skill steps renders as ONE card — a single pluralizing
+			// "Skill(s) loaded" anchor with one row per skill — so a round that loads
+			// several runbooks doesn't stack a two-row card (plus separator blank) per
+			// skill. Only the run's FIRST step emits the card; the rest already have their
+			// row on screen, and skip silently (prevRendered was set by the first step, so
+			// separator state holds). The card is a function of the WHOLE run (the anchor
+			// counts it), so the flush window never cuts a run mid-way: finalizedStepCount
+			// finalizes a skill run only once closed, the same atomic-commit contract tool
+			// groups follow.
 			if li > 0 && sub[li-1].Kind == StepSkill {
 				continue
 			}
@@ -862,20 +861,21 @@ func flattenToRow(s string) string {
 }
 
 // renderSkillCard renders a contiguous run of server-side skill loads as ONE compact
-// inline card folded into the running turn: a quiet "Skill loaded" anchor over one row
-// per skill, all riding a pale blue/turquoise fill block that butts up against a left
-// accent bar (▏ — the same surface idiom the YOU card uses, so it reads as a distinct,
-// calm capability cue rather than the model's prose or a system note). The backend now
-// loads skills eagerly, so a round routinely brings several at once — one two-row card
-// per skill drowned the transcript, hence one shared anchor and one line each.
+// inline card folded into the running turn: a quiet "Skill loaded" / "Skills loaded"
+// anchor over one row per skill, all riding a pale blue/turquoise fill block that butts
+// up against a left accent bar (▏ — the same surface idiom the YOU card uses, so it
+// reads as a distinct, calm capability cue rather than the model's prose or a system
+// note). The backend now loads skills eagerly, so a round routinely brings several at
+// once — one two-row card per skill drowned the transcript, hence one shared anchor and
+// one line each.
 //
 // Each name occupies EXACTLY one row: truncated with an ellipsis, never wrapped. The
-// per-row independence is load-bearing, not just compact: the flush frontier can split
-// a run (finalizedStepCount finalizes all but the last step), committing the card's
-// first rows while later skills still append — so no row may depend on the run's total
-// count (fixed singular anchor, no head/tail collapse, no wrap reflow). Rows only ever
-// APPEND, keeping the committed prefix byte-exact. Like the YOU card, every row is a
-// fixed bar+block width so a committed card never wraps a frozen scrollback row on resize.
+// anchor pluralizes on the run's size, so the WHOLE render is a function of the complete
+// run — which is why the flush treats a skill run atomically (finalizedStepCount commits
+// it only once CLOSED by a non-skill step, exactly like a tool run): no card row reaches
+// scrollback while the run could still grow, so the committed rows can never be
+// invalidated by a later skill. Like the YOU card, every row is a fixed bar+block width
+// so a committed card never wraps a frozen scrollback row on resize.
 func renderSkillCard(th theme.Theme, titles []string, width int) string {
 	inner := cardInner(width)
 	rows := make([]string, 0, len(titles))
@@ -891,8 +891,13 @@ func renderSkillCard(th theme.Theme, titles []string, width int) string {
 	if len(rows) == 0 {
 		return ""
 	}
-	// Row 1 is the "Skill loaded" anchor; each following row is one skill's name.
-	return renderCard(th, th.SkillLoadedSurface(), "Skill loaded", rows, width, true, false)
+	// Row 1 is the anchor — plural when the run brought more than one skill; each
+	// following row is one skill's name.
+	label := "Skill loaded"
+	if len(rows) > 1 {
+		label = "Skills loaded"
+	}
+	return renderCard(th, th.SkillLoadedSurface(), label, rows, width, true, false)
 }
 
 // noteGlyph maps a note level to (glyph, tone):

@@ -100,10 +100,14 @@ func (s *consoleSink) Interjection(text string) {
 }
 
 // SkillLoaded prints a one-line capability cue so the console transcript shows the
-// runbook the backend loaded for this turn.
+// runbook(s) the backend loaded for this turn.
 func (s *consoleSink) SkillLoaded(titles []string) {
 	s.closeAnswer()
-	s.r.Info("Skill loaded: " + strings.Join(titles, ", "))
+	label := "Skill loaded"
+	if len(titles) > 1 {
+		label = "Skills loaded"
+	}
+	s.r.Info(label + ": " + strings.Join(titles, ", "))
 }
 
 // ToolBatch / ToolState / ToolProgress are live-footer-only; the console prints

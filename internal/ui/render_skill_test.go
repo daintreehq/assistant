@@ -9,9 +9,10 @@ import (
 	"github.com/daintreehq/assistant/internal/ui/markdown"
 )
 
-// render_skill_test.go covers the inline "Skill loaded" card the cockpit folds into a
-// running turn when the backend's selector loads runbooks (StepSkill): ONE card per
-// contiguous run, one row per skill, each name truncated to its row (never wrapped).
+// render_skill_test.go covers the inline skill card the cockpit folds into a running
+// turn when the backend's selector loads runbooks (StepSkill): ONE card per contiguous
+// run, a "Skill loaded"/"Skills loaded" anchor that pluralizes on the run's size, one
+// row per skill, each name truncated to its row (never wrapped).
 
 func TestSkillCard_LabelAndFullName(t *testing.T) {
 	out := stripAnsi(renderSkillCard(darkTheme(), []string{"Orchestrate multiple agents on one problem"}, 60))
@@ -41,8 +42,8 @@ func TestSkillCard_MultipleSkillsOneRowEach(t *testing.T) {
 	if want := 1 + len(titles); len(rows) != want {
 		t.Fatalf("card must be anchor + one row per skill (%d rows), got %d: %q", want, len(rows), out)
 	}
-	if got := strings.Count(out, "Skill loaded"); got != 1 {
-		t.Errorf("card must carry exactly one anchor, got %d: %q", got, out)
+	if got := strings.Count(out, "Skills loaded"); got != 1 {
+		t.Errorf("card must carry exactly one PLURAL anchor, got %d: %q", got, out)
 	}
 	for i, title := range titles {
 		if !strings.Contains(rows[1+i], title) {
@@ -51,9 +52,26 @@ func TestSkillCard_MultipleSkillsOneRowEach(t *testing.T) {
 	}
 }
 
+// The anchor pluralizes on the run's size: one skill reads "Skill loaded", several read
+// "Skills loaded".
+func TestSkillCard_AnchorPluralizes(t *testing.T) {
+	one := stripAnsi(renderSkillCard(darkTheme(), []string{"Only skill"}, 60))
+	if !strings.Contains(one, "Skill loaded") || strings.Contains(one, "Skills loaded") {
+		t.Errorf("a single skill must carry the singular anchor: %q", one)
+	}
+	two := stripAnsi(renderSkillCard(darkTheme(), []string{"First skill", "Second skill"}, 60))
+	if !strings.Contains(two, "Skills loaded") || strings.Contains(two, "Skill loaded") {
+		t.Errorf("multiple skills must carry the plural anchor: %q", two)
+	}
+	// Blank titles don't count toward the plural: one real title stays singular.
+	mixed := stripAnsi(renderSkillCard(darkTheme(), []string{"  ", "Only skill", ""}, 60))
+	if !strings.Contains(mixed, "Skill loaded") || strings.Contains(mixed, "Skills loaded") {
+		t.Errorf("blank titles must not pluralize the anchor: %q", mixed)
+	}
+}
+
 // A long name occupies EXACTLY one row, cut with an ellipsis — never wrapped onto more
-// rows. Row-count stability per skill is what lets the flush commit a run's early rows
-// while later skills are still appending.
+// rows: one line per skill is the card's whole display contract, however long the name.
 func TestSkillCard_LongNameTruncatesToOneRow(t *testing.T) {
 	name := "Prepare a branch for review by running the full gate suite and summarizing the diff"
 	out := stripAnsi(renderSkillCard(darkTheme(), []string{name}, 40))
@@ -74,9 +92,9 @@ func TestSkillCard_LongNameTruncatesToOneRow(t *testing.T) {
 }
 
 // The skill card must NEVER take the YOU-card head/tail collapse ("N lines hidden"),
-// however many skills load: the collapse is a function of the TOTAL line count, and a run
-// can grow after its first rows were flushed — crossing the threshold would rewrite
-// committed scrollback rows. This pins the renderCard collapse=false wiring.
+// however many skills load — listing every skill one row each is the card's contract,
+// and a trim would hide the very names the card exists to show. This pins the
+// renderCard collapse=false wiring.
 func TestSkillCard_ManySkillsNeverCollapse(t *testing.T) {
 	n := userMsgHeadLines + userMsgTailLines + 2 // past the YOU-card collapse threshold
 	titles := make([]string, n)
@@ -97,10 +115,11 @@ func TestSkillCard_ManySkillsNeverCollapse(t *testing.T) {
 			t.Errorf("row %d must carry %q in order: %q", 1+i, title, rows[1+i])
 		}
 	}
-	// Crossing the threshold only APPENDS a row: the n-1 render is a strict row-prefix.
+	// Crossing the collapse threshold must not restructure the card: with the anchor
+	// already plural on both sides, one more skill only appends a row.
 	part := renderSkillCard(darkTheme(), titles[:n-1], 60)
 	if part == "" || !strings.HasPrefix(full, part+"\n") {
-		t.Errorf("growing past the collapse threshold must only append rows:\npart: %q\nfull: %q", part, full)
+		t.Errorf("crossing the collapse threshold must only append a row:\npart: %q\nfull: %q", part, full)
 	}
 }
 
@@ -225,13 +244,13 @@ func TestStepSkill_ContiguousRunRendersOneCard(t *testing.T) {
 		},
 	}
 	out := stripAnsi(renderTurnSteps(th, markdown.New(th), turn, 0, -1, 72, 70, false, 0, 1, false))
-	if got := strings.Count(out, "Skill loaded"); got != 1 {
-		t.Fatalf("a contiguous skill run must render ONE anchor, got %d: %q", got, out)
+	if got := strings.Count(out, "Skills loaded"); got != 1 {
+		t.Fatalf("a contiguous skill run must render ONE plural anchor, got %d: %q", got, out)
 	}
 	lines := strings.Split(out, "\n")
 	label := -1
 	for i, ln := range lines {
-		if strings.Contains(ln, "Skill loaded") {
+		if strings.Contains(ln, "Skills loaded") {
 			label = i
 		}
 	}
@@ -269,13 +288,13 @@ func TestStepSkill_RunsSplitByToolRenderTwoCards(t *testing.T) {
 		},
 	}
 	out := stripAnsi(renderTurnSteps(th, markdown.New(th), turn, 0, -1, 72, 70, false, 0, 1, false))
-	if got := strings.Count(out, "Skill loaded"); got != 2 {
-		t.Fatalf("two runs must render two anchors, got %d: %q", got, out)
+	if got := strings.Count(out, "Skills loaded"); got != 2 {
+		t.Fatalf("two runs must render two plural anchors, got %d: %q", got, out)
 	}
 	lines := strings.Split(out, "\n")
 	var anchors []int
 	for i, ln := range lines {
-		if strings.Contains(ln, "Skill loaded") {
+		if strings.Contains(ln, "Skills loaded") {
 			anchors = append(anchors, i)
 		}
 	}
@@ -325,12 +344,11 @@ func TestStepSkill_GluedUnderTheMarker(t *testing.T) {
 }
 
 // The realistic lifecycle at the top of a round: the backend's meta lands several skills,
-// the REAL flush machinery commits the card's first rows while the run's last step is
-// still the live one (finalizedStepCount never finalizes the last step), then prose
-// streams and the turn seals. Every committed row must survive byte-for-byte — the
-// mid-run cut is exactly the case the count-independent one-row-per-skill design exists
-// for (a fixed anchor, no collapse, no wrap reflow).
-func TestSkillRun_MidRunFlushReconcilesByteExact(t *testing.T) {
+// then prose streams, then the turn seals. Because the anchor pluralizes on the run's
+// size, the card is a function of the WHOLE run — so the flush must commit it
+// ATOMICALLY: nothing of the card while the run is the live tail, the whole card once a
+// non-skill step closes it, and every committed row byte-exact through the seal.
+func TestSkillRun_FlushCommitsCardAtomically(t *testing.T) {
 	turn := &TurnCell{
 		ID: "turn_skill_life", UserText: "QUESTIONX", State: TurnActive, Phase: domain.PhaseGenerating,
 		Steps: []TurnStep{
@@ -340,26 +358,28 @@ func TestSkillRun_MidRunFlushReconcilesByteExact(t *testing.T) {
 		},
 	}
 	m := armedModel(turn)
-	if cmd := m.flushActiveTurn(); cmd == nil {
-		t.Fatal("the run's finalized head (anchor + first two rows) must flush")
-	}
+	// While the run is the turn's live tail it may still grow, so NO card row commits —
+	// only the preamble (YOU card + marker) is flushable this frame.
+	m.flushActiveTurn()
 	flushedBefore := turn.flushedRowsText
-	stripped := stripAnsi(flushedBefore)
-	if !strings.Contains(stripped, "ALPHASKILL") || !strings.Contains(stripped, "BETASKILL") {
-		t.Fatalf("the first two skill rows did not flush:\n%s", stripped)
-	}
-	if strings.Contains(stripped, "GAMMASKILL") {
-		t.Fatalf("the live last skill step must NOT flush yet:\n%s", stripped)
+	if s := stripAnsi(flushedBefore); strings.Contains(s, "Skill") || strings.Contains(s, "ALPHASKILL") {
+		t.Fatalf("no card row may flush while the run is still open:\n%s", s)
 	}
 
-	// The round's prose closes the run; the remaining row + the prose flush behind it.
+	// The round's prose closes the run; the WHOLE card flushes behind it (the short
+	// final prose row itself stays withheld as the live tail — the card is what commits).
 	turn.Steps = append(turn.Steps, proseStep("DELTAPROSE spawning now.", false))
 	rows := m.activeTurnRows(turn) // the live footer render this frame
 	if cmd := m.flushActiveTurn(); cmd == nil {
-		t.Fatal("the run's last row and the prose must flush")
+		t.Fatal("the closed run must flush")
 	}
 	if !strings.HasPrefix(turn.flushedRowsText, flushedBefore) {
-		t.Errorf("the flush frontier rewrote already-committed card rows:\nbefore:\n%q\nafter:\n%q", flushedBefore, turn.flushedRowsText)
+		t.Errorf("the flush frontier rewrote already-committed rows:\nbefore:\n%q\nafter:\n%q", flushedBefore, turn.flushedRowsText)
+	}
+	committed := stripAnsi(turn.flushedRowsText)
+	if !strings.Contains(committed, "Skills loaded") ||
+		!strings.Contains(committed, "ALPHASKILL") || !strings.Contains(committed, "GAMMASKILL") {
+		t.Errorf("the closed run must commit whole, plural anchor included:\n%s", committed)
 	}
 	if got := strings.Join(rows[:turn.FlushedRows], "\n"); got != turn.flushedRowsText {
 		t.Errorf("committed prefix diverged from the footer render:\ncommitted:\n%q\nfooter:\n%q", turn.flushedRowsText, got)
@@ -372,8 +392,8 @@ func TestSkillRun_MidRunFlushReconcilesByteExact(t *testing.T) {
 		t.Errorf("flushed prefix + seal tail does not reconstruct the sealed turn (dup/loss):\nprefix:\n%q\ntail:\n%q", turn.flushedRowsText, tail)
 	}
 	sealed := stripAnsi(strings.Join(sealedRows, "\n"))
-	if got := strings.Count(sealed, "Skill loaded"); got != 1 {
-		t.Errorf("the sealed run must carry exactly ONE anchor, got %d:\n%s", got, sealed)
+	if strings.Count(sealed, "Skills loaded") != 1 || strings.Count(sealed, "Skill loaded") != 0 {
+		t.Errorf("the sealed run must carry exactly ONE plural anchor and no singular one:\n%s", sealed)
 	}
 	for _, w := range []string{"ALPHASKILL", "BETASKILL", "GAMMASKILL"} {
 		if n := strings.Count(sealed, w); n != 1 {
@@ -382,31 +402,57 @@ func TestSkillRun_MidRunFlushReconcilesByteExact(t *testing.T) {
 	}
 }
 
-// The flush frontier can cut a skill run mid-way (finalizedStepCount finalizes all but
-// the live last step). The windowed render must be a strict ROW-PREFIX of the full one —
-// that is what keeps already-committed scrollback rows byte-exact when the run grows.
-func TestStepSkill_WindowCutMidRunIsRowPrefix(t *testing.T) {
-	th := darkTheme()
-	md := markdown.New(th)
+// A turn that ENDS on an open skill run (cancelled or failed before any prose) must
+// still seal the whole card exactly once: nothing committed while the run was the live
+// tail, and the seal — finalizedStepCount returns everything for a non-active turn —
+// emits the card with its plural anchor.
+func TestSkillRun_OpenAtCancelSealsOnce(t *testing.T) {
 	turn := &TurnCell{
-		ID:    "turn_skillprefix",
-		State: TurnActive,
+		ID: "turn_skill_cancel", UserText: "QUESTIONX", State: TurnActive,
 		Steps: []TurnStep{
-			{Kind: StepSkill, Text: "Spawn a visible agent for edits or exploration"},
-			{Kind: StepSkill, Text: "Daintree orchestration foundation"},
-			{Kind: StepSkill, Text: "Create a plain Daintree worktree"},
+			{Kind: StepSkill, Text: "ALPHASKILL one"},
+			{Kind: StepSkill, Text: "BETASKILL two"},
 		},
 	}
-	full := renderTurnSteps(th, md, turn, 0, -1, 72, 70, false, 0, 1, false)
-	for _, cut := range []int{1, 2} {
-		part := renderTurnSteps(th, md, turn, 0, cut, 72, 70, false, 0, 1, false)
-		// STRICT prefix, ending on a row boundary: full continues with a newline, so the
-		// cut can neither be empty, nor equal, nor extend the window's final row in place.
-		if part == "" || !strings.HasPrefix(full, part+"\n") {
-			t.Errorf("window [0,%d) must be a strict row-prefix of the full render:\npart: %q\nfull: %q", cut, part, full)
-		}
-		if rows := strings.Split(stripAnsi(part), "\n"); len(rows) != 1+cut {
-			t.Errorf("window [0,%d) must render anchor + %d rows, got %d: %q", cut, cut, len(rows), rows)
+	m := armedModel(turn)
+	m.flushActiveTurn() // open run: commits the preamble at most
+	if s := stripAnsi(turn.flushedRowsText); strings.Contains(s, "ALPHASKILL") || strings.Contains(s, "Skill") {
+		t.Fatalf("an open trailing run must not flush any card row: %s", s)
+	}
+	turn.State = TurnCancelled
+	sealedRows := m.activeTurnRows(turn)
+	tail := sealTail(sealedRows, turn.flushedRowsText)
+	combined := stripAnsi(turn.flushedRowsText + "\n" + tail)
+	if strings.Count(combined, "Skills loaded") != 1 ||
+		strings.Count(combined, "ALPHASKILL") != 1 || strings.Count(combined, "BETASKILL") != 1 {
+		t.Errorf("a cancelled turn must seal the whole card exactly once:\n%s", combined)
+	}
+}
+
+// finalizedStepCount treats a skill run like a tool run: flushable only once CLOSED by a
+// non-skill step, never split — the pluralizing anchor makes the card a function of the
+// whole run, so committing part of an open run could freeze a row a later skill rewrites.
+func TestFinalize_SkillRunCommitsAtomically(t *testing.T) {
+	s := func(txt string) TurnStep { return TurnStep{Kind: StepSkill, Text: txt} }
+	cases := []struct {
+		name  string
+		state TurnState
+		steps []TurnStep
+		want  int
+	}{
+		{"open trailing run is withheld whole", TurnActive,
+			[]TurnStep{s("a"), s("b"), s("c")}, 0},
+		{"closed run finalizes whole", TurnActive,
+			[]TurnStep{s("a"), s("b"), s("c"), proseStep("done", false)}, 3},
+		{"prose before an open run still finalizes", TurnActive,
+			[]TurnStep{proseStep("hi", false), s("a"), s("b")}, 1},
+		{"sealed turn finalizes everything", TurnComplete,
+			[]TurnStep{s("a"), s("b"), s("c")}, 3},
+	}
+	for _, tc := range cases {
+		turn := &TurnCell{ID: "turn_fin", State: tc.state, Steps: tc.steps}
+		if got := finalizedStepCount(turn); got != tc.want {
+			t.Errorf("%s: finalizedStepCount = %d, want %d", tc.name, got, tc.want)
 		}
 	}
 }

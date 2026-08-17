@@ -45,6 +45,11 @@ import (
 //   - A contiguous tool run is final only when every activity in it is terminal AND it is
 //     CLOSED (a non-tool step follows it) — so the whole branch tree commits atomically and
 //     is never split across the flush frontier.
+//   - A contiguous skill run is likewise final only once CLOSED by a non-skill step: the
+//     run renders as ONE card whose anchor pluralizes on the run's size ("Skills loaded"),
+//     so committing part of an open run could freeze an anchor row a later skill would
+//     rewrite. The steps themselves are immutable; it is the CARD that is a function of
+//     the whole run.
 //   - The last step is never final while the turn is active (it is the live one — its
 //     completed paragraphs flush separately, see activeTurnFinalRows).
 //
@@ -83,6 +88,21 @@ func finalizedStepCount(t *TurnCell) int {
 				continue
 			}
 			break // an open / mutating run — nothing past it is final
+		}
+		if s.Kind == StepSkill {
+			// Scan the whole contiguous skill run [i:j) — flushable only once CLOSED by
+			// a following non-skill step, so the card (one render of the whole run)
+			// commits atomically.
+			j := i
+			for j < n && t.Steps[j].Kind == StepSkill {
+				j++
+			}
+			if j <= n-1 {
+				k = j
+				i = j
+				continue
+			}
+			break // the run is the live tail — it could still grow this turn
 		}
 		k = i + 1 // prose / note that is not the last step
 		i++
