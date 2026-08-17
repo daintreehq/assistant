@@ -256,8 +256,9 @@ var extractSchema = json.RawMessage(`{
 func newExtractTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.extract",
-		Description: "Read a bounded tail of one or more Daintree terminals and extract content as plain TEXT with the small model — the default way to read what an agent said. " +
-			"Over MULTIPLE terminalIds it MERGES every tail into ONE answer. For a distinct answer per agent, or several named fields, use terminal.extract.json with an array schema keyed by terminalId. " +
+		Description: "Over MULTIPLE terminalIds this MERGES every tail into ONE answer — never one answer per terminal. " +
+			"For a distinct answer per agent, or several named fields, use terminal.extract.json with an array schema keyed by terminalId. " +
+			"On a SINGLE terminalId it reads a bounded tail and extracts as plain TEXT with the small model — the default way to read what an agent said. " +
 			"PARALLEL: no-wait extract/.json calls batched in ONE reply run CONCURRENTLY — emit several independent extractions as one batch, not one per turn; the wait is roughly the slowest single call. A wait-bearing call is a barrier and runs serially. " +
 			"Omit `instruction` to use it as a finished/condition gate (booleans only, no extraction model call). " +
 			"A wait that observes the agent FINISH auto-retires that terminal's spawn-attached watcher (watchersRetired) — the completion is in your hands, so no notification follows. " +
@@ -346,7 +347,9 @@ func newExtractTool(deps Deps) tools.Tool {
 			if retired > 0 {
 				result["watchersRetired"] = retired
 			}
-			return tools.Ok(note+base0, result)
+			// Merge scope leads: it says the answer may be about the WRONG thing, which
+			// outranks the truncation note's "there is more of the right thing".
+			return tools.Ok(noteMergedExtraction(result, base.terminalIDs, mergeRemedyText)+note+base0, result)
 		},
 	}
 }
@@ -446,12 +449,56 @@ func newExtractJSONTool(deps Deps) tools.Tool {
 			if retired > 0 {
 				result["watchersRetired"] = retired
 			}
-			return tools.Ok("Extracted JSON result.", result)
+			// Flagged even though a terminalId-keyed schema CAN attribute per agent: the
+			// merge is a fact about the input pass, and whether the schema actually asked
+			// for an entry per id is not something this handler can tell from an arbitrary
+			// jsonSchema. Reporting the topology and letting the remedy name the check
+			// beats a classifier that would quietly overclaim coverage.
+			return tools.Ok(noteMergedExtraction(result, base.terminalIDs, mergeRemedyJSON)+"Extracted JSON result.", result)
 		},
 	}
 }
 
 /* --------------------------------- helpers -------------------------------- */
+
+// The remedy clause each extraction tool appends to the shared merge warning. They
+// differ because the way OUT of the ambiguity differs: text has no way to attribute an
+// answer, so the fix is one call per id; the json tool can attribute, so the fix is to
+// check the schema actually produced an entry per id.
+const (
+	mergeRemedyText = "For an answer each, call terminal.extract once per id, or terminal.extract.json keyed by terminalId."
+	mergeRemedyJSON = "Confirm there is an entry for every terminalId before treating this as full-cohort coverage."
+)
+
+// noteMergedExtraction flags a successful extraction whose INPUT spanned several
+// terminals, and returns the same warning as a summary prefix ("" for a single id).
+//
+// The gap it closes: over several ids the tails are concatenated into ONE extraction
+// pass, so the model may answer about a single terminal while the result echoes all N
+// ids back. None of the existing fields catch that — terminalIds is input provenance,
+// matched is the WAIT verdict, and truncated is the extraction model's token cap; all
+// three are honestly true of a one-terminal answer. Only the merge itself is missing,
+// so that is what gets reported, and only when it can actually mislead (len > 1).
+//
+// It lands in BOTH channels deliberately, from ONE string so they cannot drift. The
+// result map is the durable structured signal, but a big cohort extraction is exactly
+// the result that overruns MaxToolResultChars, and that path (SerializeToolResult)
+// replaces the whole map with a stub and keeps only the first TruncationSummaryChars of
+// the summary — so a map-only flag would disappear in the very case that motivated it.
+// Hence the warning leads the summary. It is also kept SHORT on purpose: at the schema's
+// maxItems (16) the text note plus the truncation note above it total 493 runes, so both
+// still fit whole inside TruncationSummaryChars (500) when a truncated cohort extraction
+// also overflows. Lengthening either one starts silently eating the other's remedy.
+func noteMergedExtraction(result map[string]any, terminalIDs []string, remedy string) string {
+	if len(terminalIDs) <= 1 {
+		return ""
+	}
+	note := fmt.Sprintf("⚠ MERGED: %d tails went into ONE extraction pass — this answer may cover only one terminal. %s",
+		len(terminalIDs), remedy)
+	result["merged"] = true
+	result["note"] = note
+	return note + "\n\n"
+}
 
 // asyncDeadline bounds a detached extraction so a never-settling wait can't pin
 // the goroutine (or its app-scoped ctx) indefinitely. The worst-case poll
