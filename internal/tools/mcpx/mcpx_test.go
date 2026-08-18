@@ -414,6 +414,112 @@ func TestTerminalSendCommandFailurePreserved(t *testing.T) {
 	}
 }
 
+// The runbooks tell the model to label every copy-tree run, and `name` is a
+// TOP-LEVEL sibling of worktreeId/options on the Daintree action rather than an
+// option key. These wrappers decode strictly, so a missing schema property is not
+// ignored — it fails the call outright, which is how a documented, harmless label
+// turned into a guaranteed wasted round trip on the first generate of every
+// bundle. Both directions are pinned: the field decodes, and it reaches MCP.
+func TestCopyTreeRunNameIsForwarded(t *testing.T) {
+	for _, tc := range []struct {
+		label string
+		tool  func(Deps) tools.Tool
+		args  string
+	}{
+		{"generate", newCopyTreeGenerateTool, `{"worktreeId":"wt-1","name":"auth flow context"}`},
+		{"generateAndCopyFile", newCopyTreeGenerateAndCopyFileTool, `{"worktreeId":"wt-1","name":"auth flow context"}`},
+		{"injectToTerminal", newCopyTreeInjectTool, `{"terminalId":"t1","name":"auth flow context"}`},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			mcp := &fakeMCP{connected: true, result: MCPCallResult{Text: "ok"}}
+			tool := tc.tool(Deps{MCP: mcp})
+			decoded, err := tool.Decode(json.RawMessage(tc.args))
+			if err != nil {
+				t.Fatalf("name must decode, got %v", err)
+			}
+			if res := tool.Handle(context.Background(), decoded, &tools.ToolContext{}); !res.Ok {
+				t.Fatalf("expected ok, got %+v", res.Error)
+			}
+			if mcp.lastArgs["name"] != "auth flow context" {
+				t.Errorf("name not forwarded: %v", mcp.lastArgs)
+			}
+		})
+	}
+
+	// Blank is absent, not an empty label: Daintree treats whitespace as unnamed
+	// and derives a fallback, so forwarding "" would only be noise on the wire.
+	// Padding around a real label is trimmed rather than dropped. Both generate
+	// and inject are covered — inject builds its own map, so a fix to one says
+	// nothing about the other.
+	for _, tc := range []struct {
+		label string
+		tool  func(Deps) tools.Tool
+		base  string
+	}{
+		{"generate", newCopyTreeGenerateTool, `"worktreeId":"wt-1"`},
+		{"injectToTerminal", newCopyTreeInjectTool, `"terminalId":"t1"`},
+	} {
+		t.Run(tc.label+"/blank", func(t *testing.T) {
+			mcp := &fakeMCP{connected: true, result: MCPCallResult{Text: "ok"}}
+			tool := tc.tool(Deps{MCP: mcp})
+			decoded, err := tool.Decode(json.RawMessage(`{` + tc.base + `,"name":"   "}`))
+			if err != nil {
+				t.Fatalf("blank name must decode, got %v", err)
+			}
+			if res := tool.Handle(context.Background(), decoded, &tools.ToolContext{}); !res.Ok {
+				t.Fatalf("expected ok, got %+v", res.Error)
+			}
+			if _, present := mcp.lastArgs["name"]; present {
+				t.Errorf("blank name should be dropped, got %v", mcp.lastArgs)
+			}
+		})
+
+		t.Run(tc.label+"/padded", func(t *testing.T) {
+			mcp := &fakeMCP{connected: true, result: MCPCallResult{Text: "ok"}}
+			tool := tc.tool(Deps{MCP: mcp})
+			decoded, err := tool.Decode(json.RawMessage(`{` + tc.base + `,"name":"  auth flow context  "}`))
+			if err != nil {
+				t.Fatalf("padded name must decode, got %v", err)
+			}
+			if res := tool.Handle(context.Background(), decoded, &tools.ToolContext{}); !res.Ok {
+				t.Fatalf("expected ok, got %+v", res.Error)
+			}
+			if mcp.lastArgs["name"] != "auth flow context" {
+				t.Errorf("padded name should be trimmed, got %v", mcp.lastArgs["name"])
+			}
+		})
+	}
+}
+
+// The struct field and the ADVERTISED schema are separate plumbing: dropping
+// `properties.name` would stop the wire inventory offering the field while every
+// decode/forward assertion above stayed green, and the model would go back to
+// never sending a label. Pin the schema itself, `additionalProperties:false`
+// included — the strictness is what made the missing property fatal rather than
+// merely ignored.
+func TestCopyTreeSchemasAdvertiseName(t *testing.T) {
+	for label, raw := range map[string]json.RawMessage{
+		"generate": copyTreeGenerateSchema,
+		"inject":   copyTreeInjectSchema,
+	} {
+		var schema struct {
+			AdditionalProperties bool `json:"additionalProperties"`
+			Properties           map[string]struct {
+				Type string `json:"type"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatalf("%s: schema is not valid JSON: %v", label, err)
+		}
+		if schema.AdditionalProperties {
+			t.Errorf("%s: schema must stay strict (additionalProperties:false)", label)
+		}
+		if got := schema.Properties["name"].Type; got != "string" {
+			t.Errorf("%s: schema must advertise a string `name`, got %q", label, got)
+		}
+	}
+}
+
 func TestCopyTreeInjectSummary(t *testing.T) {
 	// Success: concrete summary naming the destination terminal.
 	mcp := &fakeMCP{connected: true, result: MCPCallResult{Text: "ok"}}

@@ -98,8 +98,12 @@ func newTerminalRenameTool(deps Deps) tools.Tool {
 /* ------------------------- copyTree.* shared shapes ----------------------- */
 
 // copyTreeOptions is forwarded verbatim; the keys are Daintree's, not ours.
+// `name` is a sibling of worktreeId/options on the Daintree action, NOT an option
+// key — the wrapper omitted it while the runbooks told the model to send one, so
+// every first call was rejected as an unknown field before it ever reached MCP.
 type copyTreeGenerateArgs struct {
 	WorktreeID string         `json:"worktreeId,omitempty"`
+	Name       string         `json:"name,omitempty"`
 	Options    map[string]any `json:"options,omitempty"`
 }
 
@@ -108,6 +112,7 @@ var copyTreeGenerateSchema = json.RawMessage(`{
   "additionalProperties": false,
   "properties": {
     "worktreeId": { "type": "string", "description": "Worktree to generate the copy tree for; Daintree uses the active worktree when omitted." },
+    "name": { "type": "string", "description": "Short label for this run (2-4 words, e.g. 'auth flow context'), shown in the user's copy-tree history and the completion notification. A sibling of worktreeId and options, never inside options." },
     "options": { "type": "object", "additionalProperties": true, "description": "Opaque copyTree options forwarded to Daintree verbatim (do not invent keys)." }
   },
   "required": []
@@ -120,6 +125,11 @@ func (a copyTreeGenerateArgs) forwardMap() map[string]any {
 	m := map[string]any{}
 	if a.WorktreeID != "" {
 		m["worktreeId"] = a.WorktreeID
+	}
+	// Blank is treated as absent on the Daintree side too, so trimming to empty
+	// and dropping the key keeps the two ends agreeing on what "unnamed" means.
+	if name := strings.TrimSpace(a.Name); name != "" {
+		m["name"] = name
 	}
 	if a.Options != nil {
 		m["options"] = a.Options
@@ -163,6 +173,7 @@ func newCopyTreeGenerateAndCopyFileTool(deps Deps) tools.Tool {
 type copyTreeInjectArgs struct {
 	TerminalID string         `json:"terminalId"`
 	WorktreeID string         `json:"worktreeId,omitempty"`
+	Name       string         `json:"name,omitempty"`
 	Options    map[string]any `json:"options,omitempty"`
 }
 
@@ -172,6 +183,7 @@ var copyTreeInjectSchema = json.RawMessage(`{
   "properties": {
     "terminalId": { "type": "string", "description": "Terminal to inject the generated copy tree into." },
     "worktreeId": { "type": "string", "description": "Worktree to generate the copy tree from; Daintree uses the active worktree when omitted." },
+    "name": { "type": "string", "description": "Short label for this run (2-4 words), shown in the user's copy-tree history and the completion notification. A sibling of terminalId and worktreeId, never inside options." },
     "options": { "type": "object", "additionalProperties": true, "description": "Opaque copyTree options forwarded to Daintree verbatim (do not invent keys)." }
   },
   "required": ["terminalId"]
@@ -197,6 +209,9 @@ func newCopyTreeInjectTool(deps Deps) tools.Tool {
 			m := map[string]any{"terminalId": a.TerminalID}
 			if a.WorktreeID != "" {
 				m["worktreeId"] = a.WorktreeID
+			}
+			if name := strings.TrimSpace(a.Name); name != "" {
+				m["name"] = name
 			}
 			if a.Options != nil {
 				m["options"] = a.Options
