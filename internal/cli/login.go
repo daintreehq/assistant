@@ -262,9 +262,26 @@ func promptCustomURL(tio LoginIO, def string) (string, error) {
 // promptAPIKey reads the caller's API key without echo. When a key is already stored,
 // an empty answer keeps it — so changing only the endpoint never means re-typing it.
 func promptAPIKey(tio LoginIO, currentKey string) (string, error) {
+	// Validate the DEFAULT before offering it. credentials.Load only checks that the
+	// fields are non-empty, so a hand-edited file (or an env-supplied key) can hold a
+	// value that cannot ride an HTTP header at all — and blank Enter would then send it
+	// to the network and fail with a transport-shaped error that says nothing about the
+	// real cause. Dropping the offer here turns that into the shape message, at the
+	// prompt, with a working way forward; keeping the offer would let blank Enter loop
+	// on a default that can never succeed.
+	if currentKey != "" {
+		if err := credentials.ValidateKeyShape(currentKey); err != nil {
+			fmt.Fprintf(tio.Out, "  the stored key is unusable (%v) — enter a new one\n", err)
+			currentKey = ""
+		}
+	}
 	for {
 		if currentKey != "" {
-			fmt.Fprintf(tio.Out, "API key [keep %s]: ", credentials.Redact(currentKey))
+			// Spell the default out rather than leaning on the bracket convention:
+			// this is the prompt that makes switching endpoints cheap, and a reader who
+			// misses it re-pastes a secret they cannot see (or believes the sign-in
+			// discarded the stored key).
+			fmt.Fprintf(tio.Out, "API key (press Enter to keep %s): ", credentials.Redact(currentKey))
 		} else {
 			fmt.Fprint(tio.Out, "API key: ")
 		}

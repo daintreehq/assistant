@@ -8,6 +8,7 @@ import (
 
 	"github.com/daintreehq/assistant/internal/app"
 	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/config"
 	"github.com/daintreehq/assistant/internal/credentials"
 	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/tools"
@@ -193,6 +194,141 @@ func TestSignInEmptyKeyWithNoStoredKeyIsRejected(t *testing.T) {
 	}
 	if m.pendingSignIn.errMsg == "" {
 		t.Fatal("an empty key must explain that one is required")
+	}
+}
+
+// The "keep the current key" default has to be VISIBLE at the field, not just in the
+// dim key legend — otherwise hopping between the local and deployed backend looks like
+// it demands a re-paste of a secret the user cannot see, and the sheet reads as though
+// it discarded the stored key.
+func TestSignInKeyStageOffersToKeepTheCurrentKey(t *testing.T) {
+	const stored = "sk-or-v1-storedkey0123456789"
+	redacted := credentials.Redact(stored)
+	m := signInModel(t, app.SignInStatus{SignedIn: true, Endpoint: backend.DefaultBaseURL, KeyRedacted: redacted})
+	m.pendingSignIn.stage = signInStageKey
+	m.pendingSignIn.baseURL = backend.LocalBaseURL
+
+	out := stripAnsi(m.View().Content)
+	if !strings.Contains(out, "blank") || !strings.Contains(out, "keep your current key") {
+		t.Fatalf("key stage must say that an empty field keeps the current key:\n%s", out)
+	}
+	// The empty field itself must say what Enter would do — a blank row reads as
+	// "nothing entered, nothing will happen".
+	if !strings.Contains(out, "Enter keeps the current key)") {
+		t.Fatalf("empty key field must say what Enter would do:\n%s", out)
+	}
+	// A signed-out sheet must NOT make the offer — there is nothing to keep, and an
+	// empty Enter there is an error, not a shortcut.
+	out2 := signInModel(t, app.SignInStatus{})
+	out2.pendingSignIn.stage = signInStageKey
+	out2.pendingSignIn.baseURL = backend.LocalBaseURL
+	plain := stripAnsi(out2.View().Content)
+	// Anchor on something the signed-out key stage MUST render, or the absence checks
+	// below would also pass on a sheet that stopped drawing entirely.
+	if !strings.Contains(plain, "API key for "+backend.LocalBaseURL) {
+		t.Fatalf("precondition: the signed-out key stage did not render:\n%s", plain)
+	}
+	if strings.Contains(plain, "keep your current key") || strings.Contains(plain, "Enter keeps") {
+		t.Fatalf("a signed-out sheet must not offer to keep a key:\n%s", plain)
+	}
+}
+
+// The positive half of the promise the sheet now makes loudly: blank Enter with a key
+// in force must RESOLVE that key and start verifying, not stall on "a key is required".
+// The two halves are asserted separately because the resolver is what can silently
+// break — the sheet would still look correct while Enter did nothing useful.
+func TestSignInEmptyKeyResolvesTheCurrentKeyAndVerifies(t *testing.T) {
+	const stored = "sk-or-v1-storedkey0123456789"
+	m := signInModel(t, app.SignInStatus{SignedIn: true, Endpoint: backend.DefaultBaseURL,
+		KeyRedacted: credentials.Redact(stored)})
+	m.controller.app = &app.App{Config: config.AppConfig{APIKey: stored}}
+	m.pendingSignIn.stage = signInStageKey
+	m.pendingSignIn.baseURL = backend.LocalBaseURL
+
+	// The resolver itself: this is the value submitSignIn hands to App.SignIn.
+	got, err := m.controller.currentAPIKey()
+	if err != nil {
+		t.Fatalf("currentAPIKey: %v", err)
+	}
+	if got != stored {
+		t.Fatalf("currentAPIKey = %q, want the key in force", got)
+	}
+
+	next, cmd := m.onSignInKey(code(tea.KeyEnter))
+	m = next.(Model)
+	if m.pendingSignIn.errMsg != "" {
+		t.Fatalf("blank Enter with a key in force must not error: %q", m.pendingSignIn.errMsg)
+	}
+	if m.pendingSignIn.stage != signInStageVerifying {
+		t.Fatalf("stage = %d, want verifying — blank Enter should have started the sign-in", m.pendingSignIn.stage)
+	}
+	if cmd == nil {
+		t.Fatal("blank Enter must dispatch the verify command")
+	}
+}
+
+// Typing a replacement must retire the keep-offer everywhere it appears: the sheet
+// stays up while the key is entered, so a standing "Enter keeps the current key" would
+// be describing the opposite of what Enter is about to do — with a secret the user
+// cannot read back to catch the mistake.
+func TestSignInTypedKeyRetiresTheKeepOffer(t *testing.T) {
+	const stored = "sk-or-v1-storedkey0123456789"
+	m := signInModel(t, app.SignInStatus{SignedIn: true, Endpoint: backend.DefaultBaseURL,
+		KeyRedacted: credentials.Redact(stored)})
+	m.pendingSignIn.stage = signInStageKey
+	m.pendingSignIn.baseURL = backend.LocalBaseURL
+	m.pendingSignIn.keyInput = "sk-or-v1-replacement"
+
+	out := stripAnsi(m.View().Content)
+	if strings.Contains(out, "Enter keeps the current key)") {
+		t.Errorf("the field placeholder must give way to the typed key:\n%s", out)
+	}
+	if !strings.Contains(out, "Enter sign in") {
+		t.Errorf("the legend must say Enter signs in once a replacement is typed:\n%s", out)
+	}
+	// Neither key may reach the screen — the cockpit paints into host scrollback.
+	if strings.Contains(out, stored) || strings.Contains(out, "sk-or-v1-replacement") {
+		t.Errorf("a raw key was rendered:\n%s", out)
+	}
+}
+
+// submitSignIn TRIMS before deciding, so a field holding only spaces still keeps the
+// current key. The legend has to agree with the code that acts, or it tells the user
+// Enter will send a replacement that does not exist.
+func TestSignInWhitespaceOnlyKeyStillReadsAsKeep(t *testing.T) {
+	m := signInModel(t, app.SignInStatus{SignedIn: true, Endpoint: backend.DefaultBaseURL,
+		KeyRedacted: credentials.Redact("sk-or-v1-storedkey0123456789")})
+	m.pendingSignIn.stage = signInStageKey
+	m.pendingSignIn.baseURL = backend.LocalBaseURL
+	m.pendingSignIn.keyInput = " "
+
+	if got := signInHint(m.pendingSignIn); !strings.Contains(got, "keeps the current key") {
+		t.Fatalf("legend = %q, want the keep wording for a whitespace-only field", got)
+	}
+}
+
+// Both halves of the keep-offer must survive a realistically narrow sheet. The accent
+// line is capWrapped (it ELLIPSIZES past its row budget) and the field placeholder is a
+// single unwrappable row — an earlier, longer placeholder lost its tail at 40 columns,
+// which is precisely where a truncated instruction is least recoverable.
+func TestSignInKeepOfferSurvivesNarrowWidths(t *testing.T) {
+	redacted := credentials.Redact("sk-or-v1-storedkey0123456789")
+	for _, width := range []int{40, 50, 60, 80} {
+		m := testModel(width)
+		m.pendingSignIn = &pendingSignIn{
+			current:       app.SignInStatus{SignedIn: true, Endpoint: backend.DefaultBaseURL, KeyRedacted: redacted},
+			currentKeySet: true,
+			stage:         signInStageKey,
+			baseURL:       backend.LocalBaseURL,
+		}
+		// Wrapping inserts newlines, so compare on a whitespace-collapsed form.
+		flat := strings.Join(strings.Fields(stripAnsi(m.View().Content)), " ")
+		if want := "Leave this blank and press Enter to keep your current key (" + redacted + ")."; !strings.Contains(flat, want) {
+			t.Errorf("width %d: the keep offer is ellipsized:\n%s", width, flat)
+		}
+		if !strings.Contains(flat, "(Enter keeps the current key)") {
+			t.Errorf("width %d: the field placeholder is truncated:\n%s", width, flat)
+		}
 	}
 }
 

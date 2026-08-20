@@ -186,6 +186,47 @@ func TestRunLoginEmptyKeyKeepsTheStoredOne(t *testing.T) {
 	if !strings.Contains(out.String(), credentials.Redact(existing)) {
 		t.Fatalf("login should show the current key redacted:\n%s", out.String())
 	}
+	// And the PROMPT itself must advertise the default. Behaviour alone is not enough:
+	// the key is invisible, so a user who cannot see that blank Enter keeps it re-pastes
+	// a secret — or concludes the sign-in threw the stored one away.
+	if !strings.Contains(out.String(), "press Enter to keep "+credentials.Redact(existing)) {
+		t.Fatalf("the key prompt should say that Enter keeps the stored key:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), existing) {
+		t.Fatalf("login echoed the raw stored key:\n%s", out.String())
+	}
+}
+
+// A stored key that cannot ride an HTTP header must not be offered as the blank-Enter
+// default: credentials.Load only checks the fields are non-empty, so a hand-edited file
+// can hold one. Offering it would send it to the network and fail with a transport-
+// shaped error that never mentions the real cause — and blank Enter would keep picking
+// the same unusable value.
+func TestRunLoginRefusesToKeepAMalformedStoredKey(t *testing.T) {
+	srv := newCapsServer(t)
+	cfg := loginCfg(t)
+	const malformed = "sk-or-v1-with a space in it"
+	if err := credentials.Save(cfg.CredentialsPath, credentials.Credentials{
+		BaseURL: "https://old.example.test", APIKey: malformed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Endpoint, custom URL, then a blank key line the flow must REFUSE, followed by a
+	// usable one. A flow that still offered the stored key would take the blank line and
+	// never read the replacement.
+	const replacement = "sk-or-v1-replacement0123456789"
+	tio, out := scriptedIO([]string{"2", srv.URL, ""}, replacement)
+	got, err := RunLogin(context.Background(), cfg, tio)
+	if err != nil {
+		t.Fatalf("login: %v (output:\n%s)", err, out.String())
+	}
+	if got.APIKey != replacement {
+		t.Fatalf("key = %q, want the replacement — the malformed default must not be kept", got.APIKey)
+	}
+	if !strings.Contains(out.String(), "the stored key is unusable") {
+		t.Fatalf("login should explain why the stored key was dropped:\n%s", out.String())
+	}
 }
 
 // REGRESSION: a piped login whose input runs out before the key must FAIL, not retry.

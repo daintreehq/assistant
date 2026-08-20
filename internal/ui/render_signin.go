@@ -43,7 +43,7 @@ func renderSignIn(th theme.Theme, s *pendingSignIn, width int) string {
 	case signInStageCustomURL:
 		b.WriteString(th.Body().Render(truncateCells("Backend URL", width)))
 		b.WriteByte('\n')
-		b.WriteString(renderSignInField(th, s.urlInput, false, width))
+		b.WriteString(renderSignInField(th, s.urlInput, false, width, ""))
 	case signInStageKey:
 		b.WriteString(th.Body().Render(truncateCells("API key for "+s.baseURL, width)))
 		b.WriteByte('\n')
@@ -56,7 +56,18 @@ func renderSignIn(th theme.Theme, s *pendingSignIn, width int) string {
 		// looking. The sentence is short enough to land whole well below that width.
 		b.WriteString(th.Dim().Render(capWrap(backend.KeyPurposeNotice, width, 4)))
 		b.WriteByte('\n')
-		b.WriteString(renderSignInField(th, s.keyInput, true, width))
+		// The "keep it" affordance, stated in full and in the accent colour directly
+		// above the field. It existed from the start but only as a dim key legend under
+		// the sheet, which reads as chrome — so the common case (hop between the local
+		// and deployed backend, same key) looked like it demanded a re-paste of a secret
+		// the user cannot see, and the sheet appeared to be discarding the stored key.
+		// Naming the key that would be kept is what makes the sentence trustworthy.
+		if s.currentKeySet {
+			b.WriteString(th.Accent().Render(capWrap(
+				"Leave this blank and press Enter to keep your current key ("+s.current.KeyRedacted+").", width, 3)))
+			b.WriteByte('\n')
+		}
+		b.WriteString(renderSignInField(th, s.keyInput, true, width, keepFieldPlaceholder(s)))
 	case signInStageVerifying:
 		b.WriteString(th.Body().Render(truncateCells("Checking "+s.baseURL+" …", width)))
 	}
@@ -96,7 +107,13 @@ func renderSignInEndpoints(th theme.Theme, s *pendingSignIn, width int) string {
 // renderSignInField draws a text entry row. A masked field NEVER renders its content —
 // it renders bullets plus a character count, so a paste can be confirmed as landed
 // without the key appearing on screen (or, worse, in the host's scrollback).
-func renderSignInField(th theme.Theme, value string, masked bool, width int) string {
+// placeholder, when non-empty, stands in for an empty field: it says what pressing
+// Enter right now would do, rather than leaving a blank row that reads as "nothing
+// entered yet, and nothing will happen".
+func renderSignInField(th theme.Theme, value string, masked bool, width int, placeholder string) string {
+	if value == "" && placeholder != "" {
+		return th.Dim().Render(truncateCells("› "+placeholder, width-1)) + th.Accent().Render("▏")
+	}
 	shown := value
 	if masked {
 		n := len([]rune(value))
@@ -120,11 +137,35 @@ func signInHint(s *pendingSignIn) string {
 	case signInStageCustomURL:
 		return "Enter continue · Esc back"
 	case signInStageKey:
-		if s.currentKeySet {
-			return "Enter continue (empty keeps the current key) · Esc back"
+		// Input-dependent, because the sheet stays on screen WHILE the key is typed: a
+		// standing "Enter keeps the current key" would be a live lie the moment a
+		// character lands, and the key it appears to protect is one the user cannot see
+		// to sanity-check. Once there is input, Enter does exactly what it now says.
+		//
+		// TrimSpace, not a bare emptiness test, because submitSignIn trims before it
+		// decides — so a field holding only spaces DOES keep the current key, and the
+		// legend has to agree with the code that acts. (The field itself still shows the
+		// bullet: "a character landed" is the one thing it exists to confirm.)
+		if s.currentKeySet && strings.TrimSpace(s.keyInput) == "" {
+			return "Enter keeps the current key · type or paste to replace it · Esc back"
 		}
 		return "Enter sign in · Esc back"
 	default:
 		return "verifying — please wait"
 	}
+}
+
+// keepFieldPlaceholder is what the empty key field says when Enter would keep the
+// existing key.
+//
+// It names no key material at all, redacted or otherwise: the accent line directly
+// above already carries the redacted key, and a second copy one row below is noise
+// rather than confirmation. Kept SHORT for a second reason — the field is a single
+// truncateCells row and cannot wrap, so a longer sentence loses its tail at the
+// narrow widths the sheet is pinned at (measured: 40 columns dropped "key)").
+func keepFieldPlaceholder(s *pendingSignIn) string {
+	if !s.currentKeySet {
+		return ""
+	}
+	return "(Enter keeps the current key)"
 }
