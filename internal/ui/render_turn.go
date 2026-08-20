@@ -637,11 +637,14 @@ func renderCompletedBlocks(md *markdown.Renderer, text string, contentW int) str
 // Conservative: any doubt → false → paragraph-level fallback (correct, just less smooth). We reject:
 //
 //   - empty tail — nothing to settle.
-//   - a retroactive / width-changing / OSC-8 construct anywhere: "[" "]" "<" ">" (links/html emit
-//     OSC-8 and restyle), "&" (entity &amp;→& shrinks the line), "\\" (escape), "|" (table), "~"
-//     (strikethrough), "#" (heading). These can reach back across rows, so reject wholesale.
-//   - a GFM autolink trigger ("://", "www.", "@"): a bare URL/email is styled with an OSC-8 target
-//     embedded per wrapped row, so growing it rewrites earlier rows.
+//   - a retroactive / width-changing / OSC-8 construct anywhere: "[" "]" "<" ">" (links/html
+//     restyle, and an http/https one also emits OSC-8), "&" (entity &amp;→& shrinks the line),
+//     "\\" (escape), "|" (table), "~" (strikethrough), "#" (heading). These can reach back across
+//     rows, so reject wholesale.
+//   - a GFM autolink trigger ("://", "www.", "@"): a bare URL/email restyles its whole token as it
+//     grows — and an http/https one additionally carries an OSC-8 target embedded per wrapped row
+//     (an email's mailto: target does not survive the scheme allowlist, but it still restyles) — so
+//     growing it rewrites earlier rows.
 //   - any newline or tab: a newline can form a setext underline, a hard break, a list, a code
 //     fence, or a definition list (all restyle/re-wrap earlier lines); a tab is block indentation.
 //   - a leading block opener ("- ", "+ ", "N. ", "N) ", or a >=4-space indent = indented code).

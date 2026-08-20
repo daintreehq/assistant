@@ -12,7 +12,9 @@
 //     a hard 80-col wrap, never rune/byte counts.
 //   - Security: strip pre-existing ANSI from the INPUT before parsing (untrusted
 //     model output could inject SGR / OSC-8 links); when color is off, strip the
-//     OUTPUT too.
+//     OUTPUT too. The OSC-8 hyperlinks we then GENERATE are restricted to
+//     http/https targets (filterHyperlinkSchemes) — glamour would otherwise make
+//     mailto:/file:///javascript: destinations genuinely clickable in the host.
 //   - Bounded LRU cache keyed (contentHash, width, expanded); each Renderer owns
 //     one immutable theme, so theme is implicit in the cache instance.
 //   - Plain fallback on unknown lexer / render failure / empty prose.
@@ -134,6 +136,11 @@ func (r *Renderer) render(clean string, width int) Rendered {
 
 	// Trim trailing blank lines glamour appends (the spec trims trailing blanks).
 	styled = strings.TrimRight(styled, "\n")
+	// Restrict the hyperlinks glamour generated to http/https BEFORE either
+	// representation is derived or cached, so the allowlist holds for every
+	// consumer. (The no-color branch below strips all ANSI anyway, but the
+	// ordering is what makes the invariant obvious to a reader.)
+	styled = filterHyperlinkSchemes(styled)
 	plain := ansi.Strip(styled)
 
 	if !r.theme.Mode.Colorize() {
