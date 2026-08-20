@@ -21,6 +21,9 @@ func TestDaintreeCallDenylistNamesWrapper(t *testing.T) {
 		"terminal.rename":      "terminal.rename",
 		"terminal.arm":         "terminal.arm",
 		"git.getProjectPulse":  "git.getProjectPulse",
+		// The redirect must also carry the follow-up rule, not just the wrapper name —
+		// the model reaching for the raw action is exactly the one that has not read it.
+		"terminal.moveToWorktree": "Please continue in the directory",
 	} {
 		decoded, _ := tool.Decode(json.RawMessage(`{"name":"` + raw + `"}`))
 		res := tool.Handle(context.Background(), decoded, &tools.ToolContext{})

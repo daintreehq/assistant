@@ -2991,6 +2991,15 @@ func (s *Session) observeRosterMutation(internalName, rawArgs string, res domain
 		} else {
 			s.invalidateRosterAndRefresh()
 		}
+	case "terminal.moveToWorktree":
+		// A move rewrites each cached row's worktreeId, so the cache is stale either
+		// way — but the ids we asked for are NOT the full set that changed: Daintree
+		// moves a whole tab group together, so panes we never named can travel with
+		// the ones we did. Nothing short of a re-read knows which, so invalidate
+		// rather than patch. Invalidate on FAILURE too: a partial batch already
+		// applied some moves, and even a fully-failed one may have been accepted by
+		// Daintree before the link dropped.
+		s.invalidateRosterAndRefresh()
 	case "agentTask.spawnForEdits", "workflow.startWorkOnIssue", "recipe.run", "worktree.createWithRecipe":
 		// Invalidate on FAILURE too: a spawn can fail ambiguously with the launch
 		// already accepted by Daintree (saga `ambiguous`), or after Daintree opened a

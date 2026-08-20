@@ -79,10 +79,11 @@ func TestCreateWiresEveryDependency(t *testing.T) {
 
 // TestCreateRegistersFullToolSet asserts the real builder wires the full tool
 // inventory and that AssertSafe (the hard no-file-edit gate inside Create) passed
-// over it. The worklist expects 77 tools (incl. the agentTask.superviseTerminal
+// over it. The worklist expects 79 tools (incl. the agentTask.superviseTerminal
 // adopt tool, the agentTask.status / agentTask.list readers, the worktree.list /
 // worktree.getCurrent readers, the git.getProjectPulse read wrapper, the
-// terminal.close wrapper, the terminal.rename wrapper, the terminal.awaitAll cohort finish-wait, the
+// terminal.close wrapper, the terminal.rename wrapper, the terminal.moveToWorktree cohort
+// relocation wrapper, the subagent.run delegation primitive, the terminal.awaitAll cohort finish-wait, the
 // terminal.extract.json structured-extract tool, the five scratch.* session-scratch
 // tools, the four async-futures
 // tools — terminal.run.async / terminal.await.async / async.list / async.cancel — and
@@ -99,7 +100,7 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 	// model round (~16k tokens), and inventory size measurably degrades tool-selection
 	// accuracy, so a family that quietly grows must be a conscious decision.
 	got := len(a.Registry.List())
-	// 77 since the docs family was removed (issue #332): Daintree usage questions are
+	// 77 after the docs family was removed (issue #332): Daintree usage questions are
 	// answered by the backend now, which searches the public docs MCP itself before the
 	// model opens. Offering a local docs tool alongside that would give the model two
 	// ways to answer the same question, and it would use both.
@@ -109,8 +110,10 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 	// expensive search out of the main conversation entirely, and the sub-agent it
 	// dispatches is offered a read-only subset of this same registry rather than a
 	// second inventory of its own.
-	if got != 78 {
-		t.Errorf("registered tools = %d, want 78", got)
+	//
+	// 79 with the terminal.moveToWorktree cohort-relocation wrapper (issue #347).
+	if got != 79 {
+		t.Errorf("registered tools = %d, want 79", got)
 	}
 	// The local skill-selection tools were removed in the backend migration; assert
 	// their absence so a re-introduction (or a stale wiring) is caught here.

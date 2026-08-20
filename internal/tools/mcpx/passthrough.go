@@ -257,3 +257,80 @@ func copyTreeInjectPassthrough(ctx context.Context, mcp MCPClient, terminalID st
 	result, _ := res.Result.(map[string]any)
 	return tools.Ok(fmt.Sprintf("Injected copy tree into terminal %s.", terminalID), result)
 }
+
+// terminalMoveToWorktreePassthrough files a batch of terminals into ONE open
+// worktree through the Daintree terminal.moveToWorktree MCP tool (which takes ONE
+// terminalId per call), looping so the model can relocate a whole spawned cohort in
+// a SINGLE confirmed wrapper call instead of N system-tier daintree.call
+// confirmations — the cohort case is what motivated wrapping the action at all.
+//
+// Reporting mirrors terminalClosePassthrough deliberately: the summary names every
+// id that moved and every id that did not, and the result is a FAILURE if ANY move
+// failed, so a partial outcome is never narrated as a clean success. A
+// connection/cancellation failure aborts the rest of the batch (every remaining call
+// would fail identically) and keeps the abort's own code and recoverability.
+//
+// Each per-id refusal message is preserved verbatim in the details, because
+// Daintree's two failure modes need OPPOSITE recoveries — an unknown terminalId
+// means re-read the roster, an unknown worktreeId means the destination path itself
+// is wrong and every id in the batch will fail the same way. We deliberately do NOT
+// sniff the message text to classify the second case as globally fatal: matching on
+// Daintree's prose would break silently the day it is reworded, and the faithful
+// per-id report already tells the model both ids and the shared destination.
+//
+// The raw action returns void on success, so there is no structured payload to
+// extract — the report is built entirely from the ids we attempted.
+func terminalMoveToWorktreePassthrough(ctx context.Context, mcp MCPClient, ids []string, worktreeID string) tools.ToolResult {
+	var moved, failed, notAttempted []string
+	details := map[string]any{"worktreeId": worktreeID}
+	refusals := map[string]string{}
+	var abort tools.ToolResult // the fatal result (dead link / cancel) that stopped the batch
+	aborted := false
+	for i, id := range ids {
+		res := passthrough(ctx, mcp, "terminal.moveToWorktree",
+			map[string]any{"terminalId": id, "worktreeId": worktreeID}, "")
+		if res.Ok {
+			moved = append(moved, id)
+			continue
+		}
+		failed = append(failed, id)
+		if res.Error != nil {
+			refusals[id] = res.Error.Message
+			if res.Error.Code == codeMCPUnavailable || res.Error.Code == codeCancelled {
+				// The link is gone or the turn was cancelled — every REMAINING id would
+				// fail identically. Stop, record the rest as not-attempted (so none
+				// silently vanishes from the report), and keep the abort's own
+				// code/recoverability rather than flattening it to MCP_TOOL_ERROR below.
+				abort = res
+				aborted = true
+				notAttempted = append(notAttempted, ids[i+1:]...)
+				break
+			}
+		}
+	}
+	details["moved"] = moved
+	if len(failed) == 0 {
+		return tools.Ok(fmt.Sprintf(
+			"Moved %d terminal(s) into worktree %s: %s. The process was NOT restarted — send each live agent \"Please continue in the directory %s\" to actually relocate its work.",
+			len(moved), worktreeID, join(moved, ", "), worktreeID), details)
+	}
+	// Name EVERY terminal that did not move (errored + not-attempted) so a partial
+	// outcome is never narrated as a clean success.
+	unmoved := append(append([]string{}, failed...), notAttempted...)
+	details["failed"] = failed
+	details["refusals"] = refusals
+	if len(notAttempted) > 0 {
+		details["notAttempted"] = notAttempted
+	}
+	if aborted {
+		msg := fmt.Sprintf("Moved %d of %d terminal(s) into worktree %s before the batch aborted; did not move: %s. %s",
+			len(moved), len(ids), worktreeID, join(unmoved, ", "), abort.Error.Message)
+		if !abort.Error.Recoverable {
+			return tools.Fail(abort.Error.Code, msg, tools.WithDetails(details), tools.Unrecoverable())
+		}
+		return tools.Fail(abort.Error.Code, msg, tools.WithDetails(details))
+	}
+	msg := fmt.Sprintf("Moved %d of %d terminal(s) into worktree %s; failed to move: %s.",
+		len(moved), len(ids), worktreeID, join(unmoved, ", "))
+	return tools.Fail(codeMCPToolError, msg, tools.WithDetails(details))
+}

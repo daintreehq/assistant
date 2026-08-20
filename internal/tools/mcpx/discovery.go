@@ -242,6 +242,7 @@ var wrappedMCPTools = map[string]string{
 	"terminal.rename":              "terminal.rename (typed wrapper — pass terminalId and a non-empty name; UI-only, no confirmation)",
 	"terminal.sendCommand":         "terminal.sendCommand (typed wrapper — pass terminalId and command)",
 	"terminal.close":               `terminal.close (typed wrapper — pass terminalId, or terminalIds:["...","..."] to close several in one call; ONLY at the user's explicit request, never your own cleanup/recovery)`,
+	"terminal.moveToWorktree":      `terminal.moveToWorktree (typed wrapper — pass terminalId, or terminalIds:["...","..."] to relocate a cohort in one call, plus worktreeId as the exact PATH from worktree.list; it does NOT restart the process, so still send each live agent "Please continue in the directory <worktreePath>")`,
 	"terminal.arm":                 "terminal.arm (typed wrapper — pass terminalId)",
 	"terminal.disarm":              "terminal.disarm (typed wrapper — pass terminalId)",
 	"terminal.disarmAll":           "terminal.disarmAll (typed wrapper — no args needed)",

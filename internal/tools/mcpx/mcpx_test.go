@@ -25,6 +25,22 @@ type fakeMCP struct {
 	url             string // endpoint reported by Status()
 	transport       string
 	statusErr       string
+	// resultsByName routes a per-MCP-tool result, so a batching wrapper that also
+	// READS (terminal.moveToWorktree resolving ids through terminal.list) can be given
+	// a roster and a void move result in the same fake. Falls back to `result` for any
+	// name it does not carry, keeping every pre-existing single-result test unchanged.
+	resultsByName map[string]MCPCallResult
+	errsByName    map[string]error
+	// calls is the ORDERED call log (name + a copy of the args). lastName/lastArgs only
+	// remember the final call, which cannot distinguish "listed then moved three" from
+	// "moved three".
+	calls []fakeMCPCall
+}
+
+// fakeMCPCall is one recorded CallTool invocation.
+type fakeMCPCall struct {
+	name string
+	args map[string]any
 }
 
 func (f *fakeMCP) Connected() bool {
@@ -40,12 +56,34 @@ func (f *fakeMCP) CallTool(_ context.Context, name string, args map[string]any) 
 	f.lastName = name
 	f.lastArgs = args
 	f.callCount++
+	argsCopy := make(map[string]any, len(args))
+	for k, v := range args {
+		argsCopy[k] = v
+	}
+	f.calls = append(f.calls, fakeMCPCall{name: name, args: argsCopy})
+	if err, ok := f.errsByName[name]; ok && err != nil {
+		return MCPCallResult{}, err
+	}
 	if f.failOn != nil {
 		if id, _ := args["terminalId"].(string); f.failOn[id] {
 			return MCPCallResult{IsError: true, Text: "no such terminal"}, nil
 		}
 	}
+	if res, ok := f.resultsByName[name]; ok {
+		return res, nil
+	}
 	return f.result, nil
+}
+
+// callsTo returns the ordered args of every recorded call to one MCP tool.
+func (f *fakeMCP) callsTo(name string) []map[string]any {
+	var out []map[string]any
+	for _, c := range f.calls {
+		if c.name == name {
+			out = append(out, c.args)
+		}
+	}
+	return out
 }
 func (f *fakeMCP) ListTools(_ context.Context, _ bool) ([]MCPToolInfo, error) {
 	return f.toolList, f.listErr
