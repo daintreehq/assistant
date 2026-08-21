@@ -148,15 +148,30 @@ func FormatRunTimeline(events []domain.RunEventRecord, auditRows []domain.AuditR
 			// DEGRADED selector always is: it failed open and kept the prior set without
 			// deciding on it, so the round may carry exactly the right runbook for
 			// entirely the wrong reason, and `active` alone looks perfectly healthy.
-			active := skillRefTitles(payload["active"])
+			// A set that CLEARS is a change like any other, so it must be tracked and
+			// said out loud — otherwise the replay silently implies the last-named set
+			// stayed active for the rest of the run, and an A → none → A sequence would
+			// hide the reactivation too. That is only knowable when `active` really
+			// decoded as an array: an absent or malformed value means "this row cannot
+			// tell us", which must leave the tracked set alone rather than clear it.
+			active, usable := skillRefTitles(payload["active"])
 			degraded := selectorDegraded(payload)
-			changed := !activeShown || !equalStringSlices(active, shownActive)
-			if !degraded && !(changed && len(active) > 0) {
+			changed := usable && (!activeShown || !equalStringSlices(active, shownActive))
+			// A first round with nothing active renders nothing (the common no-skills
+			// case); only a set that was non-empty and then cleared is worth a line.
+			worthSaying := changed && (len(active) > 0 || len(shownActive) > 0)
+			if !degraded && !worthSaying {
 				continue
 			}
-			shownActive, activeShown = active, true
+			if usable {
+				shownActive, activeShown = active, true
+			}
 			if degraded {
 				lines = append(lines, degradedSkillLine(active, payload))
+				continue
+			}
+			if len(active) == 0 {
+				lines = append(lines, "✦ skills active: none")
 				continue
 			}
 			lines = append(lines, "✦ skills active: "+strings.Join(active, ", "))
@@ -402,11 +417,14 @@ func equalStringSlices(a, b []string) bool {
 }
 
 // skillRefTitles coerces a decoded array of {id,title} skill objects to display labels,
-// falling back to the id for a ref the backend sent without a title.
-func skillRefTitles(v any) []string {
+// falling back to the id for a ref the backend sent without a title. The second return
+// says whether the value was structurally a LIST at all — the caller needs "an empty set
+// was reported" and "this row's active field is missing or malformed" to be different
+// answers, since only the first may clear the tracked set.
+func skillRefTitles(v any) ([]string, bool) {
 	arr, ok := v.([]any)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	out := make([]string, 0, len(arr))
 	for _, e := range arr {
@@ -423,7 +441,7 @@ func skillRefTitles(v any) []string {
 		}
 		out = append(out, label)
 	}
-	return out
+	return out, true
 }
 
 func str(v any) string {

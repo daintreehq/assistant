@@ -468,8 +468,10 @@ func (s *RunEventSink) SkillLoaded(titles []string) {
 // SkillDecision persists the committed per-round skill outcome so /explain replay can
 // answer "which runbook was active for this round, and did the selector actually decide
 // that or fail open into it". Written on EVERY committed round, unfiltered — the durable
-// log is the record; FormatRunTimeline decides what a human is shown (today: only the
-// degraded case, since a clean decision repeats what the skill:loaded row already said).
+// log is the record; FormatRunTimeline decides what a human is shown, collapsing the
+// rounds where the active set did not change and always surfacing a degraded selector.
+// Once a run has these rows they are its whole skill story: the replay then suppresses
+// the eager skill:loaded rows, which name only a per-attempt delta.
 func (s *RunEventSink) SkillDecision(ev SkillDecisionEvent) {
 	s.flushContent()
 	s.write("skill:decision", ev)

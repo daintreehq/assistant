@@ -220,6 +220,69 @@ func TestFormatRunTimelineShowsChangedActiveSet(t *testing.T) {
 	}
 }
 
+// A set that CLEARS must be said out loud. Silence here would let the replay imply the
+// last-named set stayed active for the rest of the run.
+func TestFormatRunTimelineReportsActiveSetClearing(t *testing.T) {
+	events := []domain.RunEventRecord{
+		decisionRow(0, `{"active":[{"id":"a","title":"Alpha"}],"selector":{"ran":true}}`),
+		decisionRow(1, `{"active":[],"selector":{"ran":true}}`),
+	}
+	out := FormatRunTimeline(events, nil)
+	if !strings.Contains(out, "Alpha") {
+		t.Fatalf("the initial set is missing: %q", out)
+	}
+	if !strings.Contains(out, "none") {
+		t.Fatalf("a cleared active set rendered nothing, so the replay still implies "+
+			"Alpha is active: %q", out)
+	}
+}
+
+// …and a REACTIVATION after clearing must show too — the bug this guards against is
+// state that never recorded the clear, making A → none → A collapse to a single A.
+func TestFormatRunTimelineReportsReactivationAfterClearing(t *testing.T) {
+	events := []domain.RunEventRecord{
+		decisionRow(0, `{"active":[{"id":"a","title":"Alpha"}],"selector":{"ran":true}}`),
+		decisionRow(1, `{"active":[],"selector":{"ran":true}}`),
+		decisionRow(2, `{"active":[{"id":"a","title":"Alpha"}],"selector":{"ran":true}}`),
+	}
+	out := FormatRunTimeline(events, nil)
+	if got := strings.Count(out, "Alpha"); got != 2 {
+		t.Fatalf("Alpha rendered %d time(s), want 2 (before and after the clear): %q", got, out)
+	}
+}
+
+// A run that never has any active skills stays silent. "none" is for a set that CLEARED,
+// not for the ordinary no-skills run, which would otherwise gain a line per turn.
+func TestFormatRunTimelineSilentWhenNothingWasEverActive(t *testing.T) {
+	events := []domain.RunEventRecord{
+		decisionRow(0, `{"active":[],"newlyLoaded":[],"selector":{"ran":false,"degraded":false}}`),
+		decisionRow(1, `{"active":[],"newlyLoaded":[],"selector":{"ran":false,"degraded":false}}`),
+	}
+	if out := FormatRunTimeline(events, nil); strings.TrimSpace(out) != "" {
+		t.Fatalf("a run with no skills must render nothing, got %q", out)
+	}
+}
+
+// A row whose `active` is missing or malformed says "this row cannot tell us" — it must
+// NOT be read as "the set cleared", which would blank a perfectly good tracked set.
+func TestFormatRunTimelineMalformedActiveDoesNotClearTheTrackedSet(t *testing.T) {
+	events := []domain.RunEventRecord{
+		decisionRow(0, `{"active":[{"id":"a","title":"Alpha"}],"selector":{"ran":true}}`),
+		decisionRow(1, `{"selector":{"ran":true}}`),                         // absent
+		decisionRow(2, `{"active":"not-an-array","selector":{"ran":true}}`), // malformed
+		decisionRow(3, `{"active":[{"id":"a","title":"Alpha"}],"selector":{"ran":true}}`),
+	}
+	out := FormatRunTimeline(events, nil)
+	if strings.Contains(out, "none") {
+		t.Fatalf("an unusable active field was misread as a cleared set: %q", out)
+	}
+	// Alpha is still the tracked set across rows 1-2, so row 3 is not a change.
+	if got := strings.Count(out, "Alpha"); got != 1 {
+		t.Fatalf("Alpha rendered %d time(s), want 1 — the tracked set was disturbed by an "+
+			"unusable row: %q", got, out)
+	}
+}
+
 // The degraded case is ALWAYS shown, even on a round whose active set is unchanged —
 // that is exactly the fail-open shape: the set held because deciding failed, not because
 // the selector chose it.

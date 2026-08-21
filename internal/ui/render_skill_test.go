@@ -115,6 +115,11 @@ func TestPump_SkillLoadedDoesNotDisturbStreamingProse(t *testing.T) {
 // and move the flush boundary for something that draws nothing.
 func TestPump_SkillDecisionDoesNotFlushTheTokenCoalescer(t *testing.T) {
 	p := newEventPump()
+	// Neutralize the production coalesce window: with the real 25ms timer a scheduler
+	// pause could flush the first token on its own and fail this test even though the
+	// skill callback is correctly inert. The sentinel's own emit is the deterministic
+	// flush this assertion depends on.
+	p.flushDur = time.Hour
 	p.AssistantToken("first half ")
 	p.SkillDecision(agent.SkillDecisionEvent{
 		Active:   []agent.SkillRef{{ID: "supervise", Title: "Supervise a fleet of agents"}},
@@ -146,6 +151,7 @@ func TestPump_SkillDecisionDoesNotFlushTheTokenCoalescer(t *testing.T) {
 // have passed that.
 func TestPump_SkillLoadedDoesNotFlushTheTokenCoalescer(t *testing.T) {
 	p := newEventPump()
+	p.flushDur = time.Hour // see the decision test above
 	p.AssistantToken("first half ")
 	p.SkillLoaded([]string{"Supervise a fleet of agents"})
 	p.AssistantToken("second half")

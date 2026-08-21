@@ -2080,6 +2080,10 @@ func copySkillRefs(refs []backend.SkillRef) []SkillRef {
 // debug trace consume it; nothing folds it into the live conversation, and the one place
 // it reaches a human is an explicit `/explain <run>` replay of that run's timeline.
 //
+// In an /explain replay these rows are SUPERSEDED by the committed skill:decision rows
+// whenever the run recorded any; they still render for runs from before that event
+// existed, which would otherwise lose their skill story entirely.
+//
 // It used to draw an inline "Skill loaded" card, and there used to be a /skills command.
 // Both were removed: backend skill selection is prompt-assembly machinery, not a decision
 // the user takes or can reverse, so there is no affordance to attach the information to.

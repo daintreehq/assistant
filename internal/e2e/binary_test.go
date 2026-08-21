@@ -195,8 +195,10 @@ func TestBinaryJSONOneShot(t *testing.T) {
 	if sel2["degraded"] != true {
 		t.Errorf("round 2 selector = %#v, want degraded:true", decisions[1]["selector"])
 	}
-	if newly, _ := decisions[1]["newlyLoaded"].([]any); len(newly) != 0 {
-		t.Errorf("round 2 newlyLoaded = %#v, want empty", decisions[1]["newlyLoaded"])
+	// `ok` matters: an ignored assertion yields a nil slice, so a missing, null or
+	// wrongly-typed field would satisfy a bare length check.
+	if newly, ok := decisions[1]["newlyLoaded"].([]any); !ok || len(newly) != 0 {
+		t.Errorf("round 2 newlyLoaded = %#v, want an empty array", decisions[1]["newlyLoaded"])
 	}
 	if act2, _ := decisions[1]["active"].([]any); len(act2) != 2 {
 		t.Errorf("round 2 active = %#v, want the set it fell open into", decisions[1]["active"])
