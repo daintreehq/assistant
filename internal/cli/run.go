@@ -238,12 +238,30 @@ func readPromptFile(path string, stdin io.Reader) (string, error) {
 	if path == promptFileStdin {
 		return readBoundedText(stdin, maxPromptFileBytes, "--prompt-file", "-")
 	}
+	return readBoundedFile(path, maxPromptFileBytes, "--prompt-file")
+}
+
+// readBoundedFile opens a NAMED path and reads it under a byte bound.
+//
+// It insists on a regular file, which is a stronger check than it looks: os.Open on a
+// FIFO blocks until a writer appears, BEFORE any bound this code could apply, and
+// --timeout cannot preempt a syscall already in flight. Streaming input has a spelling
+// already — "-" — so a named pipe here is a mistake worth naming rather than a hang worth
+// waiting out. A directory becomes a clear message instead of an opaque read error.
+func readBoundedFile(path string, limit int64, flag string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", flag, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s %s: not a regular file (use '-' to stream from stdin)", flag, path)
+	}
 	f, err := os.Open(path)
 	if err != nil {
-		return "", fmt.Errorf("--prompt-file: %w", err)
+		return "", fmt.Errorf("%s: %w", flag, err)
 	}
 	defer f.Close()
-	return readBoundedText(f, maxPromptFileBytes, "--prompt-file", path)
+	return readBoundedText(f, limit, flag, path)
 }
 
 // readProjectInstructionsFile resolves --project-instructions-file to DAINTREE.md
@@ -259,12 +277,7 @@ func readPromptFile(path string, stdin io.Reader) (string, error) {
 // DAINTREE.md would run the job against a DIFFERENT brief than the caller named and hide
 // the typo behind a successful-looking run.
 func readProjectInstructionsFile(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", fmt.Errorf("--project-instructions-file: %w", err)
-	}
-	defer f.Close()
-	return readBoundedText(f, projectinstructions.MaxBytes, "--project-instructions-file", path)
+	return readBoundedFile(path, projectinstructions.MaxBytes, "--project-instructions-file")
 }
 
 // applyAutoProjectInstructions fills o.ProjectInstructions from an auto-DISCOVERED

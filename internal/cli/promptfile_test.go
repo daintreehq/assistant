@@ -9,6 +9,7 @@ import (
 
 	"github.com/daintreehq/assistant/internal/cli/render"
 	"github.com/daintreehq/assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/host"
 	"github.com/daintreehq/assistant/internal/projectinstructions"
 )
 
@@ -258,5 +259,36 @@ func TestApplyAutoProjectInstructionsNeverClobbers(t *testing.T) {
 	applyAutoProjectInstructions(&none, "")
 	if none.ProjectInstructions != nil {
 		t.Errorf("empty discovered content must leave the override nil, got %q", *none.ProjectInstructions)
+	}
+}
+
+// TestHostOverridesProjectInstructionsPrecedence covers the OTHER auto-load call site.
+// The embedded host reads DAINTREE.md itself and hands the content over per boot, so
+// without the guard an operator's --project-instructions-file would be replaced on every
+// single boot — and the helper test above would not notice, because it never runs this
+// merge.
+func TestHostOverridesProjectInstructionsPrecedence(t *testing.T) {
+	explicit := "# From the flag"
+	base := config.ConfigOverrides{ProjectInstructions: &explicit}
+
+	got := hostOverrides(base, host.AppParams{ProjectPath: "/repo", ProjectInstructions: "# From the descriptor"})
+	if got.ProjectInstructions == nil || *got.ProjectInstructions != explicit {
+		t.Errorf("the descriptor clobbered the explicit file: %v", got.ProjectInstructions)
+	}
+	if got.ProjectPath == nil || *got.ProjectPath != "/repo" {
+		t.Errorf("ProjectPath = %v, want the descriptor's cwd", got.ProjectPath)
+	}
+
+	// Without the flag the descriptor must still be honoured — the guard must not turn
+	// the host's own DAINTREE.md into a no-op.
+	got = hostOverrides(config.ConfigOverrides{}, host.AppParams{ProjectInstructions: "# From the descriptor"})
+	if got.ProjectInstructions == nil || *got.ProjectInstructions != "# From the descriptor" {
+		t.Errorf("descriptor content must apply when nothing explicit is set: %v", got.ProjectInstructions)
+	}
+
+	// And the base must not be mutated: the factory runs once per session, so a merge
+	// that wrote through would leak one boot's project into the next.
+	if base.ProjectPath != nil {
+		t.Error("hostOverrides mutated the shared base overrides")
 	}
 }

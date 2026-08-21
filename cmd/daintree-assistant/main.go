@@ -204,6 +204,15 @@ func parseArgs(args []string) (parsedArgs, error) {
 	// developer's real state dir. Fail at the argument boundary instead.
 	// "-" is a non-empty value, so --prompt-file's stdin spelling passes this check
 	// untouched; only a literally empty `--prompt-file=` is rejected.
+	//
+	// The advice differs by flag because the FALLBACK differs, and pointing someone at an
+	// environment variable that does not exist is worse than saying nothing: --prompt-file
+	// has no other source at all, and --project-instructions-file falls back to the
+	// project's own DAINTREE.md rather than to the environment.
+	emptyValueFallback := map[string]string{
+		"prompt-file":               "there is no other prompt source",
+		"project-instructions-file": "omit the flag to use the project's own DAINTREE.md",
+	}
 	for _, name := range []string{"backend-url", "api-key-file", "prompt-file", "state-dir", "log-dir",
 		"mcp-url", "mcp-token", "project", "project-id", "window-id", "project-instructions-file"} {
 		f := fs.Lookup(name)
@@ -211,7 +220,11 @@ func parseArgs(args []string) (parsedArgs, error) {
 			continue
 		}
 		if strings.TrimSpace(f.Value.String()) == "" {
-			return parsedArgs{}, fmt.Errorf("--%s was given an empty value; omit the flag to fall back to the environment", name)
+			advice, ok := emptyValueFallback[name]
+			if !ok {
+				advice = "omit the flag to fall back to the environment"
+			}
+			return parsedArgs{}, fmt.Errorf("--%s was given an empty value; %s", name, advice)
 		}
 	}
 	// A boolean override is carried as a POINTER so an explicit --auto-approve=false can

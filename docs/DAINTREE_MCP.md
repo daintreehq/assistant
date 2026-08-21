@@ -27,8 +27,10 @@ Daintree launches the CLI and passes the connection details via environment / fl
 | Auth header    | `Authorization: Bearer <token>`                            |
 
 `DAINTREE_WINDOW_ID` is injected by Daintree so a CLI bound to one Daintree window
-can be told apart from another. It is read into config (`AppConfig.WindowID`, env-only —
-never a CLI flag) and surfaced by `/status` via `config.DescribeConfig`. (`/doctor`
+can be told apart from another. It is read into config (`AppConfig.WindowID`) and
+surfaced by `/status` via `config.DescribeConfig`. Daintree injects it as env; a headless
+caller can also say it in argv as `--window-id`, or per session as `windowId` on
+`daintree.session.open` (both beat the env, like every other harness flag). (`/doctor`
 reports connection health and a live MCP probe rather than the raw config values.)
 
 The client (`internal/mcp`) uses `github.com/modelcontextprotocol/go-sdk`: it connects

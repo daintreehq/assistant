@@ -44,8 +44,8 @@ type OpenInput struct {
 	// can repoint it, and identity is exactly the thing worth repointing: projectId
 	// scopes the state directory into a per-project subdirectory, so it isolates a
 	// session's database and lease as a side effect of naming the project.
-	ProjectID string `json:"projectId,omitempty" jsonschema:"Daintree project id. It scopes the state directory into a per-project subdirectory, so two sessions naming different projects do not share a conversation database or an owner lease."`
-	WindowID  string `json:"windowId,omitempty" jsonschema:"Daintree window id. Identity only - it tells the assistant which window it is speaking for and has no effect on where state is stored."`
+	ProjectID string `json:"projectId,omitempty" jsonschema:"Daintree project id. It scopes the DEFAULT state root into a per-project subdirectory, so sessions naming different projects get separate databases and leases - but only when stateDir is left unset, since an explicit stateDir wins outright. To guarantee isolation, give each session its own stateDir."`
+	WindowID  string `json:"windowId,omitempty" jsonschema:"Daintree window id. Identity only: it is reported by status and carried in config, and has no effect on where state is stored or on how a headless session behaves."`
 	DebugLog  *bool  `json:"debugLog,omitempty" jsonschema:"Write a structured session trace to the log directory. Strongly recommended: it is the only way to diagnose a bad run."`
 	// Approvals is a tri-state rather than a bool because the two obvious answers are
 	// both wrong on their own: always approving lets the assistant push and run

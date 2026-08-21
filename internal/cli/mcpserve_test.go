@@ -83,15 +83,41 @@ func TestSessionProjectIdentityOverridesProcessDefaults(t *testing.T) {
 		PromptFile: "-",
 	}
 
-	session := sessionOptions(process, mcpserver.OpenParams{ProjectID: "session-project"})
-	if session.ProjectID != "session-project" {
-		t.Errorf("ProjectID = %q, want the session's value to win", session.ProjectID)
-	}
-	if session.WindowID != "launch-window" {
-		t.Errorf("WindowID = %q, want an omitted session field to inherit the launch default", session.WindowID)
-	}
-	if session.Prompt != "" || session.HasPrompt || session.PromptFile != "" {
-		t.Errorf("one-shot prompt state leaked into a session: prompt=%q hasPrompt=%v promptFile=%q",
-			session.Prompt, session.HasPrompt, session.PromptFile)
+	// Both fields, both directions — a table so deleting EITHER overlay line fails.
+	for _, tc := range []struct {
+		name                 string
+		params               mcpserver.OpenParams
+		wantProject, wantWin string
+	}{
+		{"project overrides, window inherits",
+			mcpserver.OpenParams{ProjectID: "session-project"}, "session-project", "launch-window"},
+		{"window overrides, project inherits",
+			mcpserver.OpenParams{WindowID: "session-window"}, "launch-project", "session-window"},
+		{"both override",
+			mcpserver.OpenParams{ProjectID: "p2", WindowID: "w2"}, "p2", "w2"},
+		{"neither given inherits both",
+			mcpserver.OpenParams{}, "launch-project", "launch-window"},
+		// Whitespace is NOT a value. config's FirstString trims what it resolves, so a
+		// raw " " stored here would count as set at this layer and unset at that one:
+		// the launch flag would be discarded and the environment (or a bare state root)
+		// would answer instead — silently opening the wrong project's database.
+		{"whitespace is treated as omitted",
+			mcpserver.OpenParams{ProjectID: "   ", WindowID: "\t"}, "launch-project", "launch-window"},
+		{"a padded value is stored trimmed",
+			mcpserver.OpenParams{ProjectID: "  padded  "}, "padded", "launch-window"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session := sessionOptions(process, tc.params)
+			if session.ProjectID != tc.wantProject {
+				t.Errorf("ProjectID = %q, want %q", session.ProjectID, tc.wantProject)
+			}
+			if session.WindowID != tc.wantWin {
+				t.Errorf("WindowID = %q, want %q", session.WindowID, tc.wantWin)
+			}
+			if session.Prompt != "" || session.HasPrompt || session.PromptFile != "" {
+				t.Errorf("one-shot prompt state leaked into a session: prompt=%q hasPrompt=%v promptFile=%q",
+					session.Prompt, session.HasPrompt, session.PromptFile)
+			}
+		})
 	}
 }

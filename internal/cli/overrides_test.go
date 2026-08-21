@@ -97,8 +97,13 @@ func TestOverridesFromOptionsMapsHarnessFlags(t *testing.T) {
 // AppConfig but not the state path would look correct and isolate nothing.
 func TestProjectIdentityFlagsBeatTheEnvironment(t *testing.T) {
 	// A home, not a --state-dir: an explicit state dir beats project scoping outright,
-	// so pointing one at a temp dir would test nothing about the project id.
-	t.Setenv("HOME", t.TempDir())
+	// so pointing one at a temp dir would test nothing about the project id. USERPROFILE
+	// as well as HOME, because os.UserHomeDir reads the other one on Windows — a test
+	// that only set HOME would still PASS there while creating .daintree in the
+	// developer's real profile.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", "")
 	t.Setenv("DAINTREE_PROJECT_ID", "env-project")
 	t.Setenv("DAINTREE_WINDOW_ID", "env-window")
@@ -120,8 +125,12 @@ func TestProjectIdentityFlagsBeatTheEnvironment(t *testing.T) {
 	if cfg.WindowID != "flag-window" {
 		t.Errorf("WindowID = %q, want the flag to beat the env", cfg.WindowID)
 	}
-	if !strings.Contains(cfg.StateDir, config.ProjectIDToDir("flag-project")) {
-		t.Errorf("StateDir = %q, want it scoped by the flag's project id", cfg.StateDir)
+	// The EXACT path, not a substring: "contains the slug" would also be satisfied by a
+	// state dir created somewhere outside the temp home, which is the failure worth
+	// catching.
+	want := filepath.Join(home, ".daintree", "assistant-cli", config.ProjectIDToDir("flag-project"))
+	if cfg.StateDir != want {
+		t.Errorf("StateDir = %q, want %q", cfg.StateDir, want)
 	}
 }
 

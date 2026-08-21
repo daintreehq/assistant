@@ -22,6 +22,26 @@ import (
 //
 // host.Run returns a nonzero code only when its stdin/factory precondition fails
 // (terminal stdin, nil factory); the normal path never returns (teardown os.Exits).
+// hostOverrides merges one boot descriptor onto the process-level overrides.
+//
+// The descriptor's cwd is the authoritative project path, and its DAINTREE.md content
+// (host.boot already read the file) rides as an override — but only when nothing
+// explicit is there, because that content is DISCOVERED exactly like the file
+// buildOverrides loads. Without the guard, an operator who launched the host with
+// --project-instructions-file would have it silently replaced on every boot.
+//
+// It returns a COPY: the factory runs once per session, so a merge that wrote through to
+// the shared base would leak one session's project into the next.
+func hostOverrides(base config.ConfigOverrides, params host.AppParams) config.ConfigOverrides {
+	o := base
+	if params.ProjectPath != "" {
+		p := params.ProjectPath
+		o.ProjectPath = &p
+	}
+	applyAutoProjectInstructions(&o, params.ProjectInstructions)
+	return o
+}
+
 func RunHost(ctx context.Context, opts Options) int {
 	// Resolved once, before serving: --api-key-file is read here, and an unreadable one
 	// must be fatal at the door rather than per boot request.
@@ -31,20 +51,7 @@ func RunHost(ctx context.Context, opts Options) int {
 		return domain.OneShotExitCode.Error
 	}
 	factory := func(fctx context.Context, params host.AppParams) (host.App, error) {
-		// Copy per boot: the factory runs once per session and mutates the project
-		// fields below, so the shared base must not be aliased.
-		overrides := baseOverrides
-		// The descriptor's cwd is the authoritative project path; the loaded
-		// DAINTREE.md content rides as an override (host.boot already read the file).
-		if params.ProjectPath != "" {
-			p := params.ProjectPath
-			overrides.ProjectPath = &p
-		}
-		// Only when nothing explicit is already there: the descriptor's DAINTREE.md is a
-		// DISCOVERED file like the one buildOverrides loads, so an operator who launched
-		// the host with --project-instructions-file must not have it silently replaced
-		// per boot.
-		applyAutoProjectInstructions(&overrides, params.ProjectInstructions)
+		overrides := hostOverrides(baseOverrides, params)
 		// The embedded host owns the project like any interactive assistant: take
 		// the lease (spawning/attaching to the supervisor daemon) before opening
 		// the DB. The Ownership handle is deliberately held for the PROCESS

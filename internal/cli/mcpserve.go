@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -222,8 +223,16 @@ func sessionOptions(base Options, p mcpserver.OpenParams) Options {
 	return o
 }
 
+// applyIfSet overlays one session argument, treating a WHITESPACE-ONLY value as omitted
+// and storing the trimmed form otherwise.
+//
+// Trimming is what makes "omitted inherits the launch default" actually true. config's
+// FirstString trims every value it resolves, so a raw " " stored here would count as SET
+// at this layer and as UNSET at that one — the launch flag would be discarded and the
+// environment (or a bare state root) would answer instead. For an id that scopes the
+// state directory, that silently opens the wrong project's database.
 func applyIfSet(dst *string, v string) {
-	if v != "" {
-		*dst = v
+	if t := strings.TrimSpace(v); t != "" {
+		*dst = t
 	}
 }

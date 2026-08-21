@@ -1264,13 +1264,34 @@ func TestSessionOpenSchemaDocumentsProjectIdentity(t *testing.T) {
 		if tool.Name != "daintree.session.open" {
 			continue
 		}
+		// The PROPERTIES map, not a substring of the marshalled blob: another field's
+		// description could mention "projectId" in prose and satisfy a text search while
+		// the property itself was missing.
 		raw, err := json.Marshal(tool.InputSchema)
 		if err != nil {
 			t.Fatalf("marshal schema: %v", err)
 		}
+		// Decoded loosely on purpose: an optional field like debugLog carries a UNION
+		// type (["null","boolean"]), so a struct pinning `type` to a string fails to
+		// decode the whole schema over a field this test does not even look at.
+		var schema struct {
+			Properties map[string]map[string]any `json:"properties"`
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatalf("decode schema: %v (raw %s)", err, raw)
+		}
 		for _, want := range []string{"projectId", "windowId"} {
-			if !strings.Contains(string(raw), want) {
-				t.Errorf("session.open schema is missing %q:\n%s", want, raw)
+			prop, ok := schema.Properties[want]
+			if !ok {
+				t.Errorf("session.open schema has no %q property:\n%s", want, raw)
+				continue
+			}
+			if typ, _ := prop["type"].(string); typ != "string" {
+				t.Errorf("%s type = %v, want string", want, prop["type"])
+			}
+			// A property a model cannot understand is barely better than a missing one.
+			if desc, _ := prop["description"].(string); strings.TrimSpace(desc) == "" {
+				t.Errorf("%s has no description — a caller would have to guess what it does", want)
 			}
 		}
 		return
