@@ -31,8 +31,8 @@ stateful mode takes the lease before doing anything, so all of them fail there.
 Two steps, and nothing else — no `npm`, no `node`, no native toolchain. The result is one
 self-contained ~24 MB binary; nothing is fetched at run time.
 
-**1. Install Go.** You need **1.21 or newer** — *not* 1.25.8. Go 1.21+ reads this module's
-`go 1.25.8` directive and downloads the matching toolchain itself. Go is a build-time
+**1. Install Go.** You need **1.21 or newer** — *not* 1.25.13. Go 1.21+ reads this module's
+`go 1.25.13` directive and downloads the matching toolchain itself. Go is a build-time
 requirement only; the binary it produces does not depend on it.
 
 ```bash

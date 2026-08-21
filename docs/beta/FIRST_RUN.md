@@ -20,7 +20,7 @@ The builds are **not code-signed**, so macOS will warn about an unidentified dev
 Clear it with `xattr -d com.apple.quarantine /opt/homebrew/bin/daintree-assistant` if you
 trust the build — or use the source path below, which Gatekeeper does not question.
 
-**From source** (needs Go 1.25.8+, `git`, and `make`):
+**From source** (needs Go 1.25.13+, `git`, and `make`):
 
 ```bash
 git clone https://github.com/daintreehq/assistant

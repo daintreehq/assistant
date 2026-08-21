@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: "1.25.8"
+  GO_VERSION: "1.25.13"
 
 jobs:
   # The main gate, on every platform we claim to support.

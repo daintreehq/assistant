@@ -100,7 +100,7 @@ CLI must never probe a provider itself.
 
 ## Commands
 
-Go ≥ 1.25.8. No npm / bun / node — this is a single static binary.
+Go ≥ 1.25.13. No npm / bun / node — this is a single static binary.
 
 ```bash
 # Compile & install
@@ -164,7 +164,7 @@ in `docs/BUBBLE_TEA.md`.
 
 ## Layout & architecture
 
-Module `github.com/daintreehq/assistant`, `go 1.25.8`. **Import with full
+Module `github.com/daintreehq/assistant`, `go 1.25.13`. **Import with full
 module paths.** SQLite is `modernc.org/sqlite` (pure Go, **no CGO** — `CGO_ENABLED=0`
 builds work). MCP is `github.com/modelcontextprotocol/go-sdk`. The cockpit is **Bubble
 Tea v2** (`charm.land/bubbletea/v2`, with `bubbles/v2`, `lipgloss/v2`, `glamour/v2`).

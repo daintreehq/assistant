@@ -28,7 +28,7 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.25.8"
+  GO_VERSION: "1.25.13"
   # ONE definition of the version being built, used by every job.
   #
   # `${GITHUB_REF_NAME:-${{ inputs.tag }}}` looked equivalent and was not: on a
