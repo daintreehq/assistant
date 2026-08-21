@@ -4,14 +4,15 @@ How to drive the assistant from a script, a test harness, or another agent — w
 a terminal, without the cockpit, and without rewriting the process environment to say
 what argv says perfectly well.
 
-There are four headless surfaces. Pick by how many turns you need, and by whether the
+There are five headless surfaces. Pick by how many turns you need, and by whether the
 caller is a script or another agent.
 
 | Surface | Turns | Output | Use it when |
 |---|---|---|---|
 | `mcp --stdio` | many | MCP tools | **another agent drives the assistant as a sub-agent** |
 | `--json <prompt>` | one | JSONL on stdout | scripting, CI gates, one-shot queries |
-| `--classic` + piped stdin | many | human-rendered | a multi-turn exchange in one process |
+| `--json --multi-turn` | many | JSONL on stdout | **testing a runbook that needs a short conversation** |
+| `--classic` + piped stdin | many | human-rendered | a multi-turn exchange you intend to read yourself |
 | `host --stdio` | many | NDJSON, protocol v2 | you are Daintree, or reimplementing it |
 
 If the caller is itself an agent — Claude Code, most immediately — reach for
@@ -149,7 +150,8 @@ capture stdout and parse it without filtering.
 Exit codes (`domain.OneShotExitCode`): `0` success, `1` error, `2` cancelled. `3` is
 reserved and never emitted.
 
-`--json` requires a prompt — there is no JSONL interactive mode. A prompt that begins
+`--json` requires a prompt, or `--multi-turn` to read a whole conversation from stdin
+(see [Multi-turn](#multi-turn)) — there is no JSONL *interactive* mode. A prompt that begins
 with a dash needs `--` first (`daintree-assistant --json -- "--summarize this"`), or the
 parser reads it as an option. The two exceptions are `doctor --json` and
 `--list-skills --json`: both are reads that answer with ONE document rather than a run,
@@ -164,6 +166,7 @@ Every knob is a flag, and every flag shadows a trusted env var and wins over it.
 | `--backend-url URL` | `DAINTREE_BACKEND_URL` | outranks the endpoint stored by `/backend` |
 | `--api-key-file PATH` | `DAINTREE_API_KEY` | OPTIONAL — see below. Deliberately **no `--api-key`** |
 | `--prompt-file PATH` | — | one-shot only; `-` reads stdin. Capped at 1 MiB |
+| `--multi-turn` | — | one prompt per stdin line, one session, one transcript. Requires `--json`; each line capped at 1 MiB |
 | `--state-dir PATH` | `DAINTREE_ASSISTANT_STATE_DIR` | the database, artifacts, and the owner lease |
 | `--log-dir PATH` | `DAINTREE_ASSISTANT_LOG_DIR` | |
 | `--debug-log` | `DAINTREE_ASSISTANT_DEBUG_LOG=1` | writes the session trace |
@@ -340,7 +343,10 @@ from 0. Types:
 | `tool:call` | `id`, `name`, `args` | a call is starting |
 | `tool:result` | `id`, `name`, `ok`, `summary`, `error`, `auditId?`, `async?` | settled |
 | `info` / `warning` | `message` | non-fatal; **neither changes the exit code** |
-| `error` | `message` | fatal for this turn |
+| `error` | `message` | fatal for the turn it falls in — or for the run, when it lands outside any turn (setup failure, empty `--multi-turn` script) |
+| `turn:prompt` | `turn`, `prompt` | **`--multi-turn` only** — opens a turn |
+| `turn:end` | `turn`, `status` | **`--multi-turn` only** — closes it with that turn's outcome |
+| `command:result` | `command`, `handled`, `title`, `content`, `quit`, `conversationCleared` | **`--multi-turn` only** — a slash command ran between turns |
 | `result` | see below | terminal envelope; always last |
 
 **Do not treat a `warning` as failure, and do not decide the outcome from an `error`
@@ -486,21 +492,107 @@ longer-lived session.
 
 ## Multi-turn
 
-`--json` is one turn per process, and each process mints a fresh session. Project
-state — watchers, the attention inbox, async futures — persists in the state dir and is
-adopted by the next owner, but the *conversation* does not carry over.
+A bare `--json "prompt"` is one turn per process, and each process mints a fresh
+session. Project state — watchers, the attention inbox, async futures — persists in the
+state dir and is adopted by the next owner, but the *conversation* does not carry over.
 
-For a real multi-turn exchange, pipe stdin to the classic REPL, which reads one prompt
-per line in a single process:
+`--multi-turn` is the plural of that: one process, one session, **one prompt per stdin
+line**, and the whole conversation as a single JSONL transcript. It is what a runbook
+test usually needs, since most orchestration runbooks only reach their interesting
+behaviour on the second or third turn — after something has been spawned, or a result
+has come back.
 
 ```bash
 printf '%s\n' "list the worktrees" "now check the first one" \
-  | daintree-assistant --classic --state-dir /tmp/harness/state
+  | daintree-assistant --json --multi-turn --state-dir /tmp/harness/state
 ```
 
-Slash commands work on that stdin too — `/clear`, `/compact` and the rest of the
-catalog are handled before the line reaches the model — so a harness can reset state
-between prompts. Output is human-rendered, not JSONL: you cannot have both today.
+A prompt file checked in beside the runbook it exercises works the same way, since the
+prompts arrive on stdin either way:
+
+```bash
+daintree-assistant --json --multi-turn < testdata/worktree-review.prompts
+```
+
+It requires `--json` (without it, piping stdin to `--classic` already gives you
+human-rendered multi-turn) and, like `--prompt-file`, refuses to share a run with another
+prompt source: naming two is a mistake, not a precedence rule.
+
+**One line is one prompt.** Blank lines are skipped, and a final line without a trailing
+newline still counts. A single line is capped at 1 MiB, the same bound `--prompt-file`
+applies to its read and for the same reason — a line has no natural end, so input with
+no newline in it would otherwise grow until the process died. An over-long line is
+**refused**, never truncated: the run fails rather than silently asking a different
+question. A prompt that must span several lines is `--prompt-file`'s job — that flag's
+`-` spelling deliberately still means *all of stdin is one prompt*, newlines included,
+and `--multi-turn` does not re-cut it.
+
+**Slash commands stay available**, exactly as on `--classic` stdin — `/clear` most of
+all, so a script can reset between prompts. In this mode they reach the stream as a
+`command:result` line rather than as rendered text, since stdout carries only JSONL. A
+command line the catalog does not recognise still produces a `command:result`, with
+`handled: false` — which is how a script catches its own typos, since a mistyped
+command otherwise looks exactly like one that ran and said nothing. `/quit` stops
+consuming input.
+
+`/clear` resets **session state**, not just the conversation: it also drops watchers,
+async operations, the attention inbox and the cost ledger, which is worth knowing when
+it shares a run with `--run-scheduler`. What it never touches is the transcript —
+already-emitted lines stand, `seq` keeps climbing, `stats` keep accumulating, and an
+earlier failed turn stays failed. A script cannot launder its own failure by clearing.
+
+### What the transcript looks like
+
+The stream is one ordered transcript of the whole process, not several concatenated
+runs:
+
+- **one `session` header**, first, because it is one session;
+- **`seq` monotonic from 0 across every line**, so the transcript has a single total
+  order;
+- **one terminal `result`**, last, whose `stats` accumulate over every round of every
+  turn and whose `content` is the final turn's answer;
+- **a `turn:prompt` / `turn:end` bracket per turn.**
+
+The bracket is the unit to slice on. A turn spans one whole exchange — however many
+model rounds and tool calls it took — so `assistant:start` marks a *round*, never a
+turn, and everything between a matching `turn:prompt` and `turn:end` belongs to one
+prompt. Turn numbers are zero-based, and a slash command does not consume one.
+
+```json
+{"type":"turn:prompt","ts":…,"seq":1,"turn":0,"prompt":"list the worktrees"}
+{"type":"turn:end","ts":…,"seq":6,"turn":0,"status":"success"}
+```
+
+`turn:end` carries no exit code and no per-turn `stats`: an exit code is a property of
+the *process*, and with the bracket in hand a consumer counts the lines between the
+boundaries itself rather than trusting a second accounting block that could disagree
+with the one on `result`.
+
+`turn:prompt` **echoes the prompt**, because nothing else in the stream does and a
+transcript that cannot say which question produced which answer is not one. It is your
+own stdin, so it adds no secret you did not already supply — but it does put that text
+on stdout, which is worth knowing before piping a prompt file into a CI log.
+
+### Failure, cancellation and the exit code
+
+**A run where turn two failed is a failed run.** A failed turn does not stop the script —
+the next prompt still runs, as it would in the classic REPL — but the failure is latched:
+a later success cannot clear it. The outcome is worst-wins across turns, `error` >
+`cancelled` > `success`, and `result` reports the run's, while each `turn:end` reports
+its own turn's. Gate on `result`; it remains the only authority for the process.
+
+**`--timeout` bounds the whole process**, exactly as it does for a single-turn run —
+setup, every turn, the wait for the next line of stdin, and `--run-scheduler`'s async
+barrier. It is a wall-clock bound on the invocation, not a per-turn allowance; a
+per-turn reading would let a ten-prompt script run for ten times the number you asked
+for, which is the opposite of a bound. When it expires the current turn unwinds as
+cancelled and the remaining prompts are not run. An otherwise-successful run then
+reports `cancelled`; an earlier failed turn still outranks it, since worst-wins applies
+to the expiry like any other outcome.
+
+An empty script — stdin with no prompt on it at all, only blank lines or commands — is a
+run **failure** (exit 1, reported on the stream), not a quiet success. It is nearly
+always a harness mistake, and a transcript of nothing should not look like a clean run.
 
 ## Diagnosing a run
 

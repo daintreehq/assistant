@@ -177,6 +177,56 @@ type JsonSessionPayload struct {
 	MCPTransport string `json:"mcpTransport"`
 }
 
+// JsonTurnPromptPayload opens a multi-turn bracket: the prompt this turn was given and
+// the turn's index. Turn is ZERO-based, like seq on every line of this stream.
+//
+// The prompt is ECHOED. Nothing else in the stream carries it (TurnPrompt is a no-op on
+// this sink), and a transcript that cannot say which question produced which answer is
+// not a transcript. It is the caller's own stdin, so this adds no source of secrets the
+// caller did not already supply — but it does put that text on stdout, which is worth
+// knowing before piping a prompt file into a CI log.
+type JsonTurnPromptPayload struct {
+	Turn   int    `json:"turn"`
+	Prompt string `json:"prompt"`
+}
+
+// JsonTurnEndPayload closes a multi-turn bracket with THIS turn's outcome.
+//
+// Deliberately no exitCode: an exit code is a property of the process, and putting one
+// on a turn invites the reading that some turn's code is the run's. The run's outcome is
+// on the terminal `result` line and nowhere else. Status is the per-turn authority the
+// same way `result` is the per-run one.
+type JsonTurnEndPayload struct {
+	Turn   int              `json:"turn"`
+	Status JsonOutputStatus `json:"status"`
+}
+
+// JsonCommandResultPayload records one slash command run between turns.
+//
+// Title and Content come from the shared UI command handler, so a JSONL consumer sees
+// exactly what the cockpit would have shown — as DATA, never rendered, because stdout in
+// --json mode carries only these lines.
+type JsonCommandResultPayload struct {
+	// Command is the line as read, leading slash included, with surrounding whitespace
+	// trimmed (the same trim that decides it was a command in the first place).
+	Command string `json:"command"`
+	// Handled is false for a command the catalog does not know. It answers a DIFFERENT
+	// question from the UI handler's own Handled bit, which is true even for an unknown
+	// command because the handler still consumed the line and produced an "Unknown
+	// command" card; this one is resolved against the command registry instead. The
+	// distinction only matters here, where the reader is a script: a typo'd /claer is
+	// otherwise indistinguishable on the wire from a command that ran and said nothing.
+	Handled bool   `json:"handled"`
+	Title   string `json:"title"`
+	Content string `json:"content"`
+	// Quit reports that the command ended input consumption (`/quit`).
+	Quit bool `json:"quit"`
+	// ConversationCleared marks the conversation-state boundary `/clear` creates. It
+	// clears the CONVERSATION, never the transcript: already-emitted lines stand, seq
+	// keeps climbing, stats keep accumulating, and an earlier failed turn stays failed.
+	ConversationCleared bool `json:"conversationCleared"`
+}
+
 // JsonSessionEnvelope is the full `session` line: the standard framing plus the payload.
 type JsonSessionEnvelope struct {
 	Type string `json:"type"` // literal "session"

@@ -158,6 +158,32 @@ func canonical(cmd string) string {
 	}
 }
 
+// IsKnownCommand reports whether a slash line names a command the catalog actually has,
+// aliases included. It answers a DIFFERENT question from UICommandResult.Handled, and
+// the difference is deliberate: an unknown command is still "handled" — the handler
+// consumed the line and produced an "Unknown command" card for the cockpit to render —
+// so that field cannot tell a caller whether the command EXISTS.
+//
+// Only the JSONL stream needs the distinction, because only there is the reader a script
+// rather than a person: a typo'd /claer in a test script must be machine-detectable, and
+// on the wire it looks exactly like a command that ran and said nothing.
+func IsKnownCommand(line string) bool {
+	// Trimmed FIRST: parseCommand strips the leading "/" before it trims, so a padded
+	// "  /help  " would otherwise reach it with the slash still buried behind spaces and
+	// parse as the command "/help", which no registry row is named.
+	cmd, _, _ := parseCommand(strings.TrimSpace(line))
+	if cmd == "" {
+		return false
+	}
+	name := canonical(cmd)
+	for _, c := range COMMAND_REGISTRY {
+		if c.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // padRight pads s with spaces to at least width runes.
 func padRight(s string, width int) string {
 	n := len([]rune(s))

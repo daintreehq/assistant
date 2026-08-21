@@ -248,6 +248,23 @@ const (
 	// consumer can reach the trace for a run that then fails.
 	JsonlSession JsonlEventType = "session"
 	JsonlResult  JsonlEventType = "result"
+	// The three multi-turn-only lines. They appear ONLY in a --multi-turn run, so an
+	// ordinary one-shot stream is byte-for-byte what it always was; a consumer of that
+	// stream never has to learn them. Additive, so JSONOutputSchemaVersion stays 1 —
+	// but they DO shift every later seq in a run that emits them.
+	//
+	// turn:prompt / turn:end BRACKET one whole Session.Send. The bracket is the unit a
+	// consumer wants and the one it cannot otherwise recover: a turn spans however many
+	// model rounds the send took, so assistant:start is a round marker and never a turn
+	// marker. Per-turn stats and per-turn content are deliberately absent — with the
+	// bracket in hand a consumer counts the lines between them itself, and a second
+	// accounting path that could disagree with `stats` is worse than no second path.
+	JsonlTurnPrompt JsonlEventType = "turn:prompt"
+	JsonlTurnEnd    JsonlEventType = "turn:end"
+	// JsonlCommandResult records a slash command run BETWEEN turns. A command is not a
+	// turn: it opens no bracket, moves no turn number, and cannot change the run's
+	// status — the classic REPL treats a command line the same way.
+	JsonlCommandResult JsonlEventType = "command:result"
 )
 
 // RecommendedActionVerb is the WatcherVerdict.recommendedAction inline enum.

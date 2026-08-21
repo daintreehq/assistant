@@ -35,17 +35,39 @@ type Sink struct {
 	out io.Writer
 	now Clock
 
-	mu             sync.Mutex
-	seq            int
-	startedAt      int64
-	contentBuffer  string
-	content        string
+	mu            sync.Mutex
+	seq           int
+	startedAt     int64
+	contentBuffer string
+	content       string
+	// status/exitCode/errorMessage are TURN-scoped once multiTurn is on and run-scoped
+	// otherwise. They are the same fields either way, because a single-prompt run is
+	// exactly a one-turn run: the aggregate below folds the one turn and reproduces
+	// today's terminal line byte for byte.
 	status         domain.JsonOutputStatus
 	exitCode       int
 	errorMessage   *string
 	finished       bool
 	sessionEmitted bool
 	stats          Stats
+
+	// multiTurn arms the turn bracket. Off, BeginTurn/SettleTurn/CommandResult are
+	// never called and the sink is precisely the one-shot sink it has always been.
+	multiTurn bool
+	// turn is the NEXT turn's zero-based index; turnOpen says a bracket is unclosed.
+	turn     int
+	turnOpen bool
+
+	// The run-level aggregate, folded from each turn as it ends. Separate from the
+	// turn-level fields above because AssistantEnd RESETS those to success and clears
+	// errorMessage — correct within a turn (a round can fail and the retry succeed),
+	// catastrophic across turns, where it would let turn 3 report success for a run
+	// whose turn 2 failed. The issue is explicit: a run where turn two failed is a
+	// failed run.
+	runStatus       domain.JsonOutputStatus
+	runExitCode     int
+	runErrorMessage *string
+	runOutcomeSet   bool
 }
 
 // New builds a Sink writing to w. The default terminal state is "error"/exit 1: a
@@ -61,6 +83,136 @@ func New(w io.Writer, now Clock) *Sink {
 		status:    domain.JSONStatusError,
 		exitCode:  domain.OneShotExitCode.Error,
 	}
+}
+
+// NewMultiTurn builds a Sink for a --multi-turn run: same wire schema, same single
+// `session` header, same single terminal `result`, plus the turn bracket and the
+// run-level outcome latch. The mode is a CONSTRUCTOR choice rather than a setter so a
+// sink cannot change shape halfway through a stream.
+func NewMultiTurn(w io.Writer, now Clock) *Sink {
+	s := New(w, now)
+	s.multiTurn = true
+	return s
+}
+
+// outcome is a terminal verdict: the triple that ends up on the `result` line.
+type outcome struct {
+	status   domain.JsonOutputStatus
+	exitCode int
+	message  *string
+}
+
+// worse merges a turn's outcome into the run's, worst-wins: error > cancelled > success.
+// It is the whole of "a run where turn two failed is a failed run" — and its mirror, "a
+// later success does not forgive an earlier failure".
+//
+// Pure, so Finish and ExitCode answer the same question without either mutating state
+// the other depends on, and so the precedence rule is stated exactly once.
+//
+// The error MESSAGE is last-writer-wins among failures, matching how the single-turn
+// sink already behaves when two Error events land in one run: the most recent failure is
+// the one a reader is looking at.
+func worse(run, turn outcome) outcome {
+	// Nothing outranks an error, and its message says more than "cancelled" does — but a
+	// LATER error still replaces the message.
+	if run.status == domain.JSONStatusError {
+		if turn.status == domain.JSONStatusError {
+			return turn
+		}
+		return run
+	}
+	switch turn.status {
+	case domain.JSONStatusError, domain.JSONStatusCancelled:
+		return turn
+	}
+	return run
+}
+
+// turnOutcome is the live turn's verdict; runOutcome is the aggregate folded so far.
+// Caller holds mu.
+func (s *Sink) turnOutcome() outcome {
+	return outcome{status: s.status, exitCode: s.exitCode, message: s.errorMessage}
+}
+
+// runOutcome is the run's verdict INCLUDING the live turn — the answer both Finish and
+// ExitCode want. Before any turn has been folded it is simply the live turn, which is
+// what makes a single-prompt run's terminal line identical to what it always was.
+// Caller holds mu.
+func (s *Sink) runOutcome() outcome {
+	if !s.runOutcomeSet {
+		return s.turnOutcome()
+	}
+	return worse(outcome{status: s.runStatus, exitCode: s.runExitCode, message: s.runErrorMessage}, s.turnOutcome())
+}
+
+// foldOutcome merges one turn's outcome into the run-level aggregate. Caller holds mu.
+func (s *Sink) foldOutcome(o outcome) {
+	if !s.runOutcomeSet {
+		s.runOutcomeSet = true
+		s.runStatus, s.runExitCode, s.runErrorMessage = o.status, o.exitCode, o.message
+		return
+	}
+	merged := worse(outcome{status: s.runStatus, exitCode: s.runExitCode, message: s.runErrorMessage}, o)
+	s.runStatus, s.runExitCode, s.runErrorMessage = merged.status, merged.exitCode, merged.message
+}
+
+// BeginTurn opens a turn bracket: it emits `turn:prompt` and resets the TURN-level
+// outcome to the same default New uses, so a turn that produces no terminal assistant
+// event is a failed turn exactly as a whole one-shot run would be.
+//
+// Called by the multi-turn loop rather than driven off the EventSink's TurnPrompt hook,
+// which the Session also fires once per send. One owner for the bracket — the loop that
+// opens and closes it — means the stream cannot grow a half-bracket if the session's
+// internal event ordering ever changes, and it keeps this sink a passive recorder of
+// everything it does not itself own.
+//
+// A no-op outside multi-turn mode.
+func (s *Sink) BeginTurn(prompt string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.multiTurn {
+		return
+	}
+	s.flushContent()
+	s.status = domain.JSONStatusError
+	s.exitCode = domain.OneShotExitCode.Error
+	s.errorMessage = nil
+	s.content = ""
+	s.turnOpen = true
+	s.emitStruct(string(domain.JsonlTurnPrompt), domain.JsonTurnPromptPayload{Turn: s.turn, Prompt: prompt})
+}
+
+// SettleTurn closes the open bracket: it emits `turn:end` with the turn's own status and
+// folds that outcome into the run aggregate. Idempotent — with no bracket open it does
+// nothing, so the loop can defer it unconditionally.
+func (s *Sink) SettleTurn() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.settleTurnLocked()
+}
+
+// settleTurnLocked is SettleTurn's body; Finish calls it to close a dangling bracket.
+func (s *Sink) settleTurnLocked() {
+	if !s.multiTurn || !s.turnOpen {
+		return
+	}
+	s.flushContent()
+	s.turnOpen = false
+	s.emitStruct(string(domain.JsonlTurnEnd), domain.JsonTurnEndPayload{Turn: s.turn, Status: s.status})
+	s.foldOutcome(s.turnOutcome())
+	s.turn++
+}
+
+// CommandResult emits one `command:result` line for a slash command run between turns.
+// A command opens no bracket, moves no turn number, and never touches the run outcome.
+func (s *Sink) CommandResult(payload domain.JsonCommandResultPayload) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.multiTurn {
+		return
+	}
+	s.flushContent()
+	s.emitStruct(string(domain.JsonlCommandResult), payload)
 }
 
 // Session emits the one-time `session` line. Call it once, as early as the facts are
@@ -181,14 +333,25 @@ func (s *Sink) AssistantCancelled(content string) {
 //
 // It never downgrades a run that already failed: an error status carries a message
 // and a non-zero code that say more than "cancelled" does.
+//
+// The message is what makes that true, and so the message is what the guard tests. A
+// sink's DEFAULT status is also "error" — the pessimistic sentinel meaning "no terminal
+// event has happened yet" — and that one carries nothing at all. Guarding on the status
+// alone conflated the two and made this method a silent no-op in exactly the case it
+// exists for: a bound expiring before anything ran, which then reported a bare
+// error/exit-1 with a null message instead of the cancellation it was.
 func (s *Sink) CancelRun() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.status == domain.JSONStatusError {
+	if s.status == domain.JSONStatusError && s.errorMessage != nil {
 		return
 	}
+	// Fold at the RUN level too, not just the turn level. In multi-turn mode this can
+	// fire between turns, where the live turn-level fields are about to be reset by the
+	// next BeginTurn and would carry the cancellation nowhere.
 	s.status = domain.JSONStatusCancelled
 	s.exitCode = domain.OneShotExitCode.Cancelled
+	s.foldOutcome(outcome{status: domain.JSONStatusCancelled, exitCode: domain.OneShotExitCode.Cancelled})
 }
 
 // Interjection emits a mid-turn user message as its own JSONL line (flushing buffered
@@ -327,7 +490,19 @@ func (s *Sink) Finish() int {
 	if s.finished {
 		return s.exitCode
 	}
+	// Close a bracket the loop left open (a turn cut short by the deadline), so a
+	// consumer never sees a turn:prompt without its turn:end.
+	s.settleTurnLocked()
 	s.flushContent()
+	// Report the RUN's verdict, which folds the live turn-level state in one last time.
+	//
+	// Single-prompt runs go through this same path and are unchanged by it: with nothing
+	// folded yet the run's verdict IS the turn's. It is also what keeps a post-turn
+	// CancelRun — the --run-scheduler async barrier expiring after the answer already
+	// landed — reaching the terminal line in multi-turn mode, where the last turn has
+	// already been folded once. Re-folding the same outcome is idempotent.
+	final := s.runOutcome()
+	s.status, s.exitCode, s.errorMessage = final.status, final.exitCode, final.message
 	var errObj any
 	if s.errorMessage != nil {
 		errObj = map[string]any{"message": *s.errorMessage}
@@ -352,11 +527,12 @@ func (s *Sink) Finish() int {
 	return s.exitCode
 }
 
-// ExitCode returns the current terminal exit code without finishing.
+// ExitCode returns the current terminal exit code without finishing — the RUN's, which
+// in multi-turn mode already carries an earlier turn's failure.
 func (s *Sink) ExitCode() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.exitCode
+	return s.runOutcome().exitCode
 }
 
 // rawArgsAsAny decodes the raw JSON args string to a generic value, falling back

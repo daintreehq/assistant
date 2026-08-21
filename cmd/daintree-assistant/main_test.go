@@ -168,6 +168,62 @@ func TestParseArgsCarriesHarnessFlags(t *testing.T) {
 	if o.ProjectInstructionsFile != "/tmp/brief.md" {
 		t.Errorf("projectInstructionsFile = %q", o.ProjectInstructionsFile)
 	}
+	// Absent unless asked for: a plain one-shot must never be routed into the stdin loop.
+	if o.MultiTurn {
+		t.Error("MultiTurn = true without --multi-turn")
+	}
+}
+
+// TestParseArgsCarriesMultiTurn: the flag reaches one-shot as a bare intent — there is
+// no path and no prompt to capture, because the prompts arrive on stdin later, inside
+// the --timeout bound like every other read.
+func TestParseArgsCarriesMultiTurn(t *testing.T) {
+	got, err := parseArgs([]string{"--json", "--multi-turn", "--timeout", "5m"})
+	if err != nil {
+		t.Fatalf("parseArgs() error = %v", err)
+	}
+	o := got.Options
+	if got.Route != routeDefault {
+		t.Fatalf("route = %v, want routeDefault", got.Route)
+	}
+	if !o.MultiTurn || !o.JSON {
+		t.Fatalf("MultiTurn/JSON = %v/%v, want true/true", o.MultiTurn, o.JSON)
+	}
+	// It satisfies --json's "a run must have a prompt" rule WITHOUT setting HasPrompt:
+	// there is no single prompt, which is the whole point of the flag.
+	if o.HasPrompt || o.Prompt != "" {
+		t.Errorf("HasPrompt/Prompt = %v/%q, want false/\"\"", o.HasPrompt, o.Prompt)
+	}
+}
+
+// TestParseArgsRejectsMultiTurnMisuse: --multi-turn is a third prompt source, so it
+// obeys the same "name one source" rule as the other two — and it insists on --json,
+// without which it would just be a worse spelling of the classic REPL on piped stdin.
+func TestParseArgsRejectsMultiTurnMisuse(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"without --json", []string{"--multi-turn"}, "--multi-turn requires --json"},
+		{"with a prompt argument", []string{"--json", "--multi-turn", "hello"}, "cannot be combined"},
+		{"with --prompt-file", []string{"--json", "--multi-turn", "--prompt-file", "/tmp/p.txt"}, "cannot be combined"},
+		// Command routes return EARLY, so validation placed after them was skipped
+		// entirely: the flag silently did nothing on a route that never runs a turn —
+		// the same "looks like it worked" failure --skill's route check exists to stop.
+		{"with a command word", []string{"--json", "--multi-turn", "doctor"}, "cannot be combined"},
+		{"with a command and no --json", []string{"--multi-turn", "status"}, "--multi-turn requires --json"},
+		{"with a command and --prompt-file", []string{"--json", "--multi-turn", "--prompt-file", "/tmp/p.txt", "doctor"}, "cannot be combined"},
+		// --list-skills picks its route with a FLAG, not a positional, so the
+		// prompt-source check cannot see it and it needs its own rejection.
+		{"with --list-skills", []string{"--json", "--multi-turn", "--list-skills"}, "do not go together"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := parseArgs(tt.args); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("parseArgs(%v) error = %v, want substring %q", tt.args, err, tt.want)
+			}
+		})
+	}
 }
 
 // TestParseArgsCarriesPromptFile: the flag reaches one-shot as a PATH plus HasPrompt,
@@ -274,7 +330,7 @@ func TestUsageDocumentsHarnessFlags(t *testing.T) {
 	for _, want := range []string{
 		"--backend-url URL", "--api-key-file PATH", "--state-dir PATH",
 		"--log-dir PATH", "--auto-approve", "--debug-log", "--timeout DURATION",
-		"--prompt-file PATH", "--project-id ID", "--window-id ID",
+		"--prompt-file PATH", "--multi-turn", "--project-id ID", "--window-id ID",
 		"--project-instructions-file PATH",
 	} {
 		if !strings.Contains(help, want) {
