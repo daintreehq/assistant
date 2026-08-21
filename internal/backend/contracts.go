@@ -110,22 +110,43 @@ var EndpointChoices = []EndpointChoice{
 // Request: POST /v1/daintree/respond
 // --------------------------------------------------------------------------
 
+// Request profiles (RespondRequest.Profile). The empty string is the wire default
+// and means ProfileAssistant — the CLI omits the field on every ordinary turn so an
+// orchestrator request is byte-identical to one sent before this field existed.
+const (
+	// ProfileAssistant is the orchestrator persona: the full base prompt, skill
+	// selection, and the whole runtime/turn context surface.
+	ProfileAssistant = "assistant"
+	// ProfileSubagent is the read-only worker persona: a short standalone prompt, NO
+	// skill selection, and only the startup block for context. See internal/subagent.
+	ProfileSubagent = "subagent"
+)
+
 // RespondRequest is the single request body for the generation endpoint. The
 // backend validates it with extra="forbid" at the top level, so every field here
 // must be one the backend knows; optional sub-objects are pointers with omitempty so an
 // absent one is never sent as null. Startup is the required value exception and therefore
 // always serializes, including as {} when discovery is unavailable.
 type RespondRequest struct {
-	ProtocolVersion int             `json:"protocol_version"`
-	Session         RespondSession  `json:"session"`
-	State           *string         `json:"state,omitempty"`
-	Startup         StartupContext  `json:"startup"`
-	Input           RespondInput    `json:"input"`
-	Runtime         *RuntimeContext `json:"runtime,omitempty"`
-	Turn            *TurnContext    `json:"turn,omitempty"`
-	Selection       *Selection      `json:"selection,omitempty"`
-	Generation      *Generation     `json:"generation,omitempty"`
-	Client          *ClientInfo     `json:"client,omitempty"`
+	ProtocolVersion int            `json:"protocol_version"`
+	Session         RespondSession `json:"session"`
+	State           *string        `json:"state,omitempty"`
+	// Profile names the persona that answers this request: "" (⇒ the backend's
+	// "assistant" default) for the orchestrator the human talks to, ProfileSubagent
+	// for a bounded read-only worker running in its own isolated conversation
+	// (internal/subagent). The backend swaps the whole system prompt on it and skips
+	// skill selection entirely for a sub-agent, so it is NOT a hint — it selects
+	// which of two different assembly paths runs. omitempty is load-bearing: every
+	// ordinary turn must stay byte-identical on the wire, or the prompt cache the
+	// stable prefix exists to protect splits in two.
+	Profile    string          `json:"profile,omitempty"`
+	Startup    StartupContext  `json:"startup"`
+	Input      RespondInput    `json:"input"`
+	Runtime    *RuntimeContext `json:"runtime,omitempty"`
+	Turn       *TurnContext    `json:"turn,omitempty"`
+	Selection  *Selection      `json:"selection,omitempty"`
+	Generation *Generation     `json:"generation,omitempty"`
+	Client     *ClientInfo     `json:"client,omitempty"`
 	// Routing is the caller's endpoint-selection preference. Omitted by almost every
 	// request, which is what keeps the server default in force. See routing.go.
 	Routing *Routing `json:"routing,omitempty"`

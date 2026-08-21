@@ -181,7 +181,13 @@ internal/
   tools/         Registry (registry.go) + Dispatch (dispatch.go) + AssertSafe; tool families in
                  fsx/ mcpx/ mcpwrap/ contextx/ extractionx/ timer/ watcher/ queue/ grant/
                  workflow/ skill/ auditx/ memory/ artifactx/ agenttaskx/ asyncx/
+                 questionx/ scratchx/ subagentx/ (subagent.run — the delegation tool)
   agent/         Session (session.go) main turn loop + EventSink (events.go) + wake.go (autonomous wake)
+  subagent/      the bounded READ-ONLY delegation loop: one brief → its own isolated
+                 conversation (own backend session id, profile "subagent", its own narrow
+                 tool inventory, hard round/time/size budgets) → ONE compact report back.
+                 Everything it read goes to a transcript artifact and is dropped, so the
+                 main thread learns the answer without paying the search. See docs/SUBAGENTS.md
   daemon/        scheduler.go (3s tick) + watcher.go (terminal watcher state machine)
   asyncwork/     AsyncCoordinator — runtime owner of async tool futures (terminal.run.async /
                  terminal.await.async): 1s pure-FSM polls, sibling coalescing, completion →
@@ -246,6 +252,20 @@ sub-threads publish to the **attention queue** instead of interrupting the main 
   (`workflow.startWorkOnIssue` also spawns, via Daintree's recipe path: it creates the
   worktree AND launches an agent into it. Both are visible-terminal delegation; neither
   writes a file from this process.)
+- **Delegation is READ-ONLY, and structurally so.** `subagent.run` dispatches a
+  bounded sub-agent (`internal/subagent`) whose inventory is filtered to
+  `domain.RiskRead` tools (`app.subagentToolNames`, 36 of 78 today) minus a small
+  denylist, and whose dispatches run under `domain.ActorSubagent` with NO Confirm
+  and NO AskChoice hook — so a mutating call that somehow reached dispatch fails
+  closed instead of prompting a human who is not watching. That is the whole
+  argument for running sub-agents unattended, in parallel, and without an approval
+  of their own, and it is why `subagent.run` is itself a read-risk tool. Do NOT
+  widen the inventory past read-risk — edits still go through
+  `agentTask.spawnForEdits`. A sub-agent never recurses either (`subagent.run` is
+  denylisted from its own inventory); fan out peers from the main thread instead.
+  Every failure resolves to a `Report` with a `Status`, never an error that could
+  sink the calling turn, and a bound hit spends one final tools-withheld round so
+  the run still reports what it found, marked `partial`. See docs/SUBAGENTS.md.
 - **Tool results use the `ToolResult` envelope** via `domain.Ok(summary, result)` /
   `domain.Fail(code, message, opts…)`. Handlers never throw to the caller — `Dispatch`
   recovers panics and returns a `Fail`. Side-channels (audit, debug log) must never
@@ -485,7 +505,9 @@ subdir when a project id is set).
 
 `docs/BACKEND.md` (**the backend integration — read this for the model / skill / prompt
 story**), `docs/SUPERVISOR.md` (the persistent supervisor daemon: leases, adoption,
-autonomous wake turns, credential lifecycle), `docs/SKILLS.md` (how server-owned skills
+autonomous wake turns, credential lifecycle), `docs/SUBAGENTS.md` (**delegated research — the sub-agent loop, its bounds, the read-only
+guarantee, sub-agent skill selection, and the cockpit rows**),
+`docs/SKILLS.md` (how server-owned skills
 work + the local run-tracking tools), `docs/WORKFLOW_INTELLIGENCE.md` (the flag-gated
 workflow execution-graph layer: graph model, tools, observer, async linking, and the
 backend contract it expects),

@@ -402,6 +402,15 @@ const (
 	// tools need a scoped automation grant (actor id WakeActorID) or become a
 	// pending-approval inbox item for the next attach.
 	ActorWake ToolActor = "wake"
+	// ActorSubagent is a bounded read-only sub-agent run (internal/subagent). Like
+	// ActorWake it is non-interactive — nobody is watching a sub-agent's rounds, so
+	// there is no one to answer a confirmation — but unlike ActorWake it needs NO
+	// grant machinery at all, because its inventory contains only read-risk tools
+	// and dispatch never reaches the confirmation branch for those. If a mutating
+	// call ever DID reach dispatch under this actor, the grant-or-blocked branch is
+	// the correct outcome: it fails closed rather than prompting a human who is not
+	// there.
+	ActorSubagent ToolActor = "subagent"
 )
 
 // WakeActorID is the well-known grant actor id every daemon wake turn

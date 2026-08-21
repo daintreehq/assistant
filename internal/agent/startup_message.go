@@ -33,6 +33,14 @@ const (
 // selection as user-authored text. Agent order and identifiers are retained exactly;
 // all other externally supplied strings are normalized and capped before strict backend
 // validation.
+// BuildStartupContext is the exported form of buildStartupContext, for the sub-agent
+// runner (internal/subagent, wired in internal/app): a sub-agent sent to find a file
+// needs the same stable project snapshot the main thread sends, and deriving a second
+// one would let the two drift.
+func BuildStartupContext(pc prompts.MainPromptContext) backend.StartupContext {
+	return buildStartupContext(pc)
+}
+
 func buildStartupContext(pc prompts.MainPromptContext) backend.StartupContext {
 	project := pc.Project
 	if project == nil && (pc.ProjectID != "" || pc.ProjectPath != "") {

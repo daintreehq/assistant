@@ -103,8 +103,14 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 	// answered by the backend now, which searches the public docs MCP itself before the
 	// model opens. Offering a local docs tool alongside that would give the model two
 	// ways to answer the same question, and it would use both.
-	if got != 77 {
-		t.Errorf("registered tools = %d, want 77", got)
+	//
+	// 78 with subagent.run, the delegation primitive. It is the rare addition that
+	// makes the inventory problem BETTER rather than worse: it exists to keep an
+	// expensive search out of the main conversation entirely, and the sub-agent it
+	// dispatches is offered a read-only subset of this same registry rather than a
+	// second inventory of its own.
+	if got != 78 {
+		t.Errorf("registered tools = %d, want 78", got)
 	}
 	// The local skill-selection tools were removed in the backend migration; assert
 	// their absence so a re-introduction (or a stale wiring) is caught here.

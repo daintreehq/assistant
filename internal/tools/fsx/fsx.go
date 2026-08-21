@@ -282,7 +282,7 @@ var readSchema = json.RawMessage(`{
   "additionalProperties": false,
   "properties": {
     "path": { "type": "string", "description": "Path relative to project root." },
-    "maxBytes": { "type": "number", "description": "Max bytes to read." }
+    "maxBytes": { "type": "number", "description": "OMIT THIS. The default reads up to 200000 bytes — the whole of almost any source file. Use it only to sample the head of a known-huge file, never as caution: a truncated read cannot be continued, so seeing the rest means re-reading from the start." }
   },
   "required": ["path"]
 }`)
@@ -290,7 +290,7 @@ var readSchema = json.RawMessage(`{
 func newReadTool() tools.Tool {
 	return tools.Tool{
 		Name: "fs.read",
-		Description: "Read a UTF-8 text file from the project (read-only). " +
+		Description: "Read a UTF-8 text file from the project (read-only). Reads up to 200000 bytes by default — omit maxBytes and read the whole file. " +
 			"PARALLEL: fs.read/fs.list calls batched in ONE reply run concurrently — to read several files, emit one fs.read each in one batch, not one per turn.",
 		Risk: domain.RiskRead,
 		// Independent, bounded filesystem snapshot read, genuinely concurrent (not

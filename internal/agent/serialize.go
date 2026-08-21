@@ -49,6 +49,14 @@ func (a *ArtifactStore) Get(id string) (string, bool) {
 	return v, ok
 }
 
+// Put stores a value and returns its artifact id — the exported form of set(),
+// for the one caller outside this file that produces a payload the model may want
+// to page back: a finished sub-agent's full transcript (internal/subagent). It is
+// the same store, the same durable mirror, and therefore the same artifact.read
+// path, which is the point — a sub-agent's receipt should not need a second
+// retrieval mechanism.
+func (a *ArtifactStore) Put(value string) string { return a.set(value) }
+
 // set stores a value under a fresh id, evicting oldest-first while at/over the
 // cap (eviction happens before insert). When a persister is wired it ALSO mirrors
 // the payload to durable storage under the SAME id, best-effort: a write failure is

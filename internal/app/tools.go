@@ -24,6 +24,7 @@ import (
 	queuetools "github.com/daintreehq/assistant/internal/tools/queue"
 	"github.com/daintreehq/assistant/internal/tools/scratchx"
 	"github.com/daintreehq/assistant/internal/tools/skill"
+	"github.com/daintreehq/assistant/internal/tools/subagentx"
 	"github.com/daintreehq/assistant/internal/tools/timer"
 	"github.com/daintreehq/assistant/internal/tools/watcher"
 	"github.com/daintreehq/assistant/internal/tools/workflow"
@@ -98,6 +99,14 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 	all = append(all, addr(scratchx.Tools(scratchx.Deps{
 		Store: a.scratchStore,
 	}))...)
+	// Delegation. RequiresBackend, not RequiresNothing: a sub-agent's rounds ARE
+	// backend generations, so with the backend unreachable this tool can project and
+	// dispatch but cannot do its job — exactly what that declaration is for. Its
+	// local tool calls want Daintree MCP too, but the backend is the primary
+	// dependency: without it there is no loop at all to make them from.
+	all = append(all, addr(tools.SetRequires(subagentx.Tools(subagentx.Deps{
+		Runner: a.newSubagentRunner(),
+	}), tools.RequiresBackend))...)
 
 	// Families already returning []*tools.Tool — pass through.
 	all = append(all, grant.Tools(grant.Deps{

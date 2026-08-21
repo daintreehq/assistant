@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/daintreehq/assistant/internal/ui/theme"
 )
@@ -115,6 +117,13 @@ func presentToolVerb(name string) (label string, keys []string) {
 		return "Unpinned memory", []string{"id"}
 	case "artifact.read":
 		return "Read artifact", []string{"artifactId", "id"}
+	// A delegated sub-agent run. The target is the BRIEF, not a tool name or an id,
+	// because that is the only thing that tells the user what was handed off — and
+	// while the run is live the row's detail is replaced by the sub-agent's own
+	// progress beats ("round 3/10 · fs.search"), so this label has to read
+	// naturally in front of both.
+	case "subagent.run":
+		return "Sub-agent", []string{"task"}
 	case "copyTree.generate":
 		return "Generated tree", []string{"worktreeId"}
 	case "copyTree.generateAndCopyFile":
@@ -373,6 +382,133 @@ func styleFor(th theme.Theme, tone, s string) string {
 	}
 }
 
+// fanOutTargetCells caps the identity half of a fan-out row. Deliberately much
+// tighter than presentToolTarget's own 48: this prefix shares the detail budget
+// with a live progress beat or a result summary, and the point is for the row to
+// stay IDENTIFIABLE, not for the brief to be readable in full.
+const fanOutTargetCells = 30
+
+// briefLeadIns are the imperative openings a delegation brief almost always
+// starts with. They are stripped for DISPLAY ONLY. Longest-first, so "find every"
+// is tried before "find".
+var briefLeadIns = []string{
+	"in this repository,", "in this repo,", "in this codebase,",
+	"find out which", "find out what", "find out where", "find out how",
+	"work out which", "work out what",
+	"figure out which", "figure out what",
+	"find every", "find all", "find the", "find",
+	"locate every", "locate all", "locate the", "locate",
+	"identify every", "identify all", "identify the", "identify",
+	"determine which", "determine what", "determine the", "determine",
+	"list every", "list all", "list the", "list",
+	"count how many", "count the", "count",
+	"search for the", "search for", "search",
+	"tell me which", "tell me what",
+	"report which", "report what",
+	"which", "what", "where", "how many",
+}
+
+// briefGist trims a leading imperative from a sub-agent brief so the DISTINCTIVE
+// words lead the row.
+//
+// It exists because the fan-out prefix is only ~30 cells, and briefs are written
+// by a model that opens nearly all of them the same way. Raw, three concurrent
+// rows read "Find the GitHub issue describ…", "Find every Go file that reg…",
+// "Find what schemaUserVersion…" — the shared boilerplate consumes the budget and
+// the part that identifies each row is what gets cut. Stripping the lead-in turns
+// them into "GitHub issue describing the…", "Go file that registers a to…",
+// "schemaUserVersion is set to".
+//
+// Display only, and conservative: it strips at most ONE lead-in, only from the
+// very start, and only when a substantial remainder survives — a brief that is
+// entirely a lead-in keeps its original text rather than rendering as an empty
+// row. The full brief is never lost; it is in the tool args, the transcript, and
+// the expanded view.
+func briefGist(brief string) string {
+	trimmed := strings.TrimSpace(brief)
+	lower := strings.ToLower(trimmed)
+	// ToLower can change BYTE length for a few runes (Turkish dotted capital I is
+	// the classic case), which would make len(lead) the wrong cut point in the
+	// ORIGINAL string. The lead-ins are all ASCII, so when the lengths diverge the
+	// prefix cannot be one of them in any meaningful sense — bail rather than slice.
+	if len(lower) != len(trimmed) {
+		return trimmed
+	}
+	for _, lead := range briefLeadIns {
+		if !strings.HasPrefix(lower, lead) {
+			continue
+		}
+		// The match must end on a WORD BOUNDARY. Without this, "find" matched
+		// "Finding the relevant issue" and rendered it as "ing the relevant issue"
+		// — a corrupted label, which is worse than the boilerplate it was trying to
+		// remove. "what" did the same to "Whatever causes the failure".
+		rest := trimmed[len(lead):]
+		if rest != "" {
+			next, _ := utf8.DecodeRuneInString(rest)
+			if next != utf8.RuneError && !isBriefBoundary(next) {
+				continue
+			}
+		}
+		rest = strings.TrimSpace(rest)
+		// Drop a bare article left behind ("find all of the X" leaves "of the X").
+		for _, filler := range []string{"of the ", "of ", "the ", "a ", "an "} {
+			if strings.HasPrefix(strings.ToLower(rest), filler) {
+				rest = strings.TrimSpace(rest[len(filler):])
+				break
+			}
+		}
+		// Only accept the trim if what remains still says something. A very short
+		// remainder means the lead-in WAS the brief.
+		if len([]rune(rest)) >= 8 {
+			return rest
+		}
+		return trimmed
+	}
+	return trimmed
+}
+
+// isBriefBoundary reports whether r can legitimately follow a lead-in — i.e. the
+// lead-in was a whole word rather than the start of a longer one.
+func isBriefBoundary(r rune) bool {
+	return unicode.IsSpace(r) || unicode.IsPunct(r)
+}
+
+// fanOutMinIdentityCells is the smallest identity prefix worth showing. Below
+// this the prefix is noise rather than a label, and the room is better spent on
+// the outcome.
+const fanOutMinIdentityCells = 12
+
+// fanOutDetail composes "<identity> · <volatile>" for a fan-out row, but ONLY
+// when both halves fit the row's detail budget.
+//
+// The ordering rule is a safety one, and it was a real regression before this
+// function existed. The identity prefix is what makes three concurrent sub-agent
+// rows tellable apart, but the volatile half is what says how the run ENDED — and
+// at a narrow width the prefix pushed "PARTIAL — stopped early" off the row,
+// leaving a partial finding rendered exactly like a complete one. So the volatile
+// half is never sacrificed for the identity: if there is not room for a useful
+// prefix beside it, the prefix is dropped entirely.
+func fanOutDetail(identity, volatile string, room int) string {
+	const sep = " · "
+	avail := room - cellWidth(volatile) - cellWidth(sep)
+	if avail < fanOutMinIdentityCells {
+		return volatile
+	}
+	if avail > fanOutTargetCells {
+		avail = fanOutTargetCells
+	}
+	return truncateCells(identity, avail) + sep + volatile
+}
+
+// identityBearingTarget reports whether a tool's target should survive alongside
+// its progress/summary, because several calls of it run concurrently under one
+// verb and the target is the only thing telling them apart.
+//
+// Only subagent.run today. agentTask.spawnForEdits also fans out, but its rows
+// are already distinguished by the terminal ids in their summaries, and widening
+// this would change long-settled rendering for the codebase's busiest tool.
+func identityBearingTarget(name string) bool { return name == "subagent.run" }
+
 // renderActivityRow renders one branch row: "<branch> <glyph> <verb> <detail> <dur>".
 // last marks the final branch (└─ vs ├─). expanded reveals raw args. now drives
 // the live elapsed on an active row.
@@ -396,6 +532,18 @@ func renderActivityRow(th theme.Theme, a Activity, last, expanded bool, spinnerF
 		}
 	}
 
+	// The detail budget is computed HERE, before the detail is composed, because
+	// the fan-out prefix below has to fit inside it — see fanOutDetail. The final
+	// truncate at render time uses this same number.
+	labelCols := cellWidth(label) + 1
+	if labelCols < labelWidth {
+		labelCols = labelWidth
+	}
+	detailRoom := width - prefixCols - labelCols - durationCols
+	if detailRoom < 8 {
+		detailRoom = 8
+	}
+
 	// Default detail (`a.detail ?? (done ? a.summary)`): the row's
 	// own Detail when set (the controller stores the target there, and the result
 	// summary on done), otherwise the args-derived target. Either way it is the
@@ -407,6 +555,18 @@ func renderActivityRow(th theme.Theme, a Activity, last, expanded bool, spinnerF
 	// While active, the live in-tool substep overrides ("launching terminal").
 	if a.State == ActActive && a.ProgressMsg != "" {
 		detail = a.ProgressMsg
+	}
+	// Fan-out rows KEEP their target, because for these tools the target IS the
+	// row's identity. The model is told to delegate several questions at once, so
+	// three sub-agents run side by side under the same verb — and with the default
+	// rules above, all three would read "round 3/10 · fs.search" while live and
+	// "Reported back · 3 rounds…" when settled, i.e. three identical rows for three
+	// different questions. Prefixing the (short) brief makes each row say which
+	// delegation it is, and puts the volatile half where truncation eats it first.
+	if identityBearingTarget(a.Name) {
+		if target := presentToolTarget(a.Name, a.Args); target != "" && detail != "" && detail != target {
+			detail = fanOutDetail(briefGist(target), detail, detailRoom)
+		}
 	}
 	// On FAILURE, surface the failure summary even when a target detail exists — the
 	// outcome must never be hidden behind the original "Reading foo.go" target. The
@@ -462,18 +622,9 @@ func renderActivityRow(th theme.Theme, a Activity, last, expanded bool, spinnerF
 	b.WriteString(th.Body().Render(label))
 
 	if detail != "" {
-		// Budget the detail so a long one truncates BEFORE colliding with the timing:
-		// labelCols = max(label+1, LABEL_WIDTH);
-		// detailRoom = max(8, width - PREFIX_COLS - labelCols - DURATION_COLS).
+		// labelCols / detailRoom were computed above, before the detail was composed
+		// (the fan-out prefix needs the budget to decide whether it fits).
 		labelLen := cellWidth(label)
-		labelCols := labelLen + 1
-		if labelCols < labelWidth {
-			labelCols = labelWidth
-		}
-		detailRoom := width - prefixCols - labelCols - durationCols
-		if detailRoom < 8 {
-			detailRoom = 8
-		}
 		// Pad short labels so details line up in a column; long labels get the single
 		// separating space (max(1, LABEL_WIDTH - label.length)).
 		pad := labelWidth - labelLen

@@ -30,7 +30,7 @@ already drifted out of agreement with each other and with the binary.
 > minting would cover mutating work. And `user.askMultipleChoice` needs a human at a
 > TTY: every unattended actor has no question surface and gets `QUESTION_NOT_INTERACTIVE`.
 
-## Inventory — 84 tools in 23 groups
+## Inventory — 85 tools in 24 groups
 
 ### `agentTask.*`
 
@@ -156,6 +156,12 @@ already drifted out of agreement with each other and with the binary.
 |---|---|---|---|---|---|---|---|---|
 | `skill.run.get` | read | supervisor | — | not needed | — | serial | — | Read your stepwise progress through a loaded skill's runbook in THIS session: currentStep, per-step status (done\|skip… |
 | `skill.step.advance` | local | supervisor | — | not needed | — | serial | — | Record that step N of a loaded skill's runbook is done (or skipped) and move to nextStep; OMIT nextStep to finish the… |
+
+### `subagent.*`
+
+| Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
+|---|---|---|---|---|---|---|---|---|
+| `subagent.run` | read | supervisor | — | not needed | `assistant-backend` | read-cohort | — | Delegate ONE research question to a read-only sub-agent working in its own separate conversation; only its short repo… |
 
 ### `terminal.*`
 

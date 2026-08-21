@@ -43,6 +43,17 @@ const backendToolDescriptionMaxRunes = 8192
 // immediate, precise error. Content is encoded exactly as the old DeepSeek wire
 // encoder did: a tool result flattens to text; an assistant tool-call turn keeps an
 // explicit null content; multimodal parts are forwarded verbatim.
+// ToBackendMessages is the exported form of toBackendMessages, for the OTHER loop
+// that speaks this wire shape: internal/subagent, which runs a bounded read-only
+// turn in its own isolated conversation. It shares the encoder rather than
+// reimplementing it because the tricky parts are not obvious and getting one wrong
+// is a mid-run 400 — explicit null content on a tool-call turn, verbatim
+// reasoning_content replay, and the role rejection that turns a would-be backend
+// 400 into a precise local error.
+func ToBackendMessages(messages []models.ChatMessage) ([]backend.Message, error) {
+	return toBackendMessages(messages)
+}
+
 func toBackendMessages(messages []models.ChatMessage) ([]backend.Message, error) {
 	out := make([]backend.Message, 0, len(messages))
 	for i, m := range messages {

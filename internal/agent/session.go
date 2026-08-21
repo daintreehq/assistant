@@ -1895,6 +1895,19 @@ func upstreamFailureAdvice(be *backend.Error) string {
 
 // backendAssistantMessage builds the local assistant message for a backend result:
 // content null on a pure tool-call turn (no prose), else the visible content.
+// BackendAssistantMessage is the exported form of backendAssistantMessage, shared
+// with internal/subagent for the same reason ToBackendMessages is: the null-content
+// and reasoning_content rules are a wire contract, not a detail worth duplicating.
+func BackendAssistantMessage(msg backend.RespondMessage) models.ChatMessage {
+	return backendAssistantMessage(msg)
+}
+
+// BackendToolCalls is the exported form of backendToolCalls (see
+// BackendAssistantMessage).
+func BackendToolCalls(calls []backend.ToolCall) []models.ToolCallRequest {
+	return backendToolCalls(calls)
+}
+
 func backendAssistantMessage(msg backend.RespondMessage) models.ChatMessage {
 	calls := backendToolCalls(msg.ToolCalls)
 	m := models.ChatMessage{Role: "assistant"}

@@ -29,6 +29,10 @@ const (
 	PrefixWorkflowGraphEvent = "wge_"
 	PrefixWorkflowResource   = "wrs_"
 	PrefixReconcileRun       = "wrc_"
+	// PrefixSubagent tags one bounded read-only sub-agent run (internal/subagent).
+	// It is model-visible: the run's report carries it back as subagentId, and the
+	// durable transcript is filed under it.
+	PrefixSubagent = "sub_"
 	// PrefixArtifact tags an oversized tool-result overflow payload. Longer than the
 	// others for historical continuity — the truncation stub + artifact.read have
 	// always surfaced this id as "artifact_<8hex>", so the literal shape is wire.
