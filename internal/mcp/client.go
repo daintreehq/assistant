@@ -554,7 +554,7 @@ func (c *Client) listTools(ctx context.Context, force, degradeOnErr bool) ([]Too
 	for _, rt := range rawTools {
 		ti := ToolInfo{Name: rt.Name, Description: rt.Description}
 		if schema, ok := rt.InputSchema.(map[string]any); ok && schema != nil {
-			ti.InputSchema = schema
+			ti.InputSchema, ti.InputSchemaProvided = schema, true
 		} else {
 			ti.InputSchema = defaultInputSchema()
 		}

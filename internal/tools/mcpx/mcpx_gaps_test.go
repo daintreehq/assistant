@@ -187,7 +187,9 @@ func TestMCPUnavailableErrorsNameReconnect(t *testing.T) {
 	}{
 		{"daintree.listTools", newListToolsTool(Deps{MCP: disc}), `{}`},
 		{"tool.search", newSearchTool(Deps{MCP: disc}), `{"query":"x"}`},
-		{"daintree.call", newCallTool(Deps{MCP: disc}), `{"name":"worktree.list"}`},
+		// An action with NO typed wrapper: a denylisted name is refused before the
+		// connectivity check, which is the wrong thing for this test to measure.
+		{"daintree.call", newCallTool(Deps{MCP: disc}), `{"name":"agent.getState"}`},
 	}
 	for _, tc := range cases {
 		decoded, err := tc.tool.Decode(json.RawMessage(tc.args))
@@ -238,7 +240,7 @@ func TestMCPStaleConnectionErrorsNameReconnect(t *testing.T) {
 func TestDaintreeCallForwardsRequestKeyAsParam(t *testing.T) {
 	mcp := &fakeMCP{connected: true, result: MCPCallResult{Text: "ok"}}
 	tool := newCallTool(Deps{MCP: mcp})
-	decoded, _ := tool.Decode(json.RawMessage(`{"name":"worktree.list","arguments":{"a":1},"requestKey":"rk-9"}`))
+	decoded, _ := tool.Decode(json.RawMessage(`{"name":"agent.getState","arguments":{"a":1},"requestKey":"rk-9"}`))
 	res := tool.Handle(context.Background(), decoded, &tools.ToolContext{})
 	if !res.Ok {
 		t.Fatalf("expected ok, got %+v", res.Error)

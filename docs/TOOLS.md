@@ -313,7 +313,7 @@ request, more than double the permanent system prompt, and paid for on every sin
 | ordinary tool description | 600 chars |
 | orchestrator tool description | 1,200 chars (named exemptions only) |
 | one parameter description | 300 chars |
-| whole projection, compact wire bytes | 80,000 (88,000 with `DAINTREE_WORKFLOW_INTELLIGENCE=1`) |
+| whole projection, compact wire bytes | 91,500 (98,000 with `DAINTREE_WORKFLOW_INTELLIGENCE=1`) |
 
 Exceeding one is allowed and must be a **decision**: add the tool to `orchestratorTools`
 or the argument to `parameterBudgetExceptions`, each with a reason. Both lists are

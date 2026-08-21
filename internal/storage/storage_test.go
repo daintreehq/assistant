@@ -276,6 +276,73 @@ func TestListEventsSeverityOrder(t *testing.T) {
 	}
 }
 
+// A dynamically-invoked MCP action must be consumable through the REAL store by an
+// exact-name grant and by nothing else. grantAuthorizes is unit-tested directly, but
+// that never exercises the transaction, the decrement, or exhaustion — the parts a
+// watcher's unattended authority actually rides on.
+func TestConsumeGrantDynamicTargetExactNameOnly(t *testing.T) {
+	now := int64(1000)
+	s := openTest(t, now)
+	names := `["daintree.invoke:terminal.new"]`
+	if _, err := s.InsertGrant(domain.AutomationGrantRecord{
+		ActorID: "wch_dyn", ActorType: domain.GrantActorWatcher,
+		AllowedToolNamesJson: &names, ExpiresAt: now + 100000, MaxUses: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A sibling action under the same invoker must NOT consume it: a grant for one
+	// action is not a grant for the class of actions that invoker can reach.
+	if c, _ := s.ConsumeGrant("wch_dyn", domain.GrantActorWatcher,
+		"daintree.invoke:terminal.kill", domain.RiskTerminal, now); c != nil {
+		t.Fatal("a sibling dynamic target must not consume an exact-name grant")
+	}
+	// Nor may the bare invoker, which is ungrantable however it is scoped.
+	if c, _ := s.ConsumeGrant("wch_dyn", domain.GrantActorWatcher,
+		"daintree.invoke", domain.RiskSystem, now); c != nil {
+		t.Fatal("the bare invoker must never consume a grant")
+	}
+	// The exact target does.
+	c, err := s.ConsumeGrant("wch_dyn", domain.GrantActorWatcher,
+		"daintree.invoke:terminal.new", domain.RiskTerminal, now)
+	if err != nil || c == nil {
+		t.Fatalf("exact dynamic target must consume: %v %v", c, err)
+	}
+	if c.UsesRemaining != 0 {
+		t.Fatalf("usesRemaining after the single use = %d, want 0", c.UsesRemaining)
+	}
+	// ...once.
+	if again, _ := s.ConsumeGrant("wch_dyn", domain.GrantActorWatcher,
+		"daintree.invoke:terminal.new", domain.RiskTerminal, now); again != nil {
+		t.Fatal("an exhausted dynamic grant must not consume again")
+	}
+}
+
+// A RISK-CLASS grant reaches every ordinary tool of that class and NO dynamic
+// target: behind an invoker, "terminal" would mean every terminal-risk action the
+// connected host happens to expose, chosen at call time and never seen by whoever
+// approved it.
+func TestConsumeGrantRiskClassNeverReachesDynamicTarget(t *testing.T) {
+	now := int64(1000)
+	s := openTest(t, now)
+	risks := `["terminal"]`
+	if _, err := s.InsertGrant(domain.AutomationGrantRecord{
+		ActorID: "wch_risk", ActorType: domain.GrantActorWatcher,
+		AllowedRiskClassesJson: &risks, ExpiresAt: now + 100000, MaxUses: 5,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := s.ConsumeGrant("wch_risk", domain.GrantActorWatcher,
+		"daintree.invoke:terminal.new", domain.RiskTerminal, now); c != nil {
+		t.Fatal("a risk-class grant must not authorize a dynamic target")
+	}
+	// The same grant still authorizes an ordinary terminal-risk tool, or the
+	// risk-class scope would have been broken rather than narrowed.
+	if c, _ := s.ConsumeGrant("wch_risk", domain.GrantActorWatcher,
+		"terminal.sendCommand", domain.RiskTerminal, now); c == nil {
+		t.Fatal("a risk-class grant must still authorize an ordinary tool of that class")
+	}
+}
+
 func TestConsumeGrantAtomicUnion(t *testing.T) {
 	now := int64(1000)
 	s := openTest(t, now)

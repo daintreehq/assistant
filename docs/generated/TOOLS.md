@@ -30,7 +30,7 @@ already drifted out of agreement with each other and with the binary.
 > minting would cover mutating work. And `user.askMultipleChoice` needs a human at a
 > TTY: every unattended actor has no question surface and gets `QUESTION_NOT_INTERACTIVE`.
 
-## Inventory — 95 tools in 29 groups
+## Inventory — 96 tools in 29 groups
 
 ### `agentSessionHistory.*`
 
@@ -91,8 +91,9 @@ already drifted out of agreement with each other and with the binary.
 | Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
 |---|---|---|---|---|---|---|---|---|
 | `daintree.status` | read | supervisor | — | not needed | — | serial | — | Report the Daintree MCP link: the endpoint URL it is connected to, connected, transport, tool count, and the error te… |
-| `daintree.listTools` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | List the Daintree MCP tools, with their names and descriptions |
+| `daintree.listTools` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | List every Daintree MCP action with its description and policy (`risk`, `requiredTier`, `confirms`, `preferredTool`,… |
 | `daintree.call` | system | system | **typed** | **never** | `daintree-mcp` | serial | — | Raw passthrough to ANY Daintree MCP tool |
+| `daintree.invoke` | system | system | **typed** | **never** | `daintree-mcp` | serial | — | Invoke ONE Daintree MCP action that has no typed wrapper, gated as THAT action: a read runs with no confirmation, a m… |
 
 ### `errors.*`
 
@@ -227,8 +228,8 @@ already drifted out of agreement with each other and with the binary.
 
 | Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
 |---|---|---|---|---|---|---|---|---|
-| `tool.search` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | Search Daintree MCP tools by keyword |
-| `tool.schema` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | Look up ONE Daintree MCP tool's input schema — its exact argument shape — without invoking it |
+| `tool.search` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | Search Daintree MCP actions by keyword |
+| `tool.schema` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | Look up ONE Daintree MCP action's exact input schema — its argument shape — plus its policy (`risk`, `requiredTier`,… |
 
 ### `user.*`
 

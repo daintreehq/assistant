@@ -55,6 +55,26 @@ func TierAllowsRisk(tier domain.Tier, risk domain.RiskClass) bool {
 	return allowed[risk]
 }
 
+// tierOrder is the tier lattice from least to most authority. tierAllowed above
+// is a set-per-tier, which answers "may this tier?" but not "which is the least
+// tier that may?" — the question a discovery result has to answer when it tells
+// the model what a target action would REQUIRE.
+var tierOrder = []domain.Tier{domain.TierSupervisor, domain.TierOperator, domain.TierSystem}
+
+// MinimumTierFor returns the least-privileged tier permitted to perform risk, or
+// "" for a risk class no tier allows. Derived from the same tierAllowed matrix the
+// gate uses, so a discovery result advertising `requiredTier` can never drift from
+// what Decide would actually enforce — the failure mode a second hand-kept table
+// would have guaranteed.
+func MinimumTierFor(risk domain.RiskClass) domain.Tier {
+	for _, t := range tierOrder {
+		if TierAllowsRisk(t, risk) {
+			return t
+		}
+	}
+	return ""
+}
+
 // AlwaysConfirm reports whether the risk class is in the always-confirm set.
 func AlwaysConfirm(risk domain.RiskClass) bool { return alwaysConfirm[risk] }
 

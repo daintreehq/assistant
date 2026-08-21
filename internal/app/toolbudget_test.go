@@ -215,6 +215,22 @@ func TestToolProjectionTotalIsBounded(t *testing.T) {
 		// watcher.terminal.create, so none of them is an outlier worth singling out.
 		// tool.schema (803) pays for itself immediately: it is the tool that stops the
 		// model guessing the argument keys of everything else.
+		//
+		// UNCHANGED at 91.5 KB for issue #368's daintree.invoke, which measures 90,452
+		// — the two tools it adds on top of tool.schema cost 1,069 bytes and were paid
+		// for out of the existing headroom rather than by moving the number. The
+		// savings came from prose duplicated across surfaces: "search → schema →
+		// invoke" was restated in three descriptions, the never-auto-corrected rule sat
+		// in both tool.schema's description and its `name` property, and
+		// validate-before-invoke in both daintree.invoke's description and its
+		// `arguments` property. A rule the model reads twice costs twice and teaches
+		// once.
+		//
+		// That leaves ~1.0 KB of headroom rather than the ~2 KB the previous two raises
+		// each left. Recorded here rather than topped back up: the budget's job is to
+		// make the next addition argue for itself, and halving the slack without
+		// raising the ceiling is that job being done. The next tool to land here should
+		// expect to raise the number, deliberately, with its own paragraph.
 		{"default", ToolInventoryOptions{}, 91_500},
 		// The flag adds seven execution-graph tools. It is off by default and off in
 		// production, so it gets its own ceiling rather than eating the default's
@@ -223,6 +239,11 @@ func TestToolProjectionTotalIsBounded(t *testing.T) {
 		// and to the same ~2 KB of headroom rather than more.
 		// Raised in lockstep for the same nine additions (measuring 96,110), to the
 		// same ~2 KB of headroom rather than more.
+		// Also UNCHANGED for daintree.invoke (measuring 97,179): the flagged set carries
+		// everything the default carries, so it absorbed the identical 1,069 bytes and
+		// is left with ~0.8 KB. Same reasoning as above — the shrinking headroom is the
+		// signal, and hiding it behind a raise nobody argued for is what the budget
+		// exists to prevent.
 		{"workflow-intelligence", ToolInventoryOptions{WorkflowIntelligence: true}, 98_000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

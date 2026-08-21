@@ -180,6 +180,48 @@ type Handler func(ctx context.Context, args json.RawMessage, tctx *ToolContext) 
 // DecodeFunc means "pass raw args through unvalidated". Replaces Zod safeParse.
 type DecodeFunc func(raw json.RawMessage) (json.RawMessage, error)
 
+// TargetInfo is the EFFECTIVE identity one call resolved to, for a tool whose
+// authority depends on its arguments rather than on its registration.
+//
+// Every registered tool answers "what does this do?" once, at Register time, and
+// Tool.Risk is that answer. A target-aware invoker cannot: forwarding
+// `terminal.list` and forwarding `worktree.delete` are the same tool and wildly
+// different actions. TargetInfo is how such a tool tells dispatch which action
+// this particular call actually is, so the tier gate, the confirmation preview,
+// grant matching and the audit row all describe the ACTION rather than the
+// invoker that carried it.
+type TargetInfo struct {
+	// Name is the identity dispatch gates and audits on — for MCP dynamic
+	// invocation, domain.DynamicTargetName(action). It is deliberately NOT the raw
+	// action name: a grant reading `terminal.new` must not silently also authorize
+	// a future local tool of that name, and an audit row has to record that the
+	// call came through dynamic invocation.
+	Name string
+	// Display is the raw action shown to the human in the approval preview. The
+	// human approves "worktree.delete", not a composite identity.
+	Display string
+	// Risk is the effective risk class. Dispatch fails the call closed when it is
+	// empty, so a resolver that forgets to set it can never widen authority.
+	Risk domain.RiskClass
+	// Consequence overrides Tool.Consequence in the approval sheet when non-empty,
+	// so the preview describes THIS action rather than the generic invoker.
+	Consequence string
+}
+
+// TargetResolver computes a call's effective identity from its (already decoded)
+// arguments. It runs inside Dispatch after Decode and BEFORE the tier gate, so
+// everything downstream — Decide, Confirm, ConsumeGrant, audit — sees the target.
+//
+// Returning a non-nil ToolResult REFUSES the call with that exact failure: the
+// resolver owns the refusal prose (typed-wrapper redirect, unknown policy,
+// ineligible action), which is tool-family policy dispatch has no business
+// re-deriving. The refusal is audited as denied and the handler never runs.
+//
+// A resolver must be a pure function of (args, live catalog) and must reach the
+// same verdict the handler will: the handler re-runs the identical resolution
+// over the same immutable args, so the action confirmed is the action forwarded.
+type TargetResolver func(ctx context.Context, args json.RawMessage, tctx *ToolContext) (TargetInfo, *ToolResult)
+
 // Tool is the canonical typed tool adapter. Internal Name is dotted (fs.read);
 // the registry maps it to/from the OpenAI wire name (fs__read).
 type Tool struct {
@@ -198,6 +240,18 @@ type Tool struct {
 	Decode DecodeFunc
 	// Handle is the implementation.
 	Handle Handler
+
+	// ResolveTarget, when set, makes this tool's effective risk and audit/grant
+	// identity a function of its ARGUMENTS (see TargetResolver). nil — the case for
+	// every tool but the MCP dynamic invoker — means the static Name/Risk above are
+	// the whole story, so the pipeline is unchanged for them.
+	//
+	// Risk above stays the FAIL-CLOSED ceiling, not a placeholder: it is what the
+	// read-only sub-agent inventory filter, the parallel-dispatch adapters, and the
+	// generated capability reference read, none of which can run a resolver. Register
+	// a dynamic tool at the worst risk it could ever reach and let the resolver
+	// narrow it per call — never the reverse.
+	ResolveTarget TargetResolver
 
 	// Requires names the connection whose absence makes this tool UNABLE TO DO ITS JOB.
 	// The zero value (RequiresNothing) means purely local — filesystem, SQLite, or
@@ -298,6 +352,20 @@ type ToolContext struct {
 	AskChoice func(ctx context.Context, req AskChoiceRequest) (AskChoiceAnswer, error)
 	// Log emits an out-of-band line to the user.
 	Log func(msg string)
+
+	// GatedTarget is the effective identity dispatch resolved and GATED this call,
+	// stamped by Dispatch after ResolveTarget and nil for every ordinary tool. A
+	// handler behind a TargetResolver reads it to confirm that the action it is about
+	// to perform is the action that was tier-checked, previewed to the human, and
+	// charged against a grant.
+	//
+	// It exists because the resolver and the handler run at different times against
+	// inputs that are not all immutable: the arguments are, but the live catalog and
+	// any future host-supplied policy source are not. Re-deriving the target in the
+	// handler keeps the two in step for everything derived from the arguments; this
+	// field is what makes a DRIFT in the rest a refusal rather than a silent
+	// execution under a policy nobody approved.
+	GatedTarget *TargetInfo
 
 	// --- liveness (always present in the cockpit; may be zero in tests) ---
 	// ToolCallID identifies this call's live footer row.

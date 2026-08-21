@@ -79,7 +79,7 @@ func TestCreateWiresEveryDependency(t *testing.T) {
 
 // TestCreateRegistersFullToolSet asserts the real builder wires the full tool
 // inventory and that AssertSafe (the hard no-file-edit gate inside Create) passed
-// over it. The worklist expects 79 tools (incl. the agentTask.superviseTerminal
+// over it. The worklist expects 81 tools (incl. the agentTask.superviseTerminal
 // adopt tool, the agentTask.status / agentTask.list readers, the worktree.list /
 // worktree.getCurrent readers, the git.getProjectPulse read wrapper, the
 // terminal.close wrapper, the terminal.rename wrapper, the terminal.moveToWorktree cohort
@@ -124,19 +124,26 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 	// always confirmed, so asking an ordinary question — "what do the issue comments
 	// say?", "did the check pass?", "what errors were logged?" — cost a typed human
 	// approval. Six carry read risk and now run with none.
-	if got != 88 {
-		t.Errorf("registered tools = %d, want 88", got)
+	//
+	// 89 with daintree.invoke (issue #368), which generalizes that same argument to
+	// the actions nobody has wrapped: it runs an unwrapped action at the action's OWN
+	// risk instead of daintree.call's blanket system-tier confirmation, so a read
+	// stops costing an approval and a mutation is confirmed, granted and audited as
+	// itself. tool.schema is its precondition — invoke validates against the schema
+	// that lookup returns.
+	if got != 89 {
+		t.Errorf("registered tools = %d, want 89", got)
 	}
-	if !a.Registry.Has("tool.schema") {
-		t.Error("tool.schema (MCP input-schema lookup) must be registered")
-	}
+	// Name every new tool as well as counting: the count alone stays green when one
+	// addition is dropped and another appears.
 	for _, name := range []string{
+		"tool.schema", "daintree.invoke",
 		"project.detectRunners", "project.runCheck", "forge.listIssueComments",
 		"agentSessionHistory.list", "browser.getConsoleMessages", "errors.recent",
 		"notifications.recent", "worktree.resource.status",
 	} {
 		if !a.Registry.Has(name) {
-			t.Errorf("%s (issue #367 typed wrapper) must be registered", name)
+			t.Errorf("%s must be registered", name)
 		}
 	}
 	// Name the newest addition explicitly: the count alone would stay green if this

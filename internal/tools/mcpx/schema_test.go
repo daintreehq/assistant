@@ -3,8 +3,10 @@ package mcpx
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/domain"
@@ -177,8 +179,9 @@ func TestSchemaAnnotatesWrappedTools(t *testing.T) {
 		t.Errorf("note should warn that wrapper parameters differ (incl. nesting), got %q", note)
 	}
 	// The annotation set is derived from the family's own registration, so every
-	// name it registers is covered — including copyTree.generate, which has a
-	// wrapper but (deliberately) no daintree.call denylist entry.
+	// name it registers is covered — regardless of whether the name also appears
+	// in the daintree.call denylist, which encodes redirect policy, not
+	// wrapper existence.
 	if !getLocalWrapperNames()["copyTree.generate"] || !getLocalWrapperNames()["terminal.close"] {
 		t.Error("the wrapper set should be derived from the registered family")
 	}
@@ -425,12 +428,30 @@ func TestSchemaGuardAgreesWithRealSerializer(t *testing.T) {
 		res := callSchemaTool(t, mcp, `{"name":"panel.focus"}`)
 		serialized := agent.SerializeToolResult(res, nil)
 
-		// Independently compute what the serializer will do, and require the tool
-		// to have made the matching call.
-		wantOk := len(serialized) <= domain.MaxToolResultChars && res.Ok
+		// Independently compute what the serializer WOULD do for the success
+		// envelope, and require the tool to have made the matching call.
+		//
+		// The obvious formulation — `len(serialized) <= cap && res.Ok` — is
+		// tautological on the rejection side: when res.Ok is false the whole
+		// conjunction is false, so `res.Ok != wantOk` can never fire and a guard
+		// that rejected at 1,000 characters would pass just as happily. The
+		// expected decision has to be derived WITHOUT consulting res.Ok, from the
+		// envelope the success path would have produced.
+		wouldBe, merr := json.Marshal(serializedEnvelope{
+			Ok:      true,
+			Summary: fmt.Sprintf("Input schema for the %s MCP tool.", "panel.focus"),
+			Result: map[string]any{
+				"name": "panel.focus", "inputSchema": schema,
+				"policy": policyBlock(Deps{}, "panel.focus", true),
+			},
+		})
+		if merr != nil {
+			t.Fatalf("fill=%d: could not build the reference envelope: %v", fill, merr)
+		}
+		wantOk := utf8.RuneCount(wouldBe) <= domain.MaxToolResultChars
 		if res.Ok != wantOk {
-			t.Errorf("fill=%d: accepted=%v but serialized length is %d (cap %d)",
-				fill, res.Ok, len(serialized), domain.MaxToolResultChars)
+			t.Errorf("fill=%d: accepted=%v but the success envelope is %d runes (cap %d); serialized length %d",
+				fill, res.Ok, utf8.RuneCount(wouldBe), domain.MaxToolResultChars, len(serialized))
 		}
 		// Whether accepted or rejected, what reaches the model must never be a
 		// paged stub — that is the outcome this whole feature exists to remove.

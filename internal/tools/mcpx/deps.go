@@ -1,5 +1,6 @@
 // Package mcpx is the Daintree MCP tool family: discovery (daintree.status,
-// daintree.listTools, tool.search, tool.schema), the raw passthrough escape hatch
+// daintree.listTools, tool.search, tool.schema), the target-aware invoker
+// (daintree.invoke), the raw passthrough escape hatch
 // (daintree.call), and the typed MCP wrappers — terminal
 // focus/input/arming, agent focus, and copyTree. Each wrapper carries the risk
 // class Daintree gates the action at, so reads/UI-focus run without the
@@ -32,16 +33,24 @@ type MCPStatus struct {
 }
 
 // MCPToolInfo is one discovered Daintree MCP tool (listTools entries).
-// InputSchema is the tool's raw MCP-advertised JSON Schema — the arbitrary
-// map the server put on the wire, NOT a normalized/flattened projection. It is
-// what `tool.schema` hands back verbatim. Carrying it here is load-bearing: the
-// concrete client has always cached it (mcp.ToolInfo.InputSchema), but this
-// consumer-side struct used to omit the field, so the app adapter dropped it at
-// the seam and NO local tool could report an MCP tool's argument shape (#311).
+// InputSchema is the tool's raw MCP-advertised JSON Schema — the arbitrary map
+// the server put on the wire, NOT a normalized/flattened projection. Carrying it
+// here is load-bearing: the concrete client has always cached it
+// (mcp.ToolInfo.InputSchema), but this consumer-side struct used to omit the
+// field, so the app adapter dropped it at the seam and NO local tool could report
+// an MCP action's argument shape (#311) — the gap that made every dynamic call a
+// guess. It is what tool.schema hands back verbatim and what daintree.invoke
+// validates arguments against.
 type MCPToolInfo struct {
 	Name        string
 	Description string
 	InputSchema map[string]any
+	// InputSchemaProvided reports whether the SERVER advertised InputSchema, rather
+	// than it being the client's substituted empty-object default. Load-bearing for
+	// daintree.invoke: the default accepts every object, so validating against it
+	// would be a check in name only — an action whose server published no contract
+	// must be refused, not waved through.
+	InputSchemaProvided bool
 }
 
 // MCPClient is the slice of the Daintree MCP transport these tools reach. It is a
@@ -95,6 +104,14 @@ type Deps struct {
 	// bounds locally). Injected rather than imported because mcpx must not depend on
 	// mcpwrap; internal/app already holds both and wires this.
 	WrapperNames []string
+	// Policy is the OPTIONAL host-supplied action-policy source (see policy.go).
+	// Daintree does not publish a machine-readable action manifest yet, so this is
+	// nil on every install today and the reviewed local catalog is the only
+	// classifier. Leaving the seam here — rather than adding it when the host
+	// catches up — is what makes the host contract a value flowing through existing
+	// plumbing instead of new plumbing, and what lets an older Daintree fail closed
+	// by simply having nothing to say.
+	Policy TargetPolicySource
 }
 
 // Tools returns the MCP family (discovery + passthrough + the wrappers in this
@@ -106,6 +123,7 @@ func Tools(deps Deps) []tools.Tool {
 		newSearchTool(deps),
 		newSchemaTool(deps),
 		newCallTool(deps),
+		newInvokeTool(deps),
 		newTerminalFocusTool(deps),
 		newTerminalRenameTool(deps),
 		newCopyTreeGenerateTool(deps),
