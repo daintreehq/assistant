@@ -423,7 +423,9 @@ func TestSanitizeInputKeepsLayout(t *testing.T) {
 	if got := sanitizeInput(in); got != in {
 		t.Fatalf("sanitizeInput altered ordinary markdown:\n got %q\nwant %q", got, in)
 	}
-	if got := sanitizeInput("a\rb\x00c\x7fd"); got != "abcd" {
-		t.Fatalf("sanitizeInput(%q) = %q, want %q", "a\\rb\\x00c\\x7fd", got, "abcd")
+	// CR becomes a line ending (CommonMark treats it as one); the other controls
+	// are removed outright.
+	if got := sanitizeInput("a\rb\x00c\x7fd"); got != "a\nbcd" {
+		t.Fatalf("sanitizeInput(%q) = %q, want %q", "a\\rb\\x00c\\x7fd", got, "a\\nbcd")
 	}
 }

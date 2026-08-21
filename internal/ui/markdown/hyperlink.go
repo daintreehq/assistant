@@ -3,6 +3,7 @@ package markdown
 import (
 	"net/url"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
 )
@@ -20,8 +21,9 @@ import (
 // lone 0x9C byte is not a control at all but the CONTINUATION byte of an ordinary
 // rune ('Ü' is C3 9C), so honouring it splits a URI mid-rune and spills its tail —
 // and a raw BEL — into visible text. C1 controls are instead removed from the
-// model's prose at the input boundary by sanitizeInput, which is where that
-// defence belongs: the only OSC 8 in the output is the 7-bit form we generated.
+// model's prose by sanitizeInput and, decisively, by sanitizeOutput — which drops
+// any C1 that reaches the rendered string however it got there. By the time the
+// output ships, the only OSC 8 left is the 7-bit form we generated.
 const osc8Intro = "\x1b]8;"
 
 // linkState is the effective OSC-8 link at the current point in the stream.
@@ -44,11 +46,23 @@ const (
 // code points and honours those, so a model writing U+009D ("8-bit OSC") followed
 // by "8;;file:///etc/passwd" U+009C would hand the host a clickable local-file
 // target without ever emitting an ESC. Dropping C0 (bar the layout characters
-// markdown needs) and C1 wholesale closes that, and keeps filterHyperlinkSchemes'
-// job honest: the only OSC 8 downstream is the 7-bit form we generated ourselves.
+// markdown needs) and C1 wholesale closes the literal form.
+//
+// It cannot be the whole defence, though: glamour runs html.UnescapeString over
+// text nodes AFTER we hand it the source, so "&#x9d;" and "&#27;" come back as
+// live controls downstream of here (and pre-decoding cannot win — the next round
+// of entities just decodes one layer later). sanitizeOutput is the boundary that
+// actually holds; this pass keeps the markdown the parser sees clean.
 func sanitizeInput(s string) string {
 	if strings.IndexByte(s, '\x1b') >= 0 {
 		s = ansi.Strip(s)
+	}
+	if strings.IndexByte(s, '\r') >= 0 {
+		// CommonMark treats a lone CR as a line ending, so it has to become one
+		// rather than vanish — dropping it would weld two lines (and their block
+		// markers) into one.
+		s = strings.ReplaceAll(s, "\r\n", "\n")
+		s = strings.ReplaceAll(s, "\r", "\n")
 	}
 	if !strings.ContainsFunc(s, isTerminalControl) {
 		return s
@@ -83,25 +97,22 @@ func isTerminalControl(r rune) bool {
 // actionable. Issue #348 draws the line at http/https; everything else keeps its
 // visible text and loses only the (zero-width) escape.
 //
-// The transform is purely SUBTRACTIVE — it removes whole sequences and never
-// rewrites a kept one — with exactly one exception: when a rejected opener
-// supersedes a still-open allowed one, a hyperlink reset takes its place so the
-// allowed target cannot bleed onto the rejected span. Keeping the allowed bytes
+// The transform never rewrites a kept sequence. It only ever ADDS bytes in two
+// places: a hyperlink reset in place of a rejected opener that supersedes a
+// still-open allowed one (so the allowed target cannot bleed onto the rejected
+// span), and a reset/reopen pair around a row break inside an allowed link (see
+// reopenAcrossRows). Keeping the allowed bytes
 // identical is what preserves the wrap survival issue #348 asked for: lipgloss's
 // WrapWriter closes and REOPENS the span (same full URL, same id=) around every
 // newline it inserts, so each physical row carries the complete URI on its own.
-//
-// (That reopen is not universal — a URI containing ';' defeats the OSC parsing in
-// lipgloss's own dependency, so such a link is tracked on its first row only. That
-// is an upstream gap, not one this filter can close; it is unaffected either way
-// by what happens here.)
 //
 // Cell widths are unaffected: a complete OSC-8 sequence occupies no cells, so
 // removing whole sequences cannot change wrapping or row boundaries.
 func filterHyperlinkSchemes(s string) string { return filterOSC8(s, httpHyperlinkURI) }
 
-// stripHyperlinks removes EVERY OSC-8 sequence, for deriving the plain-text
-// fallback.
+// stripHyperlinks removes the OSC-8 OPENERS, for deriving the plain-text fallback.
+// (A standalone closer is deliberately preserved by the shared state machine; the
+// ansi.Strip that follows removes it, and it carries no target either way.)
 //
 // ansi.Strip cannot be trusted to do this: it scans an OSC payload byte by byte
 // and so reads a lone 0x9C as 8-bit ST — which in UTF-8 is the continuation byte
@@ -140,20 +151,31 @@ func filterOSC8(s string, keep func(uri string) bool) string {
 		last = to
 	}
 
+	// openRaw is the exact bytes of the currently-open ALLOWED opener, kept so a
+	// row break inside that link can be repaired with the identical sequence
+	// rather than a re-serialized one. See reopenAcrossRows.
+	openRaw := ""
+	prev := 0
 	for i := 0; i < len(s); {
 		j := strings.Index(s[i:], osc8Intro)
 		if j < 0 {
 			break
 		}
 		j += i
+		if state == linkKept {
+			reopenAcrossRows(s, prev, j, openRaw, drop)
+		}
+		prev = j
 
 		n, uri, ok := scanOSC8(s[j:])
 		if !ok {
 			if n == 0 {
 				break // unterminated tail: nothing after it to filter, leave it be
 			}
-			// Aborted string (a bare ESC, CAN or SUB). The terminal resumes normal
-			// processing at that byte, so we resume scanning there too.
+			// Unusable sequence: an abort (a bare ESC, CAN or SUB — the terminal
+			// resumes normal processing at that byte, so we resume there too), or a
+			// terminated one with no params/URI separator, in which case n is past its
+			// terminator. Either way it stays in the output untouched.
 			i = j + n
 			continue
 		}
@@ -172,6 +194,8 @@ func filterOSC8(s string, keep func(uri string) bool) string {
 		// Opener.
 		if keep(uri) {
 			state = linkKept
+			openRaw = s[j:i]
+			prev = i
 			continue // kept verbatim — no copy needed, it stays in the pending run
 		}
 		repl := ""
@@ -182,6 +206,10 @@ func filterOSC8(s string, keep func(uri string) bool) string {
 		}
 		drop(j, i, repl)
 		state = linkDropped
+		prev = i
+	}
+	if state == linkKept {
+		reopenAcrossRows(s, prev, len(s), openRaw, drop)
 	}
 
 	if !edited {
@@ -201,8 +229,10 @@ func filterOSC8(s string, keep func(uri string) bool) string {
 // exactly what we generate, and nothing else needs to be understood.
 //
 // ok is false when the sequence never terminates (n == 0, so there is nothing
-// further to scan) or when it is aborted by a bare ESC, CAN or SUB — for which n
-// is the offset of the aborting byte, always > 0, so the caller makes progress.
+// further to scan) or when it is unusable: aborted by a bare ESC, CAN or SUB, or
+// terminated but carrying no params/URI separator. In every unusable case n > 0 —
+// the offset of the aborting byte, or the length of the whole sequence — so the
+// caller always makes progress and simply leaves those bytes alone.
 func scanOSC8(s string) (n int, uri string, ok bool) {
 	body := s[len(osc8Intro):]
 	for i := 0; i < len(body); i++ {
@@ -259,5 +289,125 @@ func httpHyperlinkURI(uri string) bool {
 	if u.User != nil {
 		return false
 	}
+	// A URI that is not valid UTF-8 did not survive the pipeline intact: x/ansi's
+	// wrapper frames OSC payloads bytewise and cuts a rune whose continuation byte
+	// is 0x9C ('Ü' is C3 9C), so lipgloss can hand us per-row openers carrying a
+	// TRUNCATED target. Shipping one would be exactly the mis-directed link issue
+	// #348 is about, so such a link simply does not become clickable.
+	if !utf8.ValidString(uri) {
+		return false
+	}
 	return u.Hostname() != ""
+}
+
+// sanitizeOutput is the trust boundary that actually holds: it keeps only the
+// escapes we generate — SGR, and the OSC 8 hyperlinks filterHyperlinkSchemes has
+// already validated — and drops every other control from the rendered string.
+//
+// WHY it must live here and not (only) at the input: glamour calls
+// html.UnescapeString on text nodes, so a model writing "&#27;[2J" or "&#x9d;"
+// gets a live clear-screen or an 8-bit OSC introducer back AFTER sanitizeInput
+// has run. Pre-decoding cannot win that race — each extra layer of entities
+// decodes one round later — but checking the bytes we are about to hand the
+// terminal is decisive, whatever produced them.
+//
+// A dropped ESC leaves its (now inert) payload as ordinary text: "&#27;[2J"
+// renders as the visible characters "[2J". That is deliberate — the attempt stays
+// legible to the human instead of silently disappearing, and nothing about it can
+// still drive the terminal.
+func sanitizeOutput(s string) string {
+	var (
+		b      strings.Builder
+		edited bool
+		last   int
+	)
+	drop := func(from, to int) {
+		if !edited {
+			b.Grow(len(s))
+			edited = true
+		}
+		b.WriteString(s[last:from])
+		last = to
+	}
+
+	for i := 0; i < len(s); {
+		c := s[i]
+		switch {
+		case c == '\x1b':
+			if strings.HasPrefix(s[i:], osc8Intro) {
+				if n, _, ok := scanOSC8(s[i:]); ok {
+					i += n // ours, already validated
+					continue
+				}
+			}
+			if n := sgrLen(s[i:]); n > 0 {
+				i += n // ours: a colour/attribute change, which cannot do anything else
+				continue
+			}
+			drop(i, i+1) // a lone ESC: strip the introducer, leave the payload visible
+			i++
+		case c == '\n' || c == '\t':
+			i++
+		case c < 0x20 || c == 0x7f:
+			drop(i, i+1)
+			i++
+		case c == 0xc2 && i+1 < len(s) && s[i+1] >= 0x80 && s[i+1] <= 0x9f:
+			drop(i, i+2) // a C1 control, which xterm honours as readily as the 7-bit form
+			i += 2
+		default:
+			i++
+		}
+	}
+
+	if !edited {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// sgrLen returns the byte length of the SGR sequence at the start of s, or 0 if
+// s does not begin with one. SGR is CSI (ESC [) + parameter bytes + intermediate
+// bytes + the final byte 'm'; any other final byte is some OTHER CSI function
+// (cursor movement, erase, scroll) that our renderer never emits.
+func sgrLen(s string) int {
+	if !strings.HasPrefix(s, "\x1b[") {
+		return 0
+	}
+	i := 2
+	for ; i < len(s) && s[i] >= 0x30 && s[i] <= 0x3f; i++ {
+	}
+	for ; i < len(s) && s[i] >= 0x20 && s[i] <= 0x2f; i++ {
+	}
+	if i < len(s) && s[i] == 'm' {
+		return i + 1
+	}
+	return 0
+}
+
+// reopenAcrossRows closes and reopens an allowed hyperlink around every newline in
+// s[from:to], so each physical row carries the target on its own.
+//
+// This is the guarantee issue #348 actually asks for, and lipgloss very nearly
+// provides it: its WrapWriter resets before a newline it inserts and reopens
+// after. But its own OSC parser splits a sequence on EVERY ';' and then requires
+// exactly three fields, so a URI legitimately containing one — "…?a=1;b=2" — is
+// never tracked, and the rows after the first carry no target at all. Rather than
+// depend on that, we make the guarantee ourselves.
+//
+// It is self-limiting: when WrapWriter did reopen correctly, its reset arrives
+// BEFORE the newline, so the link is already closed by the time we get here and
+// this is never called for that row. It therefore only fires where the row would
+// otherwise have been left without a target.
+func reopenAcrossRows(s string, from, to int, openRaw string, drop func(from, to int, repl string)) {
+	if openRaw == "" {
+		return
+	}
+	for p := from; p < to; p++ {
+		if s[p] != '\n' {
+			continue
+		}
+		drop(p, p, ansi.ResetHyperlink()) // close before the break…
+		drop(p+1, p+1, openRaw)           // …and reopen with the identical bytes after it
+	}
 }

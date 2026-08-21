@@ -138,6 +138,10 @@ func (r *Renderer) render(clean string, width int) Rendered {
 	// consumer. (The no-color branch below strips all ANSI anyway, but the
 	// ordering is what makes the invariant obvious to a reader.)
 	styled = filterHyperlinkSchemes(styled)
+	// …then drop every control we did NOT generate. glamour un-escapes HTML
+	// entities in text nodes after we hand it the source, so "&#27;[2J" arrives
+	// here as a live clear-screen no matter how clean the input was.
+	styled = sanitizeOutput(styled)
 	// stripHyperlinks first: ansi.Strip mis-frames an OSC payload whose bytes
 	// include 0x9C (the continuation byte of runes like 'Ü'), which would spill the
 	// tail of a legitimate URI — and its BEL — into the plain text.
