@@ -85,12 +85,24 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 		if err != nil {
 			return nil, err
 		}
-		a, err := app.Create(app.CreateOptions{Overrides: overrides})
+		a, err := app.Create(app.CreateOptions{Overrides: overrides, PinnedSkillIDs: sessionOpts.PinnedSkillIDs})
 		if err != nil {
 			own.Release()
 			return nil, err
 		}
 		a.AdoptAsCurrentSession()
+
+		// Negotiate the pins before the session is handed back, so a bad id fails the
+		// session.open tool call — where the caller is looking — instead of silently
+		// producing turns that never load the runbook they named. Uses the BOOTSTRAP
+		// context: this is work the open must finish, and a client that gave up should
+		// stop us waiting on it.
+		pinNotice, perr := a.PreparePinnedSkills(bootstrap)
+		if perr != nil {
+			_ = a.Shutdown()
+			own.Release()
+			return nil, perr
+		}
 
 		logPath := startProcessLog(a.Config)
 
@@ -148,6 +160,10 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 			ApprovalMode: string(mode),
 			MCPConnected: st.Connected,
 			MCPTransport: st.Transport,
+			// Reported so a caller that inherited a server-level --skill can see what its
+			// turns actually load; the advisory rides SessionOutput.Warnings via describe.
+			PinnedSkills:        a.PinnedSkillIDs(),
+			PinPreflightWarning: pinNotice,
 		}
 		rt := mcpserver.NewAppRuntime(a, facts, approvals, own.Release)
 		if withRun, ok := rt.(interface{ CurrentRunID() string }); ok {
@@ -218,6 +234,7 @@ func sessionOptions(base Options, p mcpserver.OpenParams) Options {
 	applyIfSet(&o.LogDir, p.LogDir)
 	applyIfSet(&o.ProjectID, p.ProjectID)
 	applyIfSet(&o.WindowID, p.WindowID)
+	applySliceIfSet(&o.PinnedSkillIDs, p.Skills)
 	return o
 }
 
@@ -238,5 +255,19 @@ func sessionOptions(base Options, p mcpserver.OpenParams) Options {
 func applyIfSet(dst *string, v string) {
 	if strings.TrimSpace(v) != "" {
 		*dst = v
+	}
+}
+
+// applySliceIfSet is applyIfSet for a list argument, and it tests NIL rather than
+// length on purpose. For a string, "" is the only way to say "unset", so the two
+// coincide; for a slice they part company, and the difference is a real instruction: a
+// caller that sends `"skills": []` is explicitly clearing a server-level --skill for
+// this session, which length-testing would silently reverse into "inherit them".
+//
+// The copy is defensive — the session's decoded argument must not stay aliased into the
+// process-level options that seed every later session.
+func applySliceIfSet(dst *[]string, v []string) {
+	if v != nil {
+		*dst = append([]string(nil), v...)
 	}
 }

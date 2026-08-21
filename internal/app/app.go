@@ -93,6 +93,16 @@ type CreateOptions struct {
 	// wake turns continue the SAME conversation the last cockpit ran. A missing
 	// pointer still mints fresh. Ignored when SessionID is set explicitly.
 	ResumeCurrentSession bool
+	// PinnedSkillIDs names backend runbooks every turn of this session must load
+	// (`--skill`, or `skills` on daintree.session.open). Deliberately NOT a config
+	// value: it has no environment source and is a per-session execution control like
+	// Timeout, so routing it through config.AppConfig would also leak it into the
+	// supervisor's wake turns, which nobody asked to pin.
+	//
+	// Normalized on the way in. Naming pins here does NOT negotiate them — the caller
+	// must run App.PreparePinnedSkills before the first turn, which is where an
+	// unsupported backend or a mistyped id becomes a loud failure.
+	PinnedSkillIDs []string
 }
 
 // ToolBuilder returns the tools to register on the App's registry. It is a SEAM:
@@ -250,6 +260,13 @@ type App struct {
 	// 422ing every subsequent turn, permanently. Readers compare the pin against the live
 	// endpoint, so a mismatched answer is simply not believed.
 	backendCaps atomic.Pointer[backendCapsSnapshot]
+
+	// pinnedSkillIDs are the runbooks the LAUNCH named (`--skill`, or `skills` on
+	// daintree.session.open) and every turn of this session must load. Immutable after
+	// Create: argv and the session-open arguments are both session-constant, so there
+	// is no writer and callers get copies (see PinnedSkillIDs). Nil on every ordinary
+	// launch, which is what keeps the capability preflight off the normal boot path.
+	pinnedSkillIDs []string
 
 	// reconcileLedgerMu/done guard the boot ledger reconcile. `done` is committed only
 	// after terminal.list returned a parseable inventory; launch cancellation or a transient
@@ -487,6 +504,9 @@ func Create(opts CreateOptions) (*App, error) {
 		ownership:       ownership,
 		dispatchActor:   dispatchActor,
 		dispatchActorID: dispatchActorID,
+		// Normalized once, here, so every consumer (the preflight, the Session, the
+		// MCP facts) sees the same trimmed, deduplicated, order-preserving list.
+		pinnedSkillIDs: NormalizePinnedSkillIDs(opts.PinnedSkillIDs),
 		// A fresh, empty scratch workspace for this session. Built before the tool
 		// registry so the scratch.* family can capture the concrete store directly.
 		scratchStore: scratchx.NewStore(),
@@ -692,6 +712,13 @@ func Create(opts CreateOptions) (*App, error) {
 		// fresh session id has no persisted token.
 		BackendStateStore:   store,
 		InitialBackendState: loadPersistedBackendState(store, sessionID, resumedSession),
+		// Caller-named runbooks + the gate that decides whether they may reach the wire.
+		// The gate is a func, not a bool, because the capability answer is pinned to the
+		// endpoint that gave it and the delegate behind Backend can be replaced: reading
+		// it per round is what keeps a swapped endpoint from being sent a field it
+		// forbids. Nil pins make both inert.
+		PinnedSkillIDs:               a.PinnedSkillIDs(),
+		BackendAcceptsPinnedSkillIDs: a.backendAcceptsPinnedSkillIDs,
 		// Live async futures for the turn context's async-operations block, re-read
 		// every round so the model sees (and never re-issues) its in-flight work.
 		AsyncInvocationLister: store,

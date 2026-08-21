@@ -223,6 +223,21 @@ type SessionDeps struct {
 	// InitialBackendState seeds the opaque token on construction — the persisted
 	// value from the previous owner of this session ("" for a fresh session).
 	InitialBackendState string
+	// PinnedSkillIDs are backend runbook ids the LAUNCH named (`--skill`) and every
+	// round of this session must load. Session-constant, like InitialBackendState:
+	// argv cannot change mid-conversation. Nil (the default, and every ordinary run)
+	// leaves the request's selection block byte-identical to before the feature.
+	//
+	// The Session never validates these — app.PreparePinnedSkills already refused the
+	// launch over an unsupported backend or an unknown id. All that is left here is
+	// attaching them, and the gate below.
+	PinnedSkillIDs []string
+	// BackendAcceptsPinnedSkillIDs reports whether the endpoint about to be called
+	// advertises selection.pinned_skill_ids. Consulted EVERY round rather than once,
+	// because the answer is pinned to an endpoint and the backend delegate is
+	// swappable: sending the field to a backend that forbids it 422s the whole turn.
+	// nil ⇒ fails closed (the default in tests), which with nil pins is a no-op.
+	BackendAcceptsPinnedSkillIDs func() bool
 	// WorkflowRunLister feeds the turn footer's active-workflow-runs block (optional;
 	// nil ⇒ the block is omitted). Read-only, best-effort, never breaks the turn.
 	WorkflowRunLister WorkflowRunLister

@@ -125,3 +125,47 @@ func TestSessionProjectIdentityOverridesProcessDefaults(t *testing.T) {
 		})
 	}
 }
+
+// The nil-versus-empty distinction is a real instruction, not pedantry: a caller sending
+// `"skills": []` on session.open is explicitly clearing whatever `--skill` this server
+// process was launched with, and length-testing would silently reverse that into
+// "inherit them" — pinning a session to runbooks it asked not to have.
+func TestApplySliceIfSet(t *testing.T) {
+	defaults := []string{"proc.default"}
+
+	t.Run("nil inherits the process default", func(t *testing.T) {
+		dst := append([]string(nil), defaults...)
+		applySliceIfSet(&dst, nil)
+		if len(dst) != 1 || dst[0] != "proc.default" {
+			t.Fatalf("dst = %v, want the process default preserved", dst)
+		}
+	})
+
+	t.Run("non-nil empty CLEARS the process default", func(t *testing.T) {
+		dst := append([]string(nil), defaults...)
+		applySliceIfSet(&dst, []string{})
+		if len(dst) != 0 {
+			t.Fatalf("dst = %v, want an explicit empty array to clear the default", dst)
+		}
+	})
+
+	t.Run("non-empty replaces", func(t *testing.T) {
+		dst := append([]string(nil), defaults...)
+		applySliceIfSet(&dst, []string{"a.one", "b.two"})
+		if len(dst) != 2 || dst[0] != "a.one" || dst[1] != "b.two" {
+			t.Fatalf("dst = %v, want the session's own list in order", dst)
+		}
+	})
+
+	// The decoded session argument must not stay aliased into the process-level options
+	// that seed EVERY later session — one caller's pins would leak into the next.
+	t.Run("copies defensively", func(t *testing.T) {
+		src := []string{"a.one"}
+		var dst []string
+		applySliceIfSet(&dst, src)
+		src[0] = "mutated"
+		if dst[0] != "a.one" {
+			t.Fatalf("dst aliased the source: %v", dst)
+		}
+	})
+}

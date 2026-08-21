@@ -265,7 +265,19 @@ func (f *fakeBackend) handleCapabilities(w http.ResponseWriter, _ *http.Request)
 			// the fail-closed branch, which is the branch that cannot regress.
 			"display_context": true,
 		},
-		"skills": map[string]any{"catalog_revision": "sha256:test", "manual_resolve": false},
+		"skills": map[string]any{
+			"catalog_revision": "sha256:test",
+			"manual_resolve":   false,
+			// Advertised for the same reason display_context above is: a fake that withheld
+			// it would leave every end-to-end path exercising only the fail-closed branch,
+			// which is the branch that cannot regress. With it on, an e2e --skill run
+			// actually reaches the wire.
+			"pinned_skill_ids": true,
+			"catalog": []map[string]any{
+				{"id": "daintree.foundation", "title": "Foundation"},
+				{"id": "daintree.orchestration.multi-agent", "title": "Multi-agent orchestration"},
+			},
+		},
 		"tasks": []string{
 			"checkpoint", "memory_distill", "watcher_classify", "terminal_judge",
 			"terminal_summarize", "terminal_extract_text", "terminal_extract_json",

@@ -63,14 +63,28 @@ func RunHost(ctx context.Context, opts Options) int {
 			return nil, err
 		}
 		a, err := app.Create(app.CreateOptions{
-			Overrides: overrides,
-			SessionID: params.SessionID, // appSessionId: resume id when resuming
+			Overrides:      overrides,
+			SessionID:      params.SessionID, // appSessionId: resume id when resuming
+			PinnedSkillIDs: opts.PinnedSkillIDs,
 		})
 		if err != nil {
 			own.Release()
 			return nil, err
 		}
 		a.AdoptAsCurrentSession()
+		// Negotiate --skill before the host serves a frame. The protocol has no warning
+		// frame, so both halves go to stderr — the same channel the auto-approve notice
+		// below uses, and for the same reason: a condition that changes what every turn
+		// means must not be invisible just because the wire cannot carry it.
+		pinNotice, perr := a.PreparePinnedSkills(fctx)
+		if perr != nil {
+			_ = a.Shutdown()
+			own.Release()
+			return nil, perr
+		}
+		if pinNotice != "" {
+			fmt.Fprintf(os.Stderr, "daintree-assistant host: %s\n", pinNotice)
+		}
 		// Same trap as the one-shot path: the host runs as the `main` actor, so
 		// AUTO_APPROVE bypasses its confirmation bridge entirely — Daintree would be
 		// driving a runtime that performs tier-allowed mutations without ever asking.

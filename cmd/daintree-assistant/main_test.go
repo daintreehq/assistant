@@ -468,3 +468,126 @@ func TestParseArgsRunSchedulerTimeoutRuleIsRouteIndependent(t *testing.T) {
 		}
 	}
 }
+
+// --skill is the binary's only repeatable flag, so it is the only one whose accumulation
+// semantics are worth pinning. The failures below are all silent-underrun shapes: a pin
+// that vanished is indistinguishable from one that worked, which is the exact ambiguity
+// this flag was added to remove.
+func TestParseArgsCollectsRepeatedSkills(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{name: "none", args: []string{"hi"}},
+		{name: "one", args: []string{"--skill", "a.one", "hi"}, want: []string{"a.one"}},
+		{name: "repeated, in order", args: []string{"--skill", "b.two", "--skill", "a.one", "hi"}, want: []string{"b.two", "a.one"}},
+		{name: "inline value spelling", args: []string{"--skill=a.one", "hi"}, want: []string{"a.one"}},
+		{name: "single-dash spelling", args: []string{"-skill", "a.one", "hi"}, want: []string{"a.one"}},
+		{name: "exact repeat collapses", args: []string{"--skill", "a.one", "--skill", "a.one", "hi"}, want: []string{"a.one"}},
+		{name: "surrounding space trimmed", args: []string{"--skill", "  a.one  ", "hi"}, want: []string{"a.one"}},
+		// A comma is a legal character in an opaque backend id, so inventing it as a
+		// separator would make such an id unnameable. One pin per occurrence.
+		{name: "commas are not a separator", args: []string{"--skill", "a,b", "hi"}, want: []string{"a,b"}},
+		{name: "interactive launch may pin", args: []string{"--skill", "a.one"}, want: []string{"a.one"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseArgs(tt.args)
+			if err != nil {
+				t.Fatalf("parseArgs() error = %v", err)
+			}
+			pins := got.Options.PinnedSkillIDs
+			if len(pins) != len(tt.want) {
+				t.Fatalf("pins = %v, want %v", pins, tt.want)
+			}
+			for i := range pins {
+				if pins[i] != tt.want[i] {
+					t.Fatalf("pins = %v, want %v", pins, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// Every rejection here exists because the alternative is a launch that looks pinned and
+// is not — or, for --list-skills, a route that quietly swallowed something the caller
+// meant.
+func TestParseArgsRejectsMeaninglessSkillCombinations(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		// A harness expanding an unset shell variable produces exactly this, and running
+		// unpinned would be the worst possible interpretation of it.
+		{name: "empty value", args: []string{"--skill=", "hi"}, want: "empty value"},
+		{name: "blank value", args: []string{"--skill", "   ", "hi"}, want: "empty value"},
+		// --timeout's "silently ignored elsewhere" is the wrong precedent for this flag.
+		{name: "pin on doctor", args: []string{"--skill", "a.one", "doctor"}, want: "never runs a turn"},
+		{name: "pin on status", args: []string{"--skill", "a.one", "status"}, want: "never runs a turn"},
+		{name: "pin on daemon", args: []string{"--skill", "a.one", "daemon"}, want: "never runs a turn"},
+		{name: "list with a prompt", args: []string{"--list-skills", "hello"}, want: "does not take a prompt"},
+		{name: "list with a command", args: []string{"--list-skills", "doctor"}, want: "does not take a prompt"},
+		{name: "list plus pin", args: []string{"--list-skills", "--skill", "a.one"}, want: "do not go together"},
+		{name: "list with stdio", args: []string{"--list-skills", "--stdio"}, want: "--stdio is only valid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseArgs(tt.args)
+			if err == nil {
+				t.Fatalf("parseArgs(%v) succeeded; want an error naming %q", tt.args, tt.want)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want it to mention %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// A pin IS meaningful on the two routes that serve turns; rejecting it there would break
+// the parity the issue asks for between argv and daintree.session.open.
+func TestParseArgsAllowsSkillsOnTurnServingRoutes(t *testing.T) {
+	for _, args := range [][]string{
+		{"--skill", "a.one", "mcp"},
+		{"--skill", "a.one", "mcp", "--stdio"},
+		{"--skill", "a.one", "host", "--stdio"},
+	} {
+		got, err := parseArgs(args)
+		if err != nil {
+			t.Fatalf("parseArgs(%v) error = %v", args, err)
+		}
+		if len(got.Options.PinnedSkillIDs) != 1 {
+			t.Fatalf("parseArgs(%v) dropped the pin: %v", args, got.Options.PinnedSkillIDs)
+		}
+	}
+}
+
+// --list-skills is carved out AHEAD of the "--json requires a prompt" rule for the same
+// reason `doctor --json` is: a listing a script cannot parse is not one, and the whole
+// point of the catalog is to feed --skill from a script.
+func TestParseArgsRoutesListSkills(t *testing.T) {
+	for _, args := range [][]string{{"--list-skills"}, {"--list-skills", "--json"}, {"--json", "--list-skills"}} {
+		got, err := parseArgs(args)
+		if err != nil {
+			t.Fatalf("parseArgs(%v) error = %v", args, err)
+		}
+		if got.Route != routeListSkills {
+			t.Fatalf("parseArgs(%v) route = %v, want routeListSkills", args, got.Route)
+		}
+	}
+	// The general rule it is carved out of must still hold for everyone else.
+	if _, err := parseArgs([]string{"--json"}); err == nil {
+		t.Fatal("a bare --json must still require a prompt")
+	}
+}
+
+func TestUsageDocumentsSkillFlags(t *testing.T) {
+	var buf bytes.Buffer
+	writeUsage(&buf, "test")
+	for _, want := range []string{"--skill ID", "--list-skills", "repeatable"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("usage does not mention %q:\n%s", want, buf.String())
+		}
+	}
+}

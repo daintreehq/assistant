@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -1297,4 +1298,106 @@ func TestSessionOpenSchemaDocumentsProjectIdentity(t *testing.T) {
 		return
 	}
 	t.Fatal("daintree.session.open is not offered")
+}
+
+// The two headless surfaces must not drift: a runbook you can pin from argv you must be
+// able to pin here. That starts with the argument being discoverable — a caller that
+// cannot see the field in the schema has to read our source to find it, which is the
+// exact problem --list-skills exists to end.
+func TestSessionOpenAdvertisesTheSkillsArgument(t *testing.T) {
+	cs, _ := connect(t, func(_, _ context.Context, _ OpenParams) (Runtime, error) {
+		return newFakeRuntime("ses_test"), nil
+	})
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	var open *mcp.Tool
+	for _, tool := range res.Tools {
+		if tool.Name == "daintree.session.open" {
+			open = tool
+		}
+	}
+	if open == nil || open.InputSchema == nil {
+		t.Fatal("daintree.session.open is missing or has no schema")
+	}
+	b, err := json.Marshal(open.InputSchema)
+	if err != nil {
+		t.Fatalf("marshal schema: %v", err)
+	}
+	schema := string(b)
+	if !strings.Contains(schema, `"skills"`) {
+		t.Fatalf("session.open does not advertise a skills argument:\n%s", schema)
+	}
+	// A caller told to pass an id needs to be told where ids come from, or the field is
+	// only usable by someone who already read the backend's source.
+	if !strings.Contains(schema, "--list-skills") {
+		t.Fatalf("the skills argument does not say how to discover an id:\n%s", schema)
+	}
+}
+
+// The pins must reach the factory verbatim, and nil must stay nil so the merge below it
+// can still tell "omitted" from "explicitly cleared".
+func TestSessionOpenPassesSkillsThrough(t *testing.T) {
+	var got OpenParams
+	// A distinct id per open: the registry (rightly) refuses to reopen one that is
+	// already live, and this test deliberately opens twice to compare "given" against
+	// "omitted".
+	opened := 0
+	cs, _ := connect(t, func(_, _ context.Context, p OpenParams) (Runtime, error) {
+		got = p
+		opened++
+		return newFakeRuntime(fmt.Sprintf("ses_test_%d", opened)), nil
+	})
+	var out SessionOutput
+	if err := call(t, cs, "daintree.session.open",
+		OpenInput{Project: "/repo", Skills: []string{"b.two", "a.one"}}, &out); err != nil {
+		t.Fatalf("session.open: %v", err)
+	}
+	if len(got.Skills) != 2 || got.Skills[0] != "b.two" || got.Skills[1] != "a.one" {
+		t.Fatalf("Skills = %v, want [b.two a.one] in order", got.Skills)
+	}
+
+	got = OpenParams{}
+	if err := call(t, cs, "daintree.session.open", OpenInput{Project: "/repo"}, &out); err != nil {
+		t.Fatalf("session.open: %v", err)
+	}
+	if got.Skills != nil {
+		t.Fatalf("an omitted skills argument must stay nil so it can inherit the process default, got %#v", got.Skills)
+	}
+}
+
+// Trimming a blank entry away would open a session pinned to LESS than was asked for —
+// the same silent underrun `--skill=` is rejected for at the argument boundary.
+func TestSessionOpenRejectsABlankSkillID(t *testing.T) {
+	cs, _ := connect(t, func(_, _ context.Context, _ OpenParams) (Runtime, error) {
+		return newFakeRuntime("ses_test"), nil
+	})
+	var out SessionOutput
+	err := call(t, cs, "daintree.session.open", OpenInput{Project: "/repo", Skills: []string{"a.one", "  "}}, &out)
+	if err == nil {
+		t.Fatal("a blank skills entry must fail the open rather than being silently dropped")
+	}
+	if !strings.Contains(err.Error(), "skills[1]") {
+		t.Fatalf("the error must name which entry was blank: %v", err)
+	}
+}
+
+// The non-fatal half of the pin preflight (pinning supported, no catalog to check
+// against) has to reach the caller, and SessionOutput.Warnings is the field they already
+// read for "conditions that will silently ruin a run".
+func TestSessionOpenSurfacesThePinPreflightAdvisory(t *testing.T) {
+	cs, _ := connect(t, func(_, _ context.Context, _ OpenParams) (Runtime, error) {
+		rt := newFakeRuntime("ses_test")
+		rt.facts.PinnedSkills = []string{"a.one"}
+		rt.facts.PinPreflightWarning = "this backend advertises no skill catalog"
+		return rt, nil
+	})
+	out := openSession(t, cs)
+	if !strings.Contains(strings.Join(out.Warnings, " | "), "no skill catalog") {
+		t.Fatalf("the pin advisory did not reach the caller: %v", out.Warnings)
+	}
+	if len(out.Facts.PinnedSkills) != 1 || out.Facts.PinnedSkills[0] != "a.one" {
+		t.Fatalf("a caller that inherited a server-level pin must be able to see it: %+v", out.Facts)
+	}
 }

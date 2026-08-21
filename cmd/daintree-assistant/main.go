@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -86,6 +87,8 @@ func main() {
 		code = cli.RunReset(ctx, opts, parsed.ResetScope, parsed.ResetOptions)
 	case routeSupportBundle:
 		code = cli.RunSupportBundle(ctx, opts, parsed.SupportBundle)
+	case routeListSkills:
+		code = cli.RunListSkills(ctx, opts)
 	default:
 		code = cli.Run(ctx, opts)
 	}
@@ -107,6 +110,7 @@ const (
 	routeStatus
 	routeReset
 	routeSupportBundle
+	routeListSkills
 )
 
 // parsedArgs is the pure result of command-line parsing. main is the only place
@@ -177,7 +181,14 @@ func parseArgs(args []string) (parsedArgs, error) {
 		// `support-bundle` flags.
 		bundleOut   = fs.String("out", "", "")
 		bundleAudit = fs.Bool("include-audit", false, "")
+		// Skill controls. `--skill` is the repo's only repeatable flag, so it is the only
+		// one registered through fs.Var rather than fs.String — one pin per occurrence,
+		// deliberately NOT comma-splitting, because a skill id is an opaque backend key
+		// and inventing a separator inside it would make a legal id unnameable.
+		skills     skillIDFlags
+		listSkills = fs.Bool("list-skills", false, "")
 	)
+	fs.Var(&skills, "skill", "")
 
 	flagArgs, positionals, help, forcePrompt, err := splitInterspersedArgs(fs, args)
 	if err != nil {
@@ -273,9 +284,30 @@ func parseArgs(args []string) (parsedArgs, error) {
 		DebugLog:                boolFlag("debug-log", debugLog),
 		Timeout:                 *timeout,
 		RunScheduler:            *runScheduler,
+
+		PinnedSkillIDs: skills,
 	}
 
 	parsed := parsedArgs{Options: opts, Route: routeDefault}
+	// --list-skills is a read-and-print, and it is carved out FIRST — ahead of the
+	// subcommand switch and, crucially, ahead of the "--json requires a prompt" rule
+	// below, for the same reason `doctor --json` is: a listing a script cannot parse is
+	// not one. It takes no prompt and no subcommand, and pairing it with --skill is a
+	// contradiction (you cannot pin an id in the same breath as asking what the ids are),
+	// so both are refused rather than silently ignored.
+	if *listSkills {
+		if len(positionals) > 0 {
+			return parsedArgs{}, fmt.Errorf("--list-skills does not take a prompt or a command: %s", strings.Join(positionals, " "))
+		}
+		if len(skills) > 0 {
+			return parsedArgs{}, errors.New("--list-skills and --skill do not go together: list the catalog first, then pin an id from it")
+		}
+		if *stdio {
+			return parsedArgs{}, stdioRequiresHostError()
+		}
+		parsed.Route = routeListSkills
+		return parsed, nil
+	}
 	// `doctor --json` is a real thing: doctor is the release gate, and a gate that can
 	// only be read by a human is not one. It is carved out BEFORE the --json rule below
 	// because that rule exists to keep a PROMPT named "doctor" working — and `-- doctor`
@@ -284,6 +316,9 @@ func parseArgs(args []string) (parsedArgs, error) {
 		parsed.Route = routeDoctor
 		if *stdio {
 			return parsedArgs{}, stdioRequiresHostError()
+		}
+		if len(skills) > 0 {
+			return parsedArgs{}, errors.New("--skill has no effect on \"doctor\", which never runs a turn")
 		}
 		return parsed, nil
 	}
@@ -350,6 +385,13 @@ func parseArgs(args []string) (parsedArgs, error) {
 		if parsed.Route != routeDefault {
 			if *stdio && parsed.Route != routeHost && parsed.Route != routeMCP {
 				return parsedArgs{}, stdioRequiresHostError()
+			}
+			// A pin is meaningless on a route that never runs a turn, and --timeout's
+			// documented "silently ignored elsewhere" is the WRONG precedent to follow
+			// here: this whole flag exists because a --skill that does nothing looks
+			// exactly like one that worked. Say so at the argument boundary instead.
+			if len(skills) > 0 && !routeRunsTurns(parsed.Route) {
+				return parsedArgs{}, fmt.Errorf("--skill has no effect on %q, which never runs a turn", positionals[0])
 			}
 			return parsed, nil
 		}
@@ -442,6 +484,35 @@ func optionName(token string) (name string, inlineValue bool) {
 	return name, false
 }
 
+// skillIDFlags accumulates a repeatable --skill. Go's stock FlagSet has no repeatable
+// string, and this is the first flag in the binary that needs one.
+//
+// It rejects an empty occurrence for the same reason the empty-value guard below rejects
+// `--state-dir=`: a harness expanding an unset shell variable produces `--skill=`, and
+// quietly ignoring it would run unpinned — the one outcome this flag exists to prevent.
+// Exact repeats are collapsed (first occurrence wins) rather than rejected, because
+// naming the same runbook twice is a harmless script artifact, not a mistake worth
+// failing a launch over.
+//
+// Case is preserved and commas are not split: the id is the backend's own key.
+type skillIDFlags []string
+
+func (v *skillIDFlags) String() string { return strings.Join(*v, ",") }
+
+func (v *skillIDFlags) Set(raw string) error {
+	id := strings.TrimSpace(raw)
+	if id == "" {
+		return errors.New("--skill was given an empty value; omit the flag to let the backend's selector choose")
+	}
+	for _, have := range *v {
+		if have == id {
+			return nil
+		}
+	}
+	*v = append(*v, id)
+	return nil
+}
+
 func isBoolFlag(f *flag.Flag) bool {
 	b, ok := f.Value.(interface{ IsBoolFlag() bool })
 	return ok && b.IsBoolFlag()
@@ -451,6 +522,19 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 	set := false
 	fs.Visit(func(f *flag.Flag) { set = set || f.Name == name })
 	return set
+}
+
+// routeRunsTurns reports whether a route ever opens a backend turn, which is the only
+// thing a pinned skill can affect. `host` and `mcp` both serve sessions that do, so a
+// process-level --skill is a legitimate default for them (the MCP client can still
+// override it per session.open); doctor/status/daemon/reset/support-bundle never do.
+func routeRunsTurns(r route) bool {
+	switch r {
+	case routeDefault, routeHost, routeMCP:
+		return true
+	default:
+		return false
+	}
 }
 
 func rejectCommandArgs(command string, args []string) error {
@@ -504,6 +588,8 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "  --timeout DURATION  cancel a one-shot run after this long (e.g. 10m; 0 = no limit)")
 	fmt.Fprintln(w, "  --run-scheduler     run the scheduler during a one-shot and await its async work")
 	fmt.Fprintln(w, "                      before exiting (requires --timeout)")
+	fmt.Fprintln(w, "  --skill ID          load this backend runbook on every turn (repeatable)")
+	fmt.Fprintln(w, "  --list-skills       print the runbooks this backend can load, and exit")
 	fmt.Fprintln(w, "  --yes               skip the reset confirmation (required without a TTY)")
 	fmt.Fprintln(w, "  --no-backup         skip the reset's timestamped backup")
 	fmt.Fprintln(w, "  --out PATH          support-bundle destination")

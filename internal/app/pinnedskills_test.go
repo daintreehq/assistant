@@ -1,0 +1,253 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/config"
+)
+
+// pinCapableApp builds an offline App whose backend answers a scripted capability
+// descriptor, with `--skill` pins already named. The counter it returns is what proves
+// the preflight's cost: an ordinary launch must not pay a capability GET.
+func pinCapableApp(t *testing.T, pins []string, caps backend.Capabilities, capsErr error) (*App, *int32) {
+	t.Helper()
+	dir := t.TempDir()
+	var calls int32
+	fb := &fakeBackend{caps: func() (backend.Capabilities, error) {
+		atomic.AddInt32(&calls, 1)
+		return caps, capsErr
+	}}
+	a, err := Create(CreateOptions{
+		Overrides: config.ConfigOverrides{
+			Offline:              boolPtr(true),
+			StateDir:             &dir,
+			ProjectPath:          &dir,
+			Tier:                 strPtr("operator"),
+			WorkflowIntelligence: boolPtr(false),
+		},
+		BackendOverride: fb,
+		PinnedSkillIDs:  pins,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Shutdown() })
+	return a, &calls
+}
+
+// capsWithCatalog is a backend that accepts pins and advertises a catalog.
+func capsWithCatalog(refs ...backend.SkillRef) backend.Capabilities {
+	caps := backend.Capabilities{}
+	caps.Skills.PinnedSkillIDs = true
+	caps.Skills.CatalogRevision = "sha256:test"
+	// Non-nil even when empty: an advertised empty catalog is a real answer.
+	caps.Skills.Catalog = append([]backend.SkillRef{}, refs...)
+	return caps
+}
+
+// The cost contract. The capability fetch lives in the preflight rather than a boot
+// handshake precisely so an ordinary launch keeps its current network profile — if this
+// ever regresses, every scripted run in the fleet grows a round trip nobody asked for.
+func TestPreparePinnedSkillsMakesNoCallWithoutPins(t *testing.T) {
+	a, calls := pinCapableApp(t, nil, capsWithCatalog(), nil)
+	notice, err := a.PreparePinnedSkills(context.Background())
+	if err != nil || notice != "" {
+		t.Fatalf("PreparePinnedSkills with no pins = (%q, %v), want a silent no-op", notice, err)
+	}
+	if got := atomic.LoadInt32(calls); got != 0 {
+		t.Fatalf("an unpinned launch fetched capabilities %d time(s); it must fetch none", got)
+	}
+	if a.PinnedSkillIDs() != nil {
+		t.Fatalf("PinnedSkillIDs = %v, want nil", a.PinnedSkillIDs())
+	}
+}
+
+// A backend that never advertises the capability must not be sent the field (it is
+// extra="forbid" server-side, so the turn would 422) AND must not be run against
+// silently — an unpinned run that looks pinned is the failure --skill exists to prevent,
+// so refusing to launch is the only honest answer.
+func TestPreparePinnedSkillsRefusesAnUnawareBackend(t *testing.T) {
+	a, _ := pinCapableApp(t, []string{"daintree.foundation"}, backend.Capabilities{}, nil)
+	_, err := a.PreparePinnedSkills(context.Background())
+	if err == nil {
+		t.Fatal("a backend that does not advertise skills.pinned_skill_ids must fail the launch, not run unpinned")
+	}
+	if !strings.Contains(err.Error(), "does not accept pinned skills") {
+		t.Fatalf("error does not name the cause: %v", err)
+	}
+	// The gate must stay shut regardless — nothing may reach the wire.
+	if a.backendAcceptsPinnedSkillIDs() {
+		t.Fatal("gate opened against a backend that advertises nothing")
+	}
+}
+
+// "We could not ask" is not evidence that pinning works. Proceeding would send the field
+// blind (422) or drop it silently; both are worse than a clear failure.
+func TestPreparePinnedSkillsFailsWhenCapabilitiesCannotBeRead(t *testing.T) {
+	a, _ := pinCapableApp(t, []string{"x"}, backend.Capabilities{}, errors.New("dial tcp: refused"))
+	_, err := a.PreparePinnedSkills(context.Background())
+	if err == nil {
+		t.Fatal("an unreadable capability descriptor must fail a pinned launch")
+	}
+	if !strings.Contains(err.Error(), "dial tcp: refused") {
+		t.Fatalf("error drops the underlying cause: %v", err)
+	}
+}
+
+// nil catalog (a backend that predates the listing) is NOT an empty catalog. It cannot
+// answer, so the id rides on the backend's own warning backstop — advisory, not fatal.
+func TestPreparePinnedSkillsWarnsWhenNoCatalogIsAdvertised(t *testing.T) {
+	caps := backend.Capabilities{}
+	caps.Skills.PinnedSkillIDs = true // catalog stays nil
+	a, _ := pinCapableApp(t, []string{"beta", "alpha"}, caps, nil)
+
+	notice, err := a.PreparePinnedSkills(context.Background())
+	if err != nil {
+		t.Fatalf("a missing catalog is the SERVER's gap and must not fail the launch: %v", err)
+	}
+	if notice == "" {
+		t.Fatal("a pin that could not be checked must say so")
+	}
+	// Sorted so the advisory is stable regardless of pin order.
+	if !strings.Contains(notice, `"alpha", "beta"`) {
+		t.Fatalf("advisory does not name the unchecked ids in stable order: %q", notice)
+	}
+	if !a.backendAcceptsPinnedSkillIDs() {
+		t.Fatal("pinning is supported here; the gate must be open")
+	}
+}
+
+// An advertised empty catalog IS an answer: this backend loads nothing, so every id is
+// wrong. Collapsing it with nil would let a typo through on exactly the deployment that
+// could have caught it.
+func TestPreparePinnedSkillsRejectsAgainstAnEmptyCatalog(t *testing.T) {
+	a, _ := pinCapableApp(t, []string{"anything"}, capsWithCatalog(), nil)
+	if _, err := a.PreparePinnedSkills(context.Background()); err == nil {
+		t.Fatal("an advertised empty catalog knows every id is unknown; the launch must fail")
+	}
+}
+
+// The common case the whole feature is for: a typo, caught before a turn is spent, and
+// named as a near miss rather than as a run that looked fine.
+func TestPreparePinnedSkillsReportsEveryUnknownIDWithNearMisses(t *testing.T) {
+	caps := capsWithCatalog(
+		backend.SkillRef{ID: "daintree.foundation", Title: "Foundation"},
+		backend.SkillRef{ID: "daintree.orchestration.multi-agent", Title: "Multi-agent"},
+	)
+	a, _ := pinCapableApp(t, []string{"daintree.foundatoin", "totally.unrelated.thing"}, caps, nil)
+
+	_, err := a.PreparePinnedSkills(context.Background())
+	if err == nil {
+		t.Fatal("unknown ids must fail before a turn is spent")
+	}
+	msg := err.Error()
+	// BOTH failures in one message: a caller who mistyped two ids should not have to
+	// re-run to discover the second.
+	if !strings.Contains(msg, "daintree.foundatoin") || !strings.Contains(msg, "totally.unrelated.thing") {
+		t.Fatalf("not every unknown id was reported: %v", msg)
+	}
+	if !strings.Contains(msg, `did you mean "daintree.foundation"?`) {
+		t.Fatalf("a one-transposition typo must produce a near miss: %v", msg)
+	}
+	// A far-off id must NOT be guessed at — a wrong suggestion sends the reader to fix
+	// something that was never the problem.
+	if strings.Contains(msg, `"totally.unrelated.thing" (did you mean`) {
+		t.Fatalf("a far-off id should not be guessed at: %v", msg)
+	}
+	if !strings.Contains(msg, "--list-skills") {
+		t.Fatalf("the error must point at the way to discover the real ids: %v", msg)
+	}
+}
+
+func TestPreparePinnedSkillsAcceptsKnownIDs(t *testing.T) {
+	caps := capsWithCatalog(
+		backend.SkillRef{ID: "a.one", Title: "One"},
+		backend.SkillRef{ID: "b.two", Title: "Two"},
+	)
+	a, _ := pinCapableApp(t, []string{"b.two", "a.one"}, caps, nil)
+	notice, err := a.PreparePinnedSkills(context.Background())
+	if err != nil || notice != "" {
+		t.Fatalf("known ids = (%q, %v), want a clean pass", notice, err)
+	}
+	// Order is preserved through Create: the backend admits pins in order and budgets
+	// them against its cap, so a reordered list is a different request.
+	if got := a.PinnedSkillIDs(); len(got) != 2 || got[0] != "b.two" || got[1] != "a.one" {
+		t.Fatalf("PinnedSkillIDs = %v, want the launch order [b.two a.one]", got)
+	}
+}
+
+// Case-sensitive matching, case-insensitive suggestion: the id is the backend's key, so
+// a wrong case is a real miss — but it is also exactly the typo a suggestion should catch.
+func TestPinnedSkillIDMatchingIsCaseSensitiveButSuggestsAcrossCase(t *testing.T) {
+	caps := capsWithCatalog(backend.SkillRef{ID: "daintree.foundation", Title: "Foundation"})
+	a, _ := pinCapableApp(t, []string{"Daintree.Foundation"}, caps, nil)
+	_, err := a.PreparePinnedSkills(context.Background())
+	if err == nil {
+		t.Fatal("a wrong-case id is not the catalog's id and must not silently match")
+	}
+	if !strings.Contains(err.Error(), `did you mean "daintree.foundation"?`) {
+		t.Fatalf("a case-only difference must be suggested: %v", err)
+	}
+}
+
+// THE race the endpoint pin exists for, in the pin gate this time: a descriptor from
+// another endpoint is not evidence about this one. Believed, it would attach a field the
+// live backend forbids and 422 every remaining turn.
+func TestPinGateDistrustsCapabilitiesFromAnotherEndpoint(t *testing.T) {
+	a, _ := pinCapableApp(t, []string{"x"}, capsWithCatalog(backend.SkillRef{ID: "x"}), nil)
+	if _, err := a.PreparePinnedSkills(context.Background()); err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	if !a.backendAcceptsPinnedSkillIDs() {
+		t.Fatal("gate should be open after a successful preflight")
+	}
+
+	caps := backend.Capabilities{}
+	caps.Skills.PinnedSkillIDs = true
+	a.backendCaps.Store(&backendCapsSnapshot{baseURL: "http://somewhere-else.test", caps: caps})
+	if a.backendAcceptsPinnedSkillIDs() {
+		t.Fatal("an answer from a DIFFERENT endpoint must never open the gate")
+	}
+}
+
+func TestNormalizePinnedSkillIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"nil stays nil", nil, nil},
+		{"blank-only collapses to nil", []string{"", "  "}, nil},
+		{"trims", []string{"  a.one  "}, []string{"a.one"}},
+		{"drops exact repeats, keeps first-seen order", []string{"b", "a", "b"}, []string{"b", "a"}},
+		{"case is preserved — the id is the backend's key", []string{"A.One"}, []string{"A.One"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := NormalizePinnedSkillIDs(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("got %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// The App's list must not be mutable through what it hands out — a caller that sorts its
+// copy would otherwise silently reorder what every later turn pins.
+func TestPinnedSkillIDsReturnsACopy(t *testing.T) {
+	a, _ := pinCapableApp(t, []string{"a", "b"}, capsWithCatalog(), nil)
+	got := a.PinnedSkillIDs()
+	got[0] = "mutated"
+	if again := a.PinnedSkillIDs(); again[0] != "a" {
+		t.Fatalf("caller mutated the App's pins through the returned slice: %v", again)
+	}
+}
