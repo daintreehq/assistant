@@ -81,6 +81,7 @@ func TestSessionProjectIdentityOverridesProcessDefaults(t *testing.T) {
 		Prompt:     "a launch prompt",
 		HasPrompt:  true,
 		PromptFile: "-",
+		MultiTurn:  true,
 	}
 
 	// Both fields, both directions — a table so deleting EITHER overlay line fails.
@@ -118,9 +119,12 @@ func TestSessionProjectIdentityOverridesProcessDefaults(t *testing.T) {
 			if session.WindowID != tc.wantWin {
 				t.Errorf("WindowID = %q, want %q", session.WindowID, tc.wantWin)
 			}
-			if session.Prompt != "" || session.HasPrompt || session.PromptFile != "" {
-				t.Errorf("one-shot prompt state leaked into a session: prompt=%q hasPrompt=%v promptFile=%q",
-					session.Prompt, session.HasPrompt, session.PromptFile)
+			// MultiTurn is in this set for the sharpest version of the same reason: it
+			// reads prompts from stdin line by line, which on the stdio transport is the
+			// JSON-RPC stream carrying the protocol itself.
+			if session.Prompt != "" || session.HasPrompt || session.PromptFile != "" || session.MultiTurn {
+				t.Errorf("one-shot prompt state leaked into a session: prompt=%q hasPrompt=%v promptFile=%q multiTurn=%v",
+					session.Prompt, session.HasPrompt, session.PromptFile, session.MultiTurn)
 			}
 		})
 	}

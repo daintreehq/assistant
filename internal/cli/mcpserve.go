@@ -228,7 +228,10 @@ func sessionOptions(base Options, p mcpserver.OpenParams) Options {
 	// prompt must not replay it into a session, and on the stdio transport a
 	// --prompt-file of "-" would be read off the JSON-RPC stream that is carrying the
 	// protocol itself.
-	o.Prompt, o.HasPrompt, o.PromptFile = "", false, ""
+	// MultiTurn is cleared for the same reason and then some: it reads prompts from
+	// stdin line by line, which on this transport is the JSON-RPC stream carrying the
+	// protocol itself.
+	o.Prompt, o.HasPrompt, o.PromptFile, o.MultiTurn = "", false, "", false
 	applyIfSet(&o.Project, p.Project)
 	applyIfSet(&o.BackendURL, p.BackendURL)
 	applyIfSet(&o.APIKeyFile, p.APIKeyFile)

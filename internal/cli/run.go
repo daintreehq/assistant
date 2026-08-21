@@ -67,8 +67,14 @@ type Options struct {
 	// not the prompt itself, for the same reason parseArgs is I/O-free: the flag layer
 	// captures it and RunOneShot reads it, inside the --timeout bound.
 	PromptFile string
-	StateDir   string
-	LogDir     string
+	// MultiTurn runs a whole CONVERSATION in one process: one prompt per stdin line,
+	// each its own turn against the same session, all of it one JSONL transcript. It
+	// requires --json (without it the classic REPL on piped stdin is already exactly
+	// this) and refuses to share a run with either single-prompt source, since two
+	// prompt spellings at once is a mistake rather than a precedence question.
+	MultiTurn bool
+	StateDir  string
+	LogDir    string
 	// ProjectID scopes StateDir into a per-project subdirectory, so it is how a harness
 	// gets project isolation without hand-rolling state directories. WindowID is the
 	// other half of looking like a real Daintree window rather than a bare cwd.
@@ -364,10 +370,11 @@ func buildOverrides(opts Options, r *render.Renderer) (config.ConfigOverrides, e
 // Run routes per the top-level dispatch:
 //
 //	prompt        → RunOneShot
+//	--multi-turn  → RunOneShot (prompts come from stdin, one turn per line)
 //	--json no prompt → usage error (exit 2, stderr; normally caught by main)
 //	else          → RunInteractive
 func Run(ctx context.Context, opts Options) int {
-	if opts.HasPrompt {
+	if opts.HasPrompt || opts.MultiTurn {
 		return RunOneShot(ctx, opts)
 	}
 	if opts.JSON {
@@ -383,7 +390,14 @@ func RunOneShot(ctx context.Context, opts Options) int {
 	stderrR := render.New(os.Stderr)
 	var sink *jsonout.Sink
 	if opts.JSON {
-		sink = jsonout.New(os.Stdout, domain.NowMS)
+		// The multi-turn sink differs ONLY in that it brackets turns and latches the
+		// run's outcome across them; a single-prompt run keeps the plain constructor, so
+		// its stream is what it has always been down to the byte.
+		if opts.MultiTurn {
+			sink = jsonout.NewMultiTurn(os.Stdout, domain.NowMS)
+		} else {
+			sink = jsonout.New(os.Stdout, domain.NowMS)
+		}
 	}
 
 	// A --timeout bounds the run by CANCELLING it, so a turn already under way unwinds
@@ -435,6 +449,25 @@ func RunOneShot(ctx context.Context, opts Options) int {
 			return domain.OneShotExitCode.Cancelled
 		}
 		return domain.OneShotExitCode.Error
+	}
+
+	// The argument boundary already refuses these combinations; this is the same rule
+	// restated where the damage would happen, because Options is also assembled by
+	// callers that never went through parseArgs (the MCP server derives one per
+	// session). Without --json there is no sink for the loop to write to, and two
+	// prompt sources at once means one of them is silently ignored.
+	if opts.MultiTurn {
+		var bad error
+		switch {
+		case !opts.JSON:
+			bad = errors.New("--multi-turn requires --json")
+		case opts.HasPrompt || opts.PromptFile != "":
+			bad = errors.New("--multi-turn reads its prompts from stdin and cannot be combined with a prompt argument or --prompt-file")
+		}
+		if bad != nil {
+			reportError(bad)
+			return exitFor()
+		}
 	}
 
 	// The prompt file is read HERE, not in parseArgs: parsing stays I/O-free and
@@ -619,6 +652,16 @@ func RunOneShot(ctx context.Context, opts Options) int {
 			} else {
 				stderrR.Warn(pinNotice)
 			}
+		}
+		// One prompt or a whole scripted conversation — the difference is entirely in
+		// this statement. Everything above (lease, app, MCP, pins, scheduler, session
+		// header) is process-scoped and already right for a run of any number of turns,
+		// and everything below (the async barrier, Shutdown, the terminal line) closes
+		// the PROCESS, not a turn.
+		if opts.MultiTurn {
+			err := runJSONTurns(ctx, a, sink, os.Stdin)
+			debuglog.BootTrace("oneshot.multiturn.done")
+			return err
 		}
 		_, err := a.Session.Send(ctx, opts.Prompt, agent.SendOptions{})
 		debuglog.BootTrace("oneshot.send.done")

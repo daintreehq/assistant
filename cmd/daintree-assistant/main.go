@@ -58,7 +58,11 @@ func main() {
 	// always a process shutdown; one-shot and subcommand paths additionally use
 	// SIGINT as ordinary context cancellation.
 	signals := []os.Signal{syscall.SIGTERM}
-	if route != routeDefault || opts.HasPrompt {
+	// MultiTurn belongs with the one-shot paths, not the interactive ones: it has no
+	// prompt argument, so HasPrompt is false, but it is headless and scripted and wants
+	// Ctrl-C to be ordinary context cancellation. Omitting it would leave the flag as the
+	// one scripted route a Ctrl-C could not stop.
+	if route != routeDefault || opts.HasPrompt || opts.MultiTurn {
 		signals = append(signals, os.Interrupt)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), signals...)
@@ -157,8 +161,14 @@ func parseArgs(args []string) (parsedArgs, error) {
 		// exercises, rather than being shell-quoted — and a prompt beginning with a dash
 		// no longer needs `--` first. "-" reads stdin.
 		promptFile = fs.String("prompt-file", "", "")
-		stateDir   = fs.String("state-dir", "", "")
-		logDir     = fs.String("log-dir", "", "")
+		// multiTurn is the plural of the whole one-shot idea: one process, one session,
+		// one prompt per stdin line, one JSONL transcript. It is a separate flag rather
+		// than a plural reading of --prompt-file because that flag's stdin spelling
+		// already means "all of stdin is ONE prompt", newlines included, and quietly
+		// re-cutting it at line boundaries would change what an existing harness asks.
+		multiTurn = fs.Bool("multi-turn", false, "")
+		stateDir  = fs.String("state-dir", "", "")
+		logDir    = fs.String("log-dir", "", "")
 		// The project identity pair. --project-id is the load-bearing one: it scopes the
 		// state directory into a per-project subdirectory, which is how a harness gets
 		// isolation without hand-rolling paths.
@@ -275,6 +285,7 @@ func parseArgs(args []string) (parsedArgs, error) {
 		BackendURL:              *backendURL,
 		APIKeyFile:              *apiKeyFile,
 		PromptFile:              *promptFile,
+		MultiTurn:               *multiTurn,
 		StateDir:                *stateDir,
 		LogDir:                  *logDir,
 		ProjectID:               *projectID,
@@ -407,6 +418,21 @@ func parseArgs(args []string) (parsedArgs, error) {
 	if *promptFile != "" && len(positionals) > 0 {
 		return parsedArgs{}, fmt.Errorf("--prompt-file and a prompt argument cannot be combined; pass the prompt one way")
 	}
+	// --multi-turn is a THIRD prompt source, so it obeys the same rule as the other two:
+	// naming more than one is a mistake, never a precedence question.
+	//
+	// It also insists on --json, which is not mere validation. Without it this flag would
+	// be a second, worse spelling of something that already exists — the classic REPL on
+	// piped stdin is multi-turn today — and the whole point of the flag is the half that
+	// route CANNOT do: emit the conversation as one JSONL transcript.
+	if *multiTurn {
+		if !*jsonOut {
+			return parsedArgs{}, fmt.Errorf("--multi-turn requires --json; for human-rendered multi-turn output pipe stdin to --classic")
+		}
+		if *promptFile != "" || len(positionals) > 0 {
+			return parsedArgs{}, fmt.Errorf("--multi-turn reads its prompts from stdin, one per line; it cannot be combined with a prompt argument or --prompt-file")
+		}
+	}
 	if len(positionals) > 0 {
 		// Join remaining tokens so an unquoted multi-word prompt still works; a single
 		// quoted arg passes through unchanged.
@@ -420,8 +446,8 @@ func parseArgs(args []string) (parsedArgs, error) {
 	if *promptFile != "" {
 		parsed.Options.HasPrompt = true
 	}
-	if *jsonOut && !parsed.Options.HasPrompt {
-		return parsedArgs{}, fmt.Errorf("--json requires a prompt")
+	if *jsonOut && !parsed.Options.HasPrompt && !*multiTurn {
+		return parsedArgs{}, fmt.Errorf("--json requires a prompt (or --multi-turn to read one prompt per line from stdin)")
 	}
 
 	return parsed, nil
@@ -577,6 +603,8 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "  --backend-url URL   assistant backend (env: DAINTREE_BACKEND_URL)")
 	fmt.Fprintln(w, "  --api-key-file PATH read the API key from a file (env: DAINTREE_API_KEY)")
 	fmt.Fprintln(w, "  --prompt-file PATH  read the one-shot prompt from a file ('-' for stdin)")
+	fmt.Fprintln(w, "  --multi-turn        run one prompt per stdin line as a conversation in one")
+	fmt.Fprintln(w, "                      session, all of it one JSONL transcript (requires --json)")
 	fmt.Fprintln(w, "  --state-dir PATH    state root (env: DAINTREE_ASSISTANT_STATE_DIR)")
 	fmt.Fprintln(w, "  --log-dir PATH      debug-log directory (env: DAINTREE_ASSISTANT_LOG_DIR)")
 	fmt.Fprintln(w, "  --project-id ID     Daintree project id (env: DAINTREE_PROJECT_ID)")
