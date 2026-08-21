@@ -105,59 +105,28 @@ func TestBackendContextCompactionClosesOnAnyContractDeviation(t *testing.T) {
 	}
 }
 
-// The boot warm-up must serve the compaction gate on surfaces that never perform an
-// explicit handshake — a classic REPL and the supervisor daemon run the long sessions
-// this feature exists for, and neither one asks.
-func TestBackendContextCompactionReadsTheBootWarmupCache(t *testing.T) {
+// The gate reads only what an EXPLICIT handshake left behind, and a /backend switch
+// therefore closes it until something negotiates with the new endpoint. That is the
+// documented limit (see backendContextCompaction), and it is the SAFE direction: a block
+// spliced on the strength of the old deployment's contract would rewrite this
+// conversation's history on a promise nobody made.
+func TestBackendSwitchClosesTheCompactionGate(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
 
-	a.compactionCaps.Store(compactionCapableSnapshot(a.Backend.BaseURL()))
+	before := a.Backend.BaseURL()
+	a.backendCaps.Store(compactionCapableSnapshot(before))
 	if _, ok := a.backendContextCompaction(); !ok {
-		t.Fatal("the warm-up's answer must open the gate")
+		t.Fatal("precondition: the gate should be open for the current endpoint")
 	}
 
-	// Pinned like the shared cache: an answer about a different deployment is not
-	// evidence about this one.
-	a.compactionCaps.Store(compactionCapableSnapshot("http://elsewhere.invalid"))
+	if _, err := a.SetBackendURL("http://127.0.0.1:8473"); err != nil {
+		t.Fatalf("switch failed: %v", err)
+	}
+	if a.Backend.BaseURL() == before {
+		t.Skip("endpoint did not change in this environment")
+	}
 	if _, ok := a.backendContextCompaction(); ok {
-		t.Fatal("a warm-up answer from another endpoint must not open the gate")
-	}
-}
-
-// The warm-up must NOT publish into the shared capability cache. That cache drives the
-// display-context and pinned-skill gates, which were built around an explicit handshake
-// — quietly changing when they start sending is a decision about other features that
-// this one has no business making.
-func TestCapabilityWarmupDoesNotDisturbTheSharedCache(t *testing.T) {
-	a := newOfflineApp(t)
-	defer a.Shutdown()
-
-	a.compactionCaps.Store(compactionCapableSnapshot(a.Backend.BaseURL()))
-	if a.backendCaps.Load() != nil {
-		t.Fatal("the warm-up must never write the shared capability cache")
-	}
-	if a.backendAcceptsDisplayContext() {
-		t.Fatal("the warm-up must not open the display gate")
-	}
-	if a.backendAcceptsPinnedSkillIDs() {
-		t.Fatal("the warm-up must not open the pinned-skill gate")
-	}
-}
-
-// An explicit handshake that answered for THIS endpoint is a real answer, and an
-// incompatible one must close the gate rather than fall through to a stale warm-up that
-// happens to be compatible.
-func TestBackendContextCompactionPrefersTheExplicitHandshake(t *testing.T) {
-	a := newOfflineApp(t)
-	defer a.Shutdown()
-
-	a.compactionCaps.Store(compactionCapableSnapshot(a.Backend.BaseURL()))
-	disabled := compactionCapableSnapshot(a.Backend.BaseURL())
-	disabled.caps.ContextCompaction.Enabled = false
-	a.backendCaps.Store(disabled)
-
-	if _, ok := a.backendContextCompaction(); ok {
-		t.Fatal("a negotiated answer for this endpoint must win over the warm-up")
+		t.Error("the previous endpoint's descriptor must not survive the switch")
 	}
 }

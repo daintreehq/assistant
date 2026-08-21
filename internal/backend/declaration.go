@@ -126,7 +126,7 @@ func (f *declarationFilter) resolve(final bool) (hadMarker, settled bool) {
 	// regressed and let the marker through.
 	leadBytes, leadRunes := 0, 0
 	for _, r := range buf {
-		if !unicode.IsSpace(r) {
+		if !declarationIsSpace(r) {
 			break
 		}
 		leadBytes += len(string(r))
@@ -153,4 +153,13 @@ func (f *declarationFilter) resolve(final bool) (hadMarker, settled bool) {
 		return false, false
 	}
 	return false, true
+}
+
+// declarationIsSpace is Python's str.isspace() set, which is what the backend's scanner
+// applies. It is unicode.IsSpace plus the four ASCII information separators
+// (U+001C-U+001F), which Go does not classify as space but Python does. Without them a
+// leaked marker preceded by a separator byte would be stripped server-side and rendered
+// here — a divergence in exactly the direction this guard exists to prevent.
+func declarationIsSpace(r rune) bool {
+	return unicode.IsSpace(r) || (r >= 0x1c && r <= 0x1f)
 }

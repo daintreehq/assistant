@@ -211,6 +211,10 @@ func (a *App) SetBackendURL(rawURL string) (string, error) {
 	// The capability descriptor is pinned to the endpoint that answered it, so the
 	// cached one is discarded on read rather than needing to be cleared here — a gate
 	// opened on the old deployment's answer would 422 every turn against the new one.
+	// Server-side context compaction reads the same cache and therefore goes quiet after
+	// a switch until something negotiates with the new endpoint — which is correct while
+	// nothing has: a block spliced on the strength of the old deployment's contract would
+	// rewrite this conversation's history on a promise nobody made.
 	return target, nil
 }
 

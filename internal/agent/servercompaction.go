@@ -235,8 +235,14 @@ func isCompactionBlockName(m models.ChatMessage) bool { return isCompactionBlock
 // compactionSpanToolClosed reports whether every tool call in [start,end) has its
 // result there too, and vice versa.
 //
-// A mirror of the backend's own _is_tool_closed, and worth duplicating rather than
-// trusting: the cost of being wrong is asymmetric. Ending the span on a user message
+// A CONSERVATIVE mirror of the backend's own _is_tool_closed — every span the backend
+// refuses is refused here, and a few it would allow are refused too: an id declared on
+// both sides with no result at all, an orphan result inside the span, and a call with no
+// id (which the backend's request model already rejects upstream). Each of those costs
+// one turn's prompt savings and nothing else, which is the right direction to be wrong in.
+//
+// Worth duplicating rather than trusting, because the cost of being wrong is asymmetric.
+// Ending the span on a user message
 // keeps calls and results together in a well-ordered conversation, but the request
 // boundary does not REQUIRE that ordering — a result may legally arrive after the next
 // user message. Compacting such a span would delete an assistant's call while leaving
@@ -264,8 +270,7 @@ func compactionSpanToolClosed(messages []models.ChatMessage, start, end int) boo
 	}
 	// Tracking BOTH sides, not just the inside: an id declared on both sides of the
 	// boundary reads as "inside" to a one-set check, which would accept a span that
-	// deletes one declaration and leaves the other. Rare, but it is precisely the shape
-	// the backend's own check refuses, and the two must not disagree about safety.
+	// deletes one declaration and leaves the other.
 	for id := range inside {
 		if outside[id] {
 			return false
