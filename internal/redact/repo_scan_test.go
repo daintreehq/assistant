@@ -120,7 +120,7 @@ func TestRepositoryContainsNoCredentials(t *testing.T) {
 // pushes fixtures toward saying what they are, which a reader benefits from anyway.
 var fixtureMarkers = []string{
 	"test", "fake", "planted", "example", "dummy", "sample", "placeholder",
-	"notreal", "invalid", "bogus", "xxx", "abcdef", "0123456789",
+	"replacement", "notreal", "invalid", "bogus", "xxx", "abcdef", "0123456789",
 }
 
 // isObviousFixture reports whether a credential-shaped string announces itself as one.

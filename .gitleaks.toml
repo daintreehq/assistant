@@ -40,7 +40,10 @@ not because of where it lives.
 # credential, which is what we actually want to classify.
 regexTarget = "secret"
 regexes = [
-  '''(?i)(test|fake|planted|example|dummy|sample|placeholder|notreal|bogus|invalid)''',
+  # `replacement` earns its place beside `placeholder`: a fixture named for the slot it
+  # stands in rather than for being fake (`sk-or-v1-replacement`, the key a sign-in test
+  # types over the stored one). A real credential is not named after what it replaces.
+  '''(?i)(test|fake|planted|example|dummy|sample|placeholder|replacement|notreal|bogus|invalid)''',
   # Sequential filler is a fixture tell: nobody's real credential is "…abcdef0123456789".
   '''abcdef''',
   '''0123456789''',
