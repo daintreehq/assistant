@@ -214,6 +214,9 @@ func TestParseArgsRejectsMultiTurnMisuse(t *testing.T) {
 		{"with a command word", []string{"--json", "--multi-turn", "doctor"}, "cannot be combined"},
 		{"with a command and no --json", []string{"--multi-turn", "status"}, "--multi-turn requires --json"},
 		{"with a command and --prompt-file", []string{"--json", "--multi-turn", "--prompt-file", "/tmp/p.txt", "doctor"}, "cannot be combined"},
+		// --list-skills picks its route with a FLAG, not a positional, so the
+		// prompt-source check cannot see it and it needs its own rejection.
+		{"with --list-skills", []string{"--json", "--multi-turn", "--list-skills"}, "do not go together"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if _, err := parseArgs(tt.args); err == nil || !strings.Contains(err.Error(), tt.want) {

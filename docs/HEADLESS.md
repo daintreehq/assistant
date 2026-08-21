@@ -166,7 +166,7 @@ Every knob is a flag, and every flag shadows a trusted env var and wins over it.
 | `--backend-url URL` | `DAINTREE_BACKEND_URL` | outranks the endpoint stored by `/backend` |
 | `--api-key-file PATH` | `DAINTREE_API_KEY` | OPTIONAL — see below. Deliberately **no `--api-key`** |
 | `--prompt-file PATH` | — | one-shot only; `-` reads stdin. Capped at 1 MiB |
-| `--multi-turn` | — | one prompt per stdin line, one session, one transcript. Requires `--json` |
+| `--multi-turn` | — | one prompt per stdin line, one session, one transcript. Requires `--json`; each line capped at 1 MiB |
 | `--state-dir PATH` | `DAINTREE_ASSISTANT_STATE_DIR` | the database, artifacts, and the owner lease |
 | `--log-dir PATH` | `DAINTREE_ASSISTANT_LOG_DIR` | |
 | `--debug-log` | `DAINTREE_ASSISTANT_DEBUG_LOG=1` | writes the session trace |
@@ -519,9 +519,13 @@ human-rendered multi-turn) and, like `--prompt-file`, refuses to share a run wit
 prompt source: naming two is a mistake, not a precedence rule.
 
 **One line is one prompt.** Blank lines are skipped, and a final line without a trailing
-newline still counts. A prompt that must span several lines is `--prompt-file`'s job —
-that flag's `-` spelling deliberately still means *all of stdin is one prompt*, newlines
-included, and `--multi-turn` does not re-cut it.
+newline still counts. A single line is capped at 1 MiB, the same bound `--prompt-file`
+applies to its read and for the same reason — a line has no natural end, so input with
+no newline in it would otherwise grow until the process died. An over-long line is
+**refused**, never truncated: the run fails rather than silently asking a different
+question. A prompt that must span several lines is `--prompt-file`'s job — that flag's
+`-` spelling deliberately still means *all of stdin is one prompt*, newlines included,
+and `--multi-turn` does not re-cut it.
 
 **Slash commands stay available**, exactly as on `--classic` stdin — `/clear` most of
 all, so a script can reset between prompts. In this mode they reach the stream as a
@@ -582,7 +586,9 @@ setup, every turn, the wait for the next line of stdin, and `--run-scheduler`'s 
 barrier. It is a wall-clock bound on the invocation, not a per-turn allowance; a
 per-turn reading would let a ten-prompt script run for ten times the number you asked
 for, which is the opposite of a bound. When it expires the current turn unwinds as
-cancelled, the remaining prompts are not run, and the run reports cancelled.
+cancelled and the remaining prompts are not run. An otherwise-successful run then
+reports `cancelled`; an earlier failed turn still outranks it, since worst-wins applies
+to the expiry like any other outcome.
 
 An empty script — stdin with no prompt on it at all, only blank lines or commands — is a
 run **failure** (exit 1, reported on the stream), not a quiet success. It is nearly

@@ -112,13 +112,16 @@ func runJSONTurns(ctx context.Context, a *app.App, sink *jsonout.Sink, in io.Rea
 			})
 			// A command can be slow — /compact runs two backend calls — so the deadline
 			// may well have expired inside it.
-			if cmd.Quit || ctx.Err() != nil {
+			if ctx.Err() != nil {
 				return done(nil)
 			}
+			// A read FAILURE outranks /quit, and the order matters: a reader can hand
+			// back a partial "/quit" together with an I/O error, and stopping on the
+			// command would report that truncated stream as a clean, deliberate exit.
 			if readFailed {
 				return done(fmt.Errorf("--multi-turn: reading stdin: %w", res.err))
 			}
-			if res.err != nil {
+			if cmd.Quit || res.err != nil {
 				return done(nil)
 			}
 			continue

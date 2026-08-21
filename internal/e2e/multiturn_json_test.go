@@ -3,12 +3,14 @@ package e2e
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 // runMultiTurn builds the binary, feeds it the given stdin lines under
@@ -343,8 +345,18 @@ func TestBinaryJSONMultiTurnContinuesAfterAFailedTurn(t *testing.T) {
 	// THE assertion: all three prompts ran. A regression that stopped reading stdin at
 	// the first failed turn would still satisfy every other test in this file.
 	linesOfTypeN(t, lines, "turn:prompt", 3)
-	if n := fake.callCount(); n < 3 {
-		t.Fatalf("backend respond calls = %d, want at least 3 — turn 3 never reached the backend", n)
+	// The call COUNT alone cannot prove this: turn two's own retries inflate it. Look
+	// for the third prompt in a recorded request body instead.
+	sawThird := false
+	for i := 0; i < fake.callCount(); i++ {
+		for _, m := range fake.requestMessages(i) {
+			if strings.Contains(fmt.Sprint(m["content"]), "three") {
+				sawThird = true
+			}
+		}
+	}
+	if !sawThird {
+		t.Fatalf("no backend request carried the third prompt — the loop stopped at the failed turn")
 	}
 	ends := linesOfTypeN(t, lines, "turn:end", 3)
 	if got, _ := ends[0].raw["status"].(string); got != "success" {
@@ -446,7 +458,13 @@ func TestBinaryJSONMultiTurnTimeoutBeforeAnyPromptReportsCancelled(t *testing.T)
 	t.Cleanup(func() { _ = pw.Close(); _ = pr.Close() })
 
 	bin := buildBinary(t)
-	cmd := exec.Command(bin, "--json", "--multi-turn", "--timeout", "3s")
+	// A watchdog well beyond the product's own 3s bound. If --timeout ever stops
+	// working, the child holds an stdin that never closes and Run would block until the
+	// whole package times out — the test hanging on precisely the regression it exists
+	// to catch. CommandContext kills it instead, so the failure is reported as one.
+	watchdog, cancelWatchdog := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancelWatchdog()
+	cmd := exec.CommandContext(watchdog, bin, "--json", "--multi-turn", "--timeout", "3s")
 	cmd.Env = append(cmd.Environ(),
 		"DAINTREE_BACKEND_URL="+fake.baseURL(),
 		"DAINTREE_ASSISTANT_STATE_DIR="+t.TempDir(),

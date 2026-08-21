@@ -214,7 +214,13 @@ func (f *fakeBackend) handleRespond(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if round.errorMessage != "" {
-		writeEvent("error", map[string]any{"message": round.errorMessage, "type": "server_error"})
+		// The NESTED envelope the client actually decodes (backend.Envelope →
+		// EnvelopeError). A flat {message,type} payload decodes to an empty error and
+		// the client substitutes a generic "stream_error", so the test would pass while
+		// exercising the malformed-payload fallback instead of real error decoding.
+		writeEvent("error", map[string]any{"error": map[string]any{
+			"type": "api_error", "code": "upstream_error", "message": round.errorMessage,
+		}})
 		return
 	}
 	writeEvent("done", map[string]any{"finish_reason": finish, "usage": usage})

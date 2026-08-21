@@ -255,6 +255,12 @@ func parseArgs(args []string) (parsedArgs, error) {
 		if *stdio {
 			return parsedArgs{}, stdioRequiresHostError()
 		}
+		// --list-skills names its route with a FLAG rather than a positional, so the
+		// check above cannot see it: it is a read-and-print that never runs a turn, and
+		// pairing it with --multi-turn silently discards the conversation.
+		if *listSkills {
+			return parsedArgs{}, fmt.Errorf("--multi-turn and --list-skills do not go together: --list-skills prints the catalog and exits without running a turn")
+		}
 	}
 	// An explicitly EMPTY value is a mistake, never a request to fall back. A harness
 	// that expands an unset shell variable produces `--api-key-file=` or `--state-dir=`,
