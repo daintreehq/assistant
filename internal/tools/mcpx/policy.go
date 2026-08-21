@@ -101,10 +101,32 @@ var neverDynamic = map[string]bool{
 	"agentSettings.get": true, // discloses preset env config, provider auth tokens included
 }
 
+// neverDynamicNormalized is neverDynamic re-keyed through normalizeMCPName, the
+// same case-folding/whitespace-stripping the daintree.call denylist matches on.
+//
+// The exact-match map alone is only as strong as the spelling a source happens to
+// use. localTargetPolicies is exact-keyed too, so today a case variant simply falls
+// through to "unknown" and is refused — but that is an accident of there being no
+// host source wired, not a property of the exclusion. The moment a host classifies
+// "Terminal.Kill" or "Git.Commit", the exact lookup misses, the AlwaysConfirm clamp
+// happily admits terminal/git risk, and a case-insensitive Daintree dispatcher runs
+// the excluded action under an approvable, grantable policy. A hard exclusion that
+// a different capitalisation walks around is not a hard exclusion.
+var neverDynamicNormalized = func() map[string]bool {
+	m := make(map[string]bool, len(neverDynamic))
+	for k := range neverDynamic {
+		m[normalizeMCPName(k)] = true
+	}
+	return m
+}()
+
 // ResolveTargetPolicy classifies one raw action name: hard exclusions first, then
 // the reviewed local catalog, then the host, then unknown.
 func ResolveTargetPolicy(src TargetPolicySource, action string) TargetPolicy {
-	if neverDynamic[action] {
+	// Both spellings: the exact name as given, and the normalized form, so a
+	// case/whitespace variant cannot route around the exclusion (see
+	// neverDynamicNormalized).
+	if neverDynamic[action] || neverDynamicNormalized[normalizeMCPName(action)] {
 		return TargetPolicy{Action: action}
 	}
 	if p, ok := localTargetPolicies[action]; ok {
@@ -248,8 +270,16 @@ func preferredWrapperToolName(action string) string {
 	if hint == "" {
 		return ""
 	}
-	name := strings.Fields(hint)[0]
-	return strings.TrimRight(name, ",")
+	// Guard the index rather than assume the hint is well-formed. policyBlock calls
+	// this for EVERY catalog row on every tool.search / daintree.listTools, so an
+	// empty or whitespace-only denylist value — a plausible typo in a hand-kept map —
+	// would turn routine discovery into a recovered TOOL_THREW panic. An unnamed
+	// preferred tool is simply no preferred tool.
+	fields := strings.Fields(hint)
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.TrimRight(fields[0], ",")
 }
 
 // ClassifiedActionNames lists every locally-classified action, sorted. Used by the

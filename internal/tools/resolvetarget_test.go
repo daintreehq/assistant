@@ -431,3 +431,51 @@ func TestNilResolveTargetLeavesStaticPipelineIntact(t *testing.T) {
 		t.Errorf("static tool must audit under its own name, got %q", got)
 	}
 }
+
+// A target-aware tool's STATIC Risk is a fail-closed ceiling, and two surfaces read
+// it without ever being able to run the resolver: the read-only sub-agent inventory
+// filter and parallel dispatch. Parallel dispatch is the half that can be pinned
+// structurally — a tool whose risk is decided per call cannot also declare itself
+// safe to run concurrently on the basis of the risk it happened to register at.
+// Until now the rule lived only in a comment on Tool.ResolveTarget, and a comment
+// has never stopped a field being set.
+func TestAssertSafeRejectsAParallelTargetAwareTool(t *testing.T) {
+	resolver := func(_ context.Context, _ json.RawMessage, _ *ToolContext) (TargetInfo, *ToolResult) {
+		return TargetInfo{Name: "mcp.dynamic:terminal.list", Risk: domain.RiskRead}, nil
+	}
+	handle := func(_ context.Context, _ json.RawMessage, _ *ToolContext) ToolResult { return Ok("ok", nil) }
+
+	// The shape daintree.invoke actually has: a resolver, no parallel flags. Legal.
+	ok := NewRegistry()
+	if err := ok.Register(&Tool{Name: "mcp.invoke", Risk: domain.RiskSystem,
+		ResolveTarget: resolver, Handle: handle}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ok.AssertSafe(); err != nil {
+		t.Fatalf("a non-parallel target-aware tool must be accepted: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		tool *Tool
+	}{
+		{"Parallelizable", &Tool{Name: "mcp.invokeParallel", Risk: domain.RiskRead,
+			ResolveTarget: resolver, Parallelizable: true, Handle: handle}},
+		{"ParallelHomogeneous", &Tool{Name: "mcp.invokeHomogeneous", Risk: domain.RiskSystem,
+			ResolveTarget: resolver, ParallelHomogeneous: true, Handle: handle}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewRegistry()
+			if err := r.Register(tc.tool); err != nil {
+				t.Fatal(err)
+			}
+			err := r.AssertSafe()
+			if err == nil {
+				t.Fatalf("AssertSafe must reject a target-aware tool declaring %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.tool.Name) {
+				t.Errorf("the error must name the offending tool, got %q", err)
+			}
+		})
+	}
+}

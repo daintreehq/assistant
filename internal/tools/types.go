@@ -251,6 +251,13 @@ type Tool struct {
 	// generated capability reference read, none of which can run a resolver. Register
 	// a dynamic tool at the worst risk it could ever reach and let the resolver
 	// narrow it per call — never the reverse.
+	//
+	// The parallel half of that rule is ENFORCED, not merely stated: Registry.
+	// AssertSafe rejects a resolver-bearing tool that also sets Parallelizable or
+	// ParallelHomogeneous at boot, because the concurrency grouping is decided from
+	// the static Risk a resolver is free to raise. The sub-agent half stays a matter
+	// of registering at the ceiling — a read-risk tool with a resolver is legitimate
+	// so long as its resolver only ever narrows.
 	ResolveTarget TargetResolver
 
 	// Requires names the connection whose absence makes this tool UNABLE TO DO ITS JOB.

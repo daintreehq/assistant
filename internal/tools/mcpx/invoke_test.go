@@ -64,7 +64,12 @@ func runInvoke(t *testing.T, deps Deps, raw string) (tools.TargetInfo, *tools.To
 	if refusal != nil {
 		return target, refusal, tools.ToolResult{}
 	}
-	return target, nil, tool.Handle(context.Background(), decoded, &tools.ToolContext{})
+	// Mirror what Dispatch does between the two calls: publish the identity it gated
+	// on. The handler refuses outright without it (a resolver-bearing tool reaching
+	// Handle ungated is a wiring bug), so a helper that skipped this would exercise
+	// only the refusal path and prove nothing about any of the success cases.
+	gated := target
+	return target, nil, tool.Handle(context.Background(), decoded, &tools.ToolContext{GatedTarget: &gated})
 }
 
 func requireRefusal(t *testing.T, refusal *tools.ToolResult, code string) *tools.ToolResult {
@@ -544,6 +549,64 @@ func TestDangerousActionsAreNotDynamicallyClassified(t *testing.T) {
 		if p := ResolveTargetPolicy(hostile, name); p.Known {
 			t.Errorf("a host source re-enabled %s (risk %q) — the exclusion must be absolute", name, p.Risk)
 		}
+	}
+	// Nor by SPELLING one differently. The cases above all feed the exclusion its own
+	// exact keys, which the plain map lookup catches — so they say nothing about the
+	// case/whitespace variants the rest of this family normalizes away before matching
+	// (see normalizeMCPName and the daintree.call denylist). A host is free to publish
+	// "Terminal.Kill", and an exclusion the exact map misses lands in the AlwaysConfirm
+	// clamp, which admits terminal risk without complaint.
+	variants := hostSource{}
+	spellings := []string{"Terminal.Kill", "TERMINAL.KILL", " terminal.kill ", "Git.Commit", "  Worktree.Delete\t", "AgentSettings.Get"}
+	for _, name := range spellings {
+		variants[name] = TargetPolicy{Risk: domain.RiskTerminal, Danger: "confirm"}
+	}
+	for _, name := range spellings {
+		if p := ResolveTargetPolicy(variants, name); p.Known {
+			t.Errorf("a host source re-enabled %q by respelling it (risk %q) — the exclusion must normalize like every other name match", name, p.Risk)
+		}
+	}
+}
+
+// A resolver-bearing tool that reaches Handle with no gate record must refuse. The
+// drift check exists to be structural rather than trusted, so the case where nothing
+// can be proven is precisely the case that must not be waved through — and it is the
+// shape any future path calling Handle directly would take.
+func TestInvokeRefusesWithoutAGatedTarget(t *testing.T) {
+	mcp, deps := invokeDeps()
+	tool := newInvokeTool(deps)
+	decoded, err := tool.Decode(json.RawMessage(`{"action":"terminal.list","arguments":{}}`))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	res := tool.Handle(context.Background(), decoded, &tools.ToolContext{})
+	if res.Ok {
+		t.Fatal("an ungated invoke must be refused, not run")
+	}
+	if res.Error == nil || res.Error.Code != codePolicyDrift {
+		t.Fatalf("want %s, got %+v", codePolicyDrift, res.Error)
+	}
+	if mcp.lastName != "" {
+		t.Errorf("the action was forwarded anyway (%s) — the refusal must precede the call", mcp.lastName)
+	}
+}
+
+// policyBlock reduces a denylist hint to its leading token for `preferredTool`, and
+// it runs for EVERY catalog row on every tool.search / daintree.listTools. A blank
+// or whitespace-only hint — the shape a typo in a hand-kept map takes — must degrade
+// to "no preferred tool" rather than panic, or one bad entry turns routine discovery
+// into a recovered TOOL_THREW.
+func TestPreferredWrapperToolNameSurvivesABlankHint(t *testing.T) {
+	const action = "test.blankHintAction"
+	denylistLookup[normalizeMCPName(action)] = "   \t "
+	defer delete(denylistLookup, normalizeMCPName(action))
+
+	if got := preferredWrapperToolName(action); got != "" {
+		t.Errorf("a whitespace-only hint should reduce to no preferred tool, got %q", got)
+	}
+	// And the discovery surface that calls it must still render the row.
+	if b := policyBlock(Deps{}, action, true); b["preferredTool"] != nil && b["preferredTool"] != "" {
+		t.Errorf("policyBlock should omit preferredTool for a blank hint, got %v", b["preferredTool"])
 	}
 }
 

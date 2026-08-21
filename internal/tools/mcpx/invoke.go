@@ -153,13 +153,25 @@ func newInvokeTool(deps Deps) tools.Tool {
 			// against what dispatch actually gated: a policy that said "read" at the gate
 			// and "external" here would otherwise run unconfirmed under a risk nobody
 			// approved. Drift is a refusal, never a best-effort.
-			if g := tctx.GatedTarget; g != nil {
-				if g.Name != domain.DynamicTargetName(target.action) || g.Risk != target.policy.Risk {
-					return tools.Fail(codePolicyDrift, fmt.Sprintf(
-						"The policy for %s changed between authorization and execution (approved as %s/%s, now %s/%s), so it "+
-							"was NOT run. Retry to re-authorize under the current policy.",
-						target.action, g.Display, g.Risk, target.action, target.policy.Risk), tools.Unrecoverable())
-				}
+			g := tctx.GatedTarget
+			if g == nil {
+				// Dispatch stamps this for every tool carrying a ResolveTarget, so a nil
+				// here means the call did not come through the gate — and the point of
+				// this check is to be structural rather than trusted. Skipping it when
+				// the stamp is missing inverts that: the one case where nothing can be
+				// proven becomes the one case that is waved through, and any future path
+				// that reaches Handle directly silently gets an ungated system-tier MCP
+				// forward. Refuse instead; a resolver-bearing tool with no gate record is
+				// a wiring bug, not a call to make.
+				return tools.Fail(codePolicyDrift, fmt.Sprintf(
+					"%s ran without a gated target, so nothing can confirm the action was authorized; it was NOT run.",
+					target.action), tools.Unrecoverable())
+			}
+			if g.Name != domain.DynamicTargetName(target.action) || g.Risk != target.policy.Risk {
+				return tools.Fail(codePolicyDrift, fmt.Sprintf(
+					"The policy for %s changed between authorization and execution (approved as %s/%s, now %s/%s), so it "+
+						"was NOT run. Retry to re-authorize under the current policy.",
+					target.action, g.Display, g.Risk, target.action, target.policy.Risk), tools.Unrecoverable())
 			}
 
 			args := make(map[string]any, len(target.arguments)+1)

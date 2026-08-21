@@ -108,14 +108,63 @@ func (r *Registry) List() []*Tool {
 	return out
 }
 
-// AssertSafe enforces the no-file-edit invariant over all registered names at
-// startup. Returns the *safety.FileEditAttemptError if any name is file-mutating.
+// AssertSafe enforces the registry's startup invariants: the no-file-edit rule over
+// all registered names, and the fail-closed ceiling for target-aware tools.
+// Returns the *safety.FileEditAttemptError if any name is file-mutating.
 func (r *Registry) AssertSafe() error {
 	names := make([]string, 0, len(r.tools))
 	for name := range r.tools {
 		names = append(names, name)
 	}
-	return safety.AssertNoFileEditTools(names)
+	if err := safety.AssertNoFileEditTools(names); err != nil {
+		return err
+	}
+	return r.assertResolvedTargetsAreNotParallel()
+}
+
+// assertResolvedTargetsAreNotParallel enforces, at boot, half of the fail-closed
+// ceiling rule Tool.ResolveTarget documents in prose.
+//
+// The rule is that a target-aware tool registers at the WORST risk its resolver
+// could ever reach, because several surfaces read the STATIC Tool.Risk and have no
+// way to run a resolver:
+//
+//   - the read-only sub-agent inventory filter (internal/app/subagent.go) admits a
+//     tool on `Risk == domain.RiskRead`, and a sub-agent dispatches with no Confirm
+//     and no AskChoice hook — so a resolver that raised the risk mid-run would have
+//     nobody to ask and nothing to fall back on;
+//   - parallel dispatch (internal/app/context.go) groups on
+//     `Parallelizable && Risk == domain.RiskRead`, running the batch concurrently
+//     and without the sequential confirmation the mutating classes assume.
+//
+// Prose alone has never stopped a field being set. This pins the parallel half
+// structurally: a tool that resolves its own target may not also declare itself
+// concurrency-safe, because the concurrency decision is made from a risk the
+// resolver is free to raise. The sub-agent half stays a matter of registering at the
+// ceiling (a read-risk tool WITH a resolver is legitimate — it just cannot be one
+// whose resolver ever widens), which is why it is not also asserted here.
+//
+// daintree.invoke — the only such tool today — is already correct: RiskSystem and
+// neither parallel flag. So this is a guard for the next one.
+func (r *Registry) assertResolvedTargetsAreNotParallel() error {
+	var bad []string
+	for _, name := range r.order {
+		t := r.tools[name]
+		if t.ResolveTarget == nil {
+			continue
+		}
+		if t.Parallelizable {
+			bad = append(bad, name+" (Parallelizable)")
+		}
+		if t.ParallelHomogeneous {
+			bad = append(bad, name+" (ParallelHomogeneous)")
+		}
+	}
+	if len(bad) > 0 {
+		return fmt.Errorf("target-aware tools must not opt into concurrent dispatch — the parallel grouping reads the "+
+			"STATIC Tool.Risk, which a resolver may raise per call: %s", strings.Join(bad, ", "))
+	}
+	return nil
 }
 
 // AssertRegistered checks that every name in names is registered, returning an
