@@ -269,3 +269,62 @@ func TestWarnDoesNotPoisonTheTerminalEnvelope(t *testing.T) {
 		t.Errorf("Warn must emit a warning line, got %v", types(lines))
 	}
 }
+
+// TestCancelRunPreservesTheAnswerAndEmitsNoSecondAssistantEvent: a --run-scheduler
+// one-shot whose --timeout fires while it waits for async work to settle has a real
+// answer already streamed. The run is cancelled, but the answer must survive into the
+// terminal `result` line — and the turn must not sprout a second terminal assistant
+// event, which is why this is not AssistantCancelled.
+func TestCancelRunPreservesTheAnswerAndEmitsNoSecondAssistantEvent(t *testing.T) {
+	var buf bytes.Buffer
+	s := New(&buf, fixedClock)
+	s.Session(sampleSession())
+	s.AssistantStart()
+	s.AssistantEnd("spawned two agents", "")
+	s.Warn("timed out after 5m waiting for async work to settle")
+	s.CancelRun()
+	code := s.Finish()
+
+	if code != domain.OneShotExitCode.Cancelled {
+		t.Errorf("exit code = %d, want %d (cancelled)", code, domain.OneShotExitCode.Cancelled)
+	}
+	lines := decodeLines(t, &buf)
+	last := lines[len(lines)-1]
+	if last["type"] != "result" {
+		t.Fatalf("last line type = %v, want result", last["type"])
+	}
+	if last["status"] != string(domain.JSONStatusCancelled) {
+		t.Errorf("status = %v, want cancelled", last["status"])
+	}
+	if last["content"] != "spawned two agents" {
+		t.Errorf("content = %v, want the completed answer preserved", last["content"])
+	}
+	if last["error"] != nil {
+		t.Errorf("error = %v, want null (a cancelled wait is not a turn error)", last["error"])
+	}
+	for _, l := range lines {
+		if l["type"] == "assistant:cancelled" {
+			t.Error("CancelRun emitted assistant:cancelled; the turn already ended with assistant:end")
+		}
+	}
+}
+
+// TestCancelRunNeverDowngradesAFailedRun: an error status carries a message and a
+// non-zero code that say strictly more than "cancelled" does, so the late wait timeout
+// must not overwrite it.
+func TestCancelRunNeverDowngradesAFailedRun(t *testing.T) {
+	var buf bytes.Buffer
+	s := New(&buf, fixedClock)
+	s.Error("backend unreachable")
+	s.CancelRun()
+	code := s.Finish()
+
+	if code != domain.OneShotExitCode.Error {
+		t.Errorf("exit code = %d, want %d (error must survive CancelRun)", code, domain.OneShotExitCode.Error)
+	}
+	lines := decodeLines(t, &buf)
+	last := lines[len(lines)-1]
+	if last["status"] != string(domain.JSONStatusError) {
+		t.Errorf("status = %v, want error", last["status"])
+	}
+}

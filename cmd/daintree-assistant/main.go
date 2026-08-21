@@ -166,6 +166,10 @@ func parseArgs(args []string) (parsedArgs, error) {
 		autoApprove             = fs.Bool("auto-approve", false, "")
 		debugLog                = fs.Bool("debug-log", false, "")
 		timeout                 = fs.Duration("timeout", 0, "")
+		// Plain bool, not the *bool tri-state: that machinery exists only for flags that
+		// shadow a trusted env var and must be able to beat it. This one has no env
+		// counterpart — it is a per-invocation decision about what this run commits to.
+		runScheduler = fs.Bool("run-scheduler", false, "")
 		// `reset` flags. Parsed always (a FlagSet cannot be conditional here) but only
 		// consulted on the reset route, like every other subcommand-specific option.
 		yes      = fs.Bool("yes", false, "")
@@ -196,6 +200,14 @@ func parseArgs(args []string) (parsedArgs, error) {
 
 	if *timeout < 0 {
 		return parsedArgs{}, fmt.Errorf("invalid --timeout %s (must not be negative)", *timeout)
+	}
+	// --run-scheduler REQUIRES a bound. The flag holds the run open until the async work
+	// it started settles, and settling is not guaranteed: an invocation whose terminals
+	// stay unreadable does not advance toward expiry, so an unbounded flagged run can
+	// wait forever. Demanding the duration explicitly is better than inventing a default,
+	// which would silently truncate a legitimately long job at a number nobody chose.
+	if *runScheduler && *timeout <= 0 {
+		return parsedArgs{}, fmt.Errorf("--run-scheduler requires a positive --timeout (e.g. --timeout 10m)")
 	}
 	// An explicitly EMPTY value is a mistake, never a request to fall back. A harness
 	// that expands an unset shell variable produces `--api-key-file=` or `--state-dir=`,
@@ -260,6 +272,7 @@ func parseArgs(args []string) (parsedArgs, error) {
 		AutoApprove:             boolFlag("auto-approve", autoApprove),
 		DebugLog:                boolFlag("debug-log", debugLog),
 		Timeout:                 *timeout,
+		RunScheduler:            *runScheduler,
 	}
 
 	parsed := parsedArgs{Options: opts, Route: routeDefault}
@@ -489,6 +502,8 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "  --auto-approve      run mutating tools without confirmation")
 	fmt.Fprintln(w, "  --debug-log         write the session trace to the log directory")
 	fmt.Fprintln(w, "  --timeout DURATION  cancel a one-shot run after this long (e.g. 10m; 0 = no limit)")
+	fmt.Fprintln(w, "  --run-scheduler     run the scheduler during a one-shot and await its async work")
+	fmt.Fprintln(w, "                      before exiting (requires --timeout)")
 	fmt.Fprintln(w, "  --yes               skip the reset confirmation (required without a TTY)")
 	fmt.Fprintln(w, "  --no-backup         skip the reset's timestamped backup")
 	fmt.Fprintln(w, "  --out PATH          support-bundle destination")

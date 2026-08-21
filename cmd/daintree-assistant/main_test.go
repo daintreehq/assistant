@@ -355,3 +355,116 @@ func TestNoRawAPIKeyFlag(t *testing.T) {
 		}
 	}
 }
+
+// TestParseArgsCarriesRunScheduler: the opt-in reaches Options as a plain bool, and
+// the flag's absence leaves it false. It is deliberately NOT a *bool tri-state — there
+// is no env var for an explicit false to have to beat.
+func TestParseArgsCarriesRunScheduler(t *testing.T) {
+	got, err := parseArgs([]string{"--run-scheduler", "--timeout", "10m", "--json", "spawn the agents"})
+	if err != nil {
+		t.Fatalf("parseArgs() error = %v", err)
+	}
+	if !got.Options.RunScheduler {
+		t.Error("RunScheduler = false, want true")
+	}
+	if got.Options.Timeout != 10*time.Minute {
+		t.Errorf("timeout = %v, want 10m", got.Options.Timeout)
+	}
+
+	off, err := parseArgs([]string{"--timeout", "10m", "hello"})
+	if err != nil {
+		t.Fatalf("parseArgs() error = %v", err)
+	}
+	if off.Options.RunScheduler {
+		t.Error("RunScheduler = true without the flag, want false (the default must stay off)")
+	}
+
+	// An explicit =false is still just false; the point is that it parses rather than
+	// being read as a positional prompt.
+	explicit, err := parseArgs([]string{"--run-scheduler=false", "hello"})
+	if err != nil {
+		t.Fatalf("parseArgs(--run-scheduler=false) error = %v", err)
+	}
+	if explicit.Options.RunScheduler {
+		t.Error("RunScheduler = true for --run-scheduler=false")
+	}
+}
+
+// TestParseArgsRunSchedulerRequiresTimeout: the flag holds the run open until its async
+// work settles, and settling is not guaranteed — an invocation whose terminals stay
+// unreadable never advances toward expiry. Without a bound that is a script that hangs
+// forever, so the missing duration is an argument-boundary error rather than a default
+// nobody chose.
+func TestParseArgsRunSchedulerRequiresTimeout(t *testing.T) {
+	for _, args := range [][]string{
+		{"--run-scheduler", "hello"},
+		{"--run-scheduler", "--timeout", "0", "hello"},
+		{"--run-scheduler", "--timeout", "0s", "--json", "hello"},
+	} {
+		if _, err := parseArgs(args); err == nil {
+			t.Errorf("parseArgs(%v) = nil error, want a rejection", args)
+		}
+	}
+	// A positive timeout is the only accepted shape.
+	if _, err := parseArgs([]string{"--run-scheduler", "--timeout", "1s", "hello"}); err != nil {
+		t.Errorf("parseArgs with a positive --timeout errored: %v", err)
+	}
+	// --timeout alone must keep working exactly as before and must NOT imply the flag.
+	got, err := parseArgs([]string{"--timeout", "1s", "hello"})
+	if err != nil {
+		t.Fatalf("parseArgs(--timeout only) error = %v", err)
+	}
+	if got.Options.RunScheduler {
+		t.Error("--timeout implied --run-scheduler; it must not")
+	}
+}
+
+// TestUsageDocumentsRunScheduler: an opt-in nobody can discover is an opt-in nobody
+// uses — and this one's --timeout requirement has to be discoverable too.
+func TestUsageDocumentsRunScheduler(t *testing.T) {
+	var out bytes.Buffer
+	writeUsage(&out, "test-version")
+	help := out.String()
+	if !strings.Contains(help, "--run-scheduler") {
+		t.Errorf("usage missing --run-scheduler:\n%s", help)
+	}
+	if !strings.Contains(help, "requires --timeout") {
+		t.Errorf("usage does not mention the --timeout requirement:\n%s", help)
+	}
+}
+
+// TestParseArgsRunSchedulerTimeoutRuleIsRouteIndependent pins a deliberate choice: the
+// --timeout requirement is checked before the route is picked, so `daemon
+// --run-scheduler` is REJECTED rather than silently ignored. Only RunOneShot reads the
+// flag, so the alternative would be accepting an explicit request and doing nothing with
+// it — silence is the worse answer for a flag someone typed on purpose.
+func TestParseArgsRunSchedulerTimeoutRuleIsRouteIndependent(t *testing.T) {
+	routes := map[string]route{"doctor": routeDoctor, "daemon": routeDaemon, "host": routeHost}
+	for word := range routes {
+		_, err := parseArgs([]string{"--run-scheduler", word})
+		if err == nil {
+			t.Errorf("parseArgs(--run-scheduler %s) = nil error, want the --timeout rejection", word)
+			continue
+		}
+		// The SPECIFIC error, not merely any error: a route that failed for an unrelated
+		// reason would otherwise pass this test while proving nothing about the rule.
+		if !strings.Contains(err.Error(), "--timeout") {
+			t.Errorf("parseArgs(--run-scheduler %s) error = %q, want it to name --timeout", word, err)
+		}
+	}
+	// With a bound it parses AND still reaches the right route — the flag must not
+	// disturb route selection, and the route words must not be read as prompts.
+	for word, want := range routes {
+		got, err := parseArgs([]string{"--run-scheduler", "--timeout", "1m", word})
+		if err != nil {
+			t.Errorf("parseArgs(--run-scheduler --timeout 1m %s) errored: %v", word, err)
+			continue
+		}
+		if got.Route != want {
+			t.Errorf("parseArgs(... %s).Route = %v, want %v", word, got.Route, want)
+		}
+		if got.Options.HasPrompt {
+			t.Errorf("parseArgs(... %s) took the route word as a prompt (%q)", word, got.Options.Prompt)
+		}
+	}
+}

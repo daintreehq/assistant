@@ -4,12 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/daintreehq/assistant/internal/ipc"
 )
 
 // buildBinary compiles cmd/daintree-assistant once for the whole package into an
@@ -332,4 +335,179 @@ func firstIndex(ss []string, s string) int {
 		}
 	}
 	return -1
+}
+
+// schedulerActiveOnWire reads runtime.scheduler_active from the Nth respond request.
+// The flag's whole invisible half is this wire value: the backend defaults it to true,
+// so an explicit false is what tells the model background work is unavailable.
+func schedulerActiveOnWire(t *testing.T, f *fakeBackend, n int) bool {
+	t.Helper()
+	body := f.request(n)
+	if body == nil {
+		t.Fatalf("no respond request at index %d", n)
+	}
+	rt, ok := body["runtime"].(map[string]any)
+	if !ok {
+		t.Fatalf("request %d has no runtime block: %v", n, body)
+	}
+	active, ok := rt["scheduler_active"].(bool)
+	if !ok {
+		t.Fatalf("runtime.scheduler_active missing or not a bool: %v", rt)
+	}
+	return active
+}
+
+// TestBinaryOneShotSchedulerActiveOnTheWire runs the real binary twice against the fake
+// backend — once plain, once with --run-scheduler — and asserts the runtime fact the
+// model actually reads. The default must keep reporting false (a one-shot that does not
+// tick must not claim it does), and the opt-in must report true on the FIRST round,
+// because that is the round where the model decides whether to start background work at
+// all. Both runs must exit 0 and leave no owner lease behind.
+func TestBinaryOneShotSchedulerActiveOnTheWire(t *testing.T) {
+	bin := buildBinary(t)
+
+	run := func(t *testing.T, extraArgs ...string) (*fakeBackend, string) {
+		t.Helper()
+		fake := newFakeBackend(t, sseRound{
+			contentTokens: []string{"All ", "clear."},
+			usage:         &fakeUsage{prompt: 40, completion: 3, total: 43},
+		})
+		dir := t.TempDir()
+		args := append(append([]string{}, extraArgs...), "--json", "anything running?")
+		cmd := exec.Command(bin, args...)
+		cmd.Env = append(cmd.Environ(),
+			"DAINTREE_BACKEND_URL="+fake.baseURL(),
+			"DAINTREE_ASSISTANT_STATE_DIR="+dir,
+			"DAINTREE_ASSISTANT_TIER=operator",
+			"DAINTREE_ASSISTANT_DEBUG_LOG=0",
+			"DAINTREE_MCP_URL=",
+			"DAINTREE_MCP_TOKEN=",
+		)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("run %v: %v (stderr: %s)", args, err, stderr.String())
+		}
+		// Exactly one round: the fixture is a single prose-only reply, which is what
+		// makes "the FIRST request" and "the only request" the same assertion below.
+		if n := fake.callCount(); n != 1 {
+			t.Fatalf("backend served %d respond requests, want 1 (stderr: %s)", n, stderr.String())
+		}
+		return fake, dir
+	}
+
+	t.Run("default reports an inactive scheduler", func(t *testing.T) {
+		fake, _ := run(t)
+		if schedulerActiveOnWire(t, fake, 0) {
+			t.Error("runtime.scheduler_active = true without --run-scheduler, want false")
+		}
+	})
+
+	t.Run("--run-scheduler reports an active scheduler on the first round", func(t *testing.T) {
+		fake, dir := run(t, "--run-scheduler", "--timeout", "60s")
+		if !schedulerActiveOnWire(t, fake, 0) {
+			t.Error("runtime.scheduler_active = false with --run-scheduler, want true on the FIRST round")
+		}
+		// A one-shot that takes the lease and starts ticking still must not spawn a
+		// supervisor. daemon.lock is created by any daemon that reaches lock acquisition
+		// and is deliberately left on disk, so its ABSENCE anywhere under the state dir
+		// is real evidence that no daemon was started. A walk error is a failure, not a
+		// silent pass — a check that cannot run proves nothing.
+		found := []string{}
+		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !d.IsDir() && d.Name() == ipc.DaemonLockName {
+				found = append(found, path)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walking the state dir: %v", err)
+		}
+		if len(found) > 0 {
+			t.Errorf("one-shot spawned a daemon: found %v", found)
+		}
+		// The owner lease must be free the instant the process is gone. Taking it here
+		// is the only check that actually proves release rather than inferring it.
+		// A fresh handle, never the run's own: probing a HELD FileLock handle takes an
+		// "already mine" shortcut and would report free while releasing the holder's
+		// lease. NewFileLock starts with a nil fd, so TryAcquire makes a real flock call.
+		l := ipc.NewFileLock(ownerLockPath(t, dir))
+		ok, err := l.TryAcquire()
+		if err != nil {
+			t.Errorf("probing the owner lease: %v", err)
+		} else if !ok {
+			t.Error("owner lease still held after the one-shot exited")
+		} else {
+			l.Release()
+		}
+	})
+}
+
+// TestBinaryRunSchedulerRequiresTimeout: the bound is not optional, and the rejection
+// has to happen at the argument boundary — before a lease is taken or a turn is spent.
+func TestBinaryRunSchedulerRequiresTimeout(t *testing.T) {
+	bin := buildBinary(t)
+
+	cmd := exec.Command(bin, "--run-scheduler", "--json", "anything running?")
+	cmd.Env = append(cmd.Environ(),
+		"DAINTREE_ASSISTANT_STATE_DIR="+t.TempDir(),
+		"DAINTREE_ASSISTANT_DEBUG_LOG=0",
+		"DAINTREE_MCP_URL=",
+		"DAINTREE_MCP_TOKEN=",
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("--run-scheduler without --timeout exited 0 (stdout: %q)", stdout.String())
+	}
+	ee, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("run binary: %v (stderr: %s)", err, stderr.String())
+	}
+	// 2 is the argv-error code every bad invocation gets (main.go's parseArgs handler),
+	// NOT domain.OneShotExitCode — a run that never started has no run-level outcome to
+	// report. The two vocabularies collide on the number and mean different things.
+	if got := ee.ExitCode(); got != 2 {
+		t.Errorf("exit code = %d, want 2 (the argv-error code)", got)
+	}
+	if !strings.Contains(stderr.String(), "--timeout") {
+		t.Errorf("rejection does not name --timeout:\n%s", stderr.String())
+	}
+	// The rejection happens at the argument boundary — before a lease is taken or a
+	// turn is spent — so stdout stays empty and no owner lease is left on disk.
+	if stdout.String() != "" {
+		t.Errorf("stdout = %q, want empty (the run never started)", stdout.String())
+	}
+}
+
+// ownerLockPath finds the owner lease under a state dir. The per-project subdir name is
+// derived internally, so the file is located rather than reconstructed. A MISSING file
+// is a failure, not a skip: every successful one-shot acquires owner.lock and the file
+// deliberately outlives its release, so absence means the walk looked in the wrong place
+// — and a probe that silently does not run proves nothing about release.
+func ownerLockPath(t *testing.T, stateDir string) string {
+	t.Helper()
+	var found string
+	err := filepath.WalkDir(stateDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && d.Name() == ipc.OwnerLockName {
+			found = path
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the state dir: %v", err)
+	}
+	if found == "" {
+		t.Fatalf("no %s under %s; the run should have acquired the owner lease", ipc.OwnerLockName, stateDir)
+	}
+	return found
 }
