@@ -363,24 +363,75 @@ func TestBuildWakePromptWatcherOnlyUnchangedByAsyncBranch(t *testing.T) {
 // --- wake-prompt / coreToolNames drift guard (issue #370) ---
 
 // wakePromptToolNamePattern matches a dotted tool id the way one actually appears in
-// RENDERED prompt text: lowercase-initial segments joined by dots with no whitespace
-// across a dot. Prose cannot forge one by accident — a sentence-ending period is
-// followed by a space ("needing attention. When"), and a possessive ("that event's
-// line") carries no dot — while the two awkward real shapes both split cleanly on word
-// boundaries: the slash-joined run "terminal.read/terminal.summarize/terminal.extract"
-// and the JSON literal `queue.resolve {"id":"…"}`. Deliberately family-agnostic: keying
-// on a known prefix set (terminal|queue|async) would silently miss the very drift this
-// guards against — a future prompt naming, say, watcher.cancel.
-var wakePromptToolNamePattern = regexp.MustCompile(`\b[a-z][A-Za-z0-9]*(?:\.[a-z][A-Za-z0-9]*)+\b`)
+// RENDERED prompt text: a lowercase-initial segment followed by one or more dotted
+// segments, with no whitespace across a dot. The segment body accepts everything the
+// registry accepts (letters, digits, "_", "-") rather than just [A-Za-z0-9] — a
+// narrower grammar would extract "queue.resolve" out of a hypothetical
+// "queue.resolve-v2" and silently pass the non-core name, which is the exact drift this
+// guards. Deliberately family-agnostic too: keying on known prefixes (terminal|queue)
+// would miss a future prompt naming, say, watcher.cancel.
+//
+// The two awkward real shapes both split correctly on word boundaries: the slash-joined
+// run "terminal.read/terminal.summarize/terminal.extract" yields three names, and the
+// JSON literal `queue.resolve {"id":"…"}` yields one. Sentence-ending periods do not
+// match (a space follows), nor do possessives ("that event's line") or decimals ("1.2",
+// whose post-dot segment starts with a digit). Prose CAN forge a match though — an
+// "e.g." or a "main.go" added to a prompt would surface as a bogus name. That is a
+// nuisance failure, not a hole: fix it by rewording the prompt or masking the phrase.
+var wakePromptToolNamePattern = regexp.MustCompile(`\b[a-z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*)+\b`)
 
-// TestBuildWakePromptNamesOnlyCoreTools pins the invariant behind issue #370: every
-// tool the autonomous wake prompt tells the model to CALL must be in coreToolNames.
-// A wake turn is the zero-skill case — nothing loads a skill that could reintroduce a
-// tool the prompt assumed — so once the backend projects a SUBSET of the registry
-// rather than all of it, a prompt naming a non-core tool becomes an instruction the
-// model cannot follow. coreToolNames ⊆ registry is already closed at boot by
-// AssertRegistered("core tools"); this test closes the remaining link,
-// prompt-names ⊆ coreToolNames, so the chain holds end to end.
+// wakePromptProhibitions are the EXACT sentences that earn a tool id its exemption from
+// the core check — the prompt tells the model NOT to call it, so it has no claim on
+// coreToolNames. Masking the PHRASE (not exempting the name globally) is what keeps the
+// exemption honest: reword "do NOT call async.list" into "DO call async.list", or add a
+// second positive mention elsewhere, and the surviving occurrence is still extracted and
+// still checked. Every phrase must still appear somewhere, or its entry is stale.
+var wakePromptProhibitions = []string{
+	"do NOT call async.list",
+}
+
+// assertWakePromptToolsAreCore extracts every tool id the rendered prompt NAMES AS A
+// CALL and reports each one that is not in coreToolNames. Shared with the supervisor's
+// daemon-note guard so both halves of the assembled wake prompt are held to one rule.
+// It returns the names it saw, so a caller can verify its prohibitions still render.
+func assertWakePromptToolsAreCore(t *testing.T, label, prompt string, prohibitions []string) map[string]struct{} {
+	t.Helper()
+	core := setOf(coreToolNames...)
+	seen := map[string]struct{}{}
+	scrubbed := prompt
+	for _, phrase := range prohibitions {
+		if strings.Contains(scrubbed, phrase) {
+			seen[phrase] = struct{}{}
+			scrubbed = strings.ReplaceAll(scrubbed, phrase, " ")
+		}
+	}
+	var missing []string
+	for _, name := range wakePromptToolNamePattern.FindAllString(scrubbed, -1) {
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		if _, ok := core[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		// Mirrors AssertRegistered's diagnostic: name every offender, not just the first.
+		t.Errorf("%s names tools that are not in coreToolNames: %s\n%s",
+			label, strings.Join(missing, ", "), prompt)
+	}
+	return seen
+}
+
+// TestBuildWakePromptNamesOnlyCoreTools pins the invariant behind issue #370: every tool
+// the autonomous wake prompt tells the model to CALL must be in coreToolNames. A wake
+// may run with no relevant skill active — nothing is guaranteed to reintroduce a tool
+// the prompt assumed — so a prompt naming a non-core tool is an instruction the model
+// may be unable to follow the moment anything projects a SUBSET of the registry.
+//
+// Scope: this covers BuildWakePrompt only. The daemon appends its own note to that
+// output (internal/supervisor/wake.go), and TestUnattendedWakeNoteNamesOnlyCoreTools
+// holds that half to the same rule; together they cover the assembled daemon prompt.
 func TestBuildWakePromptNamesOnlyCoreTools(t *testing.T) {
 	// Every interpolated event field is set explicitly and kept DOT-FREE. Event text is
 	// rendered verbatim into the prompt, so a tool-shaped fixture value would be
@@ -437,51 +488,41 @@ func TestBuildWakePromptNamesOnlyCoreTools(t *testing.T) {
 			events:       []domain.QueueEvent{watcherEvent("inbox-new", "term-new"), asyncEvent},
 			branchMarker: "Also: asynchronous operation(s) you started earlier have finished",
 		},
+		// A bare event renders wakeEventLine's FALLBACK title and skips every optional
+		// fragment. Without these two the fallbacks are unreached, so a tool id added to
+		// one of them ("event — call watcher.list") would slip past the guard.
+		{
+			name:         "watcher event with no title or ids",
+			events:       []domain.QueueEvent{{Source: domain.SourceTerminalWatcher}},
+			branchMarker: "- event",
+		},
+		{
+			name:         "async event with no title or ids",
+			events:       []domain.QueueEvent{{Source: domain.SourceAsyncTool}},
+			branchMarker: "- async operation",
+		},
 	}
 
-	// async.list is named ONLY as a prohibition ("do NOT call async.list to
-	// double-check") — the wake turn is told not to reach for it, so it has no claim on
-	// coreToolNames. Every OTHER rendered name is an instruction to CALL that tool.
-	// Before adding to this list, read the new mention: only a genuine "do NOT call X"
-	// belongs here.
-	negativeOnly := []string{"async.list"}
-
-	core := setOf(coreToolNames...)
-	excluded := setOf(negativeOnly...)
 	seen := map[string]struct{}{}
-	var missing []string
-
 	for _, tc := range scenarios {
 		prompt := BuildWakePrompt(tc.events, tc.alreadySummarized)
 		if !strings.Contains(prompt, tc.branchMarker) {
 			t.Errorf("%s: branch never rendered, missing marker %q:\n%s", tc.name, tc.branchMarker, prompt)
 		}
-		for _, name := range wakePromptToolNamePattern.FindAllString(prompt, -1) {
-			if _, dup := seen[name]; dup {
-				continue
-			}
+		for name := range assertWakePromptToolsAreCore(t, tc.name, prompt, wakePromptProhibitions) {
 			seen[name] = struct{}{}
-			if _, skip := excluded[name]; skip {
-				continue
-			}
-			if _, ok := core[name]; !ok {
-				missing = append(missing, name)
-			}
 		}
 	}
 
-	// A prohibition that gets reworded or deleted must not leave a silent exclusion
-	// behind — that would hide the next real drift instead of reporting it.
+	// A prohibition that gets reworded or deleted must not leave a silent mask behind —
+	// that would hide the next real drift instead of reporting it.
 	var stale []string
-	for _, name := range negativeOnly {
-		if _, ok := seen[name]; !ok {
-			stale = append(stale, name)
+	for _, phrase := range wakePromptProhibitions {
+		if _, ok := seen[phrase]; !ok {
+			stale = append(stale, phrase)
 		}
 	}
 	if len(stale) > 0 {
-		t.Errorf("negative-only exclusions no longer mentioned in any wake prompt (drop them): %s", strings.Join(stale, ", "))
-	}
-	if len(missing) > 0 {
-		t.Fatalf("wake prompt names tools that are not in coreToolNames: %s", strings.Join(missing, ", "))
+		t.Errorf("wake prompt prohibitions no longer rendered verbatim (re-check the wording, then drop or update them): %q", stale)
 	}
 }

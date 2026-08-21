@@ -24,6 +24,12 @@ import (
 // — a loaded skill never narrows the toolset (see buildToolFilterLocked) — so this is
 // no longer a per-turn projection key; it is just the always-must-exist set. Internal
 // dotted names.
+//
+// It is ALSO the floor the autonomous wake prompt is pinned against
+// (TestBuildWakePromptNamesOnlyCoreTools): a wake turn must be able to call every tool
+// its prompt names, and it may run with no relevant skill active. That pin is LOCAL —
+// nothing transports this list to the backend, so it does not itself constrain the
+// backend's tool projection; it is the CLI-side declaration such a floor would adopt.
 var coreToolNames = []string{
 	"context.snapshot",
 	"fs.read",
@@ -31,18 +37,21 @@ var coreToolNames = []string{
 	"fs.search",
 	"queue.digest",
 	// queue.resolve is core: the autonomous wake prompt tells the reactor to clear a
-	// handled inbox item with it (both the watcher branch's hygiene line and the async
-	// completion guidance name it literally), and a wake turn carries no skill that
-	// could reintroduce it. A wake that cannot resolve leaves the badge lit forever, so
-	// it must be asserted-to-exist at boot. Its confirm/tier gate still governs it.
+	// handled inbox item with it — the watcher branch's hygiene line, the async
+	// completion guidance, and the daemon's unattended note all name it literally. A
+	// wake must work with NO relevant skill active, so the prompt cannot lean on a
+	// skill to reintroduce it; without it a handled item keeps the attention badge lit
+	// until some other path resolves or clears it. RiskLocal — every tier allows it and
+	// nothing confirms it, so being core costs nothing.
 	"queue.resolve",
 	"daintree.status",
 	"tool.search",
 	"terminal.read",
 	// terminal.summarize is core: it is the DEFAULT the wake prompt names for reading a
 	// finished agent's output (raw scrollback is garbled TUI noise), in both the watcher
-	// and the async branch. It is the one read a zero-skill autonomous turn is told to
-	// reach for first, so it must be asserted-to-exist at boot. Read-only, no gate.
+	// and the async branch. It is the first read an autonomous wake is told to reach
+	// for, and that wake must work with no relevant skill active. RiskRead, so no
+	// confirmation gate.
 	"terminal.summarize",
 	"terminal.extract",
 	// terminal.awaitAll is core: waiting for a spawned cohort to finish is a
