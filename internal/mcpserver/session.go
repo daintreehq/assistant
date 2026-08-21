@@ -60,6 +60,17 @@ type RuntimeFacts struct {
 	ApprovalMode string `json:"approvalMode"`
 	MCPConnected bool   `json:"mcpConnected"`
 	MCPTransport string `json:"mcpTransport,omitempty"`
+	// PinnedSkills are the ids this session ASKS for on every turn — what was requested,
+	// not what the backend ended up loading. Preflight can only prove an id exists in the
+	// catalog; whether it is executable under this profile, and whether it survives the
+	// active-skill cap, is decided per turn and reported through the pin warnings.
+	// Reported at all because a caller that inherited a server-level default did not
+	// choose these and would otherwise have no way to see them.
+	PinnedSkills []string `json:"pinnedSkills,omitempty"`
+	// PinPreflightWarning is the non-fatal pin advisory. NOT part of the facts wire
+	// shape — describe() folds it into SessionOutput.Warnings, which is the field a
+	// caller already reads for "conditions that will silently ruin a run".
+	PinPreflightWarning string `json:"-"`
 }
 
 // OpenParams is what session.open resolves into a runtime. Every field is optional and
@@ -82,6 +93,9 @@ type OpenParams struct {
 	Approvals ApprovalMode
 	// ApprovalTimeout bounds a parked approval; zero uses DefaultApprovalTimeout.
 	ApprovalTimeout time.Duration
+	// Skills pins backend runbooks for every turn of this session. nil inherits the
+	// process-level --skill defaults; a non-nil empty slice explicitly clears them.
+	Skills []string
 }
 
 // RuntimeFactory builds a runtime for one session. cli supplies the real one.

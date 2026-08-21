@@ -91,6 +91,18 @@ Things worth knowing before you drive it:
 - Unlike a one-shot's default, an MCP session **does** run the scheduler, so watchers,
   timers and async futures actually settle while it is open. A one-shot can opt into the
   same shape with `--run-scheduler`.
+- **`skills` pins runbooks for the session**, the MCP twin of `--skill` (see below for
+  the full semantics — they are identical, deliberately: the two headless surfaces must
+  not drift). Omitting it inherits whatever `--skill` this server process was launched
+  with; passing an explicit `[]` clears those defaults for this session. An **unknown** id fails
+  the **open**, not the first turn, so the failure lands where the caller is looking —
+  when there is a catalog to check it against. A backend that accepts pins but advertises
+  no catalog opens with a warning instead, and reports the bad id on the first turn; a
+  backend that does not accept pins at all fails the open whatever the ids are. A
+  catalogued id that this profile cannot execute also opens fine and warns per turn. `facts.pinnedSkills` reports what the session REQUESTS on
+  every turn — the only way a caller that inherited a server-level default can see them.
+  It is not a claim the backend honoured each one: an id can be in the catalog and still
+  come back `pinned_skill_not_executable` or `pinned_skill_over_cap`.
 
 ### Diagnosing a run
 
@@ -139,7 +151,9 @@ reserved and never emitted.
 
 `--json` requires a prompt — there is no JSONL interactive mode. A prompt that begins
 with a dash needs `--` first (`daintree-assistant --json -- "--summarize this"`), or the
-parser reads it as an option.
+parser reads it as an option. The two exceptions are `doctor --json` and
+`--list-skills --json`: both are reads that answer with ONE document rather than a run,
+and a gate or a catalog a script cannot parse is not one.
 
 ### Configuration
 
@@ -162,6 +176,8 @@ Every knob is a flag, and every flag shadows a trusted env var and wins over it.
 | `--project-instructions-file PATH` | — | the file's CONTENT becomes `DAINTREE.md`. Capped at 16 KiB |
 | `--timeout DURATION` | — | one-shot only; `0` means no limit |
 | `--run-scheduler` | — | one-shot only; run the scheduler and await this run's async work. Requires a positive `--timeout` |
+| `--skill ID` | — | pin a backend runbook for every turn; repeatable. See below |
+| `--list-skills` | — | print the runbooks this backend can load, then exit |
 
 `--timeout` and `--run-scheduler` are only ever *read* on the one-shot route — the
 interactive routes already run a scheduler of their own, and `daemon` / `doctor` have no
@@ -211,6 +227,57 @@ share its database and lease however they are named — give each its own `--sta
 when isolation has to be guaranteed. Both it
 and `--window-id` are also accepted by `daintree.session.open` as `projectId`/`windowId`,
 since that surface exists to repoint a process a client cannot restart.
+
+### Naming a skill: `--skill` and `--list-skills`
+
+The backend picks which runbooks a turn loads. That is right for ordinary use and wrong
+for developing a runbook: when the turn goes badly you cannot tell whether the runbook is
+bad or the selector simply did not pick it. `--skill` removes that ambiguity by naming
+one.
+
+```bash
+daintree-assistant --list-skills                       # what can this backend load?
+daintree-assistant --list-skills --json | jq -r '.skills[].id'
+daintree-assistant --skill daintree.orchestration.multi-agent "spin up two reviewers"
+daintree-assistant --skill a.one --skill b.two "..."   # repeat for more than one
+```
+
+`--list-skills` is the lightest route in the binary: one capability read against the
+configured endpoint. It takes no project lease, opens no database and connects no MCP, so
+it answers while another assistant owns the project. Text by default; `--json` writes one
+indented document, `{"catalogRevision": "...", "skills": [{"id", "title"}]}`, sorted by
+id. Exit `0` on a catalog read — **including an advertised empty one**, which is a real
+answer — `1` on a config/fetch failure or a backend that advertises no catalog at all,
+`2` on cancellation. A `--json` failure is still JSON:
+`{"error": {"code": "...", "message": "..."}}`.
+
+`--skill` is repeatable, one id per occurrence — commas are not a separator, because a
+comma is legal inside an opaque backend id. Order matters: the backend admits pins in the
+order given and budgets them against its active-skill cap. Exact repeats collapse; an
+empty value (`--skill=`, which is what an unset shell variable expands to) is rejected
+rather than run unpinned. Pins are rejected on routes that never run a turn
+(`doctor`, `status`, `daemon`, `reset`, `support-bundle`) instead of being silently
+ignored.
+
+**Nothing about `--skill` is allowed to fail quietly**, because a run that silently did
+not load the runbook looks exactly like one that did:
+
+- The backend must advertise `skills.pinned_skill_ids`. The field is validated with
+  `extra="forbid"`, so sending it to a deployment that predates it would 422 the whole
+  turn — and withholding it would run unpinned. An unaware or unreachable backend
+  therefore **fails the launch before a turn is spent**.
+- An id that is not in the advertised catalog fails the launch too, with a near miss
+  (`unknown skill id "daintree.foundatoin"; did you mean "daintree.foundation"?`).
+- A backend that accepts pins but advertises no catalog cannot be checked locally. That
+  is a `warning`, not a failure, and the server-side codes below are the backstop.
+- A pin the backend accepted but could not honour arrives as an ordinary `warning` event
+  carrying its code: `unknown_skill_id_ignored`, `pinned_skill_not_executable` (the id
+  exists but is outside this profile's menu), or `pinned_skill_over_cap`. Each is
+  reported once per session — the pin list cannot change mid-conversation, so repeating
+  it every round would only bury the tool activity.
+
+A pinned skill never narrows the tool inventory. It rides alongside the backend's own
+selection rather than replacing it, so the turn still loads whatever else it needs.
 
 Four rules worth knowing before you script against them:
 

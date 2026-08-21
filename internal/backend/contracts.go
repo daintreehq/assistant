@@ -196,6 +196,23 @@ type Generation struct {
 type Selection struct {
 	Policy string `json:"policy,omitempty"` // "new_instruction" | "always"
 	Force  bool   `json:"force,omitempty"`
+	// PinnedSkillIDs names runbooks the CALLER requires this turn, whatever the
+	// backend's classifier picks. `Force` only means "re-run the selector this
+	// round", so before this field there was no way to say "load THIS one" — which
+	// is what makes a runbook under development testable: a failure is then the
+	// runbook, not an unlucky selection.
+	//
+	// omitempty is LOAD-BEARING, not tidiness. Selection is validated with
+	// extra="forbid", so sending the key to a deployment that predates it 422s the
+	// whole turn before the model opens. Nothing may populate this without first
+	// seeing Capabilities.Skills.PinnedSkillIDs from the endpoint about to be
+	// called (App.backendAcceptsPinnedSkillIDs).
+	//
+	// Ids that are unknown, or not executable under this request's profile, are
+	// DROPPED and reported in the meta event's Warnings — never a 422, because
+	// whether a pin fits depends on the live catalog and the configured cap, which
+	// a request-shape validator cannot see.
+	PinnedSkillIDs []string `json:"pinned_skill_ids,omitempty"`
 }
 
 // ClientInfo identifies the CLI build for the backend's telemetry.
@@ -982,6 +999,26 @@ type Capabilities struct {
 	Skills  struct {
 		CatalogRevision string `json:"catalog_revision"`
 		ManualResolve   bool   `json:"manual_resolve"`
+		// PinnedSkillIDs advertises that Selection.pinned_skill_ids is accepted. It is
+		// a GATE, in the same sense as Respond.DisplayContext: Selection is
+		// extra="forbid" server-side, so a client that guesses wrong loses the entire
+		// turn rather than one optional field.
+		PinnedSkillIDs bool `json:"pinned_skill_ids"`
+		// Catalog is every skill the backend can load, as the minimal {id, title}
+		// reference, sorted by id. It is the CANONICAL full catalog rather than a
+		// profile's executable menu — capabilities carries neither a profile nor a tool
+		// inventory, so it cannot honestly narrow — which is why a locally-valid id can
+		// still come back `pinned_skill_not_executable`.
+		//
+		// nil means the backend does not advertise a catalog at all (it predates the
+		// field); a non-nil empty slice means an advertised, genuinely empty one. The
+		// two are different answers and callers must not collapse them: the first
+		// cannot validate an id, the second knows every id is wrong.
+		//
+		// Key any cache on CatalogRevision above — same snapshot. That is conservative,
+		// not exact: the revision hashes each skill's body too, so it moves on an edit
+		// that leaves this list byte-identical.
+		Catalog []SkillRef `json:"catalog"`
 	} `json:"skills"`
 	Tasks  []string `json:"tasks"`
 	Limits struct {

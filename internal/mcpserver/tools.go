@@ -54,6 +54,13 @@ type OpenInput struct {
 	Approvals string `json:"approvals,omitempty" jsonschema:"How to answer a mutating tool. decline: skip it and carry on (the safe default). ask: park it for you to decide with daintree.approve. auto: never ask. Choose ask only if you will actually poll for approvals - a parked call blocks the whole turn until it is answered or times out."`
 	// ApprovalTimeoutMs bounds a parked approval so a forgotten one cannot pin the turn.
 	ApprovalTimeoutMs int `json:"approvalTimeoutMs,omitempty" jsonschema:"How long a parked approval waits before it is denied, in milliseconds. Default 300000 (5 minutes). Only meaningful when approvals is ask."`
+	// Skills is the MCP twin of the CLI's repeatable --skill. The two headless surfaces
+	// must not drift: a runbook you can pin from argv you must be able to pin here.
+	//
+	// A NON-NIL empty array is meaningful — it clears any process-level --skill this
+	// server was launched with — which is why the merge below tests nil rather than
+	// length. Omitting the field inherits those defaults.
+	Skills []string `json:"skills,omitempty" jsonschema:"Backend skill ids to load on every turn of this session, whatever the backend's own selector picks. Run 'daintree-assistant --list-skills' to see the ids. When the backend advertises a catalog an unknown id fails this open rather than running unpinned; when it accepts pins but advertises no catalog, the open succeeds with a warning and the backend reports the bad id on the first turn. A backend that does not accept pins at all fails the open whatever the ids are. Pass an empty array to clear a server-level default."`
 }
 
 // SessionOutput describes an open session.
@@ -214,6 +221,15 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 				"approvalTimeoutMs must not be negative (got %d) — the timeout is the only thing that bounds a parked approval",
 				in.ApprovalTimeoutMs)
 		}
+		// Rejected here rather than trimmed away: an empty entry means the caller built
+		// the array from something that came back blank, and silently dropping it opens a
+		// session pinned to less than was asked for — the same silent-underrun --skill
+		// exists to prevent.
+		for i, id := range in.Skills {
+			if strings.TrimSpace(id) == "" {
+				return nil, SessionOutput{}, fmt.Errorf("skills[%d] is empty — remove it, or omit skills entirely to let the backend's selector choose", i)
+			}
+		}
 		sess, err := reg.Open(ctx, OpenParams{
 			Project: in.Project, BackendURL: in.BackendURL, APIKeyFile: in.APIKeyFile,
 			Tier: in.Tier, McpURL: in.McpURL, McpToken: in.McpToken,
@@ -221,6 +237,7 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 			ProjectID: in.ProjectID, WindowID: in.WindowID,
 			Approvals:       mode,
 			ApprovalTimeout: time.Duration(in.ApprovalTimeoutMs) * time.Millisecond,
+			Skills:          in.Skills,
 		})
 		if err != nil {
 			return nil, SessionOutput{}, err
@@ -437,6 +454,12 @@ func describe(s *Session, info *BinaryInfo) SessionOutput {
 	}
 	if snap.Stale {
 		out.Warnings = append(out.Warnings, snap.StaleMessage())
+	}
+	// The non-fatal half of the pin preflight (the backend accepts pins but serves no
+	// catalog, so the ids could not be checked before the session opened). The fatal
+	// half never reaches here — it fails the open.
+	if facts.PinPreflightWarning != "" {
+		out.Warnings = append(out.Warnings, facts.PinPreflightWarning)
 	}
 	return out
 }

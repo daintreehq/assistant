@@ -81,6 +81,13 @@ type Options struct {
 	AutoApprove             *bool
 	DebugLog                *bool
 
+	// PinnedSkillIDs are the backend runbook ids `--skill` named (repeatable). Like
+	// Timeout this is a session control rather than configuration: it has no env var,
+	// and carrying it through config would also pin the supervisor's unattended wake
+	// turns, which nobody asked for. Negotiated once per launch by
+	// App.PreparePinnedSkills — naming an id here does not yet mean it will be honoured.
+	PinnedSkillIDs []string
+
 	// Timeout bounds a one-shot run's wall clock (zero = unbounded). It is NOT a config
 	// value: it cancels the run context, so the turn unwinds through the same path as a
 	// SIGINT and reports cancelled rather than being killed mid-write.
@@ -158,6 +165,18 @@ func loadConfigFromOptions(opts Options) (config.AppConfig, error) {
 		return config.AppConfig{}, err
 	}
 	return config.LoadConfig(o)
+}
+
+// loadProbeConfigFromOptions is loadConfigFromOptions for a read-only probe: same
+// resolution, but it does not create the state directory. See config.LoadConfigForProbe
+// — a question about the backend must not have a side effect on the user's disk, nor
+// fail because a state dir it never wanted is unwritable.
+func loadProbeConfigFromOptions(opts Options) (config.AppConfig, error) {
+	o, err := overridesFromOptions(opts)
+	if err != nil {
+		return config.AppConfig{}, err
+	}
+	return config.LoadConfigForProbe(o)
 }
 
 // readAPIKeyFile reads a single-line credential file.
@@ -448,7 +467,7 @@ func RunOneShot(ctx context.Context, opts Options) int {
 	}
 	defer own.Release()
 	debuglog.BootTrace("oneshot.ownership.acquired")
-	a, err := app.Create(app.CreateOptions{Overrides: overrides})
+	a, err := app.Create(app.CreateOptions{Overrides: overrides, PinnedSkillIDs: opts.PinnedSkillIDs})
 	if err != nil {
 		reportError(err)
 		return exitFor()
@@ -465,6 +484,20 @@ func RunOneShot(ctx context.Context, opts Options) int {
 	// No model-key preflight: the CLI no longer holds model credentials (the backend
 	// owns them). If the backend is unreachable the turn fails with a clear
 	// "could not reach assistant backend" error from the backend client.
+
+	// The ONE preflight that remains, and only when `--skill` named something. It costs
+	// a capability GET, which is why it is conditional: an ordinary scripted run must
+	// not grow a network round trip. A failure here aborts BEFORE the turn, because a
+	// pin that cannot be negotiated produces a normal-looking run that silently did not
+	// load the runbook — exactly what --skill exists to rule out.
+	pinNotice, perr := a.PreparePinnedSkills(ctx)
+	if perr != nil {
+		if serr := a.Shutdown(); serr != nil {
+			fmt.Fprintf(os.Stderr, "shutdown error: %v\n", serr)
+		}
+		reportError(perr)
+		return exitFor()
+	}
 
 	// AUTO_APPROVE reaches HERE too, and that is easy to miss. One-shot is
 	// non-interactive, so it installs an auto-DECLINE confirm hook below — but dispatch
@@ -576,6 +609,17 @@ func RunOneShot(ctx context.Context, opts Options) int {
 		// After the header, so a JSONL consumer can rely on `session` being the FIRST
 		// line whenever one is emitted at all.
 		warnAutoApprove()
+		// The non-fatal half of the pin preflight: the backend accepts pins but serves no
+		// catalog, so the ids could not be checked locally. Same channel and the same
+		// reason as the auto-approve notice — a condition that will quietly change what
+		// the run means.
+		if pinNotice != "" {
+			if sink != nil {
+				sink.Warn(pinNotice)
+			} else {
+				stderrR.Warn(pinNotice)
+			}
+		}
 		_, err := a.Session.Send(ctx, opts.Prompt, agent.SendOptions{})
 		debuglog.BootTrace("oneshot.send.done")
 		return err
@@ -679,7 +723,7 @@ func runInteractive(ctx context.Context, opts Options, ttyOK bool) int {
 	}
 	defer own.Release()
 	debuglog.BootTrace("boot.ownership.acquired")
-	createOpts := app.CreateOptions{Overrides: overrides}
+	createOpts := app.CreateOptions{Overrides: overrides, PinnedSkillIDs: opts.PinnedSkillIDs}
 	// A stale on-disk schema has exactly one sensible recovery for this pre-release,
 	// single-baseline DB: hard-reset it. On an interactive terminal (Daintree's xterm)
 	// take that automatically instead of prompting — the answer is always "yes" here, so
@@ -696,6 +740,25 @@ func runInteractive(ctx context.Context, opts Options, ttyOK bool) int {
 		return domain.OneShotExitCode.Error
 	}
 	debuglog.BootTrace("boot.app.created")
+	// Negotiate `--skill` BEFORE adopting, and before either front end opens. A no-op
+	// without pins; with them, a failure aborts the launch rather than dropping the
+	// operator into a cockpit whose every turn silently ignores the runbook they named.
+	//
+	// Ordered ahead of AdoptAsCurrentSession deliberately. Adoption writes the project's
+	// durable current-session pointer and shutdown does not put back what was there, so
+	// adopting first would let a launch that never ran a turn — a mistyped `--skill` —
+	// permanently displace the real conversation: the supervisor's detached wake turns
+	// would resume the empty session instead of the one the user was actually having.
+	pinNotice, perr := a.PreparePinnedSkills(ctx)
+	if perr != nil {
+		_ = a.Shutdown()
+		r.Error(perr.Error())
+		return domain.OneShotExitCode.Error
+	}
+	if pinNotice != "" {
+		r.Warn(pinNotice)
+	}
+
 	// This conversation is now the project's current session — the one the
 	// daemon's detached wake turns continue after we exit.
 	a.AdoptAsCurrentSession()

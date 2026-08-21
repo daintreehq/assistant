@@ -100,6 +100,13 @@ type Session struct {
 	// (informational; surfaced for diagnostics, never sent back). Guarded by s.mu.
 	catalogRevision string
 	promptVersion   string
+	// pinWarningsSeen latches the pin-failure warning codes already surfaced, so a
+	// multi-round turn (and every later turn of the session) reports each cause ONCE.
+	// The condition is a property of the pin list, which is session-constant: repeating
+	// "that id is unknown" on every round would bury the tool activity the operator is
+	// actually reading. Lazily allocated and guarded by s.mu. Deliberately NOT reset by
+	// /clear or compaction — the pins survive both, so the warning is still stale news.
+	pinWarningsSeen map[string]struct{}
 
 	// compactFailures counts CONSECUTIVE small-model auto-compact summary failures
 	// (guarded by s.mu). It arms the lossy-truncation fallback once it reaches
@@ -944,7 +951,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			},
 			Runtime:    s.buildRuntimeContext(promptContext, openTerminals),
 			Turn:       s.buildTurnContext(userInput, isWake, recalledMemories, resumedWatchers),
-			Selection:  &backend.Selection{Policy: "new_instruction"},
+			Selection:  s.selectionForRound(),
 			Generation: &backend.Generation{ResponseFormat: "text"},
 		}
 
@@ -2012,6 +2019,109 @@ func (s *Session) applyStreamMeta(m backend.StreamMeta) {
 		// Side-channel: a persistence failure must never break the live stream.
 		_ = s.deps.BackendStateStore.PutSessionBackendState(s.deps.SessionID, m.State)
 	}
+	s.reportPinnedSkillWarnings(m.Warnings)
+}
+
+// pinnedSkillWarnings maps the backend's pin-refusal codes to what an operator needs
+// told. It is an ALLOWLIST, and that is the whole design: backend skill loading is
+// deliberately invisible in this CLI — no card, no cue, no /skills — because the delta
+// a load card showed was misleading about what was retained, capped, or auto-paired.
+// A pin refusal is the one narrow carve-out, because the operator asked for a specific
+// runbook by name and a `--skill` that quietly did nothing is the exact failure the flag
+// exists to prevent. Every other warning code the backend may add stays diagnostic-only
+// (the debug trace and --json already carry the raw list); widening this map would
+// resurrect the surfacing that was removed on purpose.
+var pinnedSkillWarnings = map[string]string{
+	"unknown_skill_id_ignored":    "the backend did not recognise a pinned skill id and ignored it — run `daintree-assistant --list-skills` to see what it can load",
+	"pinned_skill_not_executable": "a pinned skill exists but is not executable in this session's profile, so it was not loaded",
+	"pinned_skill_over_cap":       "a pinned skill did not fit the backend's active-skill limit and was dropped",
+}
+
+// reportPinnedSkillWarnings surfaces the pin-refusal codes from a COMMITTED meta event,
+// once per cause per session.
+//
+// Fed from applyStreamMeta (the retry-safe OnMeta path) rather than OnRawMeta on
+// purpose: a retried attempt re-emits its meta, and a warning shown twice for one
+// refusal reads as two refusals.
+//
+// It also stays silent when nothing was pinned. The backend can only raise these codes
+// in response to selection.pinned_skill_ids, but a client that reports a pin failure to
+// someone who never pinned anything is reporting a bug it cannot explain.
+func (s *Session) reportPinnedSkillWarnings(warnings []string) {
+	if len(warnings) == 0 || len(s.deps.PinnedSkillIDs) == 0 {
+		return
+	}
+	for _, code := range warnings {
+		msg, ok := pinnedSkillWarnings[code]
+		if !ok {
+			continue
+		}
+		s.mu.Lock()
+		if s.pinWarningsSeen == nil {
+			s.pinWarningsSeen = make(map[string]struct{}, len(pinnedSkillWarnings))
+		}
+		_, dup := s.pinWarningsSeen[code]
+		if !dup {
+			s.pinWarningsSeen[code] = struct{}{}
+		}
+		s.mu.Unlock()
+		if dup {
+			continue
+		}
+		s.events.Warn(msg + " (" + code + ")")
+	}
+}
+
+// selectionForRound builds the request's selection block.
+//
+// With no pins it returns exactly what it always did, so the wire bytes of an ordinary
+// turn are unchanged by this feature.
+//
+// With pins it attaches them only while the live endpoint still advertises the
+// capability. app.PreparePinnedSkills already proved that before the first turn, so a
+// closed gate here means the endpoint CHANGED underneath us — in practice `/backend`,
+// which swaps the client in place and deliberately does no network work, leaving the
+// cached capability answer pinned to the endpoint that is no longer being called.
+//
+// Sending the field anyway would 422 the entire turn against the new endpoint. Dropping
+// it and saying so once keeps the turn alive and keeps the operator from reading an
+// unpinned run as a pinned one. Deliberately not a turn failure: the switch was a
+// deliberate act and the conversation should survive it.
+func (s *Session) selectionForRound() *backend.Selection {
+	sel := &backend.Selection{Policy: "new_instruction"}
+	if len(s.deps.PinnedSkillIDs) == 0 {
+		return sel
+	}
+	if s.deps.BackendAcceptsPinnedSkillIDs == nil || !s.deps.BackendAcceptsPinnedSkillIDs() {
+		s.reportPinGateClosed()
+		return sel
+	}
+	sel.PinnedSkillIDs = append([]string(nil), s.deps.PinnedSkillIDs...)
+	return sel
+}
+
+// pinGateClosedCode is a CLIENT-side pseudo-code, kept in the same one-per-session
+// ledger as the backend's own so the two cannot each report the same silent unpinning.
+const pinGateClosedCode = "pinned_skills_withheld"
+
+func (s *Session) reportPinGateClosed() {
+	s.mu.Lock()
+	if s.pinWarningsSeen == nil {
+		s.pinWarningsSeen = make(map[string]struct{}, len(pinnedSkillWarnings)+1)
+	}
+	_, dup := s.pinWarningsSeen[pinGateClosedCode]
+	if !dup {
+		s.pinWarningsSeen[pinGateClosedCode] = struct{}{}
+	}
+	s.mu.Unlock()
+	if dup {
+		return
+	}
+	// Names the CAUSE, not just the effect. "This backend does not support pinning"
+	// would be a guess and usually a wrong one: the pins were negotiated successfully at
+	// launch, so what changed is which endpoint is being called.
+	s.events.Warn("the backend endpoint changed after --skill was negotiated, so this turn ran WITHOUT the pinned runbooks; " +
+		"restart with --skill against the new endpoint to pin them there (" + pinGateClosedCode + ")")
 }
 
 // skillLabels renders skill refs to display labels, preferring the title and falling

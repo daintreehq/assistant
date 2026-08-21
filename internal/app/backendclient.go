@@ -88,3 +88,17 @@ func backendClientConfig(cfg config.AppConfig, ledger *costledger.Ledger) backen
 	}
 	return clientCfg
 }
+
+// NewProbeBackendClient builds an App-free, UNBILLED client for a read-only probe of
+// the configured endpoint — today, `--list-skills`.
+//
+// It resolves the endpoint, the optional caller key and the routing posture exactly the
+// way the session client does, so a probe can never report on a different deployment
+// than a turn would reach. It takes no cost ledger, because a capability GET is not
+// billed and must not appear in any session total, and it needs no App: reading the
+// catalog must not take the project's owner lease, open the database, or connect MCP.
+// Listing what a backend can load is a question about the BACKEND, and it has to be
+// answerable while another assistant owns the project.
+func NewProbeBackendClient(cfg config.AppConfig) *backend.Client {
+	return backend.NewClient(backendClientConfig(cfg, nil))
+}
