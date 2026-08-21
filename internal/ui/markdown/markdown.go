@@ -12,7 +12,9 @@
 //     a hard 80-col wrap, never rune/byte counts.
 //   - Security: strip pre-existing ANSI from the INPUT before parsing (untrusted
 //     model output could inject SGR / OSC-8 links); when color is off, strip the
-//     OUTPUT too.
+//     OUTPUT too. The OSC-8 hyperlinks we then GENERATE are restricted to
+//     http/https targets (filterHyperlinkSchemes) — glamour would otherwise make
+//     mailto:/file:///javascript: destinations genuinely clickable in the host.
 //   - Bounded LRU cache keyed (contentHash, width, expanded); each Renderer owns
 //     one immutable theme, so theme is implicit in the cache instance.
 //   - Plain fallback on unknown lexer / render failure / empty prose.
@@ -87,13 +89,10 @@ func (r *Renderer) Render(content string, width int, expanded bool) Rendered {
 	if width < 1 {
 		width = 1
 	}
-	// Security: strip any ANSI the model may have injected into its own prose
-	// BEFORE hashing/parsing, so an injected SGR/OSC-8 can never reach the output
-	// and the cache key is computed over the sanitized text.
-	clean := content
-	if strings.IndexByte(content, '\x1b') >= 0 {
-		clean = ansi.Strip(content)
-	}
+	// Security: strip anything the model could use to drive the terminal itself
+	// BEFORE hashing/parsing, so it can never reach the output and the cache key
+	// is computed over the sanitized text.
+	clean := sanitizeInput(content)
 
 	key := cacheKey{
 		contentHash: hashContent(clean),
@@ -134,7 +133,19 @@ func (r *Renderer) render(clean string, width int) Rendered {
 
 	// Trim trailing blank lines glamour appends (the spec trims trailing blanks).
 	styled = strings.TrimRight(styled, "\n")
-	plain := ansi.Strip(styled)
+	// Restrict the hyperlinks glamour generated to http/https BEFORE either
+	// representation is derived or cached, so the allowlist holds for every
+	// consumer. (The no-color branch below strips all ANSI anyway, but the
+	// ordering is what makes the invariant obvious to a reader.)
+	styled = filterHyperlinkSchemes(styled)
+	// …then drop every control we did NOT generate. glamour un-escapes HTML
+	// entities in text nodes after we hand it the source, so "&#27;[2J" arrives
+	// here as a live clear-screen no matter how clean the input was.
+	styled = sanitizeOutput(styled)
+	// stripHyperlinks first: ansi.Strip mis-frames an OSC payload whose bytes
+	// include 0x9C (the continuation byte of runes like 'Ü'), which would spill the
+	// tail of a legitimate URI — and its BEL — into the plain text.
+	plain := ansi.Strip(stripHyperlinks(styled))
 
 	if !r.theme.Mode.Colorize() {
 		// Color off: the output must carry no SGR. glamour may still emit reset
