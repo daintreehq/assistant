@@ -146,7 +146,7 @@ Every knob is a flag, and every flag shadows a trusted env var and wins over it.
 
 | Flag | Env | Notes |
 |---|---|---|
-| `--backend-url URL` | `DAINTREE_BACKEND_URL` | the only endpoint mechanism there is |
+| `--backend-url URL` | `DAINTREE_BACKEND_URL` | outranks the endpoint stored by `/backend` |
 | `--api-key-file PATH` | `DAINTREE_API_KEY` | OPTIONAL — see below. Deliberately **no `--api-key`** |
 | `--state-dir PATH` | `DAINTREE_ASSISTANT_STATE_DIR` | the database, artifacts, and the owner lease |
 | `--log-dir PATH` | `DAINTREE_ASSISTANT_LOG_DIR` | |

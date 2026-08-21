@@ -243,6 +243,17 @@ func (m Model) onSubmit(text string) (tea.Model, tea.Cmd) {
 		if title, body, ok := m.handleApprovalsCommand(text); ok {
 			return m.onCommandComplete(CommandCompleteMsg{Title: title, Text: body})
 		}
+		// /backend is REFUSED while a turn runs, and only the cockpit can know that. A
+		// turn is multi-round (Session re-calls RespondStream after every tool round),
+		// so swapping between rounds would send the next round to a different endpoint
+		// carrying a `state` token the previous one signed. The bare listing form is
+		// harmless, so only an actual switch is blocked.
+		if m.inFlight && isBackendSwitch(text) {
+			return m.onCommandComplete(CommandCompleteMsg{
+				Title: "Backend",
+				Text:  "A turn is running. Switching endpoints mid-turn would send its next round somewhere that cannot read it — wait for this one to finish.",
+			})
+		}
 		// Slash command: run off the loop (some hit the model). Keep single-flight
 		// independent — a command isn't a model turn. Track it so the composer shows a
 		// busy cue while it runs (the model-backed /compact takes tens of seconds and
@@ -1442,4 +1453,11 @@ func (m *Model) sealedBlock(i int) ScrollbackBlock {
 		rendered = "\n" + rendered
 	}
 	return ScrollbackBlock{ID: cell.ID(), Kind: kind, Rendered: rendered, Plain: stripAnsi(rendered), Width: w}
+}
+
+// isBackendSwitch reports whether a submitted command is `/backend` WITH an argument —
+// i.e. one that would actually swap the client, as opposed to the bare listing form.
+func isBackendSwitch(text string) bool {
+	fields := strings.Fields(strings.TrimPrefix(strings.TrimSpace(text), "/"))
+	return len(fields) > 1 && strings.EqualFold(fields[0], "backend")
 }

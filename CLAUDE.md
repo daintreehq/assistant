@@ -54,8 +54,15 @@ process.
 **Endpoint, and NO sign-in.** The default endpoint is the deployed backend,
 `https://assistant.daintree.org` (`backend.DefaultBaseURL`); `backend.LocalBaseURL` is
 the local one (`http://127.0.0.1:8473`) you get by running `../assistant-backend`
-(`python -m daintree_assistant_server`). Point `DAINTREE_BACKEND_URL` at it — that
-trusted env var is the whole endpoint mechanism, and the local dev loop in its entirety.
+(`python -m daintree_assistant_server`). Three ways to choose, highest first:
+`--backend-url` → `DAINTREE_BACKEND_URL` (trusted env) → the endpoint **stored by
+`/backend`** (`internal/config/endpoint.go`, a 0600 `endpoint.json` at the per-user state
+root, holding ONLY `{backend_url}` — it is a preference, never a credential) → the
+default. `/backend` with no argument lists and marks the live one; with a target
+(`local`, `official`, a number, or a URL) it swaps the `Swappable` in place AND persists;
+`/backend default` forgets. Env deliberately outranks the stored choice so a harness or
+CI is never silently redirected — and because that would otherwise look like a broken
+feature, `cfg.BackendURLPinnedByEnv` makes `/backend` say so.
 
 **There is no sign-in, and the CLI stores no credential.** The backend holds its own
 upstream key and serves a request that carries **no `Authorization` header at all**, so

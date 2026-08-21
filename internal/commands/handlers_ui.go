@@ -100,6 +100,8 @@ func HandleUICommandWithProgress(ctx context.Context, line string, a *app.App, p
 		return UICommandResult{Handled: true, Title: "Models", Text: modelsText(a)}
 	case "cost":
 		return UICommandResult{Handled: true, Title: "Cost", Text: costText(a)}
+	case "backend":
+		return UICommandResult{Handled: true, Title: "Backend", Text: backendText(a, arg)}
 	case "routing":
 		return UICommandResult{Handled: true, Title: "Routing", Text: routingText(ctx, a)}
 	case "permissions":
@@ -592,6 +594,64 @@ func modelsText(a *app.App) string {
 	return "Model routing is owned by the Daintree backend.\n" +
 		padRight("backend", 8) + ": " + a.Backend.BaseURL() + "\n" +
 		padRight("model", 8) + ": daintree-assistant"
+}
+
+// backendText powers /backend: a switcher with no argument, a switch with one.
+//
+// The bare form LISTS rather than doing anything, which is the whole reason it is a
+// switcher and not just a setter: since the sign-in went away nothing else names the
+// live endpoint on demand, and "which backend am I talking to" is asked far more often
+// than "change it".
+//
+// The choice PERSISTS: it is a developer's standing preference (local day to day, the
+// deployed one to compare against), not a per-session toggle. `/backend default` forgets
+// it again.
+//
+// The cockpit refuses this mid-turn before reaching here (see ui.onSubmit): a turn is
+// multi-round, and swapping between rounds would send the next round to a different
+// endpoint carrying a state token the previous one signed.
+func backendText(a *app.App, arg string) string {
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		return a.DescribeBackendChoices()
+	}
+	var (
+		target string
+		err    error
+	)
+	reset := strings.EqualFold(arg, app.BackendResetAlias)
+	if reset {
+		target, err = a.ResetBackendURL()
+	} else {
+		target, err = a.SetBackendURL(arg)
+	}
+	if err != nil {
+		if target == "" {
+			return "Cannot switch backend: " + err.Error() + "\n\nRun /backend with no argument to see the choices."
+		}
+		// The swap SUCCEEDED and only persisting failed. Reporting that as a plain
+		// failure would be worse than useless — the user would re-run a command that
+		// already worked, against an endpoint that already changed.
+		return "Backend is now " + target + " — it answers from your next message.\n\n" +
+			"But: " + err.Error()
+	}
+	// "from your next message", not "switched": a turn already streaming finishes on the
+	// client it started on, so claiming the change is live would be false for a few more
+	// seconds in exactly the case someone would notice.
+	// The two outcomes say opposite things about the FILE, and saying the wrong one is
+	// worse than saying nothing: "remembered" after a reset would leave the user
+	// believing a preference exists that was just deleted.
+	out := "Backend is now " + target + " — it answers from your next message.\n\n"
+	if reset {
+		out += "The remembered choice is forgotten; new sessions use the default."
+	} else {
+		out += "Remembered for future sessions."
+	}
+	if a.SnapshotConfig().BackendURLPinnedByEnv {
+		out += "\n\nNOTE: DAINTREE_BACKEND_URL (or --backend-url) is set and will OVERRIDE this\n" +
+			"on the next launch. Unset it for the choice to stick."
+	}
+	return out
 }
 
 func permissionsText(a *app.App, arg string) string {

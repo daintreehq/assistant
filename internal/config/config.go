@@ -69,9 +69,23 @@ type AppConfig struct {
 	ProjectID string
 	WindowID  string
 
-	// BackendURL is the resolved Daintree backend endpoint: the deployed default
-	// unless a trusted env var / CLI override names another one.
+	// BackendURL is the resolved Daintree backend endpoint. Highest wins: a CLI
+	// override, then the trusted env var, then the endpoint stored by `/backend`, then
+	// the deployed default.
 	BackendURL string
+	// EndpointPath is where `/backend` persists its choice. PER-USER (the state ROOT,
+	// shared across projects) unless the state dir was explicitly overridden, in which
+	// case it follows the override so tests and harnesses stay isolated from a
+	// developer's real preference.
+	EndpointPath string
+	// BackendURLPinnedByEnv reports that DAINTREE_BACKEND_URL (or --backend-url) is
+	// deciding the endpoint, so a STORED choice is being overridden.
+	//
+	// It exists to stop a specific silent failure: someone runs `/backend local`, sees
+	// it confirmed, restarts, and lands back on the deployed endpoint because a shell
+	// profile exports the variable. Without this flag `/backend` cannot tell them why,
+	// and the feature looks broken rather than overridden.
+	BackendURLPinnedByEnv bool
 	// APIKey is an OPTIONAL caller-supplied bearer token, and is empty on virtually
 	// every install. The backend holds its own upstream credential and serves a
 	// request that carries no Authorization header at all, so the CLI neither asks
@@ -329,14 +343,29 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 	// --- backend endpoint + optional bearer ---
 	// Both are trustedGet, never merged. A bound project's .env must be able neither
 	// to redirect where a turn is sent (the URL) nor to supply a spendable credential
-	// on the user's behalf (the key). DAINTREE_BACKEND_URL is the dev/test escape
-	// hatch — a local backend, the fake backend in e2e — and the deployed default
-	// serves everyone else. There is nothing stored to read: the endpoint falls
-	// straight back to DefaultBaseURL and the key stays empty unless the trusted env
-	// names one, which is the normal case.
+	// on the user's behalf (the key).
+	//
+	// The endpoint is PER-USER, like the choice it records: one `/backend local` serves
+	// every project rather than having to be repeated in each. An EXPLICIT state-dir
+	// override is the exception — tests, benchmarks and harnesses all point the state
+	// dir somewhere disposable, and they must neither read nor clobber the developer's
+	// real preference.
+	endpointDir := stateRoot
+	if explicitStateDir != "" {
+		endpointDir = cfg.StateDir
+	}
+	cfg.EndpointPath = EndpointPath(endpointDir)
+	// Env ABOVE the stored choice, deliberately. A harness, a CI job and the e2e fake
+	// backend all set DAINTREE_BACKEND_URL and must not be silently redirected by
+	// whatever a developer last chose interactively. The cost is that an exported
+	// variable overrides a stored one without saying so, which is what
+	// BackendURLPinnedByEnv exists to let `/backend` explain.
+	envURL := e.trustedGet("DAINTREE_BACKEND_URL")
+	cfg.BackendURLPinnedByEnv = strings.TrimSpace(envURL) != "" || strings.TrimSpace(deref(overrides.BackendURL)) != ""
 	cfg.BackendURL = FirstString(
 		deref(overrides.BackendURL),
-		e.trustedGet("DAINTREE_BACKEND_URL"),
+		envURL,
+		LoadBackendURL(cfg.EndpointPath),
 		backend.DefaultBaseURL,
 	)
 	cfg.APIKey = FirstString(

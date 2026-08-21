@@ -6,6 +6,7 @@ import (
 
 	"github.com/daintreehq/assistant/internal/backend"
 	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/mcp"
 	"github.com/daintreehq/assistant/internal/ui/theme"
 )
 
@@ -23,6 +24,13 @@ type mastheadParams struct {
 	// masthead is the permanent record in scrollback, so a pasted transcript shows the
 	// session was running unattended, and the flag cannot change mid-session anyway.
 	AutoApprove bool
+	// Backend describes a NON-DEFAULT backend endpoint, or "" for the deployed one.
+	// It belongs in the permanent record for the same reason Routing does, plus one
+	// specific to it: since the sign-in went away there is NO other on-screen readout
+	// of which backend answered a turn, and an endpoint set by an exported variable in
+	// another terminal is otherwise completely invisible. A transcript that does not
+	// say it was talking to a local backend is a transcript that cannot be trusted.
+	Backend string
 	// Routing describes a NON-DEFAULT endpoint-routing policy, or "" for the default.
 	// It belongs in the permanent record because the privacy posture is part of the
 	// trust decision a tester makes before their first message — and because a policy
@@ -67,6 +75,12 @@ func renderMasthead(th theme.Theme, p mastheadParams, width int) string {
 		tierLine += th.Dim().Render(" " + g.Bullet + " " + gloss)
 	}
 	b.WriteString(truncateCells(tierLine, width))
+	if p.Backend != "" {
+		// Above routing, because it is the coarser fact: routing describes how the
+		// backend picks an upstream, and which backend is being asked comes first.
+		b.WriteByte('\n')
+		b.WriteString(truncateCells(th.Dim().Render("backend "+p.Backend), width))
+	}
 	if p.Routing != "" {
 		// Below the tier, above the auto-approve warning: same class of fact (what this
 		// session is permitted to do and under what terms), and it must not push the
@@ -424,6 +438,38 @@ func itoa(n int) string {
 		buf[i] = '-'
 	}
 	return string(buf[i:])
+}
+
+// mastheadBackend renders a NON-DEFAULT backend endpoint as one compact masthead line,
+// or "" when it is the deployed default.
+//
+// Only a deviation is announced, for the same reason mastheadRouting announces only a
+// deviation: a line that says the same thing on every launch stops being read. But the
+// deviation matters more here than it used to. There is no sign-in to pick an endpoint
+// any more — it comes from DAINTREE_BACKEND_URL or --backend-url — so the value can be
+// one an operator exported days ago in a shell they have since forgotten, and nothing
+// else on screen would ever mention it.
+//
+// SANITIZED, never the raw config value: neither the env var nor the flag is normalized,
+// so an endpoint carrying userinfo or a query token would otherwise be printed straight
+// into the host's native scrollback, which the cockpit never clears. mcp.SanitizeURL
+// fails closed — an unparseable endpoint renders as the empty string, which suppresses
+// the row rather than leaking it.
+func mastheadBackend(baseURL string) string {
+	u := strings.TrimSpace(baseURL)
+	if u == "" || u == backend.DefaultBaseURL {
+		return ""
+	}
+	safe := mcp.SanitizeURL(u)
+	if safe == "" {
+		return ""
+	}
+	if safe == backend.LocalBaseURL {
+		// Name the thing rather than the address. "local" is what the operator calls it,
+		// and it reads at a glance in a way a host:port never does.
+		return "local (" + safe + ")"
+	}
+	return safe
 }
 
 // mastheadRouting renders a NON-DEFAULT routing policy as one compact masthead line, or

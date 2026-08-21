@@ -275,6 +275,11 @@ func newModel(ctx context.Context, a *app.App, pump *eventPump) Model {
 			// Read once at construction: AUTO_APPROVE is trusted-env only, so it cannot
 			// change while the cockpit runs.
 			AutoApprove: a.Config.AutoApprove,
+			// From the config, not a.Backend: the headless UI harness builds a Model
+			// with no backend client at all, and the two agree at construction anyway —
+			// nothing has had a chance to replace the client yet. Empty for the
+			// deployed default, which needs no announcement.
+			Backend: mastheadBackend(a.Config.BackendURL),
 			// Same: routing is trusted-env only. Empty for the default policy, which
 			// needs no announcement.
 			Routing: mastheadRouting(a.Config.Routing),

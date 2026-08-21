@@ -431,7 +431,7 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "  --mcp-token TOKEN   Daintree MCP token (env: DAINTREE_MCP_TOKEN)")
 	fmt.Fprintln(w, "  --backend-url URL   assistant backend (env: DAINTREE_BACKEND_URL)")
 	fmt.Fprintln(w, "  --api-key-file PATH read the API key from a file (env: DAINTREE_API_KEY)")
-	fmt.Fprintln(w, "  --state-dir PATH    state + credentials root (env: DAINTREE_ASSISTANT_STATE_DIR)")
+	fmt.Fprintln(w, "  --state-dir PATH    state root (env: DAINTREE_ASSISTANT_STATE_DIR)")
 	fmt.Fprintln(w, "  --log-dir PATH      debug-log directory (env: DAINTREE_ASSISTANT_LOG_DIR)")
 	fmt.Fprintln(w, "  --auto-approve      run mutating tools without confirmation")
 	fmt.Fprintln(w, "  --debug-log         write the session trace to the log directory")
