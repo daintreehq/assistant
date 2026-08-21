@@ -50,7 +50,11 @@ func ToolsAdvertiseGrantSupport(tools []ToolInfo, grantNames []string) bool {
 // (NOT parsed from prose, which names non-existent tools as negative examples).
 // Drift is missing-only:
 // documented names absent from the live server are warned; extra live tools are
-// expected and ignored. 59 names — keep byte-stable with the reference prose.
+// expected and ignored. 61 names — keep byte-stable with the reference prose.
+// (The count is maintained by hand and had drifted to 59 before this was recounted.)
+// terminal.moveToWorktree is listed deliberately even though it is newly allowlisted:
+// we now offer a CONFIRMED typed wrapper over it, so a host that lacks it should warn
+// at connect rather than let the first user discover it after approving a move.
 var DocumentedMcpToolNames = []string{
 	"actions.getContext", "actions.list", "actions.search", "actions.getSchema",
 	"agent.focusNextAgent", "agent.focusNextWaiting", "agent.focusNextWorking",
@@ -65,7 +69,8 @@ var DocumentedMcpToolNames = []string{
 	"git.getProjectPulse",
 	"panel.focus", "recipe.list", "recipe.run",
 	"terminal.arm", "terminal.close", "terminal.disarm", "terminal.disarmAll", "terminal.getOutput",
-	"terminal.getStatus", "terminal.list", "terminal.rename", "terminal.sendCommand", "terminal.waitUntilIdle",
+	"terminal.getStatus", "terminal.list", "terminal.moveToWorktree", "terminal.rename",
+	"terminal.sendCommand", "terminal.waitUntilIdle",
 	"workflow.focusNextAttention", "workflow.prepBranchForReview", "workflow.startWorkOnIssue",
 	"worktree.createWithRecipe", "worktree.getCurrent", "worktree.list",
 }

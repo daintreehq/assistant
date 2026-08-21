@@ -30,7 +30,7 @@ already drifted out of agreement with each other and with the binary.
 > minting would cover mutating work. And `user.askMultipleChoice` needs a human at a
 > TTY: every unattended actor has no question surface and gets `QUESTION_NOT_INTERACTIVE`.
 
-## Inventory — 85 tools in 24 groups
+## Inventory — 86 tools in 24 groups
 
 ### `agentTask.*`
 
@@ -178,6 +178,7 @@ already drifted out of agreement with each other and with the binary.
 | `terminal.rename` | ui | supervisor | — | not needed | `daintree-mcp` | serial | — | Set a terminal/agent tab's title |
 | `terminal.sendCommand` | terminal | operator | yes | grantable | `daintree-mcp` | serial | — | Send a command line to a Daintree terminal — types it into the terminal's input and runs it |
 | `terminal.close` | terminal | operator | yes | grantable | `daintree-mcp` | serial | — | Close Daintree terminal(s) — moves each to the trash and ends the agent or process running in it |
+| `terminal.moveToWorktree` | terminal | operator | yes | grantable | `daintree-mcp` | serial | — | Move existing Daintree terminal(s) into ONE already-open worktree |
 | `terminal.arm` | terminal | operator | yes | grantable | `daintree-mcp` | serial | — | Add a terminal to Daintree's fleet arming set so the human's next broadcast keystrokes are ALSO routed to it |
 | `terminal.disarm` | terminal | operator | yes | grantable | `daintree-mcp` | serial | — | Remove a terminal from Daintree's fleet arming set so it no longer receives the human's broadcast input |
 | `terminal.disarmAll` | terminal | operator | yes | grantable | `daintree-mcp` | serial | — | Clear Daintree's entire fleet arming set so no terminal receives the human's broadcast input |

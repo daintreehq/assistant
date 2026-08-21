@@ -46,7 +46,7 @@ func TestPresentTool_NoRawDottedNames(t *testing.T) {
 	names := []string{
 		"scratch.create", "scratch.set", "scratch.get", "scratch.delete", "scratch.drop",
 		"terminal.awaitAll", "terminal.sendCommand", "terminal.rename", "terminal.close",
-		"terminal.arm", "terminal.disarm", "terminal.disarmAll",
+		"terminal.arm", "terminal.disarm", "terminal.disarmAll", "terminal.moveToWorktree",
 		"terminal.run.async", "terminal.await.async", "async.list", "async.cancel",
 		"memory.recall", "memory.list", "memory.save", "memory.forget", "memory.pin", "memory.unpin",
 		"artifact.read", "copyTree.generate", "copyTree.injectToTerminal",

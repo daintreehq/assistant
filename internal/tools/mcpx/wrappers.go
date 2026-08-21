@@ -353,6 +353,101 @@ func newTerminalCloseTool(deps Deps) tools.Tool {
 	}
 }
 
+/* -------------------------- terminal.moveToWorktree ----------------------- */
+
+type terminalMoveToWorktreeArgs struct {
+	TerminalID  string   `json:"terminalId,omitempty"`
+	TerminalIDs []string `json:"terminalIds,omitempty"`
+	WorktreeID  string   `json:"worktreeId"`
+}
+
+// ids merges the singular terminalId and the plural terminalIds into one
+// whitespace-trimmed, de-duplicated, order-preserving list — the same shape
+// terminalCloseArgs uses, for the same reason: the model reaches for `terminalId` by
+// analogy with every other terminal.* wrapper, but the cohort form is the whole point
+// of this one (Daintree's raw action moves exactly ONE pane per call).
+func (a terminalMoveToWorktreeArgs) ids() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	add(a.TerminalID)
+	for _, id := range a.TerminalIDs {
+		add(id)
+	}
+	return out
+}
+
+// Validate runs at DECODE time (StrictDecoder honours the Validator seam) — i.e.
+// BEFORE the confirmation prompt in dispatch — so a call missing ids or a
+// destination is rejected as invalid args up front instead of prompting the user to
+// confirm a move that then fails. The handler keeps the same guards as
+// defense-in-depth for any path that skips Decode.
+func (a terminalMoveToWorktreeArgs) Validate() error {
+	if len(a.ids()) == 0 {
+		return errors.New("provide terminalId (a single id) or terminalIds (a list); at least one non-empty terminal id is required")
+	}
+	if strings.TrimSpace(a.WorktreeID) == "" {
+		return errors.New("worktreeId is required: the exact id/PATH of an already-open worktree from worktree.list (a branch name is not accepted)")
+	}
+	return nil
+}
+
+var terminalMoveToWorktreeSchema = json.RawMessage(`{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "terminalId": { "type": "string", "minLength": 1, "description": "A single Daintree terminal id to move, e.g. \"terminal-5284bfef-3d11-424c-90cb-136f24046295\"." },
+    "terminalIds": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 }, "description": "Several terminal ids to move into the SAME worktree in one confirmed call (e.g. relocating a spawned cohort) — prefer this over calling terminal.moveToWorktree once per id." },
+    "worktreeId": { "type": "string", "minLength": 1, "description": "Destination worktree, as the exact id/PATH from worktree.list (e.g. \"/Users/you/Projects/app-worktrees/feature-x\"). A branch name is NOT accepted here." }
+  },
+  "required": ["worktreeId"]
+}`)
+
+func newTerminalMoveToWorktreeTool(deps Deps) tools.Tool {
+	return tools.Tool{
+		Name: "terminal.moveToWorktree",
+		Description: "Move existing Daintree terminal(s) into ONE already-open worktree. Pass " +
+			"{\"terminalId\":\"terminal-<uuid>\",\"worktreeId\":\"<worktreePath>\"}, or terminalIds:[\"terminal-<uuid>\", ...] to relocate a whole cohort in one call. " +
+			"worktreeId is the exact PATH from worktree.list — a branch name is NEVER accepted. " +
+			"The move does NOT restart the process: a live agent keeps running in the directory it launched from, so you MUST follow up with terminal.sendCommand " +
+			"\"Please continue in the directory <worktreePath>\" — that sentence, not this move, relocates the work.",
+		Consequence: "Files the named Daintree terminal(s) under a different worktree; a pane that shares a tab group takes the rest of that group with it. Running processes keep going, uninterrupted, in the directory they launched from.",
+		Risk:        domain.RiskTerminal,
+		Schema:      terminalMoveToWorktreeSchema,
+		Decode:      tools.StrictDecoder(func() any { return &terminalMoveToWorktreeArgs{} }),
+		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
+			var a terminalMoveToWorktreeArgs
+			// Honour the decode error rather than running on whatever fields happened to
+			// populate: a partially-unmarshalled call still carries a usable terminalId,
+			// so ignoring the error would let a bypass path mutate on half-read args.
+			if err := json.Unmarshal(raw, &a); err != nil {
+				return tools.Fail(domain.CodeValidation, "terminal.moveToWorktree: "+err.Error())
+			}
+			if err := a.Validate(); err != nil {
+				return tools.Fail(domain.CodeValidation, "terminal.moveToWorktree: "+err.Error())
+			}
+			ids := a.ids()
+			worktreeID := strings.TrimSpace(a.WorktreeID)
+			// Canonicalize AFTER the confirmation gate (dispatch has no pre-confirm
+			// hook, and Decode has no context to call the MCP with) but BEFORE the
+			// first mutation, so a truncated prefix still lands and a definitively
+			// unknown id costs zero moves rather than half a relocated cohort.
+			resolved, fail := resolveTerminalIDs(ctx, deps.MCP, ids)
+			if fail != nil {
+				return *fail
+			}
+			return terminalMoveToWorktreePassthrough(ctx, deps.MCP, resolved, worktreeID)
+		},
+	}
+}
+
 /* --------------------- terminal.arm / disarm / disarmAll ------------------ */
 
 type terminalArmingArgs struct {

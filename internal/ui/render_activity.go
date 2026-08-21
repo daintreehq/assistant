@@ -75,6 +75,10 @@ func presentToolVerb(name string) (label string, keys []string) {
 	case "terminal.close":
 		// "Ended" avoids stuttering against the result summary "Closed N terminal(s): …".
 		return "Ended", []string{"terminalId", "terminalIds:ids"}
+	case "terminal.moveToWorktree":
+		// "Relocated" rather than "Moved": the result summary already opens with
+		// "Moved N terminal(s) into …", and the verb column must not stutter against it.
+		return "Relocated", []string{"worktreeId", "terminalId", "terminalIds:ids"}
 	case "terminal.arm":
 		return "Armed", []string{"terminalId"}
 	case "terminal.disarm":

@@ -91,6 +91,7 @@ func Tools(deps Deps) []tools.Tool {
 		newCopyTreeGenerateTool(deps),
 		newTerminalSendCommandTool(deps),
 		newTerminalCloseTool(deps),
+		newTerminalMoveToWorktreeTool(deps),
 		newTerminalArmTool(deps),
 		newTerminalDisarmTool(deps),
 		newTerminalDisarmAllTool(deps),
