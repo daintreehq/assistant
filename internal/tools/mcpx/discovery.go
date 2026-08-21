@@ -19,6 +19,14 @@ import (
 // tool is callable.
 const callableNote = "`callable: false` means the tool exists but is not in this turn's tool spec — only `callable: true` tools can be invoked directly. (Loaded skills do NOT restrict this; the full toolset is normally callable.) An unwrapped tool may still be reachable via `daintree.call` when that escape hatch is offered."
 
+// discoveryNote is what list/search actually return: the callable explanation
+// plus a pointer to tool.schema. Shipping the schema lookup without pointing at
+// it here would leave the model doing what it did before — guessing arguments,
+// or paging a listTools artifact that never contained a schema — simply because
+// it never learned the lookup exists. Findability and the capability ship
+// together (cf. the tool.search tokenization fix, which needed the same pairing).
+var discoveryNote = callableNote + " " + schemaPointer
+
 // makeCallable builds a predicate reporting whether a discovered MCP tool is
 // offered in the current turn's projection. activeToolNames==nil ⇒ unconstrained
 // (every tool callable).
@@ -78,7 +86,8 @@ func newListToolsTool(deps Deps) tools.Tool {
 		Name: "daintree.listTools",
 		Description: "List the Daintree MCP tools, with their names and descriptions. Each entry carries a `callable` flag: tools " +
 			"marked `callable: false` are known to exist but are not offered in this turn's tool spec (e.g. an active skill " +
-			"narrowed the toolset), so calling them would do nothing.",
+			"narrowed the toolset), so calling them would do nothing. Entries do NOT include argument shapes — to get one tool's " +
+			"input schema, call `tool.schema` with {\"name\":\"<exact name>\"}.",
 		Risk:   domain.RiskRead,
 		Schema: noArgs,
 		Decode: tools.StrictDecoder(func() any { return &struct{}{} }),
@@ -101,7 +110,7 @@ func newListToolsTool(deps Deps) tools.Tool {
 				})
 			}
 			return tools.Ok(fmt.Sprintf("Found %d Daintree MCP tool(s).", len(out)),
-				map[string]any{"tools": out, "note": callableNote})
+				map[string]any{"tools": out, "note": discoveryNote})
 		},
 	}
 }
@@ -128,9 +137,9 @@ func newSearchTool(deps Deps) tools.Tool {
 		Name: "tool.search",
 		Description: "Search Daintree MCP tools by keyword. The query is split on spaces and a tool matches when EVERY word " +
 			"appears in its name or description (order and filler words don't matter), so prefer a couple of plain keywords " +
-			"(e.g. `rename terminal`) over a long phrase — name matches rank first. Each match carries a `callable` " +
-			"flag: tools marked `callable: false` exist but are not offered in this turn's tool spec, so calling them would do " +
-			"nothing — only `callable: true` results can be invoked now.",
+			"(e.g. `rename terminal`) over a long phrase — name matches rank first. A match flagged `callable: false` exists " +
+			"but is not in this turn's tool spec, so calling it would do nothing. Matches carry no argument shapes: once you " +
+			"have the name, call `tool.schema` with {\"name\":\"<exact name>\"} for its input schema before invoking it.",
 		Risk:   domain.RiskRead,
 		Schema: searchSchema,
 		Decode: tools.StrictDecoder(func() any { return &searchArgs{} }),
@@ -174,7 +183,7 @@ func newSearchTool(deps Deps) tools.Tool {
 			// rather than dumping the catalog.
 			if len(terms) == 0 {
 				return tools.Ok(fmt.Sprintf("Found 0 Daintree MCP tool(s) matching %q.", a.Query),
-					map[string]any{"query": a.Query, "matches": []map[string]any{}, "note": callableNote})
+					map[string]any{"query": a.Query, "matches": []map[string]any{}, "note": discoveryNote})
 			}
 			// nameHit ranks a tool above description-only hits: a term landing in the
 			// tool NAME is a far stronger signal than one buried in prose, so name
@@ -219,7 +228,7 @@ func newSearchTool(deps Deps) tools.Tool {
 				matches = append(matches, r.row)
 			}
 			return tools.Ok(fmt.Sprintf("Found %d Daintree MCP tool(s) matching %q.", len(matches), a.Query),
-				map[string]any{"query": a.Query, "matches": matches, "note": callableNote})
+				map[string]any{"query": a.Query, "matches": matches, "note": discoveryNote})
 		},
 	}
 }
@@ -263,6 +272,19 @@ var wrappedMCPTools = map[string]string{
 	// typed wrapper" rule pointed the model at this confirmation-gated escape hatch on
 	// nearly every turn — and two skills grew prose documenting the exception.
 	"forge.getCIStatus": "forge.getChecks (typed wrapper — pass prNumber; it also flags the null-vs-no-checks and required-only-counts traps)",
+
+	// Issue #367: the observation/verification actions that used to be reachable ONLY
+	// through this escape hatch, so ordinary checking cost a system-tier confirmation.
+	// Each now has a typed wrapper of the SAME name carrying the target action's real
+	// risk, so the raw path here would only skip that wrapper's validation.
+	"project.detectRunners":      "project.detectRunners (typed read wrapper — pass an optional projectId; read tier, no confirmation)",
+	"project.runCheck":           "project.runCheck (typed wrapper — pass projectId and runnerId, plus an optional cwd and timeoutMs)",
+	"forge.listIssueComments":    "forge.listIssueComments (typed read wrapper — pass issueNumber, plus an optional worktree locator, cursor and perPage)",
+	"agentSessionHistory.list":   "agentSessionHistory.list (typed read wrapper — pass an optional worktreeId/projectId scope and limit/offset)",
+	"browser.getConsoleMessages": "browser.getConsoleMessages (typed read wrapper — pass an optional dev-preview terminalId, level and limit)",
+	"errors.recent":              "errors.recent (typed read wrapper — pass an optional limit and includesDismissed)",
+	"notifications.recent":       "notifications.recent (typed read wrapper — pass an optional limit, type and unreadOnly)",
+	"worktree.resource.status":   "worktree.resource.status (typed wrapper — pass an optional worktreeId; it runs the configured status command)",
 }
 
 // denylistLookup is wrappedMCPTools re-keyed on the lowercased name so the
@@ -274,6 +296,33 @@ var denylistLookup = func() map[string]string {
 	}
 	return m
 }()
+
+// IsWrappedMCPName reports whether daintree.call refuses this raw MCP action because a
+// typed wrapper governs it. Exported for the cross-package parity test in internal/app:
+// the wrapper lives in mcpwrap and the denylist lives here, neither package may import
+// the other, and a wrapper registered without an entry silently leaves the raw bypass
+// open.
+func IsWrappedMCPName(name string) bool {
+	_, found := denylistLookup[normalizeMCPName(name)]
+	return found
+}
+
+// WrappedMCPNames returns the raw action names daintree.call refuses, sorted for a
+// deterministic test failure order.
+func WrappedMCPNames() []string {
+	names := make([]string, 0, len(wrappedMCPTools))
+	for k := range wrappedMCPTools {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// WrappedMCPRedirect returns the wrapper a refused raw name points at, or "" when the
+// name is not refused.
+func WrappedMCPRedirect(name string) string {
+	return denylistLookup[normalizeMCPName(name)]
+}
 
 // normalizeMCPName trims surrounding (and embedded control) whitespace from a
 // requested MCP tool name so a padded/case-shifted variant ("  Recipe.Run\t")

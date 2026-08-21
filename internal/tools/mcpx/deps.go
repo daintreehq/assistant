@@ -1,5 +1,5 @@
 // Package mcpx is the Daintree MCP tool family: discovery (daintree.status,
-// daintree.listTools, tool.search), the raw passthrough escape hatch
+// daintree.listTools, tool.search, tool.schema), the raw passthrough escape hatch
 // (daintree.call), and the typed MCP wrappers — terminal
 // focus/input/arming, agent focus, and copyTree. Each wrapper carries the risk
 // class Daintree gates the action at, so reads/UI-focus run without the
@@ -32,9 +32,16 @@ type MCPStatus struct {
 }
 
 // MCPToolInfo is one discovered Daintree MCP tool (listTools entries).
+// InputSchema is the tool's raw MCP-advertised JSON Schema — the arbitrary
+// map the server put on the wire, NOT a normalized/flattened projection. It is
+// what `tool.schema` hands back verbatim. Carrying it here is load-bearing: the
+// concrete client has always cached it (mcp.ToolInfo.InputSchema), but this
+// consumer-side struct used to omit the field, so the app adapter dropped it at
+// the seam and NO local tool could report an MCP tool's argument shape (#311).
 type MCPToolInfo struct {
 	Name        string
 	Description string
+	InputSchema map[string]any
 }
 
 // MCPClient is the slice of the Daintree MCP transport these tools reach. It is a
@@ -76,6 +83,18 @@ type Deps struct {
 	// Observer records input injections into the shared settle memory. nil ⇒ no
 	// recording (tests / stripped tool sets).
 	Observer CommandObserver
+	// WrapperNames are local typed tools registered by OTHER families (mcpwrap's
+	// forge/worktree/project/diagnostic wrappers) whose names are also raw Daintree MCP
+	// action names.
+	//
+	// tool.schema uses it to annotate a raw schema whose call is actually governed by a
+	// local wrapper. Without it the annotation covers only THIS package's wrappers, so
+	// tool.schema would hand back the raw schema for e.g. project.runCheck with no hint
+	// that the tool the model must actually invoke declares its own — and that wrapper
+	// legitimately differs (it rejects an empty cwd the host would take, and validates
+	// bounds locally). Injected rather than imported because mcpx must not depend on
+	// mcpwrap; internal/app already holds both and wires this.
+	WrapperNames []string
 }
 
 // Tools returns the MCP family (discovery + passthrough + the wrappers in this
@@ -85,6 +104,7 @@ func Tools(deps Deps) []tools.Tool {
 		newStatusTool(deps),
 		newListToolsTool(deps),
 		newSearchTool(deps),
+		newSchemaTool(deps),
 		newCallTool(deps),
 		newTerminalFocusTool(deps),
 		newTerminalRenameTool(deps),

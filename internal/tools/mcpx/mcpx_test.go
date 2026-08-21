@@ -38,6 +38,10 @@ type fakeMCP struct {
 	// remember the final call, which cannot distinguish "listed then moved three" from
 	// "moved three".
 	calls []fakeMCPCall
+	// listCount / lastListForce record ListTools traffic so a test can prove
+	// tool.schema reads the WARM cache (force=false) and never probes the network.
+	listCount     int
+	lastListForce bool
 }
 
 // fakeMCPCall is one recorded CallTool invocation.
@@ -91,7 +95,9 @@ func (f *fakeMCP) callsTo(name string) []map[string]any {
 	}
 	return out
 }
-func (f *fakeMCP) ListTools(_ context.Context, _ bool) ([]MCPToolInfo, error) {
+func (f *fakeMCP) ListTools(_ context.Context, force bool) ([]MCPToolInfo, error) {
+	f.listCount++
+	f.lastListForce = force
 	return f.toolList, f.listErr
 }
 

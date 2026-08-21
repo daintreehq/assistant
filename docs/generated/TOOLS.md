@@ -30,7 +30,13 @@ already drifted out of agreement with each other and with the binary.
 > minting would cover mutating work. And `user.askMultipleChoice` needs a human at a
 > TTY: every unattended actor has no question surface and gets `QUESTION_NOT_INTERACTIVE`.
 
-## Inventory — 86 tools in 24 groups
+## Inventory — 95 tools in 29 groups
+
+### `agentSessionHistory.*`
+
+| Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
+|---|---|---|---|---|---|---|---|---|
+| `agentSessionHistory.list` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | List CLOSED agent sessions that can be relaunched, from the on-disk journal — which sessions exist, carrying no trans… |
 
 ### `agentTask.*`
 
@@ -60,6 +66,12 @@ already drifted out of agreement with each other and with the binary.
 |---|---|---|---|---|---|---|---|---|
 | `audit.export` | read | supervisor | — | not needed | — | serial | — | Export the audit log as JSON or CSV with optional filters (actor, toolName, outcome, and a tsFrom/tsTo time range in… |
 
+### `browser.*`
+
+| Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
+|---|---|---|---|---|---|---|---|---|
+| `browser.getConsoleMessages` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Read captured console output (logs, warnings, errors, stack traces) from a DEV PREVIEW panel — the only panel kind th… |
+
 ### `context.*`
 
 | Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
@@ -82,6 +94,12 @@ already drifted out of agreement with each other and with the binary.
 | `daintree.listTools` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | List the Daintree MCP tools, with their names and descriptions |
 | `daintree.call` | system | system | **typed** | **never** | `daintree-mcp` | serial | — | Raw passthrough to ANY Daintree MCP tool |
 
+### `errors.*`
+
+| Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
+|---|---|---|---|---|---|---|---|---|
+| `errors.recent` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | List recent entries from Daintree's DIAGNOSTICS error log — runtime and inter-process failures, newest first |
+
 ### `forge.*`
 
 | Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
@@ -91,6 +109,7 @@ already drifted out of agreement with each other and with the binary.
 | `forge.listPRs` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | List the project's GitHub pull requests through Daintree's forge integration |
 | `forge.getPR` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Get a single forge (GitHub) pull request by number |
 | `forge.getChecks` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Read a pull request's CI check state by PR number |
+| `forge.listIssueComments` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Read ONE page of a GitHub issue's comment thread |
 
 ### `fs.*`
 
@@ -124,6 +143,19 @@ already drifted out of agreement with each other and with the binary.
 | `memory.forget` | local | supervisor | — | not needed | — | serial | — | Soft-delete ONE project memory by its mem_… id so it stops surfacing in recall, in memory.list, and in the pinned block |
 | `memory.pin` | local | supervisor | — | not needed | — | serial | — | Pin a project memory by its mem_… id so it rides EVERY round's turn context (the pinned block) and resists pruning |
 | `memory.unpin` | local | supervisor | — | not needed | — | serial | — | Unpin a project memory by its mem_… id: it stays saved and recallable but drops out of the pinned block that rides ev… |
+
+### `notifications.*`
+
+| Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
+|---|---|---|---|---|---|---|---|---|
+| `notifications.recent` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | List recent entries from the user's NOTIFICATION INBOX — completion, waiting and informational messages, including qu… |
+
+### `project.*`
+
+| Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
+|---|---|---|---|---|---|---|---|---|
+| `project.detectRunners` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | List the runnable commands a project defines, by inspecting its manifests |
+| `project.runCheck` | project | operator | yes | grantable | `daintree-mcp` | serial | — | Run ONE of a project's detected commands (test, lint, build, …) and report its exit code and output |
 
 ### `queue.*`
 
@@ -196,6 +228,7 @@ already drifted out of agreement with each other and with the binary.
 | Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
 |---|---|---|---|---|---|---|---|---|
 | `tool.search` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | Search Daintree MCP tools by keyword |
+| `tool.schema` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | Look up ONE Daintree MCP tool's input schema — its exact argument shape — without invoking it |
 
 ### `user.*`
 
@@ -237,6 +270,7 @@ already drifted out of agreement with each other and with the binary.
 | `worktree.list` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | List Daintree's worktrees for this project — each entry's id, path, branch, and whether it is active/main |
 | `worktree.getCurrent` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Get the Daintree worktree the user is currently in — its exact id, path, branch and bound issue/PR |
 | `worktree.createWithRecipe` | project | operator | yes | grantable | `daintree-mcp` | serial | — | Create a NEW git worktree from a Daintree recipe, forwarding the recipe-defined `arguments` record verbatim (Daintree… |
+| `worktree.resource.status` | project | operator | yes | grantable | `daintree-mcp` | serial | — | Run a worktree's configured remote-resource status command (e.g |
 
 ## Invariants this inventory is subject to
 
