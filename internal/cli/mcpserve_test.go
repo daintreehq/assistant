@@ -68,3 +68,30 @@ func TestApprovalModeResolution(t *testing.T) {
 		})
 	}
 }
+
+// TestSessionProjectIdentityOverridesProcessDefaults pins the defaults-not-bindings
+// rule for the identity pair: the launch config SEEDS a session, it does not constrain
+// one, and an omitted session field must not blank out what the process was launched
+// with. It also pins that a process-level --prompt-file never leaks into a session — on
+// the stdio transport, "-" would be read off the JSON-RPC stream itself.
+func TestSessionProjectIdentityOverridesProcessDefaults(t *testing.T) {
+	process := Options{
+		ProjectID:  "launch-project",
+		WindowID:   "launch-window",
+		Prompt:     "a launch prompt",
+		HasPrompt:  true,
+		PromptFile: "-",
+	}
+
+	session := sessionOptions(process, mcpserver.OpenParams{ProjectID: "session-project"})
+	if session.ProjectID != "session-project" {
+		t.Errorf("ProjectID = %q, want the session's value to win", session.ProjectID)
+	}
+	if session.WindowID != "launch-window" {
+		t.Errorf("WindowID = %q, want an omitted session field to inherit the launch default", session.WindowID)
+	}
+	if session.Prompt != "" || session.HasPrompt || session.PromptFile != "" {
+		t.Errorf("one-shot prompt state leaked into a session: prompt=%q hasPrompt=%v promptFile=%q",
+			session.Prompt, session.HasPrompt, session.PromptFile)
+	}
+}

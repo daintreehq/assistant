@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/daintreehq/assistant/internal/config"
 	"github.com/daintreehq/assistant/internal/redact"
 )
 
@@ -40,6 +41,8 @@ func TestOverridesFromOptionsMapsHarnessFlags(t *testing.T) {
 		McpURL:      "http://127.0.0.1:9000/mcp",
 		McpToken:    "mcp-fake-test-token",
 		Project:     "/tmp/project",
+		ProjectID:   "proj_fake_test",
+		WindowID:    "win_fake_test",
 	})
 	if err != nil {
 		t.Fatalf("overridesFromOptions() error = %v", err)
@@ -76,6 +79,49 @@ func TestOverridesFromOptionsMapsHarnessFlags(t *testing.T) {
 	}
 	if o.ProjectPath == nil || *o.ProjectPath != "/tmp/project" {
 		t.Errorf("ProjectPath = %v", o.ProjectPath)
+	}
+	// The identity pair. ProjectID is the load-bearing one: LoadConfig scopes StateDir
+	// into a per-project subdirectory from it, so dropping the mapping would silently
+	// give a harness the developer's real state directory.
+	if o.ProjectID == nil || *o.ProjectID != "proj_fake_test" {
+		t.Errorf("ProjectID = %v", o.ProjectID)
+	}
+	if o.WindowID == nil || *o.WindowID != "win_fake_test" {
+		t.Errorf("WindowID = %v", o.WindowID)
+	}
+}
+
+// TestProjectIdentityFlagsBeatTheEnvironment: these flags shadow trusted env vars and
+// must WIN over them, like every other harness flag. ProjectID is asserted through its
+// real consequence — the per-project state subdirectory — because a mapping that reached
+// AppConfig but not the state path would look correct and isolate nothing.
+func TestProjectIdentityFlagsBeatTheEnvironment(t *testing.T) {
+	// A home, not a --state-dir: an explicit state dir beats project scoping outright,
+	// so pointing one at a temp dir would test nothing about the project id.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", "")
+	t.Setenv("DAINTREE_PROJECT_ID", "env-project")
+	t.Setenv("DAINTREE_WINDOW_ID", "env-window")
+
+	o, err := overridesFromOptions(Options{
+		ProjectID: "flag-project",
+		WindowID:  "flag-window",
+	})
+	if err != nil {
+		t.Fatalf("overridesFromOptions() error = %v", err)
+	}
+	cfg, err := config.LoadConfig(o)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if cfg.ProjectID != "flag-project" {
+		t.Errorf("ProjectID = %q, want the flag to beat the env", cfg.ProjectID)
+	}
+	if cfg.WindowID != "flag-window" {
+		t.Errorf("WindowID = %q, want the flag to beat the env", cfg.WindowID)
+	}
+	if !strings.Contains(cfg.StateDir, config.ProjectIDToDir("flag-project")) {
+		t.Errorf("StateDir = %q, want it scoped by the flag's project id", cfg.StateDir)
 	}
 }
 
@@ -146,6 +192,13 @@ func TestOverridesFromOptionsLeavesUnsetFlagsNil(t *testing.T) {
 	if o.BackendURL != nil || o.APIKey != nil || o.StateDir != nil || o.LogDir != nil {
 		t.Errorf("unset strings must stay nil: %v %v %v %v",
 			o.BackendURL, o.APIKey, o.StateDir, o.LogDir)
+	}
+	// ProjectInstructions especially: a non-nil value here is the provenance signal that
+	// suppresses the DAINTREE.md auto-load, so an unset flag leaving it non-nil would
+	// disable project instructions entirely.
+	if o.ProjectID != nil || o.WindowID != nil || o.ProjectInstructions != nil {
+		t.Errorf("unset identity/instructions must stay nil: %v %v %v",
+			o.ProjectID, o.WindowID, o.ProjectInstructions)
 	}
 }
 

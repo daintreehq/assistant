@@ -58,20 +58,7 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 	// Serving on stdout means every diagnostic must go to stderr. A single stray byte on
 	// stdout corrupts the JSON-RPC framing and the client drops the connection.
 	factory := func(bootstrap, lifetime context.Context, p mcpserver.OpenParams) (mcpserver.Runtime, error) {
-		// Start from the process-level options (the .mcp.json env and any flags this
-		// process was launched with), then let the session's arguments win. That is the
-		// defaults-not-bindings rule: the launch config seeds a session, it does not
-		// constrain one.
-		sessionOpts := opts
-		sessionOpts.Prompt, sessionOpts.HasPrompt = "", false
-		applyIfSet(&sessionOpts.Project, p.Project)
-		applyIfSet(&sessionOpts.BackendURL, p.BackendURL)
-		applyIfSet(&sessionOpts.APIKeyFile, p.APIKeyFile)
-		applyIfSet(&sessionOpts.Tier, p.Tier)
-		applyIfSet(&sessionOpts.McpURL, p.McpURL)
-		applyIfSet(&sessionOpts.McpToken, p.McpToken)
-		applyIfSet(&sessionOpts.StateDir, p.StateDir)
-		applyIfSet(&sessionOpts.LogDir, p.LogDir)
+		sessionOpts := sessionOptions(opts, p)
 		// The mode decides both the confirm hook's behaviour and, for "auto", the
 		// runtime's own auto-approve (which makes dispatch skip the hook entirely —
 		// they are two different layers and both have to agree).
@@ -206,6 +193,35 @@ func resolveApprovalMode(requested mcpserver.ApprovalMode, defaultAutoApprove bo
 
 // applyIfSet overwrites dst only when the session supplied a value, so an unset session
 // argument falls back to the process-level default rather than blanking it.
+// sessionOptions overlays one session's arguments onto the process-level options.
+//
+// Start from what this process was launched with (the .mcp.json env and any flags), then
+// let the session's arguments win. That is the defaults-not-bindings rule: the launch
+// config SEEDS a session, it does not constrain one — an omitted session field inherits
+// the launch value rather than blanking it.
+//
+// It is a standalone function rather than inline in the factory so the precedence can be
+// asserted without standing up a project lease, a store and a backend.
+func sessionOptions(base Options, p mcpserver.OpenParams) Options {
+	o := base
+	// The one-shot prompt state is CLEARED, not overlaid: a server launched with a
+	// prompt must not replay it into a session, and on the stdio transport a
+	// --prompt-file of "-" would be read off the JSON-RPC stream that is carrying the
+	// protocol itself.
+	o.Prompt, o.HasPrompt, o.PromptFile = "", false, ""
+	applyIfSet(&o.Project, p.Project)
+	applyIfSet(&o.BackendURL, p.BackendURL)
+	applyIfSet(&o.APIKeyFile, p.APIKeyFile)
+	applyIfSet(&o.Tier, p.Tier)
+	applyIfSet(&o.McpURL, p.McpURL)
+	applyIfSet(&o.McpToken, p.McpToken)
+	applyIfSet(&o.StateDir, p.StateDir)
+	applyIfSet(&o.LogDir, p.LogDir)
+	applyIfSet(&o.ProjectID, p.ProjectID)
+	applyIfSet(&o.WindowID, p.WindowID)
+	return o
+}
+
 func applyIfSet(dst *string, v string) {
 	if v != "" {
 		*dst = v

@@ -40,10 +40,11 @@ func RunHost(ctx context.Context, opts Options) int {
 			p := params.ProjectPath
 			overrides.ProjectPath = &p
 		}
-		if params.ProjectInstructions != "" {
-			pi := params.ProjectInstructions
-			overrides.ProjectInstructions = &pi
-		}
+		// Only when nothing explicit is already there: the descriptor's DAINTREE.md is a
+		// DISCOVERED file like the one buildOverrides loads, so an operator who launched
+		// the host with --project-instructions-file must not have it silently replaced
+		// per boot.
+		applyAutoProjectInstructions(&overrides, params.ProjectInstructions)
 		// The embedded host owns the project like any interactive assistant: take
 		// the lease (spawning/attaching to the supervisor daemon) before opening
 		// the DB. The Ownership handle is deliberately held for the PROCESS

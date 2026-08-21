@@ -74,6 +74,8 @@ type OpenParams struct {
 	McpToken   string
 	StateDir   string
 	LogDir     string
+	ProjectID  string
+	WindowID   string
 	DebugLog   *bool
 	// Approvals selects the confirmation mode. Empty inherits the process default
 	// (auto when --auto-approve/DAINTREE_ASSISTANT_AUTO_APPROVE is set, else decline).

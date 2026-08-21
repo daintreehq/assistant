@@ -133,6 +133,9 @@ func TestParseArgsCarriesHarnessFlags(t *testing.T) {
 		"--api-key-file", "/tmp/key.txt",
 		"--state-dir", "/tmp/state",
 		"--log-dir", "/tmp/logs",
+		"--project-id", "proj_fake_test",
+		"--window-id", "win_fake_test",
+		"--project-instructions-file", "/tmp/brief.md",
 		"--auto-approve",
 		"--debug-log",
 		"--timeout", "90s",
@@ -157,6 +160,101 @@ func TestParseArgsCarriesHarnessFlags(t *testing.T) {
 	if o.Timeout != 90*time.Second {
 		t.Errorf("timeout = %v, want 90s", o.Timeout)
 	}
+	if o.ProjectID != "proj_fake_test" || o.WindowID != "win_fake_test" {
+		t.Errorf("project/window id = %q/%q", o.ProjectID, o.WindowID)
+	}
+	// A nonexistent path: parseArgs must capture it WITHOUT reading it, or the function
+	// stops being the pure, table-testable thing every case here relies on.
+	if o.ProjectInstructionsFile != "/tmp/brief.md" {
+		t.Errorf("projectInstructionsFile = %q", o.ProjectInstructionsFile)
+	}
+}
+
+// TestParseArgsCarriesPromptFile: the flag reaches one-shot as a PATH plus HasPrompt,
+// never as text. parseArgs does no I/O — the paths below do not exist and must still
+// parse — so "there is a prompt" is decided here and "what it says" much later, inside
+// the --timeout bound.
+func TestParseArgsCarriesPromptFile(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"a path", []string{"--prompt-file", "/tmp/does-not-exist.md"}, "/tmp/does-not-exist.md"},
+		// "-" is stdin, and it must survive the explicitly-empty check that rejects
+		// `--prompt-file=`.
+		{"stdin", []string{"--prompt-file", "-"}, "-"},
+		// The whole reason the flag exists for a harness: --json rejects a run with no
+		// prompt, and a file-supplied prompt has to satisfy that check.
+		{"with --json", []string{"--json", "--prompt-file", "/tmp/prompt.md"}, "/tmp/prompt.md"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseArgs(tc.args)
+			if err != nil {
+				t.Fatalf("parseArgs() error = %v", err)
+			}
+			if got.Route != routeDefault {
+				t.Errorf("route = %v, want the one-shot route", got.Route)
+			}
+			if got.Options.PromptFile != tc.want {
+				t.Errorf("PromptFile = %q, want %q", got.Options.PromptFile, tc.want)
+			}
+			if !got.Options.HasPrompt {
+				t.Error("HasPrompt = false; a prompt file must route the run to one-shot")
+			}
+			if got.Options.Prompt != "" {
+				t.Errorf("Prompt = %q, want empty — parseArgs must not read the file", got.Options.Prompt)
+			}
+		})
+	}
+}
+
+// TestParseArgsRejectsTwoPromptSources: two prompts is a MISTAKE, not a precedence
+// question. Silently picking one would run a prompt the caller can see they also passed
+// the other way — the worst outcome for a harness whose job is reproducing an exact
+// question. The `--` case matters because that is how a prompt beginning with a dash is
+// passed today.
+func TestParseArgsRejectsTwoPromptSources(t *testing.T) {
+	for _, args := range [][]string{
+		{"--prompt-file", "/tmp/prompt.md", "which worktrees are ready?"},
+		{"--prompt-file", "/tmp/prompt.md", "--", "--summarize this"},
+		{"--json", "--prompt-file", "/tmp/prompt.md", "hello"},
+	} {
+		_, err := parseArgs(args)
+		if err == nil {
+			t.Fatalf("%v must be rejected", args)
+		}
+		if !strings.Contains(err.Error(), "--prompt-file") {
+			t.Errorf("error should name the flag, got: %v", err)
+		}
+	}
+}
+
+// TestParseArgsPromptFileDoesNotHijackCommandRoutes: a command word is chosen before the
+// prompt branch, so --prompt-file is simply ignored there — the same convention
+// --timeout already follows. It matters most for the stdio routes: "-" must never be
+// read off a stream that is carrying the protocol itself.
+func TestParseArgsPromptFileDoesNotHijackCommandRoutes(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want route
+	}{
+		{[]string{"--prompt-file", "-", "doctor"}, routeDoctor},
+		{[]string{"--prompt-file", "-", "host", "--stdio"}, routeHost},
+		{[]string{"--prompt-file", "-", "mcp", "--stdio"}, routeMCP},
+	} {
+		got, err := parseArgs(tc.args)
+		if err != nil {
+			t.Fatalf("parseArgs(%v) error = %v", tc.args, err)
+		}
+		if got.Route != tc.want {
+			t.Errorf("parseArgs(%v) route = %v, want %v", tc.args, got.Route, tc.want)
+		}
+		if got.Options.HasPrompt {
+			t.Errorf("parseArgs(%v) set HasPrompt on a command route", tc.args)
+		}
+	}
 }
 
 // TestParseArgsRejectsNegativeTimeout: a negative duration would make the run context
@@ -176,6 +274,8 @@ func TestUsageDocumentsHarnessFlags(t *testing.T) {
 	for _, want := range []string{
 		"--backend-url URL", "--api-key-file PATH", "--state-dir PATH",
 		"--log-dir PATH", "--auto-approve", "--debug-log", "--timeout DURATION",
+		"--prompt-file PATH", "--project-id ID", "--window-id ID",
+		"--project-instructions-file PATH",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("usage missing %q:\n%s", want, help)
@@ -219,7 +319,8 @@ func TestParseArgsExplicitFalseBeatsEnv(t *testing.T) {
 // wrong-key / wrong-state-dir fallback these flags exist to prevent, so it must fail at
 // the argument boundary.
 func TestParseArgsRejectsExplicitlyEmptyValues(t *testing.T) {
-	for _, name := range []string{"api-key-file", "state-dir", "backend-url", "log-dir", "project", "mcp-url", "mcp-token"} {
+	for _, name := range []string{"api-key-file", "prompt-file", "state-dir", "backend-url", "log-dir",
+		"project", "project-id", "window-id", "project-instructions-file", "mcp-url", "mcp-token"} {
 		t.Run(name, func(t *testing.T) {
 			_, err := parseArgs([]string{"--" + name + "=", "hello"})
 			if err == nil {
