@@ -143,3 +143,217 @@ func jsonStr(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+// decisionRow builds a skill:decision run-event row.
+func decisionRow(seq int, payload string) domain.RunEventRecord {
+	return domain.RunEventRecord{RunID: "r", Seq: seq, Type: "skill:decision", Payload: strPtr(payload)}
+}
+
+const activeMulti = `{"active":[{"id":"multi_agent","title":"Multi-agent orchestration"},` +
+	`{"id":"foundation","title":"Daintree orchestration foundation"}],"newlyLoaded":[],` +
+	`"selector":{"ran":true,"degraded":false,"taskType":"orchestration","confidence":0.9,"reason":""}}`
+
+// The committed decision is the run's skill story, and it names the WHOLE active set —
+// including the foundation skill that was retained rather than newly loaded, which the
+// delta-only skill:loaded cue can never mention.
+func TestFormatRunTimelineShowsActiveSetFromDecision(t *testing.T) {
+	out := FormatRunTimeline([]domain.RunEventRecord{decisionRow(0, activeMulti)}, nil)
+	if !strings.Contains(out, "Multi-agent orchestration") ||
+		!strings.Contains(out, "Daintree orchestration foundation") {
+		t.Fatalf("the active set is not named: %q", out)
+	}
+}
+
+// Once a run records decisions, the eager skill:loaded row is SUPERSEDED. It is a
+// per-attempt delta: on a retried round it can name a skill the committed round never
+// kept, so showing it above the authoritative line would put the wrong answer first.
+func TestFormatRunTimelineDecisionSupersedesEagerSkillLoaded(t *testing.T) {
+	events := []domain.RunEventRecord{
+		{RunID: "r", Seq: 0, Type: "skill:loaded", Payload: strPtr(`{"titles":["Attempt-one runbook"]}`)},
+		decisionRow(1, activeMulti),
+	}
+	out := FormatRunTimeline(events, nil)
+	if strings.Contains(out, "Attempt-one runbook") {
+		t.Fatalf("the non-authoritative delta cue survived alongside the decision: %q", out)
+	}
+	if !strings.Contains(out, "Multi-agent orchestration") {
+		t.Fatalf("the committed active set is missing: %q", out)
+	}
+}
+
+// A run from before this event existed has ONLY the eager rows, so they must still
+// render — dropping them unconditionally would blank the skill story of every past run.
+func TestFormatRunTimelineKeepsSkillLoadedWhenNoDecisionRecorded(t *testing.T) {
+	events := []domain.RunEventRecord{
+		{RunID: "r", Seq: 0, Type: "skill:loaded", Payload: strPtr(`{"titles":["Legacy runbook"]}`)},
+	}
+	out := FormatRunTimeline(events, nil)
+	if !strings.Contains(out, "Legacy runbook") {
+		t.Fatalf("a pre-decision run lost its skill row: %q", out)
+	}
+}
+
+// A decision is persisted every committed round, but an UNCHANGED set adds nothing. A
+// turn is many rounds and the set usually holds across all of them, so repeating it
+// would bury the tool calls the replay exists to show.
+func TestFormatRunTimelineCollapsesUnchangedActiveSet(t *testing.T) {
+	events := []domain.RunEventRecord{
+		decisionRow(0, activeMulti),
+		decisionRow(1, activeMulti),
+		decisionRow(2, activeMulti),
+	}
+	out := FormatRunTimeline(events, nil)
+	if got := strings.Count(out, "skills active"); got != 1 {
+		t.Fatalf("active line rendered %d times across 3 identical rounds, want 1: %q", got, out)
+	}
+}
+
+// …but a CHANGE is the whole point: mid-turn the selector swapped a runbook in.
+func TestFormatRunTimelineShowsChangedActiveSet(t *testing.T) {
+	events := []domain.RunEventRecord{
+		decisionRow(0, `{"active":[{"id":"a","title":"Alpha"}],"selector":{"ran":true}}`),
+		decisionRow(1, `{"active":[{"id":"b","title":"Beta"}],"selector":{"ran":true}}`),
+	}
+	out := FormatRunTimeline(events, nil)
+	if !strings.Contains(out, "Alpha") || !strings.Contains(out, "Beta") {
+		t.Fatalf("a mid-turn skill change was collapsed away: %q", out)
+	}
+}
+
+// A set that CLEARS must be said out loud. Silence here would let the replay imply the
+// last-named set stayed active for the rest of the run.
+func TestFormatRunTimelineReportsActiveSetClearing(t *testing.T) {
+	events := []domain.RunEventRecord{
+		decisionRow(0, `{"active":[{"id":"a","title":"Alpha"}],"selector":{"ran":true}}`),
+		decisionRow(1, `{"active":[],"selector":{"ran":true}}`),
+	}
+	out := FormatRunTimeline(events, nil)
+	if !strings.Contains(out, "Alpha") {
+		t.Fatalf("the initial set is missing: %q", out)
+	}
+	if !strings.Contains(out, "none") {
+		t.Fatalf("a cleared active set rendered nothing, so the replay still implies "+
+			"Alpha is active: %q", out)
+	}
+}
+
+// …and a REACTIVATION after clearing must show too — the bug this guards against is
+// state that never recorded the clear, making A → none → A collapse to a single A.
+func TestFormatRunTimelineReportsReactivationAfterClearing(t *testing.T) {
+	events := []domain.RunEventRecord{
+		decisionRow(0, `{"active":[{"id":"a","title":"Alpha"}],"selector":{"ran":true}}`),
+		decisionRow(1, `{"active":[],"selector":{"ran":true}}`),
+		decisionRow(2, `{"active":[{"id":"a","title":"Alpha"}],"selector":{"ran":true}}`),
+	}
+	out := FormatRunTimeline(events, nil)
+	if got := strings.Count(out, "Alpha"); got != 2 {
+		t.Fatalf("Alpha rendered %d time(s), want 2 (before and after the clear): %q", got, out)
+	}
+}
+
+// A run that never has any active skills stays silent. "none" is for a set that CLEARED,
+// not for the ordinary no-skills run, which would otherwise gain a line per turn.
+func TestFormatRunTimelineSilentWhenNothingWasEverActive(t *testing.T) {
+	events := []domain.RunEventRecord{
+		decisionRow(0, `{"active":[],"newlyLoaded":[],"selector":{"ran":false,"degraded":false}}`),
+		decisionRow(1, `{"active":[],"newlyLoaded":[],"selector":{"ran":false,"degraded":false}}`),
+	}
+	if out := FormatRunTimeline(events, nil); strings.TrimSpace(out) != "" {
+		t.Fatalf("a run with no skills must render nothing, got %q", out)
+	}
+}
+
+// A row whose `active` is missing or malformed says "this row cannot tell us" — it must
+// NOT be read as "the set cleared", which would blank a perfectly good tracked set.
+func TestFormatRunTimelineMalformedActiveDoesNotClearTheTrackedSet(t *testing.T) {
+	events := []domain.RunEventRecord{
+		decisionRow(0, `{"active":[{"id":"a","title":"Alpha"}],"selector":{"ran":true}}`),
+		decisionRow(1, `{"selector":{"ran":true}}`),                         // absent
+		decisionRow(2, `{"active":"not-an-array","selector":{"ran":true}}`), // malformed
+		decisionRow(3, `{"active":[{"id":"a","title":"Alpha"}],"selector":{"ran":true}}`),
+	}
+	out := FormatRunTimeline(events, nil)
+	if strings.Contains(out, "none") {
+		t.Fatalf("an unusable active field was misread as a cleared set: %q", out)
+	}
+	// Alpha is still the tracked set across rows 1-2, so row 3 is not a change.
+	if got := strings.Count(out, "Alpha"); got != 1 {
+		t.Fatalf("Alpha rendered %d time(s), want 1 — the tracked set was disturbed by an "+
+			"unusable row: %q", got, out)
+	}
+}
+
+// The degraded case is ALWAYS shown, even on a round whose active set is unchanged —
+// that is exactly the fail-open shape: the set held because deciding failed, not because
+// the selector chose it.
+func TestFormatRunTimelineSurfacesDegradedEvenWhenSetUnchanged(t *testing.T) {
+	degraded := `{"active":[{"id":"multi_agent","title":"Multi-agent orchestration"},{"id":"bare_id"}],` +
+		`"newlyLoaded":[],"selector":{"ran":true,"degraded":true,"taskType":"","confidence":null,` +
+		`"reason":"selector timed out"}}`
+	events := []domain.RunEventRecord{
+		decisionRow(0, `{"active":[{"id":"multi_agent","title":"Multi-agent orchestration"},`+
+			`{"id":"bare_id"}],"selector":{"ran":true,"degraded":false}}`),
+		decisionRow(1, degraded),
+	}
+	out := FormatRunTimeline(events, nil)
+	if !strings.Contains(out, "degraded") {
+		t.Fatalf("degraded selector not surfaced on an unchanged round: %q", out)
+	}
+	if !strings.Contains(out, "Multi-agent orchestration") {
+		t.Fatalf("the reused active set is not named: %q", out)
+	}
+	// A ref the backend sent without a title still shows as something addressable.
+	if !strings.Contains(out, "bare_id") {
+		t.Fatalf("a title-less ref must fall back to its id: %q", out)
+	}
+	if !strings.Contains(out, "selector timed out") {
+		t.Fatalf("the selector's reason is the diagnostic payload: %q", out)
+	}
+}
+
+// These rows are replayed from SQLite, so the payload is arbitrary stored JSON rather
+// than something built in-process. Each shape gets its own case with an exact expected
+// output, so a malformed row cannot start leaking text while a combined assertion still
+// passes on one good line elsewhere.
+func TestFormatRunTimelineToleratesMalformedSkillDecision(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload *string
+		want    string // exact rendered output
+	}{
+		{"nil payload", nil, ""},
+		{"json null", strPtr(`null`), ""},
+		{"invalid json", strPtr(`{not json`), ""},
+		{"empty object", strPtr(`{}`), ""},
+		{"selector is a scalar", strPtr(`{"selector":"not-an-object"}`), ""},
+		{"active is a scalar", strPtr(`{"active":"not-an-array","selector":{"degraded":false}}`), ""},
+		{"degraded is a string", strPtr(`{"selector":{"degraded":"true"}}`), ""},
+		{"active entries are not objects", strPtr(
+			`{"active":[1,"two",null],"selector":{"degraded":false}}`), ""},
+		{"non-string id and title", strPtr(
+			`{"active":[{"id":7,"title":false}],"selector":{"degraded":false}}`), ""},
+		{"serialization stub", strPtr(`{"error":"unserializable"}`), ""},
+		// Degraded still warns even when the active set is unusable — the flag is the
+		// diagnostic, and a missing set must not suppress it.
+		{"degraded with unusable active", strPtr(
+			`{"active":"not-an-array","selector":{"degraded":true}}`),
+			"⚠ skill selector degraded (reused the prior set)"},
+		{"degraded with non-string reason", strPtr(
+			`{"active":[],"selector":{"degraded":true,"reason":42}}`),
+			"⚠ skill selector degraded (reused the prior set)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := FormatRunTimeline(
+				[]domain.RunEventRecord{{RunID: "r", Seq: 0, Type: "skill:decision", Payload: tc.payload}}, nil)
+			if strings.TrimSpace(out) != tc.want {
+				t.Fatalf("output = %q, want %q", out, tc.want)
+			}
+			// Never the bare "· skill:decision" default, which is noise with none of
+			// the information.
+			if strings.Contains(out, "· skill:decision") {
+				t.Fatalf("bare event type leaked into the replay: %q", out)
+			}
+		})
+	}
+}

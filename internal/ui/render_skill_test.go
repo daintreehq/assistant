@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/domain"
 )
 
@@ -69,6 +70,25 @@ func TestPump_SkillLoadedEmitsNothing(t *testing.T) {
 	}
 }
 
+// The committed per-round decision is dropped just as completely. It carries strictly
+// MORE than the old card did (the whole active set, the selector's verdict), which makes
+// it the most tempting thing to surface — and the least suitable, since it fires every
+// round whether anything changed or not.
+func TestPump_SkillDecisionEmitsNothing(t *testing.T) {
+	p := newEventPump()
+	p.SkillDecision(agent.SkillDecisionEvent{
+		Active: []agent.SkillRef{
+			{ID: "supervise", Title: "Supervise a fleet of agents"},
+		},
+		Selector: agent.SkillSelectorOutcome{Ran: true, Degraded: true},
+	})
+
+	if got := drainToSentinel(t, p); len(got) != 0 {
+		t.Fatalf("SkillDecision queued %d pump event(s) (first kind %v); the backend skill "+
+			"decision must be inert in the cockpit", len(got), got[0].kind)
+	}
+}
+
 // Inert, NOT emit-with-no-render — a distinct property worth its own case, because emit()
 // drains the token coalescer: a forwarded skill load would flush buffered prose early and
 // move the flush boundary for something that draws nothing. With a token mid-flight, the
@@ -86,6 +106,65 @@ func TestPump_SkillLoadedDoesNotDisturbStreamingProse(t *testing.T) {
 		if strings.Contains(ev.text, "Supervise a fleet") {
 			t.Fatalf("a skill title reached the reducer as prose: %q", ev.text)
 		}
+	}
+}
+
+// Inertness in the strict sense: a decision arriving BETWEEN two tokens must not flush
+// the coalescer. Buffering A, emitting the decision, then buffering B has to yield ONE
+// token event carrying A+B — an implementation that called emit() would split it in two
+// and move the flush boundary for something that draws nothing.
+func TestPump_SkillDecisionDoesNotFlushTheTokenCoalescer(t *testing.T) {
+	p := newEventPump()
+	// Neutralize the production coalesce window: with the real 25ms timer a scheduler
+	// pause could flush the first token on its own and fail this test even though the
+	// skill callback is correctly inert. The sentinel's own emit is the deterministic
+	// flush this assertion depends on.
+	p.flushDur = time.Hour
+	p.AssistantToken("first half ")
+	p.SkillDecision(agent.SkillDecisionEvent{
+		Active:   []agent.SkillRef{{ID: "supervise", Title: "Supervise a fleet of agents"}},
+		Selector: agent.SkillSelectorOutcome{Ran: true, Degraded: true},
+	})
+	p.AssistantToken("second half")
+
+	var chunks []string
+	for _, ev := range drainToSentinel(t, p) {
+		if ev.kind != pumpTokens {
+			t.Fatalf("a skill decision put a %v event into a streaming turn; it must be inert", ev.kind)
+		}
+		if strings.Contains(ev.text, "Supervise a fleet") {
+			t.Fatalf("a skill title reached the reducer as prose: %q", ev.text)
+		}
+		chunks = append(chunks, ev.text)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("tokens arrived in %d chunk(s) (%q); a decision between them flushed the "+
+			"coalescer", len(chunks), chunks)
+	}
+	if chunks[0] != "first half second half" {
+		t.Fatalf("coalesced text = %q, want the two halves joined", chunks[0])
+	}
+}
+
+// The same strict property for the eager cue, which previously only pinned "no non-token
+// event" with the token placed BEFORE the skill event — a flush at the skill event would
+// have passed that.
+func TestPump_SkillLoadedDoesNotFlushTheTokenCoalescer(t *testing.T) {
+	p := newEventPump()
+	p.flushDur = time.Hour // see the decision test above
+	p.AssistantToken("first half ")
+	p.SkillLoaded([]string{"Supervise a fleet of agents"})
+	p.AssistantToken("second half")
+
+	var chunks []string
+	for _, ev := range drainToSentinel(t, p) {
+		if ev.kind != pumpTokens {
+			t.Fatalf("a skill load put a %v event into a streaming turn", ev.kind)
+		}
+		chunks = append(chunks, ev.text)
+	}
+	if len(chunks) != 1 || chunks[0] != "first half second half" {
+		t.Fatalf("tokens = %q; a skill load flushed the coalescer", chunks)
 	}
 }
 

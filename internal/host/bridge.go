@@ -145,6 +145,10 @@ func (b *Bridge) Interjection(string) {}
 // internal skill loads); dropped, like Interjection.
 func (b *Bridge) SkillLoaded([]string) {}
 
+// SkillDecision likewise has no host-protocol channel. A host wanting the skill decision
+// reads the --json stream or the run transcript, not this bridge.
+func (b *Bridge) SkillDecision(agent.SkillDecisionEvent) {}
+
 // ToolBatch/ToolState/ToolProgress are live-footer-only in the loop; the host
 // protocol keys off the concrete tool:started/tool:settled events, so the
 // in-tool substep stream has no host channel and is dropped.

@@ -44,6 +44,43 @@ type sseRound struct {
 	toolArgs string
 	// usage, when non-nil, rides the terminal `done` event.
 	usage *fakeUsage
+	// skills, when non-nil, replaces the default empty skills block on this round's
+	// `meta` event. It is the WIRE shape (snake_case, as the backend really sends it),
+	// so a test exercises the client's decode and the session's projection rather than
+	// a pre-shaped struct.
+	skills map[string]any
+}
+
+// defaultSkillsBlock is the "selector did not run" block every round sends unless the
+// round scripts its own.
+func defaultSkillsBlock() map[string]any {
+	return map[string]any{
+		"active":       []any{},
+		"newly_loaded": []any{},
+		"prelude":      map[string]any{"tool_executions": []any{}},
+		"selector":     map[string]any{"ran": false, "degraded": false},
+	}
+}
+
+// skillsBlock builds a wire-shaped skills block. active/newlyLoaded are id→title pairs
+// given as flat [id, title, id, title, …] so a round stays readable at the call site.
+func skillsBlock(degraded bool, active []string, newlyLoaded []string) map[string]any {
+	refs := func(flat []string) []any {
+		out := make([]any, 0, len(flat)/2)
+		for i := 0; i+1 < len(flat); i += 2 {
+			out = append(out, map[string]any{"id": flat[i], "title": flat[i+1]})
+		}
+		return out
+	}
+	return map[string]any{
+		"active":       refs(active),
+		"newly_loaded": refs(newlyLoaded),
+		"prelude":      map[string]any{"tool_executions": []any{}},
+		"selector": map[string]any{
+			"ran": true, "degraded": degraded, "task_type": "orchestration",
+			"confidence": 0.9, "reason": "scripted",
+		},
+	}
 }
 
 type fakeUsage struct {
@@ -120,16 +157,15 @@ func (f *fakeBackend) handleRespond(w http.ResponseWriter, r *http.Request) {
 
 	// meta ALWAYS first, before any token — carries the opaque state token, the skills
 	// outcome (empty here), and version markers. The client errors if it never arrives.
+	skills := round.skills
+	if skills == nil {
+		skills = defaultSkillsBlock()
+	}
 	writeEvent("meta", map[string]any{
 		"protocol_version": 2,
 		"request_id":       "req_1",
 		"model":            "daintree-assistant",
-		"skills": map[string]any{
-			"active":       []any{},
-			"newly_loaded": []any{},
-			"prelude":      map[string]any{"tool_executions": []any{}},
-			"selector":     map[string]any{"ran": false, "degraded": false},
-		},
+		"skills":           skills,
 		"state":            "dst1.test",
 		"catalog_revision": "sha256:test",
 		"prompt_version":   "test",

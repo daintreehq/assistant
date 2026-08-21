@@ -237,6 +237,12 @@ func (p *eventPump) Interjection(text string) {
 // something that draws nothing. See Session.emitSkillLoads for the full rationale.
 func (p *eventPump) SkillLoaded([]string) {}
 
+// SkillDecision is inert for the same reason, and queues nothing: it fires once per
+// round regardless of whether anything changed, so even a muted cue would be a per-round
+// transcript event for prompt-assembly machinery the user cannot act on. It must not
+// touch the token coalescer either — a decision arriving mid-stream may not split prose.
+func (p *eventPump) SkillDecision(agent.SkillDecisionEvent) {}
+
 func (p *eventPump) ToolBatch(calls []agent.BatchedToolCall) {
 	p.emit(pumpEvent{kind: pumpBatch, batch: calls})
 }

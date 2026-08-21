@@ -19,6 +19,7 @@
 package mcpserver
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/daintreehq/assistant/internal/agent"
@@ -53,8 +54,13 @@ type Event struct {
 	// Async is the `asy_…` handle when a tool accepted work that settles later. A
 	// caller seeing this must NOT expect the result on this run.
 	Async string `json:"async,omitempty"`
-	// Skills are the runbook titles the backend's selector loaded for a round.
+	// Skills are runbook titles: the ones newly loaded on a skill:loaded event, the
+	// whole ACTIVE set on a skill:decision event.
 	Skills []string `json:"skills,omitempty"`
+	// SkillsDegraded marks a skill:decision whose selector failed open and reused the
+	// prior active set — the run carries a runbook it did not actually choose. Omitted
+	// everywhere else, including on a clean decision.
+	SkillsDegraded bool `json:"skillsDegraded,omitempty"`
 }
 
 // Run is one turn: its prompt, its recorded events, and its outcome. It is written by
@@ -232,6 +238,28 @@ func (rec *Recorder) Interjection(text string) {
 func (rec *Recorder) SkillLoaded(titles []string) {
 	rec.flush()
 	rec.run.append(Event{Type: "skill:loaded", Skills: titles})
+}
+
+// SkillDecision records the committed per-round outcome. Only the active TITLES and the
+// degraded flag are kept: this transcript is a digest an agent driving us reads back (it
+// already drops tool args for the same reason), and those two answer the question a
+// caller actually has — which runbook was in play, and was it really chosen. The ids,
+// the newly-loaded delta and the rest of the selector telemetry live on the --json
+// stream, which is the full diagnostic contract.
+func (rec *Recorder) SkillDecision(ev agent.SkillDecisionEvent) {
+	rec.flush()
+	titles := make([]string, 0, len(ev.Active))
+	for _, ref := range ev.Active {
+		title := strings.TrimSpace(ref.Title)
+		if title == "" {
+			title = strings.TrimSpace(ref.ID)
+		}
+		if title == "" {
+			continue
+		}
+		titles = append(titles, title)
+	}
+	rec.run.append(Event{Type: "skill:decision", Skills: titles, SkillsDegraded: ev.Selector.Degraded})
 }
 
 func (rec *Recorder) ToolCall(ev agent.ToolCallEvent) {
