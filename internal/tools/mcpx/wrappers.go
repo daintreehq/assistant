@@ -424,13 +424,17 @@ func newTerminalMoveToWorktreeTool(deps Deps) tools.Tool {
 		Decode:      tools.StrictDecoder(func() any { return &terminalMoveToWorktreeArgs{} }),
 		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
 			var a terminalMoveToWorktreeArgs
-			_ = json.Unmarshal(raw, &a)
+			// Honour the decode error rather than running on whatever fields happened to
+			// populate: a partially-unmarshalled call still carries a usable terminalId,
+			// so ignoring the error would let a bypass path mutate on half-read args.
+			if err := json.Unmarshal(raw, &a); err != nil {
+				return tools.Fail(domain.CodeValidation, "terminal.moveToWorktree: "+err.Error())
+			}
+			if err := a.Validate(); err != nil {
+				return tools.Fail(domain.CodeValidation, "terminal.moveToWorktree: "+err.Error())
+			}
 			ids := a.ids()
 			worktreeID := strings.TrimSpace(a.WorktreeID)
-			if len(ids) == 0 || worktreeID == "" {
-				return tools.Fail(domain.CodeValidation,
-					"terminal.moveToWorktree: provide terminalId (or terminalIds) and a non-empty worktreeId (the exact id/PATH from worktree.list).")
-			}
 			// Canonicalize AFTER the confirmation gate (dispatch has no pre-confirm
 			// hook, and Decode has no context to call the MCP with) but BEFORE the
 			// first mutation, so a truncated prefix still lands and a definitively

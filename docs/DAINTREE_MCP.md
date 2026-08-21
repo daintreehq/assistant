@@ -45,12 +45,23 @@ falls back to the legacy SSE transport on failure.
 clients get an `external` tier (~70 read-safe + creation tools, no dangerous mutators like
 `worktree.delete`). The CLI treats the tier as advisory and adds its OWN safety layer on top.
 
-## Representative action / tool ids (call via `daintree.call`)
+## Representative action / tool ids (RAW names — prefer the typed wrapper where one exists)
+
+These are Daintree's raw action ids. Many are reachable through `daintree.call`, but the
+ones we wrap typed are denylisted there (see `wrappedMCPTools`) and must go through the
+wrapper — the raw forward would skip its validation.
 
 Terminals: `terminal.list`, `terminal.new`, `terminal.getOutput`, `terminal.getStatus`,
 `terminal.sendCommand`, `terminal.inject`, `terminal.waitUntilIdle`, `terminal.rename`,
-`terminal.close`, `terminal.kill`, `terminal.arm` / `terminal.disarm` /
-`terminal.disarmAll`. (`terminal.armByState` / `armAll` and `fleet.*` are renderer-only —
+`terminal.close`, `terminal.kill`, `terminal.moveToWorktree`, `terminal.arm` /
+`terminal.disarm` / `terminal.disarmAll`.
+
+> `terminal.moveToWorktree` files a pane under another OPEN worktree; `worktreeId` is
+> matched exactly (a branch name is never accepted) and a pane sharing a tab group takes
+> the group with it. It NEVER restarts the process — the moved agent keeps running in the
+> directory it launched from until it is told `Please continue in the directory <path>`.
+> `terminal.moveToNewWorktree` refuses agent dispatch outright: create the worktree first,
+> then move. (`terminal.armByState` / `armAll` and `fleet.*` are renderer-only —
 not MCP-callable; see the arming note below.)
 
 > `terminal.waitUntilIdle` blocks on **one** terminal — targeted use only; never fan out

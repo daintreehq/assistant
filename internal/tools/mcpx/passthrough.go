@@ -258,6 +258,31 @@ func copyTreeInjectPassthrough(ctx context.Context, mcp MCPClient, terminalID st
 	return tools.Ok(fmt.Sprintf("Injected copy tree into terminal %s.", terminalID), result)
 }
 
+// moveFollowUp renders the clause that has to ride EVERY result naming a terminal
+// that actually moved — success and partial failure alike. Filing a pane under a new
+// worktree does not restart or notify the process in it, so a moved agent keeps
+// working in its old directory until someone sends it this sentence. A partial batch
+// is exactly where that gets dropped: the summary is about the failure, the model
+// reads "failed", and the terminals that DID move are silently left half-relocated.
+func moveFollowUp(moved []string, worktreeID string) string {
+	if len(moved) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		" The process was NOT restarted — send each live agent among %s \"Please continue in the directory %s\"; that sentence, not this move, relocates the work.",
+		join(moved, ", "), worktreeID)
+}
+
+// movedOrNone renders the moved set for a failure summary, which must name the ids
+// that DID move — Details is not written to the audit row for a failed call, so the
+// summary is the only durable record of a partial outcome.
+func movedOrNone(moved []string) string {
+	if len(moved) == 0 {
+		return "none moved"
+	}
+	return "moved: " + join(moved, ", ")
+}
+
 // terminalMoveToWorktreePassthrough files a batch of terminals into ONE open
 // worktree through the Daintree terminal.moveToWorktree MCP tool (which takes ONE
 // terminalId per call), looping so the model can relocate a whole spawned cohort in
@@ -310,9 +335,8 @@ func terminalMoveToWorktreePassthrough(ctx context.Context, mcp MCPClient, ids [
 	}
 	details["moved"] = moved
 	if len(failed) == 0 {
-		return tools.Ok(fmt.Sprintf(
-			"Moved %d terminal(s) into worktree %s: %s. The process was NOT restarted — send each live agent \"Please continue in the directory %s\" to actually relocate its work.",
-			len(moved), worktreeID, join(moved, ", "), worktreeID), details)
+		return tools.Ok(fmt.Sprintf("Moved %d terminal(s) into worktree %s: %s.%s",
+			len(moved), worktreeID, join(moved, ", "), moveFollowUp(moved, worktreeID)), details)
 	}
 	// Name EVERY terminal that did not move (errored + not-attempted) so a partial
 	// outcome is never narrated as a clean success.
@@ -322,15 +346,22 @@ func terminalMoveToWorktreePassthrough(ctx context.Context, mcp MCPClient, ids [
 	if len(notAttempted) > 0 {
 		details["notAttempted"] = notAttempted
 	}
+	// A failed call is not proof the move did not happen — passthrough maps a Go-level
+	// transport error and a Daintree refusal to the SAME code, so a response lost after
+	// Daintree applied the move lands here as "failed". Say so, rather than let the
+	// model treat the unmoved list as settled fact and retry blind.
+	uncertain := " A failed move's outcome is not certain (a lost response looks the same as a refusal) — re-read the terminal roster before retrying."
 	if aborted {
-		msg := fmt.Sprintf("Moved %d of %d terminal(s) into worktree %s before the batch aborted; did not move: %s. %s",
-			len(moved), len(ids), worktreeID, join(unmoved, ", "), abort.Error.Message)
+		msg := fmt.Sprintf("Moved %d of %d terminal(s) into worktree %s before the batch aborted; did not move: %s. %s%s%s",
+			len(moved), len(ids), worktreeID, join(unmoved, ", "), abort.Error.Message,
+			uncertain, moveFollowUp(moved, worktreeID))
 		if !abort.Error.Recoverable {
 			return tools.Fail(abort.Error.Code, msg, tools.WithDetails(details), tools.Unrecoverable())
 		}
 		return tools.Fail(abort.Error.Code, msg, tools.WithDetails(details))
 	}
-	msg := fmt.Sprintf("Moved %d of %d terminal(s) into worktree %s; failed to move: %s.",
-		len(moved), len(ids), worktreeID, join(unmoved, ", "))
+	msg := fmt.Sprintf("Moved %d of %d terminal(s) into worktree %s (%s); failed to move: %s.%s%s",
+		len(moved), len(ids), worktreeID, movedOrNone(moved), join(unmoved, ", "),
+		uncertain, moveFollowUp(moved, worktreeID))
 	return tools.Fail(codeMCPToolError, msg, tools.WithDetails(details))
 }

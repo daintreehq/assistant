@@ -211,6 +211,7 @@ func TestControlPlaneToolsDeclareTheirDependency(t *testing.T) {
 	mustNeedDaintree := []string{
 		"agentTask.spawnForEdits", "agentTask.superviseTerminal",
 		"terminal.read", "terminal.sendCommand", "terminal.close", "terminal.focus",
+		"terminal.moveToWorktree",
 		"terminal.awaitAll", "terminal.extract", "terminal.run.async", "terminal.await.async",
 		"terminal.summarize", "daintree.call", "daintree.listTools",
 		"watcher.terminal.create", "watcher.watchPR",

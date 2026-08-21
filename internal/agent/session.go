@@ -2999,6 +2999,15 @@ func (s *Session) observeRosterMutation(internalName, rawArgs string, res domain
 		// rather than patch. Invalidate on FAILURE too: a partial batch already
 		// applied some moves, and even a fully-failed one may have been accepted by
 		// Daintree before the link dropped.
+		//
+		// Known residual staleness, deliberately not solved here: the kicked refresh can
+		// read a Daintree that has not yet applied the move and commit those pre-move
+		// worktreeIds under the new generation, so the roster can show the OLD worktree
+		// for a round or two. There is no tombstone equivalent to close's — the rows
+		// still exist, only one field is wrong — and patching the named ids would still
+		// miss the tab-group passengers a re-read exists to discover. Tolerable because
+		// nothing acts on the roster's worktreeId: the follow-up instruction uses the
+		// destination the caller passed, not the cached row.
 		s.invalidateRosterAndRefresh()
 	case "agentTask.spawnForEdits", "workflow.startWorkOnIssue", "recipe.run", "worktree.createWithRecipe":
 		// Invalidate on FAILURE too: a spawn can fail ambiguously with the launch

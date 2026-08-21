@@ -31,6 +31,9 @@ type fakeMCP struct {
 	// name it does not carry, keeping every pre-existing single-result test unchanged.
 	resultsByName map[string]MCPCallResult
 	errsByName    map[string]error
+	// onCall fires at the top of every CallTool, so a test can mutate the world
+	// mid-flight — cancelling the context between the roster read and the mutation.
+	onCall func()
 	// calls is the ORDERED call log (name + a copy of the args). lastName/lastArgs only
 	// remember the final call, which cannot distinguish "listed then moved three" from
 	// "moved three".
@@ -53,6 +56,9 @@ func (f *fakeMCP) Status() MCPStatus {
 	return MCPStatus{Connected: f.connected, Transport: f.transport, URL: f.url, Error: f.statusErr}
 }
 func (f *fakeMCP) CallTool(_ context.Context, name string, args map[string]any) (MCPCallResult, error) {
+	if f.onCall != nil {
+		f.onCall()
+	}
 	f.lastName = name
 	f.lastArgs = args
 	f.callCount++

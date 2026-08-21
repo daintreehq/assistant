@@ -508,6 +508,11 @@ func TestObserveRosterMutation_InvalidatesOnlyRosterMutators(t *testing.T) {
 		{"close ok", "terminal.close", "{}", domain.Ok("closed", map[string]any{"closed": []string{"t"}}), true},
 		{"close with unrecognized payload still reconciles", "terminal.close", "{}", domain.Ok("closed", nil), true},
 		{"close with only empty reported ids still reconciles", "terminal.close", "{}", domain.Ok("closed", map[string]any{"closed": []string{""}}), true},
+		// A move rewrites worktreeId on rows we named AND on tab-group passengers we did
+		// not, so both outcomes reconcile: a failed batch may still have applied some
+		// moves, or been accepted by Daintree before the link dropped.
+		{"move ok", "terminal.moveToWorktree", "{}", domain.Ok("moved", map[string]any{"moved": []string{"t"}}), true},
+		{"move failure may have partially applied", "terminal.moveToWorktree", "{}", domain.Fail("MCP_TOOL_ERROR", "refused"), true},
 		{"spawn ok", "agentTask.spawnForEdits", "{}", domain.Ok("spawned", nil), true},
 		{"spawn failure may have launched", "agentTask.spawnForEdits", "{}", domain.Fail("AGENT_LAUNCH_AMBIGUOUS", "ambiguous"), true},
 		{"startWorkOnIssue ok", "workflow.startWorkOnIssue", "{}", domain.Ok("started", nil), true},

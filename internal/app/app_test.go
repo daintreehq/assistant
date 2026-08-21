@@ -117,6 +117,11 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 	}
 	// The local skill-selection tools were removed in the backend migration; assert
 	// their absence so a re-introduction (or a stale wiring) is caught here.
+	// Name the newest addition explicitly: the count alone would stay green if this
+	// tool were dropped while an unrelated one was added.
+	if !a.Registry.Has("terminal.moveToWorktree") {
+		t.Error("terminal.moveToWorktree must be registered")
+	}
 	if a.Registry.Has("skill.find") || a.Registry.Has("skill.load") {
 		t.Error("skill.find/skill.load must NOT be registered (skill selection is backend-owned)")
 	}
