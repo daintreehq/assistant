@@ -570,3 +570,45 @@ func skillRefLabels(refs []backend.SkillRef) []string {
 	}
 	return out
 }
+
+// traceServerCompaction records what the backend's compacted context block did to this
+// session's history — the span it named, whether the splice was applied, and if not,
+// which gate refused it.
+//
+// This is the ONLY place a compaction surfaces. There is no cockpit card, no cue, and
+// no /compaction command, for the same reason backend skill loads are invisible: it is
+// prompt assembly, not a step the operator takes, and a per-turn notice about a
+// server-side optimisation would be noise on every turn once the feature is switched
+// on. When it goes wrong, the reason belongs where archaeology already looks — beside
+// backend.respond.meta, keyed by the same runId/turnId/round.
+func (s *Session) traceServerCompaction(runID, turnID string, round int, c *backend.StreamCompaction, sentLen int, applied bool, reason compactionRejectReason) {
+	if c == nil {
+		return
+	}
+	s.safeTrace("backend.compaction", func() map[string]any {
+		// Dereference the span edges instead of logging the *int fields directly:
+		// debuglog renders only scalars inline, so a pointer falls through to the block
+		// formatter and a one-line event grows two indented JSON stanzas. A missing edge
+		// (the very reason a span is refused as out-of-bounds) logs as an explicit null,
+		// which is a different fact from the perfectly ordinary index 0.
+		var startIndex, endIndex any = debuglog.Null, debuglog.Null
+		if start, end, ok := c.Replaces.Bounds(); ok {
+			startIndex, endIndex = start, end
+		}
+		fields := map[string]any{
+			"runId":        runID,
+			"turnId":       turnID,
+			"round":        round,
+			"blockTurnId":  c.TurnID,
+			"startIndex":   startIndex,
+			"endIndex":     endIndex,
+			"sentMessages": sentLen,
+			"blockBytes":   len(c.Block.Content),
+			"applied":      applied,
+		}
+		if reason != "" {
+			fields["reason"] = string(reason)
+		}
+		return fields
+	})
+}

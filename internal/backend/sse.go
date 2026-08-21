@@ -24,9 +24,17 @@ const (
 	// 90s tolerates several missed heartbeats before declaring the stream dead.
 	sseIdleTimeout = 90 * time.Second
 	// maxSSELineBytes bounds one SSE line. A single line carries at most one event's
-	// JSON payload fragment; 1 MiB is far beyond anything the backend legitimately
-	// emits, so exceeding it is a protocol error, not a big answer.
-	maxSSELineBytes = 1 << 20 // 1 MiB
+	// JSON payload fragment, and exceeding the bound is a protocol error that aborts
+	// the whole stream.
+	//
+	// Sized against the largest thing the backend legitimately emits on one line: a
+	// compaction block, capped at 262,144 CODE POINTS but written as JSON, where a
+	// control byte becomes six characters of \u0000 escape — a worst case near 1.6 MiB
+	// for a block that is entirely within contract. At the old 1 MiB that block aborted
+	// the stream AFTER the answer had already streamed (past the retry boundary), so an
+	// optional optimisation could destroy a reply the user had already read. It is now
+	// matched to the event bound, which always had the headroom.
+	maxSSELineBytes = 4 << 20 // 4 MiB
 	// maxSSEEventBytes bounds one accumulated event payload (all its data lines).
 	// Exceeding it aborts the stream with a typed protocol error rather than letting
 	// a misbehaving peer grow the buffer without limit.
@@ -203,6 +211,7 @@ const (
 	sseEventMeta
 	sseEventStatus
 	sseEventDelta
+	sseEventCompaction
 	sseEventDone
 	sseEventError
 )
@@ -215,6 +224,8 @@ func parseSSEEventKind(name []byte) sseEventKind {
 		return sseEventStatus
 	case "delta":
 		return sseEventDelta
+	case "compaction":
+		return sseEventCompaction
 	case "done":
 		return sseEventDone
 	case "error":
@@ -258,6 +269,20 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 		acc       toolCallAccumulator
 		metaSeen  bool
 		doneSeen  bool
+		// declFilter is the leaked-declaration backstop (declaration.go). It sits on
+		// the content path so every downstream surface inherits it — the live
+		// OnContent callback and the assembled Message.Content alike, which is what
+		// makes a leak unrenderable rather than merely untested.
+		declFilter declarationFilter
+		// compaction holds the turn's block until the stream COMMITS. A block is
+		// released to the caller only from the finish block below, and only once
+		// `done` was seen: the event rides immediately ahead of `done`, so an attempt
+		// that died before it (or one the retry layer discards) must not be able to
+		// rewrite the caller's history. compactionInvalid latches the at_most_once
+		// violation — a second block means client and server disagree about what the
+		// first one replaced, and the only safe reading of that is neither.
+		compaction        *StreamCompaction
+		compactionInvalid bool
 	)
 
 	// dispatch decodes and applies one fully-buffered event, then clears the
@@ -307,9 +332,11 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 				}
 			}
 			if d.Content != "" {
-				content.WriteString(d.Content)
-				if cb.OnContent != nil {
-					cb.OnContent(d.Content)
+				if visible := declFilter.Feed(d.Content); visible != "" {
+					content.WriteString(visible)
+					if cb.OnContent != nil {
+						cb.OnContent(visible)
+					}
 				}
 			}
 			for _, tc := range d.ToolCalls {
@@ -318,6 +345,22 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 					cb.OnToolCallDelta(tc)
 				}
 			}
+		case sseEventCompaction:
+			// Best-effort by contract: a block this client cannot read is a turn that
+			// runs on full history, never a failed answer. So a decode error drops the
+			// candidate and the stream carries on — the reply the user is waiting for
+			// has already been generated, and losing it over an optional optimisation
+			// would be the worst possible trade.
+			var c StreamCompaction
+			if err := json.Unmarshal(data, &c); err != nil {
+				compactionInvalid = true
+				return nil
+			}
+			if compaction != nil {
+				compactionInvalid = true
+				return nil
+			}
+			compaction = &c
 		case sseEventDone:
 			var dn StreamDone
 			if err := json.Unmarshal(data, &dn); err != nil {
@@ -407,11 +450,27 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 	}
 
 finish:
+	// Release anything the declaration filter is still holding: a stream that ended
+	// mid-marker ("[[DAINT") held real characters that are still owed to the caller.
+	if tail := declFilter.Finish(); tail != "" {
+		content.WriteString(tail)
+		if cb.OnContent != nil {
+			cb.OnContent(tail)
+		}
+	}
 	result.Message = RespondMessage{
 		Role:             "assistant",
 		Content:          content.String(),
 		ReasoningContent: reasoning.String(),
 		ToolCalls:        acc.build(),
+	}
+	// Commit barrier: the block is handed over only by a stream that COMMITTED — meta
+	// seen and `done` reached. The caller already discards a result it got an error
+	// with, so this is belt and braces; but "the field is set only on a committed
+	// stream" is the property the splice depends on, and it should hold at this layer
+	// rather than rely on every future caller checking the error first.
+	if metaSeen && doneSeen && !compactionInvalid {
+		result.Compaction = compaction
 	}
 
 	if !metaSeen {

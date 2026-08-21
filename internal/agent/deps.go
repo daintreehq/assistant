@@ -93,6 +93,18 @@ type MessageStore interface {
 	InsertMessage(rec domain.ConversationMessageRecord) (domain.ConversationMessageRecord, error)
 }
 
+// AtomicMessageStore is the OPTIONAL extension a store implements when it can write a
+// group of conversation rows as one unit. The compaction boundary needs it: a marker row
+// moves where rehydration starts reading, so a marker that commits without the block and
+// tail behind it hides intact history and resumes a conversation that was never written.
+//
+// Optional rather than folded into MessageStore because a store that cannot offer the
+// guarantee should say so by not implementing it, and the caller then declines to
+// compact rather than writing a boundary it cannot make safe.
+type AtomicMessageStore interface {
+	InsertMessages(recs []domain.ConversationMessageRecord) error
+}
+
 // MemoryStore is the distill-on-compact persistence seam (satisfied by
 // *storage.Store). Just before auto-compact discards the working history, the session
 // extracts durable facts and saves the novel ones via this seam. Optional: a nil
@@ -238,6 +250,20 @@ type SessionDeps struct {
 	// swappable: sending the field to a backend that forbids it 422s the whole turn.
 	// nil ⇒ fails closed (the default in tests), which with nil pins is a no-op.
 	BackendAcceptsPinnedSkillIDs func() bool
+	// BackendContextCompaction reports whether the endpoint about to be called
+	// advertises the EXACT server-side compaction contract this client implements, and
+	// hands back the descriptor (the byte cap the block is checked against lives on it).
+	// Consulted per round for the same reason as the gate above: the answer is pinned to
+	// an endpoint and the backend delegate is swappable.
+	//
+	// It gates ACCEPTANCE of an incoming block only. Once a block has been spliced into
+	// history it is part of the conversation and always sent — a later closed gate must
+	// not resurrect the transcript the block replaced, and dropping the reserved name
+	// would leave the server compacting that prefix all over again.
+	//
+	// nil ⇒ fails closed (the default in tests), which is exactly today's behaviour:
+	// full history, every round.
+	BackendContextCompaction func() (backend.ContextCompactionCaps, bool)
 	// WorkflowRunLister feeds the turn footer's active-workflow-runs block (optional;
 	// nil ⇒ the block is omitted). Read-only, best-effort, never breaks the turn.
 	WorkflowRunLister WorkflowRunLister

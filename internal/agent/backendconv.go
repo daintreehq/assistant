@@ -66,7 +66,20 @@ func toBackendMessages(messages []models.ChatMessage) ([]backend.Message, error)
 			return nil, fmt.Errorf("unsupported message role %q for backend at index %d", m.Role, i)
 		}
 
+		// The wire `name` is forwarded for EXACTLY one message: the compacted context
+		// block. That block must come back named — the backend's span selector reads
+		// the reserved name to find where already-frozen history ends, and the
+		// assembler drops it before the upstream call, so it costs nothing there.
+		//
+		// Narrow on purpose. Local tool-result messages also carry a Name (the tool's
+		// internal name, set for the CLI's own bookkeeping), and forwarding those would
+		// put an internal vocabulary on the wire for no reason — inert against today's
+		// backend, which drops `name` on tool messages, but a change nobody asked for
+		// and nobody would notice going wrong.
 		bm := backend.Message{Role: m.Role}
+		if isCompactionBlockName(m) {
+			bm.Name = m.Name
+		}
 		switch m.Role {
 		case "tool":
 			c, err := json.Marshal(m.ContentToText())

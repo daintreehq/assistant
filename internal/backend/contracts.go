@@ -839,6 +839,135 @@ type StreamDone struct {
 }
 
 // --------------------------------------------------------------------------
+// Server-side context compaction (the `compaction` stream event)
+// --------------------------------------------------------------------------
+
+// ContextCompactionBlockName is the reserved `name` the compacted block wears, and
+// the whole reason server-side compaction needs no server-side state: the client
+// splices the block into its history and sends the name back verbatim on every later
+// request, so the backend's span selector can see where frozen history ends by
+// reading the array it was handed. Honoured by the backend only on a `user` message.
+const ContextCompactionBlockName = "daintree_compaction"
+
+// StreamCompactionSpan is the half-open range of `input.messages` the block stands
+// in for — indices into the array the client itself sent on THIS request, so the
+// splice needs no negotiation:
+//
+//	messages[:StartIndex] + [block] + messages[EndIndex:]
+//
+// EndIndex is EXCLUSIVE and always greater than StartIndex (an empty span is never
+// emitted). The assistant reply currently streaming is not in that array.
+// Both fields are POINTERS because both have a legitimate zero. `start_index: 0` is
+// the ordinary case — a span opening at the very first message — so a plain int cannot
+// tell it apart from a field the payload never sent. That distinction is load-bearing
+// here in a way it usually is not: an absent start silently read as 0 would widen the
+// span back to the beginning of the conversation and destroy history the server never
+// asked to replace. Absent means invalid, and Bounds says so.
+type StreamCompactionSpan struct {
+	StartIndex *int `json:"start_index"`
+	EndIndex   *int `json:"end_index"`
+}
+
+// Bounds returns the half-open span, reporting false when either edge was missing.
+func (s StreamCompactionSpan) Bounds() (start, end int, ok bool) {
+	if s.StartIndex == nil || s.EndIndex == nil {
+		return 0, 0, false
+	}
+	return *s.StartIndex, *s.EndIndex, true
+}
+
+// StreamCompactionBlock is the reconciled message that replaces the span. Role is
+// always "user" and Name always ContextCompactionBlockName; both are checked rather
+// than assumed, because a block that fails either would move the next turn's
+// compaction boundary somewhere the server never intended.
+type StreamCompactionBlock struct {
+	Role    string `json:"role"`
+	Name    string `json:"name"`
+	Content string `json:"content"`
+}
+
+// StreamCompaction is the `compaction` event: reconciled state standing in for old
+// history. Emitted at most once per turn, immediately BEFORE the terminal `done` and
+// never after it — `done` staying terminal is deliberate, because an SSE reader
+// modelled on the `data: [DONE]` convention breaks its loop on the terminal event and
+// would silently drop anything following. Entirely optional: a turn that compacted
+// nothing simply has no such event and the client keeps the history it already holds.
+type StreamCompaction struct {
+	// TurnID is the turn this block describes. A client applies the splice only when
+	// it matches the turn it asked about — a block is a statement about one
+	// conversation prefix at one moment, not a durable fact.
+	TurnID   string                `json:"turn_id"`
+	Replaces StreamCompactionSpan  `json:"replaces"`
+	Block    StreamCompactionBlock `json:"block"`
+}
+
+// ContextCompactionSpanCaps is the advertised index convention for Replaces. Every
+// field is checked by ReplayCompatible rather than trusted: these are the assumptions
+// the splice arithmetic is built on, and a backend that changed one of them without
+// the client noticing would splice the wrong messages away.
+type ContextCompactionSpanCaps struct {
+	Collection string `json:"collection"`
+	// IndexBase is a pointer for the same reason the span's edges are: the value this
+	// client requires IS zero, so a plain int would read a descriptor that never
+	// mentioned index_base as though it had promised zero-based indices — opening the
+	// gate on a contract nobody stated.
+	IndexBase            *int `json:"index_base"`
+	EndExclusive         bool `json:"end_exclusive"`
+	ExcludesCurrentReply bool `json:"excludes_current_reply"`
+}
+
+// ContextCompactionCaps is the top-level `context_compaction` capability block —
+// a SIBLING of `respond`, not a field inside it. A nil pointer means the deployment
+// predates the feature entirely; a non-nil block with Enabled false means it
+// advertises the contract but has no compactor wired (the state of every real
+// deployment today, where only the null compactor is installed). The two are
+// different answers and the CLI keeps them distinguishable, though it withholds
+// compaction for both.
+type ContextCompactionCaps struct {
+	Enabled              bool                      `json:"enabled"`
+	StreamEvent          string                    `json:"stream_event"`
+	Delivery             string                    `json:"delivery"`
+	AtMostOnce           bool                      `json:"at_most_once"`
+	StreamingOnly        bool                      `json:"streaming_only"`
+	BestEffort           bool                      `json:"best_effort"`
+	AppendOnly           bool                      `json:"append_only"`
+	BlockMessageName     string                    `json:"block_message_name"`
+	Span                 ContextCompactionSpanCaps `json:"span"`
+	TurnIDMatchRequired  bool                      `json:"turn_id_match_required"`
+	MaxBlockContentBytes int                       `json:"max_block_content_bytes"`
+}
+
+// ReplayCompatible reports whether this deployment advertises the EXACT contract the
+// local splice implements — not merely that compaction is enabled.
+//
+// Checking the whole block rather than Enabled alone is the point. The splice is a
+// destructive rewrite of the client's own working history driven by integers the
+// server chose, and every field below is an assumption that arithmetic depends on:
+// which array the indices address, whether the end is exclusive, whether the reply
+// being streamed is in range, what name marks the boundary for the NEXT turn. A
+// backend that revises one of them ships a block this code would apply wrongly, and
+// a silent wrong splice is far worse than no compaction at all — so an unrecognised
+// contract reads as "not supported" and the turn runs on full history.
+func (c *ContextCompactionCaps) ReplayCompatible() bool {
+	if c == nil || !c.Enabled {
+		return false
+	}
+	return c.StreamEvent == "compaction" &&
+		c.Delivery == "before_done" &&
+		c.AtMostOnce &&
+		c.StreamingOnly &&
+		c.BestEffort &&
+		c.AppendOnly &&
+		c.BlockMessageName == ContextCompactionBlockName &&
+		c.Span.Collection == "input.messages" &&
+		c.Span.IndexBase != nil && *c.Span.IndexBase == 0 &&
+		c.Span.EndExclusive &&
+		c.Span.ExcludesCurrentReply &&
+		c.TurnIDMatchRequired &&
+		c.MaxBlockContentBytes > 0
+}
+
+// --------------------------------------------------------------------------
 // First-class skills block
 // --------------------------------------------------------------------------
 
@@ -941,6 +1070,18 @@ type RespondResult struct {
 	// meant to be read together. nil when the attempt never reached the wire. See
 	// transport.go.
 	Transport *TransportMarks
+	// Compaction is the turn's compacted context block, when the backend sent one and
+	// the stream reached its terminal `done`. nil is the overwhelmingly common case —
+	// no compactor, no valid span, or a deployment that predates the feature.
+	//
+	// Released ONLY by a committed stream, the same discipline OnMeta follows: a
+	// compaction event rides just ahead of `done`, so an attempt that never reached
+	// `done` (transport failure, terminal error event, EOF) cannot hand the caller a
+	// block, and a retried attempt's discarded block can never be spliced. A stream
+	// carrying MORE than one compaction event leaves this nil: at_most_once is part of
+	// the contract, and a second block is evidence the client and server disagree about
+	// what the first one replaced.
+	Compaction *StreamCompaction
 }
 
 // HasToolCalls reports whether the assistant asked to run any tools.
@@ -1020,8 +1161,13 @@ type Capabilities struct {
 		// that leaves this list byte-identical.
 		Catalog []SkillRef `json:"catalog"`
 	} `json:"skills"`
-	Tasks  []string `json:"tasks"`
-	Limits struct {
+	// ContextCompaction is the TOP-LEVEL server-side compaction contract (a sibling of
+	// `respond`, not a field within it — the backend serves it there). nil on a
+	// deployment that predates the feature; see ContextCompactionCaps.ReplayCompatible
+	// for why the CLI checks the whole block rather than just `enabled`.
+	ContextCompaction *ContextCompactionCaps `json:"context_compaction"`
+	Tasks             []string               `json:"tasks"`
+	Limits            struct {
 		RequestBytes int `json:"request_bytes"`
 		Tools        int `json:"tools"`
 	} `json:"limits"`

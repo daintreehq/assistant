@@ -344,8 +344,17 @@ func (a *App) BackendCapabilities(ctx context.Context) (backend.Capabilities, er
 	if a.Backend == nil {
 		return backend.Capabilities{}, errors.New("no backend client")
 	}
-	asked := a.Backend.BaseURL()
-	caps, err := a.Backend.Capabilities(ctx)
+	// Capture the delegate ONCE. Reading BaseURL() and Capabilities() through two
+	// separate atomic loads of a Swappable would let a /backend switch land between
+	// them, and the answer from the NEW endpoint would then be filed under the OLD
+	// one — the exact confusion the pin exists to prevent, arrived at from the other
+	// direction. Pinning the delegate makes "the endpoint that answered" literally true.
+	client := a.Backend
+	if sw, ok := client.(*backend.Swappable); ok {
+		client = sw.Current()
+	}
+	asked := client.BaseURL()
+	caps, err := client.Capabilities(ctx)
 	if err != nil {
 		return backend.Capabilities{}, err
 	}
@@ -364,6 +373,45 @@ func (a *App) backendAcceptsDisplayContext() bool {
 		return false
 	}
 	return snap.baseURL == a.Backend.BaseURL() && snap.caps.Respond.DisplayContext
+}
+
+// backendContextCompaction reports whether it is safe to ACCEPT a compacted context
+// block from the endpoint about to be called, and hands back the descriptor it was
+// judged against (the block's byte cap rides on it).
+//
+// Same endpoint-pinned, fail-closed shape as the two gates above — but for a different
+// reason, and the difference is worth stating. Those two protect a request: guessing
+// wrong there 422s the whole turn. This one protects HISTORY. A block is applied by
+// splicing it over a span of the client's own conversation, using integers the server
+// chose; a deployment whose contract this client has not verified could name a span
+// meaning something else, and the damage would be silent and permanent. So the check is
+// ReplayCompatible (the whole advertised contract), not merely `enabled` — and an
+// unknown backend, a stale answer from a different endpoint, or a single field this
+// client does not recognise all read as "not supported", which is simply today's
+// behaviour: full history, every round.
+//
+// KNOWN LIMIT, and deliberate. It reads only what an EXPLICIT handshake left behind —
+// the cockpit's boot fetch, /doctor, /routing, or a pinned-skill negotiation. A classic
+// REPL, a one-shot, the embedded host, the MCP server and the supervisor daemon perform
+// none of those, so compaction stays off there, and it stays off after a /backend switch
+// until something negotiates with the new endpoint. That is invisible and costs only
+// prompt savings, which is why it is tolerable while every deployment ships
+// context_compaction disabled — but it does mean the feature is not yet live on the
+// long-running surfaces it was built for.
+//
+// Fixing it means an explicit negotiation step per surface, NOT a boot-time fetch here:
+// TestPreparePinnedSkillsMakesNoCallWithoutPins pins the cost contract that an ordinary
+// launch adds no round trip, and a detached warm-up also races the first turn and any
+// concurrent switch. That is its own change, with its own decisions to make.
+func (a *App) backendContextCompaction() (backend.ContextCompactionCaps, bool) {
+	snap := a.backendCaps.Load()
+	if snap == nil || a.Backend == nil || snap.baseURL != a.Backend.BaseURL() {
+		return backend.ContextCompactionCaps{}, false
+	}
+	if !snap.caps.ContextCompaction.ReplayCompatible() {
+		return backend.ContextCompactionCaps{}, false
+	}
+	return *snap.caps.ContextCompaction, true
 }
 
 // Tier returns the current permission tier under the read lock.
@@ -719,6 +767,7 @@ func Create(opts CreateOptions) (*App, error) {
 		// forbids. Nil pins make both inert.
 		PinnedSkillIDs:               a.PinnedSkillIDs(),
 		BackendAcceptsPinnedSkillIDs: a.backendAcceptsPinnedSkillIDs,
+		BackendContextCompaction:     a.backendContextCompaction,
 		// Live async futures for the turn context's async-operations block, re-read
 		// every round so the model sees (and never re-issues) its in-flight work.
 		AsyncInvocationLister: store,

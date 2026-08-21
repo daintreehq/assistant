@@ -107,7 +107,17 @@ type ChatMessage struct {
 
 	ToolCalls  []ToolCallRequest
 	ToolCallID string
-	Name       string // internal helper field — DROPPED on the wire
+	// Name is an internal label, and reaches the wire for EXACTLY one message: the
+	// server-delivered compacted context block, whose reserved "daintree_compaction"
+	// must come back on every later request — that name is the entire mechanism by
+	// which the backend recognises frozen history without holding any state of its
+	// own, so dropping it would leave the server re-compacting a prefix the client had
+	// already replaced.
+	//
+	// Every OTHER use is local bookkeeping that stays local: tool-result messages carry
+	// the tool's own name here (see Session.runToolBatch and internal/subagent), and the
+	// wire encoder and the persister both drop it. See agent.isCompactionBlockName.
+	Name string
 
 	// ReasoningContent is an assistant turn's chain-of-thought (DeepSeek thinking
 	// mode). Captured from the backend response and replayed verbatim on later

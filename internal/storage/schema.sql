@@ -119,12 +119,18 @@ CREATE INDEX IF NOT EXISTS idx_run_events_ts ON run_events(ts);
 -- 3.6 conversation — session-fresh transcript. reasoningContent persists an
 -- assistant turn's DeepSeek chain-of-thought so it survives resume and replays
 -- correctly (the API 400s on a tool-call turn missing it); NULL when thinking is off.
+-- name is the message's wire `name`, and today exactly one kind of row carries one:
+-- the server-delivered compacted context block, which wears the reserved
+-- `daintree_compaction`. That name is the ONLY thing telling the backend where frozen
+-- history ends, so a block that rehydrated without it would be re-compacted and the
+-- request would carry history the server already replaced. NULL on every other row.
 CREATE TABLE IF NOT EXISTS conversation (
   id               TEXT PRIMARY KEY,
   sessionId        TEXT NOT NULL,
   seq              INTEGER NOT NULL,
   role             TEXT NOT NULL,
   content          TEXT NOT NULL,
+  name             TEXT,
   reasoningContent TEXT,
   toolCallsJson    TEXT,
   toolCallId       TEXT,

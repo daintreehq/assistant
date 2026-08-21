@@ -8,7 +8,7 @@ Guidance for working in this repository.
 > backward compatibility or version stable surfaces for their own sake — prefer
 > the simplest thing. We deliberately do NOT version the system prompt (the
 > cache key is a plain, unversioned identifier); just edit the prompt directly.
-> The SQLite schema is a single clean baseline (`schemaUserVersion`, currently 10) — on a
+> The SQLite schema is a single clean baseline (`schemaUserVersion`, currently 11) — on a
 > schema change, hard-reset the DB (`make db-reset`, which wipes the resolved
 > state dir, honouring `DAINTREE_ASSISTANT_STATE_DIR`) rather than accumulate a
 > migration chain.

@@ -167,6 +167,12 @@ func SelectResumeCheckpoint(cps []domain.ContextCheckpointRecord, res RehydrateR
 // caller can count it (the only loss this function can incur; text is preserved).
 func recordToChatMessage(r domain.ConversationMessageRecord) (models.ChatMessage, bool) {
 	m := models.ChatMessage{Role: r.Role}
+	if r.Name != nil {
+		// Restores the reserved compaction-block name, without which the resumed
+		// request would look to the backend like un-frozen history and be compacted
+		// again over content it had already replaced.
+		m.Name = *r.Name
+	}
 	if r.Content == "" {
 		m.ContentNull = true
 	} else {

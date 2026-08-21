@@ -1096,6 +1096,27 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		//      reflects the prompt actually sent (backend-reported prompt_tokens).
 		s.emitBackendUsage(result.Usage, result.Meta.Model)
 
+		// 10e-bis. Server-side compaction, if the backend sent a block.
+		//
+		//      The position is load-bearing at both ends. AFTER emitBackendUsage,
+		//      because that call stashes this round's reported prompt_tokens and the
+		//      splice must be the last writer — the figure describes the PRE-splice
+		//      prompt, and left standing against a history the block just shrank it
+		//      would trip maybeAutoCompact into compacting again on top of the
+		//      server's work. BEFORE the assistant message is appended, because that
+		//      is the coordinate space the span was measured in: the reply now in hand
+		//      is excluded from it by contract, and appending onto the spliced array
+		//      below leaves it exactly where the raw tail already sits.
+		//
+		//      The next round of THIS turn therefore sends block + tail, which is
+		//      where a tool loop's prompt cost actually accumulates. Best-effort
+		//      throughout: a refused block leaves full history and the turn carries
+		//      on, so the only trace of it is the debug log.
+		if result.Compaction != nil {
+			applied, reason := s.applyServerCompaction(result.Compaction, len(bmsgs), turnID)
+			s.traceServerCompaction(runID, turnID, iter, result.Compaction, len(bmsgs), applied, reason)
+		}
+
 		// 10f. Append the assistant message (content null on a pure tool-call turn).
 		s.pushMessage(backendAssistantMessage(result.Message))
 
@@ -2779,6 +2800,16 @@ func (s *Session) persistMessageLocked(m models.ChatMessage) {
 	if s.deps.Store == nil {
 		return
 	}
+	rec := s.conversationRecord(m, s.seq)
+	s.seq++
+	_, _ = s.deps.Store.InsertMessage(rec)
+}
+
+// conversationRecord projects a chat message into its durable row at the given seq.
+// Split out of persistMessageLocked so the grouped compaction write (which stamps
+// several rows before committing any of them) cannot drift from the single-row path —
+// the reasoning and name rules below are subtle enough that two copies would.
+func (s *Session) conversationRecord(m models.ChatMessage, seq int) domain.ConversationMessageRecord {
 	var toolCallsJSON *string
 	if len(m.ToolCalls) > 0 {
 		if b, err := json.Marshal(m.ToolCalls); err == nil {
@@ -2798,17 +2829,25 @@ func (s *Session) persistMessageLocked(m models.ChatMessage) {
 		r := m.ReasoningContent
 		reasoning = &r
 	}
-	rec := domain.ConversationMessageRecord{
+	// Persist the wire `name` for the compacted context block ONLY, so it rehydrates as
+	// a boundary the backend still recognises. Scoped the same way the wire encoder is,
+	// and for the same reason: a tool result's Name is the tool's internal name, kept
+	// for local bookkeeping, and it has no business in the durable transcript.
+	var name *string
+	if isCompactionBlockMessage(m) {
+		n := m.Name
+		name = &n
+	}
+	return domain.ConversationMessageRecord{
 		SessionID:        s.deps.SessionID,
-		Seq:              s.seq,
+		Seq:              seq,
 		Role:             m.Role,
 		Content:          m.ContentToText(),
+		Name:             name,
 		ReasoningContent: reasoning,
 		ToolCallsJson:    toolCallsJSON,
 		ToolCallID:       toolCallID,
 	}
-	s.seq++
-	_, _ = s.deps.Store.InsertMessage(rec)
 }
 
 // EstimateTokens exposes the working-history size estimate to surfaces that report
