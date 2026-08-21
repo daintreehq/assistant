@@ -31,10 +31,14 @@ func TestRunCancellable_PropagatesNormalError(t *testing.T) {
 
 func TestClassicREPL_ParentCancellationExits(t *testing.T) {
 	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", t.TempDir())
-	a, err := app.Create(app.CreateOptions{Overrides: overridesFromOptions(Options{
-		Offline: true,
+	overrides, err := overridesFromOptions(Options{
+		Offline: boolPtr(true),
 		Project: t.TempDir(),
-	})})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.Create(app.CreateOptions{Overrides: overrides})
 	if err != nil {
 		t.Fatal(err)
 	}

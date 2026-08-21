@@ -208,6 +208,13 @@ internal/
   ui/            Bubble Tea cockpit (the ONLY bubbletea importers): model/update/view, pump,
                  scrollback, splash, composer/ theme/ markdown/
   host/          embedded host (run.go) — stdio NDJSON transport, PROTOCOL_VERSION 2
+  mcpserver/     the assistant AS an MCP server (`mcp --stdio`) so another agent can drive
+                 it as a sub-agent: per-session config (no server-held binding, because an
+                 MCP client cannot restart us), async-first ask/poll because a turn takes
+                 minutes, per-session approval brokering (decline/ask/auto, always
+                 bounded so a parked dispatch cannot wedge a turn), run-transcript and
+                 debug-log resources, and stale-binary reporting for the one thing a
+                 session argument cannot fix. See docs/HEADLESS.md
   terminal/      TTY-gated raw escapes (clear.go) — the ONLY host-scrollback wipe path
   deps/          build-time blank-import anchor (deps.go) — pins go.mod modules; NO runtime effect
   e2e/           end-to-end tests only: built-binary, fake backend/MCP, inline-contract, turn/race
@@ -511,6 +518,8 @@ guarantee, sub-agent skill selection, and the cockpit rows**),
 work + the local run-tracking tools), `docs/WORKFLOW_INTELLIGENCE.md` (the flag-gated
 workflow execution-graph layer: graph model, tools, observer, async linking, and the
 backend contract it expects),
+`docs/HEADLESS.md` (**driving the CLI from a script or another agent — the `mcp --stdio`
+server, the flags, the `--json` event schema, exit codes, isolation**),
 `README.md` (full overview), `docs/BUBBLE_TEA.md` (cockpit architecture),
 `docs/ARCHITECTURE.md`, `docs/DAINTREE_MCP.md` (Daintree's MCP protocol),
 `docs/DAINTREE_HOST.md` (how Daintree launches / displays / hides / restarts this CLI),

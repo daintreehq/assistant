@@ -39,7 +39,7 @@ func doctorOpts(t *testing.T) Options {
 	// would additionally require the three workflow ids and the core-only fixtures
 	// below would fail for an environment reason, not a code one.
 	t.Setenv("DAINTREE_WORKFLOW_INTELLIGENCE", "0")
-	return Options{Offline: true, Project: t.TempDir()}
+	return Options{Offline: boolPtr(true), Project: t.TempDir()}
 }
 
 // deadBackendURL returns a URL guaranteed to refuse connections: an httptest server
@@ -121,7 +121,7 @@ func TestRunInteractive_CancelledCockpitDoesNotFallBack(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	runnerCalled := false
 	opts := Options{
-		Offline: true,
+		Offline: boolPtr(true),
 		Project: t.TempDir(),
 		Cockpit: func(context.Context, *app.App) error {
 			runnerCalled = true
@@ -161,7 +161,7 @@ func TestRunInteractive_CockpitUnavailableStillFallsBack(t *testing.T) {
 
 	runnerCalled := false
 	opts := Options{
-		Offline: true,
+		Offline: boolPtr(true),
 		Project: t.TempDir(),
 		Cockpit: func(context.Context, *app.App) error {
 			runnerCalled = true

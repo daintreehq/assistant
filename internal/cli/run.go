@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"runtime"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/mcp"
 	"github.com/daintreehq/assistant/internal/projectinstructions"
+	"github.com/daintreehq/assistant/internal/redact"
 	"github.com/daintreehq/assistant/internal/storage"
 	"github.com/daintreehq/assistant/internal/tools"
 	"github.com/mattn/go-isatty"
@@ -38,52 +40,136 @@ func DefaultCockpitRunner(context.Context, *app.App) error {
 
 // Options are the parsed CLI flags + the one-shot prompt.
 type Options struct {
-	McpURL    string
-	McpToken  string
-	Project   string
-	Tier      string
-	Offline   bool
+	McpURL   string
+	McpToken string
+	Project  string
+	Tier     string
+	// Offline/AutoApprove/DebugLog are POINTERS: nil means the flag was not passed and
+	// the environment decides, false means it was explicitly turned OFF and must beat
+	// the environment. Collapsing those two cases would let DAINTREE_ASSISTANT_AUTO_APPROVE=1
+	// survive an explicit --auto-approve=false.
+	Offline   *bool
 	Classic   bool
 	JSON      bool
 	Inline    bool // DEPRECATED NO-OP — accepted and ignored
 	Prompt    string
 	HasPrompt bool
 
+	// The harness knobs. Every one of these already had a ConfigOverrides field and a
+	// trusted env var; only the flag was missing, which forced any scripted caller to
+	// rewrite the process environment to say something argv says perfectly well. They
+	// carry the SAME trust as the env vars they shadow (argv is as trusted as env) and
+	// win over them, per the FirstString order in config.LoadConfig.
+	BackendURL string
+	// APIKeyFile is a path, never the key itself: argv is world-readable through `ps`,
+	// so there is deliberately no --api-key. Read once, in overridesFromOptions.
+	APIKeyFile  string
+	StateDir    string
+	LogDir      string
+	AutoApprove *bool
+	DebugLog    *bool
+
+	// Timeout bounds a one-shot run's wall clock (zero = unbounded). It is NOT a config
+	// value: it cancels the run context, so the turn unwinds through the same path as a
+	// SIGINT and reports cancelled rather than being killed mid-write.
+	Timeout time.Duration
+
 	// Cockpit is the runner seam (defaults to DefaultCockpitRunner when nil).
 	Cockpit CockpitRunner
 }
 
 // overridesFromOptions maps routing-irrelevant flags to config overrides. classic/
-// inline/json are routing-only and NOT carried into config.
-func overridesFromOptions(opts Options) config.ConfigOverrides {
+// inline/json/timeout are routing-only and NOT carried into config.
+//
+// It returns an error only for --api-key-file: an unreadable key file must be fatal,
+// never a silent fall-through to the stored sign-in. Falling back would run the job
+// against a DIFFERENT key than the caller named — spending someone else's credit and
+// hiding the mistake behind a successful-looking run.
+func overridesFromOptions(opts Options) (config.ConfigOverrides, error) {
 	var o config.ConfigOverrides
-	if opts.McpURL != "" {
-		v := opts.McpURL
-		o.McpURL = &v
+	set := func(dst **string, v string) {
+		if v != "" {
+			val := v
+			*dst = &val
+		}
 	}
-	if opts.McpToken != "" {
-		v := opts.McpToken
-		o.McpToken = &v
+	set(&o.McpURL, opts.McpURL)
+	set(&o.McpToken, opts.McpToken)
+	set(&o.ProjectPath, opts.Project)
+	set(&o.Tier, opts.Tier)
+	set(&o.BackendURL, opts.BackendURL)
+	set(&o.StateDir, opts.StateDir)
+	set(&o.LogDir, opts.LogDir)
+	// Pass the booleans through as-is. They already carry the "was the flag passed"
+	// distinction as nil-ness, so re-deriving it here would throw it away again.
+	o.Offline = opts.Offline
+	o.AutoApprove = opts.AutoApprove
+	o.DebugLog = opts.DebugLog
+	if opts.APIKeyFile != "" {
+		key, err := readAPIKeyFile(opts.APIKeyFile)
+		if err != nil {
+			return config.ConfigOverrides{}, err
+		}
+		o.APIKey = &key
 	}
-	if opts.Project != "" {
-		v := opts.Project
-		o.ProjectPath = &v
+	return o, nil
+}
+
+// loadConfigFromOptions is overridesFromOptions + LoadConfig, which is what every
+// subcommand that needs config but not an App actually wants. Folding the pair here
+// keeps the --api-key-file failure on the SAME error path as a bad config, so no call
+// site can accidentally drop it.
+func loadConfigFromOptions(opts Options) (config.AppConfig, error) {
+	o, err := overridesFromOptions(opts)
+	if err != nil {
+		return config.AppConfig{}, err
 	}
-	if opts.Tier != "" {
-		v := opts.Tier
-		o.Tier = &v
+	return config.LoadConfig(o)
+}
+
+// readAPIKeyFile reads a single-line credential file. Trailing newlines are the norm
+// (`printf %s` is not how anyone writes one), so trim; an empty file is an error rather
+// than an empty override, which would silently mean "use the stored sign-in".
+//
+// The read is BOUNDED. A path is caller-supplied and need not be a regular file — a
+// FIFO or /dev/zero would otherwise block or grow forever, defeating --timeout (whose
+// deadline cannot cover a syscall that never returns). One key plus generous slack is
+// all a valid file can hold.
+func readAPIKeyFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("--api-key-file: %w", err)
 	}
-	if opts.Offline {
-		v := true
-		o.Offline = &v
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, credentials.MaxKeyLength+1024))
+	if err != nil {
+		return "", fmt.Errorf("--api-key-file %s: %w", path, err)
 	}
-	return o
+	key := strings.TrimSpace(string(raw))
+	if key == "" {
+		return "", fmt.Errorf("--api-key-file %s: file is empty", path)
+	}
+	// The SAME structural check the login prompt applies, for the same reason: an
+	// embedded newline, a smart quote or an over-length paste becomes a readable message
+	// here instead of an opaque 401 a round trip later. It also pins "single-line" —
+	// ValidateKeyShape rejects every byte below 0x21, newlines included.
+	if err := credentials.ValidateKeyShape(key); err != nil {
+		return "", fmt.Errorf("--api-key-file %s: %w", path, err)
+	}
+	// Registering here means the key is masked in the debug log from the first line
+	// written, including the boot header — the stored-sign-in path does the same in
+	// app.Create, and a key that arrives by file must not be the one that leaks.
+	redact.RegisterSecret(key)
+	return key, nil
 }
 
 // buildOverrides resolves the overrides and loads the project DAINTREE.md (best
 // effort; a warning is non-fatal). Async-in-TS, here it just reads the file.
-func buildOverrides(opts Options, r *render.Renderer) config.ConfigOverrides {
-	o := overridesFromOptions(opts)
+func buildOverrides(opts Options, r *render.Renderer) (config.ConfigOverrides, error) {
+	o, err := overridesFromOptions(opts)
+	if err != nil {
+		return config.ConfigOverrides{}, err
+	}
 	projectPath := opts.Project
 	if projectPath == "" {
 		if cwd, err := os.Getwd(); err == nil {
@@ -98,7 +184,7 @@ func buildOverrides(opts Options, r *render.Renderer) config.ConfigOverrides {
 		c := res.Content
 		o.ProjectInstructions = &c
 	}
-	return o
+	return o, nil
 }
 
 // ensureSignedIn gates startup on a usable sign-in. The backend authenticates in
@@ -157,7 +243,38 @@ func RunOneShot(ctx context.Context, opts Options) int {
 		sink = jsonout.New(os.Stdout, domain.NowMS)
 	}
 
+	// A --timeout bounds the run by CANCELLING it, so a turn already under way unwinds
+	// through the same path SIGINT uses and the sink reports cancelled (exit 2) rather
+	// than the process being killed mid-JSONL-line. It is installed FIRST so setup —
+	// reading the key file, loading DAINTREE.md, the sign-in gate, waiting for the owner
+	// lease — is inside the bound too; a deadline that only starts once the turn does is
+	// not a wall-clock bound, and waiting for a lease is exactly where a scripted run
+	// hangs. Individual syscalls that ignore context (os.ReadFile, app.Create) are
+	// bounded by their own means; see readAPIKeyFile.
+	if opts.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
+		defer cancel()
+	}
+
+	// reportError routes a setup failure to the active output contract. A failure that
+	// is really OUR deadline expiring is reported as cancelled, not as an error: the
+	// layers below translate a dead context into their own vocabulary (ownership turns
+	// context.DeadlineExceeded into ErrProjectBusy), and reporting "another assistant
+	// owns this project" for a self-inflicted timeout sends the reader hunting a
+	// process that does not exist.
+	timedOut := func() bool { return opts.Timeout > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) }
 	reportError := func(err error) {
+		if timedOut() {
+			msg := fmt.Sprintf("timed out after %s", opts.Timeout)
+			if sink != nil {
+				sink.AssistantCancelled("")
+				sink.Warn(msg)
+			} else {
+				stderrR.Warn(msg)
+			}
+			return
+		}
 		msg := err.Error()
 		if sink != nil {
 			sink.Error(msg)
@@ -165,17 +282,29 @@ func RunOneShot(ctx context.Context, opts Options) int {
 			stderrR.Error(msg)
 		}
 	}
+	// exitFor collapses the repeated "report, finish the sink, pick a code" tail every
+	// setup failure below shares.
+	exitFor := func() int {
+		if sink != nil {
+			return sink.Finish()
+		}
+		if timedOut() {
+			return domain.OneShotExitCode.Cancelled
+		}
+		return domain.OneShotExitCode.Error
+	}
 
-	overrides := buildOverrides(opts, stderrR)
+	overrides, err := buildOverrides(opts, stderrR)
+	if err != nil {
+		reportError(err)
+		return exitFor()
+	}
 	debuglog.BootTrace("oneshot.overrides.loaded")
 	// Never prompt here: stdout is the answer channel (or the JSONL stream) and stdin
 	// is routinely a pipe. Fail with the instruction instead.
 	if err := ensureSignedIn(ctx, overrides, false); err != nil {
 		reportError(err)
-		if sink != nil {
-			return sink.Finish()
-		}
-		return domain.OneShotExitCode.Error
+		return exitFor()
 	}
 	// One-shot takes the owner lease briefly (never spawning a daemon — a script
 	// probe must not litter the machine with supervisors). A held lease means a
@@ -184,27 +313,22 @@ func RunOneShot(ctx context.Context, opts Options) int {
 		func(m string) { fmt.Fprintln(os.Stderr, m) })
 	if err != nil {
 		reportError(err)
-		if sink != nil {
-			return sink.Finish()
-		}
-		return domain.OneShotExitCode.Error
+		return exitFor()
 	}
 	defer own.Release()
 	debuglog.BootTrace("oneshot.ownership.acquired")
 	a, err := app.Create(app.CreateOptions{Overrides: overrides})
 	if err != nil {
 		reportError(err)
-		if sink != nil {
-			return sink.Finish()
-		}
-		return domain.OneShotExitCode.Error
+		return exitFor()
 	}
 
 	// A debug-log path is diagnostic metadata, never answer content. Keep it on
 	// stderr for every one-shot mode so stdout remains empty on a failed human run.
-	if path := debuglog.StartDebugLog(debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir},
-		map[string]any{"sessionId": a.SessionID, "project": a.Config.ProjectPath}); path != "" {
-		stderrR.Line(stderrR.Gray("logging to " + path))
+	logPath := debuglog.StartDebugLog(debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir},
+		map[string]any{"sessionId": a.SessionID, "project": a.Config.ProjectPath})
+	if logPath != "" {
+		stderrR.Line(stderrR.Gray("logging to " + logPath))
 	}
 
 	// No model-key preflight: the CLI no longer holds model credentials (the backend
@@ -220,13 +344,29 @@ func RunOneShot(ctx context.Context, opts Options) int {
 	// exactly this; a scripted run has no footer, so it gets a loud line instead —
 	// on stderr, and as a structured event in JSON mode, so neither output contract
 	// breaks.
-	if a.Config.AutoApprove {
-		const warn = "AUTO-APPROVE is ON: mutating actions will run WITHOUT confirmation (tier '%s'). " +
-			"Unset DAINTREE_ASSISTANT_AUTO_APPROVE unless this is an automated harness."
+	//
+	// It is a WARNING, not an error, and the distinction is load-bearing: Sink.Error
+	// flips the terminal status and stamps errorMessage, which AssistantEnd clears but
+	// AssistantCancelled does NOT — so routing this through Error made a cancelled run
+	// report its failure as "AUTO-APPROVE is ON". An event-driven consumer watching for
+	// `error` lines would also abort a perfectly healthy run.
+	warnAutoApprove := func() {
+		if !a.Config.AutoApprove {
+			return
+		}
+		// Name the source that actually turned it on. Telling someone to unset an env var
+		// they never set — because they passed --auto-approve — is a dead end.
+		source := "DAINTREE_ASSISTANT_AUTO_APPROVE=1 is set"
+		if opts.AutoApprove != nil && *opts.AutoApprove {
+			source = "--auto-approve was passed"
+		}
+		warn := fmt.Sprintf(
+			"AUTO-APPROVE is ON (%s): mutating actions will run WITHOUT confirmation (tier '%s'). "+
+				"Turn it off unless this is an automated harness.", source, a.Tier())
 		if sink != nil {
-			sink.Error(fmt.Sprintf(warn, a.Tier()))
+			sink.Warn(warn)
 		} else {
-			stderrR.Warn(fmt.Sprintf(warn, a.Tier()))
+			stderrR.Warn(warn)
 		}
 	}
 
@@ -258,8 +398,34 @@ func RunOneShot(ctx context.Context, opts Options) int {
 
 	debuglog.BootTrace("oneshot.app.created")
 	runErr := func() error {
-		a.ConnectMcp(ctx)
+		st := a.ConnectMcp(ctx)
 		debuglog.BootTrace("oneshot.mcp.connect.done")
+		// The session header goes out AFTER the MCP connect and BEFORE the first round.
+		// After, because mcpConnected is the field that separates a real answer from one
+		// produced in degraded local mode, and a header that guessed would be worse than
+		// none. Before, because its whole job is to let a consumer reach the trace for a
+		// run that is about to fail.
+		if sink != nil {
+			sink.Session(jsonout.SessionInfo{
+				SessionID: a.SessionID,
+				Project:   a.Config.ProjectPath,
+				Tier:      string(a.Tier()),
+				// SanitizeURL, not the raw config value: DAINTREE_BACKEND_URL and
+				// --backend-url are never normalized, so an endpoint carrying userinfo
+				// or a query token would otherwise be published verbatim on stdout and
+				// straight into a CI log. It fails closed (an unparseable endpoint
+				// becomes ""), which is the right trade for a diagnostic field.
+				BackendURL:   mcp.SanitizeURL(a.Config.BackendURL),
+				LogPath:      logPath,
+				Version:      buildVersion,
+				AutoApprove:  a.Config.AutoApprove,
+				MCPConnected: st.Connected,
+				MCPTransport: st.Transport,
+			})
+		}
+		// After the header, so a JSONL consumer can rely on `session` being the FIRST
+		// line whenever one is emitted at all.
+		warnAutoApprove()
 		_, err := a.Session.Send(ctx, opts.Prompt, agent.SendOptions{})
 		debuglog.BootTrace("oneshot.send.done")
 		return err
@@ -306,7 +472,11 @@ func runInteractive(ctx context.Context, opts Options, ttyOK bool) int {
 	wantsCockpit := !opts.Classic && ttyOK
 
 	r := render.Stdout()
-	overrides := buildOverrides(opts, r)
+	overrides, err := buildOverrides(opts, r)
+	if err != nil {
+		r.Error(err.Error())
+		return domain.OneShotExitCode.Error
+	}
 	debuglog.BootTrace("boot.overrides.loaded")
 	// Sign-in gate BEFORE the ownership lease: a login that ends in Ctrl-C should
 	// leave no lease behind, and it must not race the daemon handover.
@@ -429,7 +599,10 @@ func buildDoctorReport(ctx context.Context, opts Options) (*DoctorReport, error)
 	if opts.JSON {
 		r = render.New(os.Stderr)
 	}
-	overrides := buildOverrides(opts, r)
+	overrides, err := buildOverrides(opts, r)
+	if err != nil {
+		return nil, err
+	}
 
 	report := &DoctorReport{
 		Version:  buildVersion,

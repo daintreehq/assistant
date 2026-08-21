@@ -335,6 +335,13 @@ func (r *Runtime) supervise(sctx context.Context) superviseReason {
 	if r.creds.McpToken != "" {
 		overrides.McpToken = strPtr(r.creds.McpToken)
 	}
+	// The attaching cockpit's endpoint wins too. ipc.Credentials has carried BackendURL
+	// since the field was added, but nothing ever applied it — so a launch pointed at a
+	// local backend handed the daemon that URL and the daemon went on waking against the
+	// deployed one. Same rule as the MCP pair: freshest value from the last attach.
+	if r.creds.BackendURL != "" {
+		overrides.BackendURL = strPtr(r.creds.BackendURL)
+	}
 	r.mu.Unlock()
 
 	a, err := app.Create(app.CreateOptions{

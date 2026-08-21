@@ -191,6 +191,63 @@ func TestBinaryJSONOneShot(t *testing.T) {
 			}
 		}
 	}
+
+	// --- the session header is FIRST and names this run ---
+	// Without it a --json consumer can parse a failing run perfectly and still have no
+	// way to reach the trace that explains it: the session id and log path used to exist
+	// only as human prose on stderr.
+	if lines[0].Type != "session" {
+		t.Fatalf("first line = %q, want session: %v", lines[0].Type, types)
+	}
+	sess := lines[0].raw
+	if id, _ := sess["sessionId"].(string); !strings.HasPrefix(id, "ses_") {
+		t.Errorf("session.sessionId = %v, want a ses_ id", sess["sessionId"])
+	}
+	if got, _ := sess["backendUrl"].(string); got != fake.baseURL() {
+		t.Errorf("session.backendUrl = %v, want %q", sess["backendUrl"], fake.baseURL())
+	}
+	// This run has no MCP, which is exactly the degraded local mode a harness must be
+	// able to detect: it is invisible in the content and is the commonest cause of a
+	// confusing answer.
+	// Check `ok`: a bare `v, _ := ….(bool)` yields false for a MISSING field too, so a
+	// dropped key would pass this assertion silently.
+	if connected, ok := sess["mcpConnected"].(bool); !ok || connected {
+		t.Errorf("session.mcpConnected = %v (present=%v), want false and present", sess["mcpConnected"], ok)
+	}
+	for _, key := range []string{"project", "tier", "logPath", "version", "autoApprove"} {
+		if _, ok := sess[key]; !ok {
+			t.Errorf("session line is missing %q: %v", key, sess)
+		}
+	}
+
+	// --- the terminal envelope reports what the run cost ---
+	stats, ok := last.raw["stats"].(map[string]any)
+	if !ok {
+		t.Fatalf("result has no stats block: %v", last.raw)
+	}
+	// Every assertion checks `ok`: a bare `v, _ := ….(float64)` reads a MISSING key as 0,
+	// so a dropped field would silently satisfy any zero-valued expectation.
+	//
+	// Two SSE rounds were scripted, with one tool call between them. The fake reports
+	// 50+70 prompt and 6+4 completion tokens across those rounds; contextTokens is the
+	// LAST round's prompt size, not the sum.
+	for key, want := range map[string]int{
+		"rounds": 2, "toolCalls": 1, "toolErrors": 0,
+		"promptTokens": 120, "completionTokens": 10, "totalTokens": 130,
+		"contextTokens": 70,
+	} {
+		got, ok := stats[key].(float64)
+		if !ok {
+			t.Errorf("stats.%s is missing or not a number: %v", key, stats[key])
+			continue
+		}
+		if int(got) != want {
+			t.Errorf("stats.%s = %v, want %d", key, got, want)
+		}
+	}
+	if d, ok := stats["durationMs"].(float64); !ok || d <= 0 {
+		t.Errorf("stats.durationMs = %v (present=%v), want > 0", stats["durationMs"], ok)
+	}
 }
 
 func typesOf(lines []jsonLine) []string {
