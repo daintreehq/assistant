@@ -107,4 +107,31 @@ func TestRejectModelJudge(t *testing.T) {
 	if _, ok := rejectModelJudge(&domain.WatchCondition{StateIs: ptrState("waiting")}); ok {
 		t.Error("clean wait should not be rejected")
 	}
+
+	// NESTED rejection, at every depth a caller can reach. The advertised schema
+	// bounds the combinators' members by cardinality only — it does not enumerate
+	// their keys — so {"all":[{"modelJudge":"…"}]} is machine-LEGAL against the
+	// wait union and only collectModelJudges stops it. That gap is why the leaf
+	// descriptions say "no modelJudge ANYWHERE" rather than just "no modelJudge",
+	// and this is the runtime behaviour that makes the promise true.
+	judge := domain.WatchCondition{ModelJudge: ptrStr("done?")}
+	clean := domain.WatchCondition{StateIs: ptrState("idle")}
+	for name, wait := range map[string]*domain.WatchCondition{
+		"under all":         {All: []domain.WatchCondition{clean, judge}},
+		"under any":         {Any: []domain.WatchCondition{judge}},
+		"under not":         {Not: &judge},
+		"double-nested not": {Not: &domain.WatchCondition{Not: &judge}},
+		"all inside any":    {Any: []domain.WatchCondition{{All: []domain.WatchCondition{judge}}}},
+	} {
+		res, ok := rejectModelJudge(wait)
+		if !ok || res.Ok || res.Error.Code != "UNSUPPORTED_CONDITION" {
+			t.Errorf("modelJudge %s should be rejected: ok=%v res=%+v", name, ok, res)
+		}
+	}
+	// A composite with no modelJudge anywhere must still pass.
+	if _, ok := rejectModelJudge(&domain.WatchCondition{
+		All: []domain.WatchCondition{clean, {Not: &domain.WatchCondition{StateIs: ptrState("working")}}},
+	}); ok {
+		t.Error("clean composite wait should not be rejected")
+	}
 }
