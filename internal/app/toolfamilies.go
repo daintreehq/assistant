@@ -100,14 +100,18 @@ func (m mcpxMCPAdapter) ListTools(ctx context.Context, force bool) ([]mcpx.MCPTo
 // consumer struct. Split out as a pure function ONLY so the field mapping is unit
 // testable: this seam silently dropped InputSchema for the whole life of the
 // mcpx family, which is why no tool could report an MCP tool's argument shape
-// (#311). The schema map is passed by reference, not deep-copied — the client
-// hands out its cached map and mcpx only ever reads it; a defensive copy here
-// would allocate on every listTools/tool.search round for no benefit.
+// (#311) — and every mcpx test injects MCPToolInfo downstream of here, so a
+// regression at this line would leave the whole suite green while tool.schema
+// returned nothing usable and every dynamic invocation was refused. The schema
+// map is passed by reference, not deep-copied — the client hands out its cached
+// map and mcpx only ever reads it; a defensive copy here would allocate on every
+// listTools/tool.search round for no benefit.
 func toMcpxToolInfos(infos []mcp.ToolInfo) []mcpx.MCPToolInfo {
 	out := make([]mcpx.MCPToolInfo, 0, len(infos))
 	for _, i := range infos {
 		out = append(out, mcpx.MCPToolInfo{
-			Name: i.Name, Description: i.Description, InputSchema: i.InputSchema,
+			Name: i.Name, Description: i.Description,
+			InputSchema: i.InputSchema, InputSchemaProvided: i.InputSchemaProvided,
 		})
 	}
 	return out

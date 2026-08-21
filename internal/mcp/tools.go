@@ -10,6 +10,14 @@ type ToolInfo struct {
 	Name        string
 	Description string         // optional; "" when absent
 	InputSchema map[string]any // defaulted to {"type":"object","properties":{}} when live tool has none
+	// InputSchemaProvided reports whether the SERVER advertised the schema above,
+	// as opposed to it being the substituted default. The substitution is a display
+	// convenience — a permissive empty object that a JSON Schema validator accepts
+	// every object against — so a consumer that VALIDATES rather than displays must
+	// be able to tell the two apart. Without this bit "we have a schema" is true for
+	// a tool that published none, and validating against it is a no-op wearing the
+	// costume of a check.
+	InputSchemaProvided bool
 }
 
 // defaultInputSchema returns a fresh copy of the substitute schema used when a

@@ -84,9 +84,10 @@ const minCandidateOverlap = 4
 // used to flag a raw schema whose same-named typed wrapper actually governs the
 // call. Derived from the family's own registration rather than a hand-kept list
 // so a newly added wrapper is covered automatically — the daintree.call denylist
-// looks like the natural index but is NOT one (copyTree.generate has a wrapper
-// yet no denylist entry, so using it would have silently skipped the annotation
-// for the very tool that motivated this feature).
+// looks like the natural index but is NOT one: it encodes raw-call redirect
+// policy, which is a different question from "does a local wrapper govern this
+// name", and the two sets have historically diverged (copyTree.generate had a
+// wrapper but no denylist entry until its options became strict-decoded).
 //
 // Computed at runtime (not package init) to avoid a static initialization cycle:
 // the closure would call Tools(), which constructs this tool, which closes over
@@ -100,6 +101,9 @@ var (
 
 // localWrapperIndex is every local tool name that could shadow a raw MCP action: this
 // family's own wrappers plus the ones other families registered (Deps.WrapperNames).
+// mcpwrap cannot be imported from here, so its wrappers only reach this index through
+// the injected list — reading getLocalWrapperNames() alone would silently under-report
+// every cross-family wrapper.
 func localWrapperIndex(deps Deps) map[string]bool {
 	idx := make(map[string]bool, len(getLocalWrapperNames())+len(deps.WrapperNames))
 	for n := range getLocalWrapperNames() {
@@ -167,11 +171,11 @@ const schemaPointer = "To see a tool's ARGUMENT SHAPE (its input schema), call `
 func newSchemaTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "tool.schema",
-		Description: "Look up ONE Daintree MCP tool's input schema — its exact argument shape — without invoking it. Call with " +
-			"the literal argument object {\"name\":\"recipe.run\"}, using an exact name from tool.search or " +
-			"daintree.listTools (names are never auto-corrected; a miss returns close candidates). Reach for it whenever you " +
-			"would otherwise guess an argument key — above all for a wrapper's opaque `arguments` record, whose keys are " +
-			"Daintree's and are documented nowhere else.",
+		Description: "Look up ONE Daintree MCP action's exact input schema — its argument shape — plus its policy (`risk`, " +
+			"`requiredTier`, `confirms`, `invocable`), without invoking it. Call with the literal object " +
+			"{\"name\":\"recipe.run\"}. This schema is what `daintree.invoke` validates arguments against. Reach for it " +
+			"whenever you would otherwise guess an argument key — above all for a wrapper's opaque `arguments` record, " +
+			"whose keys are documented nowhere else.",
 		Risk:   domain.RiskRead,
 		Schema: schemaSchema,
 		Decode: tools.StrictDecoder(func() any { return &schemaArgs{} }),
@@ -207,7 +211,7 @@ func newSchemaTool(deps Deps) tools.Tool {
 			if !found {
 				return schemaNotFound(list, requested)
 			}
-			return schemaResult(requested, match.InputSchema, localWrapperIndex(deps))
+			return schemaResult(deps, requested, match.InputSchema, match.InputSchemaProvided)
 		},
 	}
 }
@@ -264,21 +268,35 @@ type serializedEnvelope struct {
 
 // schemaResult builds the success envelope, then enforces the inline size cap on
 // the WHOLE serialized envelope rather than the schema alone.
-func schemaResult(mcpName string, inputSchema map[string]any, wrappers map[string]bool) tools.ToolResult {
+func schemaResult(deps Deps, mcpName string, inputSchema map[string]any, schemaProvided bool) tools.ToolResult {
 	result := map[string]any{
 		"name":        mcpName,
 		"inputSchema": inputSchema,
+	}
+	// The policy block is what turns a schema lookup into step 2 of
+	// search → schema → invoke: the model can see, before spending a round, whether
+	// daintree.invoke will accept this action and what approving it would cost.
+	// Reporting "invocable: false" WITH the reason is the point — a bare schema plus
+	// a later refusal is two rounds and no explanation.
+	result["policy"] = policyBlock(deps, mcpName, schemaProvided)
+	if !schemaProvided {
+		// The schema below is the client's substituted placeholder, not the server's
+		// contract. Saying so is the difference between "this action takes no
+		// arguments" and "nobody knows what this action takes" — and the model would
+		// read the placeholder as the former.
+		result["inputSchemaProvided"] = false
 	}
 	// When a typed wrapper of the same name exists, the schema below is NOT the
 	// shape to call it with: wrappers variously make optional args required
 	// (terminal.rename), add batch forms (terminal.close), or nest raw fields
 	// under `arguments` (recipe.run). Without this the model reads a raw schema
 	// and builds a call the wrapper's strict decoder rejects — a new version of
-	// the very bug this tool fixes. The wrapper set comes from the family's own
-	// registration (getLocalWrapperNames), not the daintree.call denylist — see
-	// the note above localWrapperNamesMap for why the denylist is not a valid
-	// index of the wrappers that exist.
-	if wrappers[mcpName] {
+	// the very bug this tool fixes. The wrapper set comes from live registration
+	// (localWrapperIndex: this family's own tools plus the names other families
+	// injected), not the daintree.call denylist — see the note above
+	// localWrapperNamesMap for why the denylist is not a valid index of the
+	// wrappers that exist.
+	if localWrapperIndex(deps)[mcpName] {
 		result["localWrapper"] = mcpName
 		result["note"] = fmt.Sprintf(
 			"A local typed tool named %s governs the actual call — invoke THAT with its own declared parameters, which differ from the raw schema below (a wrapper may make optional arguments required, add a batch form, or nest raw fields under `arguments`). Use the raw schema only to fill in values the wrapper forwards opaquely, such as the contents of an `arguments` record.",

@@ -84,10 +84,9 @@ func newStatusTool(deps Deps) tools.Tool {
 func newListToolsTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "daintree.listTools",
-		Description: "List the Daintree MCP tools, with their names and descriptions. Each entry carries a `callable` flag: tools " +
-			"marked `callable: false` are known to exist but are not offered in this turn's tool spec (e.g. an active skill " +
-			"narrowed the toolset), so calling them would do nothing. Entries do NOT include argument shapes — to get one tool's " +
-			"input schema, call `tool.schema` with {\"name\":\"<exact name>\"}.",
+		Description: "List every Daintree MCP action with its description and policy (`risk`, `requiredTier`, `confirms`, " +
+			"`preferredTool`, `invocable`). Prefer `tool.search` — this dumps the whole catalog — and `tool.schema` for one " +
+			"action's arguments. `callable: false` means the action exists but is not in this turn's tool spec.",
 		Risk:   domain.RiskRead,
 		Schema: noArgs,
 		Decode: tools.StrictDecoder(func() any { return &struct{}{} }),
@@ -105,9 +104,7 @@ func newListToolsTool(deps Deps) tools.Tool {
 			callableOf := makeCallable(tctx.ActiveToolNames)
 			out := make([]map[string]any, 0, len(list))
 			for _, t := range list {
-				out = append(out, map[string]any{
-					"name": t.Name, "description": t.Description, "callable": callableOf(t.Name),
-				})
+				out = append(out, discoveryRow(deps, t, callableOf))
 			}
 			return tools.Ok(fmt.Sprintf("Found %d Daintree MCP tool(s).", len(out)),
 				map[string]any{"tools": out, "note": discoveryNote})
@@ -135,11 +132,11 @@ var searchSchema = json.RawMessage(`{
 func newSearchTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "tool.search",
-		Description: "Search Daintree MCP tools by keyword. The query is split on spaces and a tool matches when EVERY word " +
-			"appears in its name or description (order and filler words don't matter), so prefer a couple of plain keywords " +
-			"(e.g. `rename terminal`) over a long phrase — name matches rank first. A match flagged `callable: false` exists " +
-			"but is not in this turn's tool spec, so calling it would do nothing. Matches carry no argument shapes: once you " +
-			"have the name, call `tool.schema` with {\"name\":\"<exact name>\"} for its input schema before invoking it.",
+		Description: "Search Daintree MCP actions by keyword. The query splits on spaces and an action matches when EVERY word " +
+			"appears in its name or description, so prefer a couple of plain keywords (e.g. `rename terminal`) over a phrase — " +
+			"name matches rank first. Each match carries its policy: `risk`, `requiredTier`, `confirms`, `preferredTool`, " +
+			"and `invocable` — whether `daintree.invoke` can run it (with `unavailableReason` when not). Read its arguments " +
+			"with `tool.schema` before invoking. `callable:false` means the tool exists but is not in this turn's tool spec.",
 		Risk:   domain.RiskRead,
 		Schema: searchSchema,
 		Decode: tools.StrictDecoder(func() any { return &searchArgs{} }),
@@ -211,7 +208,7 @@ func newSearchTool(deps Deps) tools.Tool {
 					continue
 				}
 				ranked = append(ranked, scored{
-					row:     map[string]any{"name": t.Name, "description": t.Description, "callable": callableOf(t.Name)},
+					row:     discoveryRow(deps, t, callableOf),
 					nameHit: nameHit,
 				})
 			}
@@ -228,9 +225,32 @@ func newSearchTool(deps Deps) tools.Tool {
 				matches = append(matches, r.row)
 			}
 			return tools.Ok(fmt.Sprintf("Found %d Daintree MCP tool(s) matching %q.", len(matches), a.Query),
-				map[string]any{"query": a.Query, "matches": matches, "note": discoveryNote})
+				map[string]any{"query": a.Query, "matches": matches, "note": discoveryNote + " " + invokeNote})
 		},
 	}
+}
+
+// invokeNote steers the model from a search result straight to the two-step it
+// otherwise has to infer. Without it the observed behaviour is to reach for
+// daintree.call the moment no wrapper name is recognised — which is exactly the
+// blanket system-tier confirmation this family now exists to avoid.
+const invokeNote = "For an action with `invocable: true`, read its argument shape with `tool.schema` and then run it with `daintree.invoke` — it is gated at the action's own `risk`, so a read needs no approval. `daintree.call` is only for an action reported `policySource: \"unknown\"`."
+
+// discoveryRow renders one catalog entry for tool.search / daintree.listTools:
+// the name, description and per-turn `callable` flag as before, plus the policy
+// block that makes the result a complete invocation contract rather than a name.
+//
+// It merges rather than nests the policy fields so a row stays flat and cheap —
+// these results are read by the model on nearly every orchestration turn, and an
+// extra level of nesting per row costs tokens on all of them for no added meaning.
+func discoveryRow(deps Deps, t MCPToolInfo, callableOf func(string) bool) map[string]any {
+	row := map[string]any{
+		"name": t.Name, "description": t.Description, "callable": callableOf(t.Name),
+	}
+	for k, v := range policyBlock(deps, t.Name, t.InputSchemaProvided) {
+		row[k] = v
+	}
+	return row
 }
 
 /* ------------------------------ daintree.call ----------------------------- */
@@ -245,16 +265,20 @@ func newSearchTool(deps Deps) tools.Tool {
 // after whitespace normalization (see normalizeMCPName) so a "Recipe.Run" or a
 // padded " recipe.run " variant cannot bypass the redirect.
 var wrappedMCPTools = map[string]string{
-	"agent.launch":                 `agentTask.spawnForEdits (set mode:"explore" for a read-only investigation, mode:"edit" to change files)`,
-	"terminal.getOutput":           "terminal.summarize (model gist of the tail — DEFAULT for relaying what an agent said), terminal.read (raw scrollback VERBATIM — only when the exact literal text is needed), terminal.extract (pull a specific value as plain text, optionally waiting for a condition), or terminal.extract.json (structured fields — requires instruction + jsonSchema)",
-	"panel.focus":                  "terminal.focus",
-	"terminal.rename":              "terminal.rename (typed wrapper — pass terminalId and a non-empty name; UI-only, no confirmation)",
-	"terminal.sendCommand":         "terminal.sendCommand (typed wrapper — pass terminalId and command)",
-	"terminal.close":               `terminal.close (typed wrapper — pass terminalId, or terminalIds:["...","..."] to close several in one call; ONLY at the user's explicit request, never your own cleanup/recovery)`,
-	"terminal.moveToWorktree":      `terminal.moveToWorktree (typed wrapper — pass terminalId, or terminalIds:["...","..."] to relocate a cohort in one call, plus worktreeId as the exact PATH from worktree.list; it does NOT restart the process, so still send each live agent "Please continue in the directory <worktreePath>")`,
-	"terminal.arm":                 "terminal.arm (typed wrapper — pass terminalId)",
-	"terminal.disarm":              "terminal.disarm (typed wrapper — pass terminalId)",
-	"terminal.disarmAll":           "terminal.disarmAll (typed wrapper — no args needed)",
+	"agent.launch":            `agentTask.spawnForEdits (set mode:"explore" for a read-only investigation, mode:"edit" to change files)`,
+	"terminal.getOutput":      "terminal.summarize (model gist of the tail — DEFAULT for relaying what an agent said), terminal.read (raw scrollback VERBATIM — only when the exact literal text is needed), terminal.extract (pull a specific value as plain text, optionally waiting for a condition), or terminal.extract.json (structured fields — requires instruction + jsonSchema)",
+	"panel.focus":             "terminal.focus",
+	"terminal.rename":         "terminal.rename (typed wrapper — pass terminalId and a non-empty name; UI-only, no confirmation)",
+	"terminal.sendCommand":    "terminal.sendCommand (typed wrapper — pass terminalId and command)",
+	"terminal.close":          `terminal.close (typed wrapper — pass terminalId, or terminalIds:["...","..."] to close several in one call; ONLY at the user's explicit request, never your own cleanup/recovery)`,
+	"terminal.moveToWorktree": `terminal.moveToWorktree (typed wrapper — pass terminalId, or terminalIds:["...","..."] to relocate a cohort in one call, plus worktreeId as the exact PATH from worktree.list; it does NOT restart the process, so still send each live agent "Please continue in the directory <worktreePath>")`,
+	"terminal.arm":            "terminal.arm (typed wrapper — pass terminalId)",
+	"terminal.disarm":         "terminal.disarm (typed wrapper — pass terminalId)",
+	"terminal.disarmAll":      "terminal.disarmAll (typed wrapper — no args needed)",
+	// copyTree.generate has had a typed wrapper since its `options` bag was
+	// strict-decoded locally, but it was never denylisted, so the raw forward stayed
+	// open beside it — the same drift the two worktree reads had.
+	"copyTree.generate":            "copyTree.generate (typed wrapper — pass a typed options object; the raw form's opaque `options` bag is exactly what the wrapper exists to validate)",
 	"copyTree.injectToTerminal":    "copyTree.injectToTerminal (typed wrapper — pass terminalId, an optional worktreeId, and an optional top-level name labelling the run)",
 	"copyTree.generateAndCopyFile": "copyTree.generateAndCopyFile (typed wrapper — pass an optional worktreeId and an optional top-level name labelling the run)",
 	"git.getProjectPulse":          "git.getProjectPulse (typed read wrapper — pass an optional arguments object, e.g. {arguments:{worktreeId:\"...\"}}; read tier, no confirmation)",
@@ -267,6 +291,16 @@ var wrappedMCPTools = map[string]string{
 	"workflow.startWorkOnIssue":    "workflow.startWorkOnIssue (typed wrapper — pass arguments; it also attaches a supervisor watcher)",
 	"workflow.prepBranchForReview": "workflow.prepBranchForReview (typed wrapper — pass arguments)",
 	"forge.getPR":                  "forge.getPR (typed wrapper — pass arguments)",
+	// The other three forge READS are wrapped in internal/tools/mcpwrap too, and were
+	// never denylisted — the raw forward stayed open beside each typed wrapper.
+	"forge.listIssues": "forge.listIssues (typed read wrapper — pass an optional arguments object; read tier, parallelizable)",
+	"forge.listPRs":    "forge.listPRs (typed read wrapper — pass an optional arguments object; read tier, parallelizable)",
+	"forge.getIssue":   "forge.getIssue (typed read wrapper — pass arguments with the issue number under the key the forge expects)",
+	// Both worktree reads have had typed mcpwrap wrappers since they were added, but
+	// neither was ever denylisted here, so the raw forward stayed open beside them.
+	// The two indexes answer different questions and drift apart exactly like this.
+	"worktree.list":       "worktree.list (typed read wrapper — pass an optional arguments object; read tier, no confirmation)",
+	"worktree.getCurrent": "worktree.getCurrent (typed read wrapper — pass an optional arguments object; read tier, no confirmation)",
 	// The most-asked question in a CI fix-and-verify loop. Until forge.getChecks existed
 	// this was the one common read with no wrapper, so the base prompt's "prefer the
 	// typed wrapper" rule pointed the model at this confirmation-gated escape hatch on
@@ -360,9 +394,10 @@ var callSchema = json.RawMessage(`{
 func newCallTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "daintree.call",
-		Description: "Raw passthrough to ANY Daintree MCP tool. Escape hatch — highest risk ('system'), always confirmed, requires " +
-			"the 'system' tier. Prefer purpose-built tools; use this only when no wrapper exists. Tools that already have a wrapper " +
-			"(e.g. agent.launch, terminal.getOutput, panel.focus) are refused here and redirected to the wrapper.",
+		Description: "Raw passthrough to ANY Daintree MCP tool. Escape hatch — highest risk ('system'), always confirmed, " +
+			"'system' tier, never grantable. Prefer a purpose-built tool, then `daintree.invoke` (which gates an action at ITS " +
+			"OWN risk instead of this blanket system-tier prompt). Use this only for an action `daintree.invoke` refuses as " +
+			"policy-unknown. Wrapped tools (agent.launch, terminal.getOutput, panel.focus) are redirected to their wrapper.",
 		Consequence: "Runs an arbitrary Daintree MCP tool with the arguments shown. Effect depends entirely on the named tool — inspect the args before approving.",
 		Risk:        domain.RiskSystem,
 		Schema:      callSchema,

@@ -3275,10 +3275,15 @@ func (s *Session) observeRosterMutation(internalName, rawArgs string, res domain
 		// hide a terminal that really exists. A spare roster read on the rare failed
 		// spawn is cheap; a stale false negative is not.
 		s.invalidateRosterAndRefresh()
-	case "daintree.call":
-		// The raw escape hatch can reach unwrapped terminal mutations (terminal.new,
-		// terminal.kill — the wrapped ones are denylisted and redirected). Only the
-		// inner tool name tells; failures never ran, so only successes invalidate.
+	case "daintree.call", "daintree.invoke":
+		// Both invokers can reach unwrapped terminal mutations (terminal.new,
+		// terminal.inject; terminal.kill through the raw hatch only — the wrapped ones
+		// are denylisted and redirected). Only the inner action name tells; failures
+		// never ran, so only successes invalidate. daintree.invoke spells that name
+		// `action` rather than `name`, which is why rawCallInnerName reads both: a
+		// target-aware invoke that opened a terminal must invalidate the roster for
+		// exactly the reason the raw call does, and keying only on `name` would have
+		// left every dynamic terminal mutation silently stale.
 		// Best-effort by design: no result ids are extracted, so no tombstones — a
 		// laggy post-kill fetch can transiently resurrect the terminal until the next
 		// refresh. Acceptable for a rarely-used escape hatch; the wrapped close path
@@ -3298,17 +3303,24 @@ func (s *Session) invalidateRosterAndRefresh() {
 	s.refreshRosterAsync()
 }
 
-// rawCallInnerName extracts the inner MCP tool name from daintree.call arguments
-// (`{"name": "terminal.kill", ...}`). Empty on any parse failure — the caller then
-// treats the call as non-roster.
+// rawCallInnerName extracts the inner MCP action name from either invoker's
+// arguments: daintree.call spells it `name` (`{"name":"terminal.kill",...}`) and
+// daintree.invoke spells it `action` (`{"action":"terminal.new",...}`). Exactly one
+// is ever present, so reading both keeps this a single predicate rather than a
+// per-invoker branch the next invoker would forget to extend. Empty on any parse
+// failure — the caller then treats the call as non-roster.
 func rawCallInnerName(rawArgs string) string {
 	var a struct {
-		Name string `json:"name"`
+		Name   string `json:"name"`
+		Action string `json:"action"`
 	}
 	if json.Unmarshal([]byte(rawArgs), &a) != nil {
 		return ""
 	}
-	return strings.TrimSpace(a.Name)
+	if a.Name != "" {
+		return strings.TrimSpace(a.Name)
+	}
+	return strings.TrimSpace(a.Action)
 }
 
 // pruneRosterTerminals drops the given terminal ids from the cached roster, bumps

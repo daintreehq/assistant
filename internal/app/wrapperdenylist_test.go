@@ -33,19 +33,12 @@ var rawPathExceptions = map[string]string{
 	// it has a different name and IS denied, so there is no open bypass here.
 	"forge.getChecks": "wraps the differently-named forge.getCIStatus, which is denied",
 
-	// PRE-EXISTING GAP, knowingly left open by issue #367 and recorded here rather than
-	// fixed in passing. Each of these has a typed wrapper whose name equals its raw
-	// action, so daintree.call can still forward around the wrapper's strict decoding.
-	// Closing them is a behaviour change for tools this issue does not otherwise touch —
-	// a caller currently reaching them raw would start being refused — so it wants its
-	// own change with its own reasoning, not a side effect of this one. Listing them
-	// here is the point: the gap is now written down and counted, instead of being
-	// something a reader has to rediscover by grepping two packages.
-	"forge.listIssues":    "pre-existing gap (issue #367 follow-up): wrapped but still reachable raw",
-	"forge.getIssue":      "pre-existing gap (issue #367 follow-up): wrapped but still reachable raw",
-	"forge.listPRs":       "pre-existing gap (issue #367 follow-up): wrapped but still reachable raw",
-	"worktree.list":       "pre-existing gap (issue #367 follow-up): wrapped but still reachable raw",
-	"worktree.getCurrent": "pre-existing gap (issue #367 follow-up): wrapped but still reachable raw",
+	// The five pre-existing gaps issue #367 recorded here — forge.listIssues,
+	// forge.getIssue, forge.listPRs, worktree.list and worktree.getCurrent — were
+	// closed by issue #368, which had to reconcile the same two indexes to decide
+	// which raw actions daintree.invoke may classify. Writing the gaps down is what
+	// made them cheap to close: they were already named, counted and reasoned about,
+	// so the follow-up was a denylist entry each rather than a fresh investigation.
 }
 
 func TestEveryMcpwrapWrapperIsDeniedOnTheRawPath(t *testing.T) {

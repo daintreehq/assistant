@@ -41,15 +41,23 @@ func (r *Registry) SetDispatchObserver(obs DispatchObserver) { r.observer = obs 
 
 // notifyObserver invokes the observer, wrapped so a panicking or slow-failing
 // observer can never break the tool call it rides on (mirrors the audit sinks).
-func (r *Registry) notifyObserver(ctx context.Context, name string, args json.RawMessage,
-	tctx *ToolContext, outcome string, res ToolResult, durationMs int64) {
+// effRisk is the risk the call was actually gated at; "" falls back to the
+// registry. The fallback alone is not enough for a dynamically-invoked action:
+// its identity ("daintree.invoke:terminal.new") has no registry row, so the
+// lookup returns "" and the observation reads as non-material — which is how a
+// successful terminal/project/external mutation would vanish from workflow
+// evidence while still being audited correctly in SQLite.
+func (r *Registry) notifyObserver(ctx context.Context, name string, effRisk domain.RiskClass,
+	args json.RawMessage, tctx *ToolContext, outcome string, res ToolResult, durationMs int64) {
 	if r.observer == nil {
 		return
 	}
 	defer func() { _ = recover() }()
-	risk := domain.RiskClass("")
-	if t := r.tools[name]; t != nil {
-		risk = t.Risk
+	risk := effRisk
+	if risk == "" {
+		if t := r.tools[name]; t != nil {
+			risk = t.Risk
+		}
 	}
 	obs := DispatchObservation{
 		ToolName:   name,

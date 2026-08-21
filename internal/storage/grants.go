@@ -325,6 +325,20 @@ func grantAuthorizes(g domain.AutomationGrantRecord, toolName string, riskClass 
 			return true
 		}
 	}
+	// A DYNAMIC target ("daintree.invoke:worktree.delete") is authorized by an
+	// explicit name match ONLY — the risk-class half of the union rule stops here.
+	//
+	// The union rule is right for registered tools: `allowedRiskClasses:["terminal"]`
+	// names a bounded, reviewable set, because the registry decides what a terminal-risk
+	// tool is and a human can enumerate it. A dynamic target inverts that. The set
+	// behind `terminal` would become "every terminal-risk action the connected Daintree
+	// happens to expose, now and after any host upgrade" — chosen by the model at call
+	// time, never seen by whoever approved the grant. That is the same widening the
+	// ungrantable re-check above already had to close once for daintree.call, arriving
+	// through the other half of the same rule.
+	if domain.IsDynamicTargetName(toolName) {
+		return false
+	}
 	classes := parseStringList(g.AllowedRiskClassesJson)
 	for _, c := range classes {
 		if c == string(riskClass) {

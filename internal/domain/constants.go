@@ -1,5 +1,7 @@
 package domain
 
+import "strings"
+
 // Schema constants.
 const (
 	// VerificationEvidencePrefix marks an evidence string that carries a
@@ -135,16 +137,54 @@ const (
 // denial-event recommender consult this so neither ever offers an impossible
 // grant.
 var ungrantableTools = map[string]bool{
-	"grant.create":  true,
-	"grant.revoke":  true,
-	"daintree.call": true,
+	"grant.create":    true,
+	"grant.revoke":    true,
+	"daintree.call":   true,
+	"daintree.invoke": true,
 }
 
 // IsUngrantableTool reports whether a tool can never be covered by an automation
 // grant (see ungrantableTools for the rationale). The single source of truth so
 // grant.create's validation and the blocked-event grant recommendation stay in
 // lockstep.
+//
+// daintree.invoke is listed under its BARE name only. A grant naming the generic
+// invoker authorizes nothing, which is the issue's hard requirement — but a grant
+// naming one resolved target ("daintree.invoke:terminal.new", see
+// DynamicTargetName) is a different, bounded identity and IS grantable. Splitting
+// the two on the name is what lets a watcher be authorized for exactly one MCP
+// action without handing it the whole escape hatch.
 func IsUngrantableTool(name string) bool { return ungrantableTools[name] }
+
+// DynamicInvokePrefix marks a tool identity that a target-aware invoker resolved
+// from its ARGUMENTS rather than from its registration. The composite name
+// "daintree.invoke:terminal.new" is the identity dispatch confirms, matches grants
+// against, and writes to the audit row — so one string carries BOTH facts the
+// audit trail has to preserve: which MCP action ran, and that it ran through
+// dynamic invocation rather than a dedicated wrapper. No schema column was added
+// for this; audit_log.toolName already holds a tool identity and this IS one.
+const DynamicInvokePrefix = "daintree.invoke:"
+
+// DynamicTargetName builds the composite identity for one dynamically-invoked MCP
+// action. Callers pass the RAW action name exactly as it will be forwarded, so the
+// grant a human approves and the call that is made can never name different
+// actions.
+func DynamicTargetName(action string) string { return DynamicInvokePrefix + action }
+
+// IsDynamicTargetName reports whether a tool identity was resolved per-call by a
+// target-aware invoker. Load-bearing in storage.grantAuthorizes: such an identity
+// may only ever be authorized by an EXPLICIT name match, never by the risk-class
+// half of the grant union rule.
+func IsDynamicTargetName(name string) bool { return strings.HasPrefix(name, DynamicInvokePrefix) }
+
+// DynamicTargetAction returns the raw MCP action inside a composite dynamic
+// identity ("" when name is not one).
+func DynamicTargetAction(name string) string {
+	if !IsDynamicTargetName(name) {
+		return ""
+	}
+	return name[len(DynamicInvokePrefix):]
+}
 
 // Watcher lifetime defaults.
 const (

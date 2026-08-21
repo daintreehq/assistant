@@ -41,6 +41,13 @@ const (
 func (r *Registry) Dispatch(ctx context.Context, name string, rawArgs json.RawMessage, tctx *ToolContext) (result ToolResult) {
 	started := domain.NowMS()
 
+	// The effective identity is hoisted above the firewall so a panic that happens
+	// AFTER target resolution is still audited against the action that was actually
+	// being gated. Declared here, filled at step 2b; until then it is the static
+	// registration, which is the correct answer for every non-dynamic tool and for
+	// any panic before resolution.
+	effName, effRisk := name, domain.RiskClass("")
+
 	// Top-level panic firewall. The handler is recover-wrapped in runHandler, but a
 	// panic in Decode / Confirm / ReportProgress / a nil-ctx deref would otherwise
 	// crash the agent loop AND skip the audit row. Convert ANY panic into a
@@ -50,7 +57,7 @@ func (r *Registry) Dispatch(ctx context.Context, name string, rawArgs json.RawMe
 	defer func() {
 		if rec := recover(); rec != nil {
 			res := Fail(codeToolThrew, fmt.Sprintf("%v", rec))
-			result = r.audit(ctx, name, rawArgs, tctx, started, outcomeError, res, nil)
+			result = r.audit(ctx, effName, effRisk, rawArgs, tctx, started, outcomeError, res, nil)
 		}
 	}()
 
@@ -64,7 +71,7 @@ func (r *Registry) Dispatch(ctx context.Context, name string, rawArgs json.RawMe
 			msg += " Did you mean " + near + "?"
 		}
 		res := Fail(codeUnknownTool, msg, Unrecoverable())
-		return r.audit(ctx, name, rawArgs, tctx, started, outcomeError, res, nil)
+		return r.audit(ctx, name, "", rawArgs, tctx, started, outcomeError, res, nil)
 	}
 
 	// 1b. Explicit-allowlist enforcement (defense in depth). Loaded skills NEVER narrow
@@ -76,7 +83,7 @@ func (r *Registry) Dispatch(ctx context.Context, name string, rawArgs json.RawMe
 		res := Fail(codeNotOffered, fmt.Sprintf(
 			"%s is not in this turn's explicit tool allowlist; it cannot be invoked now.", name),
 			Unrecoverable())
-		return r.audit(ctx, name, rawArgs, tctx, started, outcomeDenied, res, nil)
+		return r.audit(ctx, name, "", rawArgs, tctx, started, outcomeDenied, res, nil)
 	}
 
 	// 2. Arg validation. Empty args → {} . Run the tool's Decode (replaces Zod);
@@ -84,6 +91,7 @@ func (r *Registry) Dispatch(ctx context.Context, name string, rawArgs json.RawMe
 	//    pass through unvalidated. Validation precedes the tier gate: a
 	//    malformed call to a high-tier tool returns INVALID_ARGS, not TIER_DENIED.
 	tctx.reportProgress(ToolProgress{Phase: ProgressValidating, Message: "validating request"})
+	var effConsequence string
 	args := rawArgs
 	if len(args) == 0 {
 		args = json.RawMessage(`{}`)
@@ -94,36 +102,76 @@ func (r *Registry) Dispatch(ctx context.Context, name string, rawArgs json.RawMe
 			res := Fail(codeInvalidArgs,
 				fmt.Sprintf("Invalid arguments for %s: %s", name, err.Error()),
 				WithDetails(decodeDetails(err)))
-			return r.audit(ctx, name, args, tctx, started, outcomeError, res, nil)
+			return r.audit(ctx, name, tool.Risk, args, tctx, started, outcomeError, res, nil)
 		}
 		args = parsed
 	}
 
+	// 2b. Effective-target resolution. For every tool but a target-aware invoker
+	//     ResolveTarget is nil and the static registration IS the identity, so this
+	//     is a no-op. When set, it runs HERE — after Decode (the resolver reads
+	//     validated args) and before the tier gate — because everything below keys
+	//     off the identity it produces: a dynamic call must be gated, previewed,
+	//     granted and audited as the ACTION it selected, not as the invoker.
+	//
+	//     Fail-closed twice over. A refusal returns the resolver's own failure and
+	//     the handler never runs; a resolver that returns a blank identity is a bug
+	//     that could only ever widen authority, so it is rejected rather than
+	//     defaulted back to the static risk.
+	effRisk, effConsequence = tool.Risk, tool.Consequence
+	effDisplay := name
+	if tool.ResolveTarget != nil {
+		target, refusal := tool.ResolveTarget(ctx, args, tctx)
+		if refusal != nil {
+			return r.audit(ctx, name, tool.Risk, args, tctx, started, outcomeDenied, *refusal, nil)
+		}
+		if target.Name == "" || target.Risk == "" {
+			res := Fail(codeToolThrew, fmt.Sprintf(
+				"%s could not resolve the target action's identity or risk; refusing to run it.", name),
+				Unrecoverable())
+			return r.audit(ctx, name, effRisk, args, tctx, started, outcomeDenied, res, nil)
+		}
+		effName, effRisk = target.Name, target.Risk
+		if target.Consequence != "" {
+			effConsequence = target.Consequence
+		}
+		// The approval sheet and the TIER_DENIED / blocked-inbox prose all read the
+		// display name, so a human is never asked to reason about a composite id.
+		if target.Display != "" {
+			effDisplay = target.Display
+		} else {
+			effDisplay = target.Name
+		}
+		// Publish what was gated so the handler can refuse to act under anything else.
+		gated := target
+		tctx.GatedTarget = &gated
+	}
+
 	// 3. Tier gate (BEFORE confirmation): a tier-denied tool never reaches
 	//    the grant/confirm logic.
-	decision := safety.Decide(tool.Risk, tctx.Config.Tier)
+	decision := safety.Decide(effRisk, tctx.Config.Tier)
 	if !decision.Allowed {
 		reason := decision.Reason
 		if reason == "" {
 			reason = "denied"
 		}
 		res := Fail(codeTierDenied, reason, Unrecoverable())
-		return r.audit(ctx, name, args, tctx, started, outcomeDenied, res, nil)
+		return r.audit(ctx, effName, effRisk, args, tctx, started, outcomeDenied, res, nil)
 	}
 
 	// 4. Confirmation (only when the matrix requires it).
 	if decision.NeedsConfirmation {
 		if tctx.Actor != domain.ActorMain {
 			// Branch A — non-interactive actor: a scoped grant is the only path.
-			if grant := r.tryGrant(ctx, tool, name, tctx, started); grant != nil {
-				return r.runHandler(ctx, tool, name, args, tctx, started, outcomeGrantOK, grant)
+			if grant := r.tryGrant(ctx, effName, effRisk, tctx); grant != nil {
+				return r.runHandler(ctx, tool, effName, effRisk, args, tctx, started, outcomeGrantOK, grant)
 			}
 			// No actorId, or no matching grant → blocked.
 			res := Fail(codeConfirmRequired, fmt.Sprintf(
 				"%s (%s) needs user confirmation and cannot be run by a non-interactive '%s' actor.",
-				name, tool.Risk, tctx.Actor), Unrecoverable())
-			out := r.audit(ctx, name, args, tctx, started, outcomeDenied, res, nil)
-			r.publishDenial(ctx, name, tctx, out.Summary)
+				effDisplay, effRisk, tctx.Actor), Unrecoverable())
+			out := r.audit(ctx, effName, effRisk, args, tctx, started, outcomeDenied, res, nil)
+			r.publishDenial(ctx, effName, effDisplay, tctx, out.Summary)
 			return out
 		}
 
@@ -136,24 +184,24 @@ func (r *Registry) Dispatch(ctx context.Context, name string, rawArgs json.RawMe
 			if tctx.Confirm != nil {
 				// A thrown/errored confirm is treated as a DECLINE, never approval.
 				ok, err := tctx.Confirm(ctx, ConfirmRequest{
-					ToolName:          name,
-					Risk:              tool.Risk,
+					ToolName:          effDisplay,
+					Risk:              effRisk,
 					Summary:           tool.Description,
-					Consequence:       tool.Consequence,
+					Consequence:       effConsequence,
 					Args:              args,
-					NeedsTypedConfirm: safety.NeedsTypedConfirm(tool.Risk),
+					NeedsTypedConfirm: safety.NeedsTypedConfirm(effRisk),
 				})
 				approved = err == nil && ok
 			}
 			if !approved {
-				res := Fail(codeUserDeclined, "User declined "+name+".")
-				return r.audit(ctx, name, args, tctx, started, outcomeDenied, res, nil)
+				res := Fail(codeUserDeclined, "User declined "+effDisplay+".")
+				return r.audit(ctx, effName, effRisk, args, tctx, started, outcomeDenied, res, nil)
 			}
 		}
 	}
 
 	// 5. Run (default outcome "ok").
-	return r.runHandler(ctx, tool, name, args, tctx, started, outcomeOK, nil)
+	return r.runHandler(ctx, tool, effName, effRisk, args, tctx, started, outcomeOK, nil)
 }
 
 // toolOffered reports whether name is in the per-turn allowlist. The allowlist
@@ -176,7 +224,7 @@ func toolOffered(name string, active []string) bool {
 // so on a transient ConsumeGrant failure with a *valid* grant present, the human
 // may be nudged to mint a duplicate. Accepted: the alternative (trusting a failed
 // read) would let an unauthorized call through, which is the worse failure.
-func (r *Registry) tryGrant(ctx context.Context, tool *Tool, name string, tctx *ToolContext, _ int64) *domain.AutomationGrantRecord {
+func (r *Registry) tryGrant(ctx context.Context, name string, risk domain.RiskClass, tctx *ToolContext) *domain.AutomationGrantRecord {
 	if tctx.ActorID == "" || tctx.DB == nil {
 		return nil
 	}
@@ -195,7 +243,12 @@ func (r *Registry) tryGrant(ctx context.Context, tool *Tool, name string, tctx *
 		return nil
 	}
 	actorType := domain.AutomationGrantActorType(tctx.Actor) // watcher | timer
-	grant, err := tctx.DB.ConsumeGrant(ctx, tctx.ActorID, actorType, name, tool.Risk, domain.NowMS())
+	// name/risk are the EFFECTIVE identity, so a dynamically-invoked MCP action
+	// consumes a grant naming that action ("daintree.invoke:terminal.new") rather
+	// than one naming the invoker — which the ungrantable check above rejects
+	// outright. storage.grantAuthorizes additionally refuses to let the risk-class
+	// half of the union rule reach a dynamic target at all.
+	grant, err := tctx.DB.ConsumeGrant(ctx, tctx.ActorID, actorType, name, risk, domain.NowMS())
 	if err != nil {
 		return nil
 	}
@@ -205,8 +258,9 @@ func (r *Registry) tryGrant(ctx context.Context, tool *Tool, name string, tctx *
 // runHandler invokes the handler with panic recovery and audits the outcome.
 // A grant-authorized handler that FAILS is still audited as "error", not
 // "grant_ok" — only a successful grant call is grant_ok. Never panics.
-func (r *Registry) runHandler(ctx context.Context, tool *Tool, name string, args json.RawMessage,
-	tctx *ToolContext, started int64, okOutcome string, grant *domain.AutomationGrantRecord) (res ToolResult) {
+func (r *Registry) runHandler(ctx context.Context, tool *Tool, name string, risk domain.RiskClass,
+	args json.RawMessage, tctx *ToolContext, started int64, okOutcome string,
+	grant *domain.AutomationGrantRecord) (res ToolResult) {
 
 	tctx.reportProgress(ToolProgress{Phase: ProgressRunning, Message: "running"})
 
@@ -225,14 +279,16 @@ func (r *Registry) runHandler(ctx context.Context, tool *Tool, name string, args
 	if !res.Ok {
 		outcome = outcomeError
 	}
-	return r.audit(ctx, name, args, tctx, started, outcome, res, grant)
+	return r.audit(ctx, name, risk, args, tctx, started, outcome, res, grant)
 }
 
 // audit writes the two best-effort side-channels (debug log + DB insert), each
 // wrapped so a failure can never break the tool call. On a successful DB insert
 // the new row id is stamped onto res.AuditID. Returns the (possibly stamped)
 // result.
-func (r *Registry) audit(ctx context.Context, name string, args json.RawMessage,
+// risk is the EFFECTIVE risk the call was gated at; pass "" before it is known
+// (an unknown-tool or allowlist rejection) and audit falls back to the registry.
+func (r *Registry) audit(ctx context.Context, name string, risk domain.RiskClass, args json.RawMessage,
 	tctx *ToolContext, started int64, outcome string, res ToolResult, grant *domain.AutomationGrantRecord) ToolResult {
 
 	durationMs := domain.NowMS() - started
@@ -248,10 +304,19 @@ func (r *Registry) audit(ctx context.Context, name string, args json.RawMessage,
 		if res.Error != nil {
 			errPayload = res.Error
 		}
-		risk := ""
-		if t := r.tools[name]; t != nil {
-			risk = string(t.Risk)
+		// A dynamic identity ("daintree.invoke:terminal.new") has no registry row, so
+		// the fallback lookup finds nothing and the trace would silently lose the one
+		// field saying how the call was gated. The caller's effective risk is
+		// authoritative whenever it has one; `target` and `dynamic` are emitted beside
+		// it so a log grep can separate dynamic invocations from wrapper calls without
+		// parsing the tool name.
+		riskStr := string(risk)
+		if riskStr == "" {
+			if t := r.tools[name]; t != nil {
+				riskStr = string(t.Risk)
+			}
 		}
+		target := domain.DynamicTargetAction(name)
 		debuglog.LogDebug(
 			debuglog.Config{DebugLog: tctx.Config.DebugLog, LogDir: tctx.Config.LogDir},
 			"tool.call",
@@ -260,7 +325,9 @@ func (r *Registry) audit(ctx context.Context, name string, args json.RawMessage,
 				"toolCallId": tctx.ToolCallID,
 				"runId":      tctx.RunID,
 				"sessionId":  tctx.SessionID,
-				"risk":       risk,
+				"risk":       riskStr,
+				"target":     target,
+				"dynamic":    target != "",
 				"actor":      string(tctx.Actor),
 				"actorId":    tctx.ActorID,
 				"outcome":    outcome,
@@ -320,7 +387,7 @@ func (r *Registry) audit(ctx context.Context, name string, args json.RawMessage,
 
 	// 3. Dispatch observer (workflow-intelligence evidence capture) — the third
 	//    best-effort side-channel; panic-guarded inside, never breaks the call.
-	r.notifyObserver(ctx, name, args, tctx, outcome, res, durationMs)
+	r.notifyObserver(ctx, name, risk, args, tctx, outcome, res, durationMs)
 
 	return res
 }
@@ -349,7 +416,9 @@ const (
 // the human can approve in a single step instead of hand-assembling a grant. The
 // action is gated on grant.create's actorType enum (watcher|timer|wake) — any
 // other actor would produce an invalid suggestion.
-func (r *Registry) publishDenial(ctx context.Context, name string, tctx *ToolContext, summary string) {
+// name is the effective GRANT identity (what allowedToolNames must contain);
+// display is the human-facing action name shown in the title.
+func (r *Registry) publishDenial(ctx context.Context, name, display string, tctx *ToolContext, summary string) {
 	defer func() { _ = recover() }()
 	if tctx.Queue == nil {
 		return
@@ -367,7 +436,7 @@ func (r *Registry) publishDenial(ctx context.Context, name string, tctx *ToolCon
 	grantable := tctx.Actor == domain.ActorWatcher || tctx.Actor == domain.ActorTimer || tctx.Actor == domain.ActorWake
 	if tctx.ActorID != "" && grantable && !domain.IsUngrantableTool(name) {
 		actions = []domain.RecommendedAction{{
-			Label:    fmt.Sprintf("Authorize %s %s to run %s", tctx.Actor, tctx.ActorID, name),
+			Label:    fmt.Sprintf("Authorize %s %s to run %s", tctx.Actor, tctx.ActorID, display),
 			ToolName: "grant.create",
 			Args: map[string]any{
 				"actorId":          tctx.ActorID,
@@ -381,11 +450,13 @@ func (r *Registry) publishDenial(ctx context.Context, name string, tctx *ToolCon
 		}}
 	}
 	_, _ = tctx.Queue.Publish(ctx, domain.QueuePublishArgs{
-		Source:             domain.SourceSystem,
-		Severity:           domain.SeverityBlocked,
-		Title:              "Autonomous action blocked: " + name,
-		Summary:            summary,
-		DedupeKey:          fmt.Sprintf("denied:%s:%s%s", tctx.Actor, actorIDSeg, name),
+		Source:    domain.SourceSystem,
+		Severity:  domain.SeverityBlocked,
+		Title:     "Autonomous action blocked: " + display,
+		Summary:   summary,
+		DedupeKey: fmt.Sprintf("denied:%s:%s%s", tctx.Actor, actorIDSeg, name),
+		// The title names the ACTION; the recommended grant above names the composite
+		// identity, because that is the string allowedToolNames has to carry.
 		RecommendedActions: actions,
 	})
 }
