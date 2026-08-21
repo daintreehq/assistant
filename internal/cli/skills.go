@@ -89,19 +89,30 @@ func runListSkills(ctx context.Context, opts Options, stdout, stderr io.Writer) 
 	// script can rely on, and an interrupted run that emitted nothing is the case a
 	// parser handles worst.
 	fail := func(code string, err error) int {
-		exit := domain.OneShotExitCode.Error
-		if ctx.Err() != nil {
-			exit, code = domain.OneShotExitCode.Cancelled, "cancelled"
+		cancelled := ctx.Err() != nil
+		if cancelled {
+			code = "cancelled"
 		}
-		if opts.JSON {
+		switch {
+		case opts.JSON:
+			// A document even when cancelled: "exactly one JSON document on stdout" has to
+			// hold on every path or it is not a contract a script can rely on, and an
+			// interrupted run that emitted nothing is the case a parser handles worst.
 			var doc skillCatalogErrorJSON
 			doc.Error.Code = code
 			doc.Error.Message = err.Error()
 			_ = writeIndentedJSON(stdout, doc)
-		} else {
+		case cancelled:
+			// SILENT for a human. They pressed Ctrl-C; a red "✗ context canceled" tells
+			// them what they already know while claiming the listing failed, which it did
+			// not — it was stopped.
+		default:
 			render.New(stderr).Error(err.Error())
 		}
-		return exit
+		if cancelled {
+			return domain.OneShotExitCode.Cancelled
+		}
+		return domain.OneShotExitCode.Error
 	}
 
 	cfg, err := loadProbeConfigFromOptions(opts)

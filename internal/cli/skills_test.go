@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daintreehq/assistant/internal/app"
 	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/storage"
 )
 
 // capabilitiesServer serves one canned /v1/daintree/capabilities body. `--list-skills`
@@ -281,4 +283,89 @@ func TestListSkillsParentDeadlineIsCancellation(t *testing.T) {
 	if code := runListSkills(ctx, listOpts(t, srv.URL, false), &out, &errOut); code != domain.OneShotExitCode.Cancelled {
 		t.Fatalf("exit = %d, want 2 — a caller's expired deadline is a cancellation", code)
 	}
+	// SILENT in human mode. A red "✗ context canceled" tells someone who just pressed
+	// Ctrl-C what they already know, and calls a listing that was STOPPED a listing that
+	// FAILED. The exit code carries the whole message.
+	if strings.TrimSpace(errOut.String()) != "" {
+		t.Fatalf("a cancelled human run must print nothing, got %q", errOut.String())
+	}
+	if strings.TrimSpace(out.String()) != "" {
+		t.Fatalf("stdout must stay empty on a cancelled human run, got %q", out.String())
+	}
+}
+
+// THE regression test for the adoption-order bug: a launch whose pin preflight FAILS must
+// not touch the project's durable current-session pointer.
+//
+// Adoption is not undone by shutdown, so running it before the preflight let a mistyped
+// `--skill` — a launch that never ran a single turn — permanently displace the real
+// conversation. The supervisor's detached wake turns resume whatever that pointer names,
+// so the user's actual session would simply stop being continued.
+//
+// This drives runInteractive twice against the same state dir, because the bug is an
+// ORDERING inside that function and nothing below it can observe the difference.
+func TestFailedPinPreflightDoesNotDisplaceTheCurrentSession(t *testing.T) {
+	stateDir := t.TempDir()
+	project := t.TempDir()
+	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", stateDir)
+	t.Setenv(NoDaemonEnv, "1")
+	t.Setenv("DAINTREE_BACKEND_URL", capabilitiesServer(t, twoSkillCatalog))
+
+	// A normal launch, no pins: it adopts and becomes the project's current session.
+	var adopted string
+	good := Options{
+		Offline: boolPtr(true),
+		Project: project,
+		Cockpit: func(_ context.Context, a *app.App) error {
+			adopted = a.SessionID
+			return nil
+		},
+	}
+	if code := runInteractive(context.Background(), good, true); code != domain.OneShotExitCode.Success {
+		t.Fatalf("baseline launch exit = %d, want 0", code)
+	}
+	if adopted == "" {
+		t.Fatal("the baseline launch never reached the cockpit seam")
+	}
+	if got := currentSessionPointer(t, stateDir); got != adopted {
+		t.Fatalf("current session = %q, want the baseline session %q", got, adopted)
+	}
+
+	// Now a launch with a mistyped pin. It must fail before adopting — and before the
+	// front end opens at all.
+	cockpitRan := false
+	bad := Options{
+		Offline:        boolPtr(true),
+		Project:        project,
+		PinnedSkillIDs: []string{"daintree.foundatoin"},
+		Cockpit: func(context.Context, *app.App) error {
+			cockpitRan = true
+			return nil
+		},
+	}
+	if code := runInteractive(context.Background(), bad, true); code != domain.OneShotExitCode.Error {
+		t.Fatalf("a mistyped --skill launch exit = %d, want 1", code)
+	}
+	if cockpitRan {
+		t.Fatal("the cockpit opened despite a failed pin preflight")
+	}
+	if got := currentSessionPointer(t, stateDir); got != adopted {
+		t.Fatalf("a failed launch displaced the current session: %q, want %q — the supervisor "+
+			"would now resume a conversation that never ran a turn", got, adopted)
+	}
+}
+
+// currentSessionPointer reads the durable pointer the supervisor resumes from.
+func currentSessionPointer(t *testing.T, stateDir string) string {
+	t.Helper()
+	store, err := storage.Open(filepath.Join(stateDir, "state.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	v, err := store.GetRuntimeState(storage.RuntimeKeyCurrentSession)
+	if err != nil {
+		t.Fatalf("read current session: %v", err)
+	}
+	return v
 }

@@ -292,3 +292,52 @@ func TestNearestSkillIDIsDeterministicAndBounded(t *testing.T) {
 		t.Fatalf("nearestSkillID suggested a blank id: %q", got)
 	}
 }
+
+// `/backend` (App.SetBackendURL) swaps the client in place and deliberately does no
+// network work, so the cached capability answer stays pinned to the endpoint that is no
+// longer being called. The pin gate must CLOSE on that — believing the old deployment's
+// answer would attach a field the new endpoint may forbid and 422 every remaining turn.
+//
+// This is the one production path that reaches the Session's warn-and-omit branch, so it
+// is worth pinning here rather than leaving it to look like defensive dead code.
+func TestPinGateClosesAfterAnEndpointSwitch(t *testing.T) {
+	dir := t.TempDir()
+	a, err := Create(CreateOptions{
+		Overrides: config.ConfigOverrides{
+			Offline:              boolPtr(true),
+			StateDir:             &dir,
+			ProjectPath:          &dir,
+			Tier:                 strPtr("operator"),
+			WorkflowIntelligence: boolPtr(false),
+			BackendURL:           strPtr(backend.LocalBaseURL),
+		},
+		PinnedSkillIDs: []string{"a.one"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	defer a.Shutdown()
+
+	// Stand in for a successful preflight against the CURRENT endpoint.
+	caps := backend.Capabilities{}
+	caps.Skills.PinnedSkillIDs = true
+	a.backendCaps.Store(&backendCapsSnapshot{baseURL: a.Backend.BaseURL(), caps: caps})
+	if !a.backendAcceptsPinnedSkillIDs() {
+		t.Fatal("gate should be open against the endpoint that answered")
+	}
+
+	if _, err := a.SetBackendURL(backend.DefaultBaseURL); err != nil {
+		t.Fatalf("SetBackendURL: %v", err)
+	}
+	if a.Backend.BaseURL() != backend.DefaultBaseURL {
+		t.Fatalf("the swap did not take: BaseURL = %q", a.Backend.BaseURL())
+	}
+	if a.backendAcceptsPinnedSkillIDs() {
+		t.Fatal("the gate stayed open after an endpoint switch; the old deployment's answer is not evidence about the new one")
+	}
+	// The pins themselves are untouched — they are what the launch asked for, and the
+	// Session is what decides (and reports) that they cannot ride this turn.
+	if got := a.PinnedSkillIDs(); len(got) != 1 || got[0] != "a.one" {
+		t.Fatalf("PinnedSkillIDs = %v, want the launch's list preserved across the switch", got)
+	}
+}

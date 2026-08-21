@@ -2079,11 +2079,14 @@ func (s *Session) reportPinnedSkillWarnings(warnings []string) {
 //
 // With pins it attaches them only while the live endpoint still advertises the
 // capability. app.PreparePinnedSkills already proved that before the first turn, so a
-// closed gate here means the backend delegate was swapped underneath us — the field
-// would 422 the entire turn against the new endpoint. Dropping it and saying so once
-// keeps the turn alive and keeps the operator from reading an unpinned run as a pinned
-// one; it is deliberately not a turn failure, because there is nothing the model or the
-// user can do about it mid-conversation.
+// closed gate here means the endpoint CHANGED underneath us — in practice `/backend`,
+// which swaps the client in place and deliberately does no network work, leaving the
+// cached capability answer pinned to the endpoint that is no longer being called.
+//
+// Sending the field anyway would 422 the entire turn against the new endpoint. Dropping
+// it and saying so once keeps the turn alive and keeps the operator from reading an
+// unpinned run as a pinned one. Deliberately not a turn failure: the switch was a
+// deliberate act and the conversation should survive it.
 func (s *Session) selectionForRound() *backend.Selection {
 	sel := &backend.Selection{Policy: "new_instruction"}
 	if len(s.deps.PinnedSkillIDs) == 0 {
@@ -2114,8 +2117,11 @@ func (s *Session) reportPinGateClosed() {
 	if dup {
 		return
 	}
-	s.events.Warn("the connected backend no longer advertises pinned skills, so this turn ran WITHOUT the runbooks named by --skill (" +
-		pinGateClosedCode + ")")
+	// Names the CAUSE, not just the effect. "This backend does not support pinning"
+	// would be a guess and usually a wrong one: the pins were negotiated successfully at
+	// launch, so what changed is which endpoint is being called.
+	s.events.Warn("the backend endpoint changed after --skill was negotiated, so this turn ran WITHOUT the pinned runbooks; " +
+		"restart with --skill against the new endpoint to pin them there (" + pinGateClosedCode + ")")
 }
 
 // skillLabels renders skill refs to display labels, preferring the title and falling

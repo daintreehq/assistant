@@ -60,7 +60,7 @@ type OpenInput struct {
 	// A NON-NIL empty array is meaningful — it clears any process-level --skill this
 	// server was launched with — which is why the merge below tests nil rather than
 	// length. Omitting the field inherits those defaults.
-	Skills []string `json:"skills,omitempty" jsonschema:"Backend skill ids to load on every turn of this session, whatever the backend's own selector picks. Run 'daintree-assistant --list-skills' to see the ids. When the backend advertises a catalog an unknown id fails this open rather than running unpinned; when it does not, the open succeeds with a warning and the backend reports the bad id on the first turn. Pass an empty array to clear a server-level default."`
+	Skills []string `json:"skills,omitempty" jsonschema:"Backend skill ids to load on every turn of this session, whatever the backend's own selector picks. Run 'daintree-assistant --list-skills' to see the ids. When the backend advertises a catalog an unknown id fails this open rather than running unpinned; when it accepts pins but advertises no catalog, the open succeeds with a warning and the backend reports the bad id on the first turn. A backend that does not accept pins at all fails the open whatever the ids are. Pass an empty array to clear a server-level default."`
 }
 
 // SessionOutput describes an open session.

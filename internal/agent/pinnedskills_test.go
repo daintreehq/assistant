@@ -141,8 +141,14 @@ func TestClosedGateWithholdsPinsAndSaysSoOnce(t *testing.T) {
 	if len(warns) != 1 {
 		t.Fatalf("warnings = %v, want exactly one across a two-round turn", warns)
 	}
-	if !strings.Contains(warns[0], "WITHOUT the runbooks named by --skill") {
+	if !strings.Contains(warns[0], "WITHOUT the pinned runbooks") {
 		t.Fatalf("the warning does not say what actually happened: %q", warns[0])
+	}
+	// It must name the CAUSE. In production the only way to reach this is `/backend`
+	// swapping the endpoint in place, and "this backend does not support pinning" would
+	// be a wrong guess — the pins were negotiated fine at launch.
+	if !strings.Contains(warns[0], "endpoint changed") {
+		t.Fatalf("the warning blames the wrong thing: %q", warns[0])
 	}
 }
 
