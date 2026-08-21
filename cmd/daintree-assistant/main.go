@@ -146,6 +146,16 @@ func parseArgs(args []string) (parsedArgs, error) {
 		jsonOut  = fs.Bool("json", false, "")
 		stdio    = fs.Bool("stdio", false, "") // host compatibility spelling
 		showVer  = fs.Bool("version", false, "")
+		// Harness knobs. Each shadows a trusted env var and wins over it; the point is
+		// that a scripted caller (a test harness, another agent) can say all of this in
+		// argv instead of having to rewrite the process environment.
+		backendURL  = fs.String("backend-url", "", "")
+		apiKeyFile  = fs.String("api-key-file", "", "")
+		stateDir    = fs.String("state-dir", "", "")
+		logDir      = fs.String("log-dir", "", "")
+		autoApprove = fs.Bool("auto-approve", false, "")
+		debugLog    = fs.Bool("debug-log", false, "")
+		timeout     = fs.Duration("timeout", 0, "")
 		// `reset` flags. Parsed always (a FlagSet cannot be conditional here) but only
 		// consulted on the reset route, like every other subcommand-specific option.
 		yes      = fs.Bool("yes", false, "")
@@ -174,15 +184,51 @@ func parseArgs(args []string) (parsedArgs, error) {
 		return parsedArgs{}, fmt.Errorf("invalid --tier %q (choose supervisor, operator, or system)", *tier)
 	}
 
+	if *timeout < 0 {
+		return parsedArgs{}, fmt.Errorf("invalid --timeout %s (must not be negative)", *timeout)
+	}
+	// An explicitly EMPTY value is a mistake, never a request to fall back. A harness
+	// that expands an unset shell variable produces `--api-key-file=` or `--state-dir=`,
+	// and silently deferring to the environment there is precisely the failure these
+	// flags exist to prevent: the run proceeds against a different key, or writes to the
+	// developer's real state dir. Fail at the argument boundary instead.
+	for _, name := range []string{"backend-url", "api-key-file", "state-dir", "log-dir", "mcp-url", "mcp-token", "project"} {
+		f := fs.Lookup(name)
+		if f == nil || !flagWasSet(fs, name) {
+			continue
+		}
+		if strings.TrimSpace(f.Value.String()) == "" {
+			return parsedArgs{}, fmt.Errorf("--%s was given an empty value; omit the flag to fall back to the environment", name)
+		}
+	}
+	// A boolean override is carried as a POINTER so an explicit --auto-approve=false can
+	// beat DAINTREE_ASSISTANT_AUTO_APPROVE=1. Passing the plain value would collapse
+	// "not passed" and "passed false" into the same nil, and the env would keep winning
+	// against someone who explicitly turned the flag off — worst on the flag whose whole
+	// job is to decide whether mutating tools run unattended.
+	boolFlag := func(name string, v *bool) *bool {
+		if !flagWasSet(fs, name) {
+			return nil
+		}
+		return v
+	}
+
 	opts := cli.Options{
-		McpURL:   *mcpURL,
-		McpToken: *mcpToken,
-		Project:  *project,
-		Tier:     tierValue,
-		Offline:  *offline,
-		Classic:  *classic,
-		JSON:     *jsonOut,
-		Inline:   *inline, // accepted and ignored (deprecated)
+		McpURL:      *mcpURL,
+		McpToken:    *mcpToken,
+		Project:     *project,
+		Tier:        tierValue,
+		Offline:     boolFlag("offline", offline),
+		Classic:     *classic,
+		JSON:        *jsonOut,
+		Inline:      *inline, // accepted and ignored (deprecated)
+		BackendURL:  *backendURL,
+		APIKeyFile:  *apiKeyFile,
+		StateDir:    *stateDir,
+		LogDir:      *logDir,
+		AutoApprove: boolFlag("auto-approve", autoApprove),
+		DebugLog:    boolFlag("debug-log", debugLog),
+		Timeout:     *timeout,
 	}
 
 	parsed := parsedArgs{Options: opts, Route: routeDefault}
@@ -392,6 +438,13 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "  --json              emit JSONL for a one-shot prompt")
 	fmt.Fprintln(w, "  --mcp-url URL       Daintree MCP URL (env: DAINTREE_MCP_URL)")
 	fmt.Fprintln(w, "  --mcp-token TOKEN   Daintree MCP token (env: DAINTREE_MCP_TOKEN)")
+	fmt.Fprintln(w, "  --backend-url URL   assistant backend (env: DAINTREE_BACKEND_URL)")
+	fmt.Fprintln(w, "  --api-key-file PATH read the API key from a file (env: DAINTREE_API_KEY)")
+	fmt.Fprintln(w, "  --state-dir PATH    state + credentials root (env: DAINTREE_ASSISTANT_STATE_DIR)")
+	fmt.Fprintln(w, "  --log-dir PATH      debug-log directory (env: DAINTREE_ASSISTANT_LOG_DIR)")
+	fmt.Fprintln(w, "  --auto-approve      run mutating tools without confirmation")
+	fmt.Fprintln(w, "  --debug-log         write the session trace to the log directory")
+	fmt.Fprintln(w, "  --timeout DURATION  cancel a one-shot run after this long (e.g. 10m; 0 = no limit)")
 	fmt.Fprintln(w, "  --yes               skip the reset confirmation (required without a TTY)")
 	fmt.Fprintln(w, "  --no-backup         skip the reset's timestamped backup")
 	fmt.Fprintln(w, "  --out PATH          support-bundle destination")

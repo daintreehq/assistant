@@ -140,11 +140,14 @@ func AcquireOwnership(ctx context.Context, cfg config.AppConfig, opts AcquireOpt
 // credentialsFromConfig snapshots the freshest connection credentials this
 // process resolved, for the daemon's later detached spans.
 func credentialsFromConfig(cfg config.AppConfig) *ipc.Credentials {
-	c := &ipc.Credentials{McpURL: cfg.McpURL, McpToken: cfg.McpToken}
-	if v := os.Getenv("DAINTREE_BACKEND_URL"); v != "" {
-		c.BackendURL = v
+	// The RESOLVED endpoint, not os.Getenv: --backend-url never reaches the environment,
+	// so reading it there would hand an already-running daemon a stale endpoint (or
+	// none) while this process talks to the one the operator actually named.
+	return &ipc.Credentials{
+		McpURL:     cfg.McpURL,
+		McpToken:   cfg.McpToken,
+		BackendURL: cfg.BackendURL,
 	}
-	return c
 }
 
 // QueryStatus asks the project's daemon for its status snapshot.

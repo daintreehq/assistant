@@ -55,7 +55,11 @@ func SetVersion(v string) { buildVersion = v }
 // launch, but equally runnable by hand in the foreground).
 func RunDaemon(ctx context.Context, opts Options) int {
 	r := render.Stdout()
-	overrides := buildOverrides(opts, r)
+	overrides, err := buildOverrides(opts, r)
+	if err != nil {
+		r.Error(err.Error())
+		return domain.OneShotExitCode.Error
+	}
 	// Gate BEFORE the supervisor starts. A signed-out daemon boots happily, adopts the
 	// project's watchers and async work, and then 401s inside every autonomous wake turn
 	// — supervision that looks alive and silently accomplishes nothing. Never prompt:
@@ -85,7 +89,7 @@ func RunDaemon(ctx context.Context, opts Options) int {
 // RunDaemonStop asks the project's daemon to exit.
 func RunDaemonStop(ctx context.Context, opts Options) int {
 	r := render.Stdout()
-	cfg, err := config.LoadConfig(overridesFromOptions(opts))
+	cfg, err := loadConfigFromOptions(opts)
 	if err != nil {
 		r.Error(err.Error())
 		return domain.OneShotExitCode.Error
@@ -107,7 +111,7 @@ func RunDaemonStop(ctx context.Context, opts Options) int {
 // not disturb a live cockpit or the daemon.
 func RunStatus(ctx context.Context, opts Options) int {
 	r := render.Stdout()
-	cfg, err := config.LoadConfig(overridesFromOptions(opts))
+	cfg, err := loadConfigFromOptions(opts)
 	if err != nil {
 		r.Error(err.Error())
 		return domain.OneShotExitCode.Error

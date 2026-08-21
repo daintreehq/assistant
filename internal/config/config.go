@@ -306,6 +306,15 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 			cfg.StateDir = stateRoot
 		}
 	}
+	// Always ABSOLUTE, like logDir below. A relative state dir resolves against the
+	// working directory, and the two processes that share a project do not share one:
+	// spawnDaemon sets the child's cwd to the PROJECT path while handing it this same
+	// string. `--state-dir .state` launched from /tmp/harness would then give the
+	// foreground /tmp/harness/.state and the daemon <project>/.state — different flocks,
+	// different databases, and a credentials.json created inside the user's repository.
+	if abs, err := filepath.Abs(cfg.StateDir); err == nil {
+		cfg.StateDir = abs
+	}
 	// 0700: the state dir holds conversations, the audit trail, automation grants, and
 	// memories — owner-only, never world/group readable (mirrors the debug-log dir perms).
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {

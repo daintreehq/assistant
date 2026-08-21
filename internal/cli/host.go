@@ -26,12 +26,19 @@ func RunHost(ctx context.Context, opts Options) int {
 	// Gate before serving. The host speaks NDJSON over stdio with no terminal to prompt
 	// on, so a signed-out launch must fail loudly here rather than accept boot requests
 	// whose every turn then 401s.
-	if err := ensureSignedIn(ctx, overridesFromOptions(opts), false); err != nil {
+	baseOverrides, err := overridesFromOptions(opts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return domain.OneShotExitCode.Error
+	}
+	if err := ensureSignedIn(ctx, baseOverrides, false); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return domain.OneShotExitCode.Error
 	}
 	factory := func(fctx context.Context, params host.AppParams) (host.App, error) {
-		overrides := overridesFromOptions(opts)
+		// Copy per boot: the factory runs once per session and mutates the project
+		// fields below, so the shared base must not be aliased.
+		overrides := baseOverrides
 		// The descriptor's cwd is the authoritative project path; the loaded
 		// DAINTREE.md content rides as an override (host.boot already read the file).
 		if params.ProjectPath != "" {

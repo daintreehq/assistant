@@ -466,7 +466,7 @@ func loginCheckError(baseURL string, err error, key string) error {
 // run the flow, report. Deliberately does NOT take the owner lease or build an App —
 // signing in must work while a cockpit or the supervisor daemon holds the project.
 func RunLoginCommand(ctx context.Context, opts Options) int {
-	cfg, err := config.LoadConfig(overridesFromOptions(opts))
+	cfg, err := loadConfigFromOptions(opts)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return domain.OneShotExitCode.Error
@@ -480,7 +480,7 @@ func RunLoginCommand(ctx context.Context, opts Options) int {
 
 // RunLogoutCommand is the `daintree-assistant logout` entry point.
 func RunLogoutCommand(_ context.Context, opts Options) int {
-	cfg, err := config.LoadConfig(overridesFromOptions(opts))
+	cfg, err := loadConfigFromOptions(opts)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return domain.OneShotExitCode.Error
