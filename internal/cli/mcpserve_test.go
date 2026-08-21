@@ -169,3 +169,44 @@ func TestApplySliceIfSet(t *testing.T) {
 		}
 	})
 }
+
+// TestSessionOptionsOverlaysPinnedSkills pins the WIRING, which TestApplySliceIfSet
+// above deliberately cannot: that one proves the helper behaves, this one proves
+// sessionOptions actually calls it for the pin field. The two headless surfaces are
+// wired through different lines, and a dropped overlay here fails in the quietest way
+// available — the session simply runs with the process default (or with nothing),
+// producing a green test suite and a run pinned to the wrong runbooks.
+func TestSessionOptionsOverlaysPinnedSkills(t *testing.T) {
+	process := Options{PinnedSkillIDs: []string{"proc.default"}}
+
+	for _, tc := range []struct {
+		name  string
+		given []string
+		want  []string
+	}{
+		// Omitted is not "cleared": a session that said nothing inherits what the
+		// server process was launched with.
+		{"omitted inherits the launch pins", nil, []string{"proc.default"}},
+		// An explicit empty array is an instruction, and the opposite one.
+		{"an explicit empty array clears them", []string{}, []string{}},
+		{"a list replaces them in order", []string{"b.two", "a.one"}, []string{"b.two", "a.one"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sessionOptions(process, mcpserver.OpenParams{Skills: tc.given}).PinnedSkillIDs
+			if len(got) != len(tc.want) {
+				t.Fatalf("PinnedSkillIDs = %v, want %v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("PinnedSkillIDs = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+
+	// The overlay must not write through into the options that seed every later
+	// session — one caller's pins leaking into the next is the failure this guards.
+	if len(process.PinnedSkillIDs) != 1 || process.PinnedSkillIDs[0] != "proc.default" {
+		t.Fatalf("sessionOptions mutated the process-level pins: %v", process.PinnedSkillIDs)
+	}
+}
