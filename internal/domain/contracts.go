@@ -203,14 +203,19 @@ type JsonTurnEndPayload struct {
 
 // JsonCommandResultPayload records one slash command run between turns.
 //
-// Title/Text come from the shared UI command handler, so a JSONL consumer sees exactly
-// what the cockpit would have shown — as DATA, never rendered, because stdout in --json
-// mode carries only these lines.
+// Title and Content come from the shared UI command handler, so a JSONL consumer sees
+// exactly what the cockpit would have shown — as DATA, never rendered, because stdout in
+// --json mode carries only these lines.
 type JsonCommandResultPayload struct {
-	// Command is the line as typed, leading slash included.
+	// Command is the line as read, leading slash included, with surrounding whitespace
+	// trimmed (the same trim that decides it was a command in the first place).
 	Command string `json:"command"`
-	// Handled is false for a command the catalog does not know. A typo in a test script
-	// would otherwise be indistinguishable from a command that ran and said nothing.
+	// Handled is false for a command the catalog does not know. It answers a DIFFERENT
+	// question from the UI handler's own Handled bit, which is true even for an unknown
+	// command because the handler still consumed the line and produced an "Unknown
+	// command" card; this one is resolved against the command registry instead. The
+	// distinction only matters here, where the reader is a script: a typo'd /claer is
+	// otherwise indistinguishable on the wire from a command that ran and said nothing.
 	Handled bool   `json:"handled"`
 	Title   string `json:"title"`
 	Content string `json:"content"`

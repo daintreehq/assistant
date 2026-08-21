@@ -208,6 +208,12 @@ func TestParseArgsRejectsMultiTurnMisuse(t *testing.T) {
 		{"without --json", []string{"--multi-turn"}, "--multi-turn requires --json"},
 		{"with a prompt argument", []string{"--json", "--multi-turn", "hello"}, "cannot be combined"},
 		{"with --prompt-file", []string{"--json", "--multi-turn", "--prompt-file", "/tmp/p.txt"}, "cannot be combined"},
+		// Command routes return EARLY, so validation placed after them was skipped
+		// entirely: the flag silently did nothing on a route that never runs a turn —
+		// the same "looks like it worked" failure --skill's route check exists to stop.
+		{"with a command word", []string{"--json", "--multi-turn", "doctor"}, "cannot be combined"},
+		{"with a command and no --json", []string{"--multi-turn", "status"}, "--multi-turn requires --json"},
+		{"with a command and --prompt-file", []string{"--json", "--multi-turn", "--prompt-file", "/tmp/p.txt", "doctor"}, "cannot be combined"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if _, err := parseArgs(tt.args); err == nil || !strings.Contains(err.Error(), tt.want) {

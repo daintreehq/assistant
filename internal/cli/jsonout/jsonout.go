@@ -333,14 +333,25 @@ func (s *Sink) AssistantCancelled(content string) {
 //
 // It never downgrades a run that already failed: an error status carries a message
 // and a non-zero code that say more than "cancelled" does.
+//
+// The message is what makes that true, and so the message is what the guard tests. A
+// sink's DEFAULT status is also "error" — the pessimistic sentinel meaning "no terminal
+// event has happened yet" — and that one carries nothing at all. Guarding on the status
+// alone conflated the two and made this method a silent no-op in exactly the case it
+// exists for: a bound expiring before anything ran, which then reported a bare
+// error/exit-1 with a null message instead of the cancellation it was.
 func (s *Sink) CancelRun() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.status == domain.JSONStatusError {
+	if s.status == domain.JSONStatusError && s.errorMessage != nil {
 		return
 	}
+	// Fold at the RUN level too, not just the turn level. In multi-turn mode this can
+	// fire between turns, where the live turn-level fields are about to be reset by the
+	// next BeginTurn and would carry the cancellation nowhere.
 	s.status = domain.JSONStatusCancelled
 	s.exitCode = domain.OneShotExitCode.Cancelled
+	s.foldOutcome(outcome{status: domain.JSONStatusCancelled, exitCode: domain.OneShotExitCode.Cancelled})
 }
 
 // Interjection emits a mid-turn user message as its own JSONL line (flushing buffered

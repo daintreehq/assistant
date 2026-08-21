@@ -230,6 +230,32 @@ func parseArgs(args []string) (parsedArgs, error) {
 	if *runScheduler && *timeout <= 0 {
 		return parsedArgs{}, fmt.Errorf("--run-scheduler requires a positive --timeout (e.g. --timeout 10m)")
 	}
+	// --multi-turn is validated HERE, before the route is chosen, and that placement is
+	// the point. Every check below this line sits after a subcommand's early return, so
+	// putting it there let `--multi-turn status` and `--json --multi-turn doctor` through
+	// unexamined — the flag silently doing nothing on a route that never runs a turn,
+	// which is exactly the "looks like it worked" failure --skill's own route check
+	// exists to prevent. --run-scheduler validates its bound here for the same reason.
+	//
+	// It insists on --json, which is not mere validation. Without it this flag would be a
+	// second, worse spelling of something that already exists — the classic REPL on piped
+	// stdin is multi-turn today — and the whole point of the flag is the half that route
+	// CANNOT do: emit the conversation as one JSONL transcript.
+	//
+	// And it is a THIRD prompt source, so it obeys the same rule as the other two:
+	// naming more than one is a mistake, never a precedence question. A command word is
+	// a positional too, so this is also what refuses `--multi-turn doctor`.
+	if *multiTurn {
+		if !*jsonOut {
+			return parsedArgs{}, fmt.Errorf("--multi-turn requires --json; for human-rendered multi-turn output pipe stdin to --classic")
+		}
+		if *promptFile != "" || len(positionals) > 0 {
+			return parsedArgs{}, fmt.Errorf("--multi-turn reads its prompts from stdin, one per line; it cannot be combined with a prompt argument, a command, or --prompt-file")
+		}
+		if *stdio {
+			return parsedArgs{}, stdioRequiresHostError()
+		}
+	}
 	// An explicitly EMPTY value is a mistake, never a request to fall back. A harness
 	// that expands an unset shell variable produces `--api-key-file=` or `--state-dir=`,
 	// and silently deferring to the environment there is precisely the failure these
@@ -417,21 +443,6 @@ func parseArgs(args []string) (parsedArgs, error) {
 	// an exact question.
 	if *promptFile != "" && len(positionals) > 0 {
 		return parsedArgs{}, fmt.Errorf("--prompt-file and a prompt argument cannot be combined; pass the prompt one way")
-	}
-	// --multi-turn is a THIRD prompt source, so it obeys the same rule as the other two:
-	// naming more than one is a mistake, never a precedence question.
-	//
-	// It also insists on --json, which is not mere validation. Without it this flag would
-	// be a second, worse spelling of something that already exists — the classic REPL on
-	// piped stdin is multi-turn today — and the whole point of the flag is the half that
-	// route CANNOT do: emit the conversation as one JSONL transcript.
-	if *multiTurn {
-		if !*jsonOut {
-			return parsedArgs{}, fmt.Errorf("--multi-turn requires --json; for human-rendered multi-turn output pipe stdin to --classic")
-		}
-		if *promptFile != "" || len(positionals) > 0 {
-			return parsedArgs{}, fmt.Errorf("--multi-turn reads its prompts from stdin, one per line; it cannot be combined with a prompt argument or --prompt-file")
-		}
 	}
 	if len(positionals) > 0 {
 		// Join remaining tokens so an unquoted multi-word prompt still works; a single

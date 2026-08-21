@@ -47,6 +47,18 @@ func mtFind(lines []map[string]any, typ string) []map[string]any {
 	return out
 }
 
+// mtFindN is mtFind with the count asserted up front. Every caller here indexes the
+// result, so a wrong count must FAIL the test rather than panic three lines later — and
+// a test that silently iterated zero matches would pass while proving nothing.
+func mtFindN(t *testing.T, lines []map[string]any, typ string, want int) []map[string]any {
+	t.Helper()
+	got := mtFind(lines, typ)
+	if len(got) != want {
+		t.Fatalf("%s lines = %d, want %d", typ, len(got), want)
+	}
+	return got
+}
+
 // mtClock is a monotonically advancing fake clock.
 func mtClock() Clock {
 	n := int64(1000)
@@ -84,12 +96,8 @@ func TestMultiTurnBracketsEachTurnAndKeepsOneSessionAndOneResult(t *testing.T) {
 	if got := mtTypes(lines); !equalStrings(got, want) {
 		t.Fatalf("line types =\n %v\nwant\n %v", got, want)
 	}
-	if n := len(mtFind(lines, "session")); n != 1 {
-		t.Errorf("session lines = %d, want exactly 1 for the whole process", n)
-	}
-	if n := len(mtFind(lines, "result")); n != 1 {
-		t.Errorf("result lines = %d, want exactly 1 (terminal, always last)", n)
-	}
+	mtFindN(t, lines, "session", 1)
+	mtFindN(t, lines, "result", 1)
 	// seq is one ordered transcript, not per-turn counters.
 	for i, l := range lines {
 		seq, ok := l["seq"].(float64)
@@ -98,7 +106,7 @@ func TestMultiTurnBracketsEachTurnAndKeepsOneSessionAndOneResult(t *testing.T) {
 		}
 	}
 	// Turn numbers are zero-based and advance only for model turns.
-	prompts := mtFind(lines, "turn:prompt")
+	prompts := mtFindN(t, lines, "turn:prompt", 2)
 	for i, p := range prompts {
 		if got, _ := p["turn"].(float64); int(got) != i {
 			t.Errorf("turn:prompt[%d].turn = %v, want %d", i, p["turn"], i)
@@ -160,7 +168,7 @@ func TestLaterSuccessNeverForgivesAnEarlierFailedTurn(t *testing.T) {
 			code, domain.OneShotExitCode.Error)
 	}
 	lines := mtLines(t, &buf)
-	result := mtFind(lines, "result")[0]
+	result := mtFindN(t, lines, "result", 1)[0]
 	if got, _ := result["status"].(string); got != string(domain.JSONStatusError) {
 		t.Errorf("result.status = %q, want %q", got, domain.JSONStatusError)
 	}
@@ -169,8 +177,8 @@ func TestLaterSuccessNeverForgivesAnEarlierFailedTurn(t *testing.T) {
 		t.Errorf("result.error = %v, want the failed turn's message", result["error"])
 	}
 	// The failure is reported per-turn too, and only on the turn that failed.
-	ends := mtFind(lines, "turn:end")
 	wantStatuses := []string{"success", "error", "success"}
+	ends := mtFindN(t, lines, "turn:end", len(wantStatuses))
 	for i, e := range ends {
 		if got, _ := e["status"].(string); got != wantStatuses[i] {
 			t.Errorf("turn:end[%d].status = %q, want %q", i, got, wantStatuses[i])
@@ -242,7 +250,7 @@ func TestStatsAccumulateAcrossTurns(t *testing.T) {
 	s.SettleTurn()
 
 	s.Finish()
-	result := mtFind(mtLines(t, &buf), "result")[0]
+	result := mtFindN(t, mtLines(t, &buf), "result", 1)[0]
 	stats, _ := result["stats"].(map[string]any)
 	for key, want := range map[string]int{
 		"rounds": 2, "toolCalls": 2, "toolErrors": 1,
@@ -273,11 +281,7 @@ func TestCommandResultIsRecordedWithoutOpeningATurn(t *testing.T) {
 	}
 
 	lines := mtLines(t, &buf)
-	cmds := mtFind(lines, "command:result")
-	if len(cmds) != 1 {
-		t.Fatalf("command:result lines = %d, want 1", len(cmds))
-	}
-	c := cmds[0]
+	c := mtFindN(t, lines, "command:result", 1)[0]
 	for key, want := range map[string]any{
 		"command": "/clear", "handled": true, "title": "Clear",
 		"content": "Conversation cleared.", "quit": false, "conversationCleared": true,
@@ -287,7 +291,7 @@ func TestCommandResultIsRecordedWithoutOpeningATurn(t *testing.T) {
 		}
 	}
 	// The command did NOT consume a turn number: the second bracket is still turn 1.
-	prompts := mtFind(lines, "turn:prompt")
+	prompts := mtFindN(t, lines, "turn:prompt", 2)
 	if got, _ := prompts[1]["turn"].(float64); int(got) != 1 {
 		t.Errorf("turn after a command = %v, want 1 (a command is not a turn)", prompts[1]["turn"])
 	}
@@ -317,7 +321,7 @@ func TestClearResetsTheConversationNotTheTranscript(t *testing.T) {
 			t.Fatalf("seq restarted at line %d (%v); /clear must not reset the transcript", i, l["seq"])
 		}
 	}
-	stats, _ := mtFind(lines, "result")[0]["stats"].(map[string]any)
+	stats, _ := mtFindN(t, lines, "result", 1)[0]["stats"].(map[string]any)
 	if got, _ := stats["rounds"].(float64); int(got) != 2 {
 		t.Errorf("stats.rounds = %v, want 2 — accounting spans the whole process", stats["rounds"])
 	}
@@ -352,7 +356,7 @@ func TestPostTurnCancelRunStillReachesTheTerminalLine(t *testing.T) {
 	if code := s.Finish(); code != domain.OneShotExitCode.Cancelled {
 		t.Fatalf("exit code = %d, want %d", code, domain.OneShotExitCode.Cancelled)
 	}
-	result := mtFind(mtLines(t, &buf), "result")[0]
+	result := mtFindN(t, mtLines(t, &buf), "result", 1)[0]
 	if got, _ := result["content"].(string); got != "started" {
 		t.Errorf("result.content = %q, want the answer to survive the run-level cancel", got)
 	}
@@ -397,6 +401,72 @@ func TestSingleTurnSinkEmitsNoTurnLines(t *testing.T) {
 	want := []string{"session", "assistant:start", "assistant:end", "result"}
 	if !equalStrings(types, want) {
 		t.Fatalf("single-turn line types = %v, want %v (no turn/command lines)", types, want)
+	}
+}
+
+// TestCancelBeforeAnyTurnReportsCancelledNotError is the bug the default sentinel hid.
+// A fresh sink's status is already "error" — meaning "nothing terminal has happened
+// yet", not "something failed" — so a guard that looked only at the status made
+// CancelRun a no-op in precisely the case it exists for: a --timeout expiring while the
+// loop waited for the first line of stdin. That reported a bare error/exit-1 with a null
+// message, sending the reader hunting a failure that never occurred.
+func TestCancelBeforeAnyTurnReportsCancelledNotError(t *testing.T) {
+	var buf bytes.Buffer
+	s := NewMultiTurn(&buf, mtClock())
+	s.Session(SessionInfo{SessionID: "ses_1"})
+	s.CancelRun() // the bound expired before a single prompt was read
+
+	if code := s.Finish(); code != domain.OneShotExitCode.Cancelled {
+		t.Fatalf("exit code = %d, want %d — nothing failed, the run was cut short",
+			code, domain.OneShotExitCode.Cancelled)
+	}
+	result := mtFindN(t, mtLines(t, &buf), "result", 1)[0]
+	if got, _ := result["status"].(string); got != string(domain.JSONStatusCancelled) {
+		t.Errorf("result.status = %q, want cancelled", got)
+	}
+	// And no assistant event was invented for a turn that never opened.
+	for _, typ := range []string{"assistant:start", "assistant:cancelled", "turn:prompt"} {
+		if n := len(mtFind(mtLines(t, &buf), typ)); n != 0 {
+			t.Errorf("%s lines = %d, want 0 — no turn ever started", typ, n)
+		}
+	}
+}
+
+// TestCancelBetweenTurnsReachesTheTerminalLine: cancellation between turns has no live
+// turn to record it, and the next BeginTurn would reset the turn-level fields anyway —
+// so it has to reach the run aggregate directly or it would vanish.
+func TestCancelBetweenTurnsReachesTheTerminalLine(t *testing.T) {
+	var buf bytes.Buffer
+	s := NewMultiTurn(&buf, mtClock())
+	runTurnOK(s, "first", "one")
+	s.CancelRun() // deadline expired while waiting for the next line
+
+	if code := s.Finish(); code != domain.OneShotExitCode.Cancelled {
+		t.Fatalf("exit code = %d, want %d", code, domain.OneShotExitCode.Cancelled)
+	}
+	result := mtFindN(t, mtLines(t, &buf), "result", 1)[0]
+	if got, _ := result["content"].(string); got != "one" {
+		t.Errorf("result.content = %q, want the completed turn's answer to survive", got)
+	}
+}
+
+// TestCancelRunStillRefusesToDowngradeARealError guards the other side of the same
+// change: an error that carries a MESSAGE says more than "cancelled" and must win.
+func TestCancelRunStillRefusesToDowngradeARealError(t *testing.T) {
+	var buf bytes.Buffer
+	s := NewMultiTurn(&buf, mtClock())
+	s.BeginTurn("breaks")
+	s.Error("boom")
+	s.SettleTurn()
+	s.CancelRun()
+
+	if code := s.Finish(); code != domain.OneShotExitCode.Error {
+		t.Fatalf("exit code = %d, want error to outrank a later cancellation", code)
+	}
+	result := mtFindN(t, mtLines(t, &buf), "result", 1)[0]
+	errObj, _ := result["error"].(map[string]any)
+	if errObj == nil || errObj["message"] != "boom" {
+		t.Errorf("result.error = %v, want the real failure's message preserved", result["error"])
 	}
 }
 

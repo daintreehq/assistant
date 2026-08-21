@@ -4,14 +4,15 @@ How to drive the assistant from a script, a test harness, or another agent — w
 a terminal, without the cockpit, and without rewriting the process environment to say
 what argv says perfectly well.
 
-There are four headless surfaces. Pick by how many turns you need, and by whether the
+There are five headless surfaces. Pick by how many turns you need, and by whether the
 caller is a script or another agent.
 
 | Surface | Turns | Output | Use it when |
 |---|---|---|---|
 | `mcp --stdio` | many | MCP tools | **another agent drives the assistant as a sub-agent** |
 | `--json <prompt>` | one | JSONL on stdout | scripting, CI gates, one-shot queries |
-| `--classic` + piped stdin | many | human-rendered | a multi-turn exchange in one process |
+| `--json --multi-turn` | many | JSONL on stdout | **testing a runbook that needs a short conversation** |
+| `--classic` + piped stdin | many | human-rendered | a multi-turn exchange you intend to read yourself |
 | `host --stdio` | many | NDJSON, protocol v2 | you are Daintree, or reimplementing it |
 
 If the caller is itself an agent — Claude Code, most immediately — reach for
@@ -342,7 +343,7 @@ from 0. Types:
 | `tool:call` | `id`, `name`, `args` | a call is starting |
 | `tool:result` | `id`, `name`, `ok`, `summary`, `error`, `auditId?`, `async?` | settled |
 | `info` / `warning` | `message` | non-fatal; **neither changes the exit code** |
-| `error` | `message` | fatal for this turn |
+| `error` | `message` | fatal for the turn it falls in — or for the run, when it lands outside any turn (setup failure, empty `--multi-turn` script) |
 | `turn:prompt` | `turn`, `prompt` | **`--multi-turn` only** — opens a turn |
 | `turn:end` | `turn`, `status` | **`--multi-turn` only** — closes it with that turn's outcome |
 | `command:result` | `command`, `handled`, `title`, `content`, `quit`, `conversationCleared` | **`--multi-turn` only** — a slash command ran between turns |
@@ -523,11 +524,18 @@ that flag's `-` spelling deliberately still means *all of stdin is one prompt*, 
 included, and `--multi-turn` does not re-cut it.
 
 **Slash commands stay available**, exactly as on `--classic` stdin — `/clear` most of
-all, so a script can reset the conversation between prompts. In this mode they reach the
-stream as a `command:result` line rather than as rendered text, since stdout carries
-only JSONL. `/clear` clears the *conversation*, never the transcript: already-emitted
-lines stand, `seq` keeps climbing, `stats` keep accumulating, and an earlier failed turn
-stays failed. `/quit` stops consuming input.
+all, so a script can reset between prompts. In this mode they reach the stream as a
+`command:result` line rather than as rendered text, since stdout carries only JSONL. A
+command line the catalog does not recognise still produces a `command:result`, with
+`handled: false` — which is how a script catches its own typos, since a mistyped
+command otherwise looks exactly like one that ran and said nothing. `/quit` stops
+consuming input.
+
+`/clear` resets **session state**, not just the conversation: it also drops watchers,
+async operations, the attention inbox and the cost ledger, which is worth knowing when
+it shares a run with `--run-scheduler`. What it never touches is the transcript —
+already-emitted lines stand, `seq` keeps climbing, `stats` keep accumulating, and an
+earlier failed turn stays failed. A script cannot launder its own failure by clearing.
 
 ### What the transcript looks like
 

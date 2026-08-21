@@ -28,7 +28,7 @@ func drain(ch <-chan lineResult) []lineResult {
 // as the end of the script. Suppressing it would leave each of them waiting on a closed
 // channel for a signal that never came.
 func TestStreamLinesSplitsOnNewlinesAndKeepsEmptyOnes(t *testing.T) {
-	got := drain(streamLines(context.Background(), strings.NewReader("one\n\ntwo\n")))
+	got := drain(streamLines(context.Background(), strings.NewReader("one\n\ntwo\n"), 0))
 	want := []string{"one\n", "\n", "two\n", ""}
 	if len(got) != len(want) {
 		t.Fatalf("got %d results (%v), want %d", len(got), got, len(want))
@@ -53,7 +53,7 @@ func TestStreamLinesSplitsOnNewlinesAndKeepsEmptyOnes(t *testing.T) {
 // prompt: a prompt file whose last line has no trailing newline arrives as (text, EOF),
 // and a reader that dropped it would run every prompt but the last.
 func TestStreamLinesDeliversAFinalUnterminatedLine(t *testing.T) {
-	got := drain(streamLines(context.Background(), strings.NewReader("first\nlast, no newline")))
+	got := drain(streamLines(context.Background(), strings.NewReader("first\nlast, no newline"), 0))
 	if len(got) != 2 {
 		t.Fatalf("got %d results (%v), want 2", len(got), got)
 	}
@@ -69,7 +69,7 @@ func TestStreamLinesDeliversAFinalUnterminatedLine(t *testing.T) {
 // an error beside the text: "the caller submitted nothing" and "there is no more input"
 // mean opposite things to the loops that consume this.
 func TestStreamLinesDistinguishesEOFFromAnEmptyLine(t *testing.T) {
-	got := drain(streamLines(context.Background(), strings.NewReader("\n")))
+	got := drain(streamLines(context.Background(), strings.NewReader("\n"), 0))
 	if len(got) != 2 {
 		t.Fatalf("got %d results (%v), want 2: the empty submission, then the EOF sentinel", len(got), got)
 	}
@@ -86,30 +86,68 @@ func TestStreamLinesDistinguishesEOFFromAnEmptyLine(t *testing.T) {
 	}
 }
 
-// TestStreamLinesReleasesTheConsumerOnCancel: an idle read has no deadline, so
-// cancellation is the only way a --timeout or a SIGTERM can free a waiting caller.
-func TestStreamLinesReleasesTheConsumerOnCancel(t *testing.T) {
-	// A reader that never returns, standing in for an idle pipe or a terminal.
-	pr, pw := io.Pipe()
-	t.Cleanup(func() { _ = pw.Close() })
-
+// TestStreamLinesReleasesTheGoroutineOnCancel pins the cancellation path that actually
+// exists: the select on the SEND. A reader goroutine holding a line nobody is receiving
+// would otherwise leak for the life of the process, one per abandoned stream.
+//
+// What this deliberately does NOT claim is that cancelling frees a goroutine blocked in
+// the read itself. It cannot: an idle pipe read has no deadline and returns when it
+// returns. That is why every consumer selects on ctx.Done() of its own accord (the
+// REPL's readLine, runJSONTurns' loop) rather than waiting for this channel to close —
+// and why the honest end-to-end proof of the bound is the real-binary timeout test in
+// internal/e2e, not anything assertable here.
+func TestStreamLinesReleasesTheGoroutineOnCancel(t *testing.T) {
+	// A line IS available, so the goroutine gets past the read and parks on the send
+	// with no receiver — the state this test is about.
 	ctx, cancel := context.WithCancel(context.Background())
-	lines := streamLines(ctx, pr)
-
-	consumed := make(chan struct{})
-	go func() {
-		defer close(consumed)
-		select {
-		case <-ctx.Done():
-		case <-lines:
-		}
-	}()
+	lines := streamLines(ctx, strings.NewReader("a line nobody reads\n"), 0)
 
 	cancel()
+
+	// The goroutine must notice and return, which closes the channel. Draining is safe
+	// either way: it may yield the buffered line first if the send won the race.
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		for range lines {
+		}
+	}()
 	select {
-	case <-consumed:
+	case <-closed:
 	case <-time.After(2 * time.Second):
-		t.Fatal("consumer was not released by cancellation")
+		t.Fatal("reader goroutine did not exit after cancellation; it leaks per abandoned stream")
+	}
+}
+
+// TestStreamLinesBoundsALine: a line has no natural end, so input containing no newline
+// at all — a binary file piped in by mistake, or /dev/zero — would otherwise accumulate
+// in memory until the process died. A --timeout cannot save it: cancellation frees the
+// consumer without interrupting the read already in flight.
+func TestStreamLinesBoundsALine(t *testing.T) {
+	const limit = 512
+	// Well past bufio's default 4096-byte buffer in the unbounded case, to prove the
+	// bound is what stops it rather than the buffer size.
+	huge := strings.Repeat("x", 20000)
+
+	got := drain(streamLines(context.Background(), strings.NewReader(huge), limit))
+	if len(got) == 0 {
+		t.Fatal("no result at all; the bound must REPORT, not silently truncate")
+	}
+	if got[0].err == nil || !strings.Contains(got[0].err.Error(), "larger than") {
+		t.Fatalf("result = (%q, %v), want an error naming the bound", got[0].line, got[0].err)
+	}
+	// A truncated prompt is worse than a rejected one: the run would look successful
+	// while the model was asked a different question.
+	if got[0].line != "" {
+		t.Errorf("line = %q, want empty — an over-long line is refused, never truncated", got[0].line)
+	}
+
+	// A line comfortably longer than bufio's internal buffer but WITHIN the bound still
+	// arrives whole, so the bound is a bound and not a buffer-size artefact.
+	long := strings.Repeat("y", 10000)
+	ok := drain(streamLines(context.Background(), strings.NewReader(long+"\n"), 1<<20))
+	if len(ok) == 0 || ok[0].line != long+"\n" {
+		t.Errorf("a 10000-byte line within the bound did not arrive intact (got %d results)", len(ok))
 	}
 }
 
@@ -117,7 +155,7 @@ func TestStreamLinesReleasesTheConsumerOnCancel(t *testing.T) {
 // would break every later reader in the same run.
 func TestStreamLinesNeverClosesTheReader(t *testing.T) {
 	r := &closeSpy{Reader: strings.NewReader("only line\n")}
-	drain(streamLines(context.Background(), r))
+	drain(streamLines(context.Background(), r, 0))
 	if r.closed {
 		t.Fatal("streamLines closed the reader; os.Stdin is the process's, not this read's")
 	}

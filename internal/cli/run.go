@@ -424,10 +424,18 @@ func RunOneShot(ctx context.Context, opts Options) int {
 	reportError := func(err error) {
 		if timedOut() {
 			msg := fmt.Sprintf("timed out after %s", opts.Timeout)
-			if sink != nil {
+			switch {
+			case sink != nil && opts.MultiTurn:
+				// A multi-turn stream promises that every assistant event sits inside a
+				// turn bracket, and a setup timeout has no turn to sit in. CancelRun moves
+				// the run's outcome without inventing an event, which is exactly the
+				// distinction it was built for.
+				sink.CancelRun()
+				sink.Warn(msg)
+			case sink != nil:
 				sink.AssistantCancelled("")
 				sink.Warn(msg)
-			} else {
+			default:
 				stderrR.Warn(msg)
 			}
 			return
@@ -461,7 +469,10 @@ func RunOneShot(ctx context.Context, opts Options) int {
 		switch {
 		case !opts.JSON:
 			bad = errors.New("--multi-turn requires --json")
-		case opts.HasPrompt || opts.PromptFile != "":
+		// opts.Prompt is checked as well as HasPrompt: they are independent fields, and a
+		// programmatic caller that set the text but not the flag would otherwise slip
+		// past the very check that exists to stop a prompt being silently ignored.
+		case opts.HasPrompt || opts.Prompt != "" || opts.PromptFile != "":
 			bad = errors.New("--multi-turn reads its prompts from stdin and cannot be combined with a prompt argument or --prompt-file")
 		}
 		if bad != nil {

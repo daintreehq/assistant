@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -19,10 +20,18 @@ import (
 // several new places (slash commands especially) where one could leak.
 func runMultiTurn(t *testing.T, fake *fakeBackend, stdinLines ...string) ([]jsonLine, int, string) {
 	t.Helper()
+	return runMultiTurnRaw(t, fake, strings.Join(stdinLines, "\n")+"\n")
+}
+
+// runMultiTurnRaw is runMultiTurn with the stdin bytes given EXACTLY, so a test can
+// drive the cases a []string cannot express — a final prompt with no trailing newline,
+// CRLF endings, or a stream that never ends.
+func runMultiTurnRaw(t *testing.T, fake *fakeBackend, stdin string, extraArgs ...string) ([]jsonLine, int, string) {
+	t.Helper()
 	bin := buildBinary(t)
 	dir := t.TempDir()
 
-	cmd := exec.Command(bin, "--json", "--multi-turn")
+	cmd := exec.Command(bin, append([]string{"--json", "--multi-turn"}, extraArgs...)...)
 	cmd.Env = append(cmd.Environ(),
 		"DAINTREE_BACKEND_URL="+fake.baseURL(),
 		"DAINTREE_ASSISTANT_STATE_DIR="+dir,
@@ -31,7 +40,7 @@ func runMultiTurn(t *testing.T, fake *fakeBackend, stdinLines ...string) ([]json
 		"DAINTREE_MCP_URL=", // no MCP → clean degraded local mode
 		"DAINTREE_MCP_TOKEN=",
 	)
-	cmd.Stdin = strings.NewReader(strings.Join(stdinLines, "\n") + "\n")
+	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -83,17 +92,24 @@ func linesOfType(lines []jsonLine, typ string) []jsonLine {
 	return out
 }
 
+// linesOfTypeN is linesOfType with the count asserted up front, so a wrong count FAILS
+// rather than panicking at the first index a line later.
+func linesOfTypeN(t *testing.T, lines []jsonLine, typ string, want int) []jsonLine {
+	t.Helper()
+	got := linesOfType(lines, typ)
+	if len(got) != want {
+		t.Fatalf("%s lines = %d, want %d", typ, len(got), want)
+	}
+	return got
+}
+
 // assertOneTranscript pins the invariants that make the whole stream ONE transcript:
 // a single session header first, a single terminal result last, and seq monotonic from
 // 0 across every line in between.
 func assertOneTranscript(t *testing.T, lines []jsonLine) {
 	t.Helper()
-	if n := len(linesOfType(lines, "session")); n != 1 {
-		t.Errorf("session lines = %d, want exactly 1 for the whole process", n)
-	}
-	if n := len(linesOfType(lines, "result")); n != 1 {
-		t.Errorf("result lines = %d, want exactly 1 (terminal, always last)", n)
-	}
+	linesOfTypeN(t, lines, "session", 1)
+	linesOfTypeN(t, lines, "result", 1)
 	if lines[0].Type != "session" {
 		t.Errorf("first line = %q, want session", lines[0].Type)
 	}
@@ -153,8 +169,8 @@ func TestBinaryJSONMultiTurnKeepsOneConversationAndOneTranscript(t *testing.T) {
 
 	// THE point of the feature: turn 2 was sent to the SAME conversation. The second
 	// request must replay turn 1's prompt and answer, which a fresh process cannot do.
-	if fake.calls < 2 {
-		t.Fatalf("backend respond calls = %d, want at least 2 (one per turn)", fake.calls)
+	if fake.callCount() < 2 {
+		t.Fatalf("backend respond calls = %d, want at least 2 (one per turn)", fake.callCount())
 	}
 	second := fake.requestMessages(1)
 	var roles, blob []string
@@ -172,7 +188,7 @@ func TestBinaryJSONMultiTurnKeepsOneConversationAndOneTranscript(t *testing.T) {
 	}
 
 	// One accounting block for the process, summed across BOTH turns.
-	result := linesOfType(lines, "result")[0]
+	result := linesOfTypeN(t, lines, "result", 1)[0]
 	stats, _ := result.raw["stats"].(map[string]any)
 	if got, _ := stats["rounds"].(float64); int(got) != 2 {
 		t.Errorf("stats.rounds = %v, want 2 (one per turn here)", stats["rounds"])
@@ -230,11 +246,7 @@ func TestBinaryJSONMultiTurnRunsSlashCommandsBetweenTurns(t *testing.T) {
 	assertOneTranscript(t, lines)
 	assertBracketsWellFormed(t, lines)
 
-	cmds := linesOfType(lines, "command:result")
-	if len(cmds) != 1 {
-		t.Fatalf("command:result lines = %d, want 1", len(cmds))
-	}
-	c := cmds[0].raw
+	c := linesOfTypeN(t, lines, "command:result", 1)[0].raw
 	if got, _ := c["command"].(string); got != "/clear" {
 		t.Errorf("command:result.command = %q, want %q", got, "/clear")
 	}
@@ -255,8 +267,8 @@ func TestBinaryJSONMultiTurnRunsSlashCommandsBetweenTurns(t *testing.T) {
 	}
 
 	// /clear cleared the CONVERSATION: the post-clear request must not replay it.
-	if fake.calls < 2 {
-		t.Fatalf("backend respond calls = %d, want at least 2", fake.calls)
+	if fake.callCount() < 2 {
+		t.Fatalf("backend respond calls = %d, want at least 2", fake.callCount())
 	}
 	var blob []string
 	for _, m := range fake.requestMessages(1) {
@@ -280,18 +292,209 @@ func TestBinaryJSONMultiTurnEmptyScriptFailsLoudly(t *testing.T) {
 	if exitCode != 1 {
 		t.Fatalf("exit code = %d, want 1 for a script with no prompts", exitCode)
 	}
-	if fake.calls != 0 {
-		t.Errorf("backend respond calls = %d, want 0 — nothing was asked", fake.calls)
+	if n := fake.callCount(); n != 0 {
+		t.Errorf("backend respond calls = %d, want 0 — nothing was asked", n)
 	}
-	result := linesOfType(lines, "result")
-	if len(result) != 1 {
-		t.Fatalf("result lines = %d, want 1", len(result))
-	}
+	result := linesOfTypeN(t, lines, "result", 1)
 	if got, _ := result[0].raw["status"].(string); got != "error" {
 		t.Errorf("result.status = %q, want error", got)
 	}
 	if n := len(linesOfType(lines, "turn:prompt")); n != 0 {
 		t.Errorf("turn:prompt lines = %d, want 0", n)
+	}
+	// The explicit diagnosis, not merely the sink's pessimistic default. Without these
+	// two assertions this test would still pass if the emptiness check were deleted
+	// outright — a fresh sink already defaults to error/exit 1, and there would still be
+	// no backend call and no bracket. What must be proved is that the run SAYS why.
+	errLine := linesOfTypeN(t, lines, "error", 1)[0]
+	msg, _ := errLine.raw["message"].(string)
+	if !strings.Contains(msg, "no prompts on stdin") {
+		t.Errorf("error.message = %q, want it to name the empty script", msg)
+	}
+	errObj, _ := result[0].raw["error"].(map[string]any)
+	if errObj == nil || !strings.Contains(fmt.Sprint(errObj["message"]), "no prompts on stdin") {
+		t.Errorf("result.error = %v, want the same diagnosis on the terminal line", result[0].raw["error"])
+	}
+}
+
+// TestBinaryJSONMultiTurnContinuesAfterAFailedTurn is the loop's continuation contract
+// at the level that can actually regress. The sink test proves the outcome ALGEBRA;
+// only this proves the loop keeps reading stdin after a turn fails — a regression that
+// stopped at the first failure would still satisfy every other test here.
+func TestBinaryJSONMultiTurnContinuesAfterAFailedTurn(t *testing.T) {
+	// The failing round is LAST, so the fake replays it for every later request. That is
+	// deliberate rather than incidental: the client RETRIES a failed round, and a
+	// one-round failure sandwiched between successes gets consumed by that retry — the
+	// turn then succeeds on the replayed next round and the test silently asserts
+	// nothing. A sticky failure fails the turn however many attempts it takes.
+	fake := newFakeBackend(t,
+		plainRound("Fine."),
+		sseRound{errorMessage: "upstream exploded"},
+	)
+	lines, exitCode, stderr := runMultiTurn(t, fake, "one", "two", "three")
+
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1 — a run with a failed turn is a failed run (stderr: %s)",
+			exitCode, stderr)
+	}
+	assertOneTranscript(t, lines)
+	assertBracketsWellFormed(t, lines)
+
+	// THE assertion: all three prompts ran. A regression that stopped reading stdin at
+	// the first failed turn would still satisfy every other test in this file.
+	linesOfTypeN(t, lines, "turn:prompt", 3)
+	if n := fake.callCount(); n < 3 {
+		t.Fatalf("backend respond calls = %d, want at least 3 — turn 3 never reached the backend", n)
+	}
+	ends := linesOfTypeN(t, lines, "turn:end", 3)
+	if got, _ := ends[0].raw["status"].(string); got != "success" {
+		t.Errorf("turn:end[0].status = %q, want success", got)
+	}
+	for _, i := range []int{1, 2} {
+		if got, _ := ends[i].raw["status"].(string); got != "error" {
+			t.Errorf("turn:end[%d].status = %q, want error", i, got)
+		}
+	}
+	result := linesOfTypeN(t, lines, "result", 1)[0]
+	if got, _ := result.raw["status"].(string); got != "error" {
+		t.Errorf("result.status = %q, want error", got)
+	}
+}
+
+// TestBinaryJSONMultiTurnRunsAFinalPromptWithNoTrailingNewline: a prompt file that does
+// not end in a newline is ordinary, and the last line of one is a real prompt. Dropping
+// it would run every prompt but the last — a failure that looks like a working run.
+func TestBinaryJSONMultiTurnRunsAFinalPromptWithNoTrailingNewline(t *testing.T) {
+	fake := newFakeBackend(t, plainRound("One."), plainRound("Two."))
+	lines, exitCode, stderr := runMultiTurnRaw(t, fake, "first\nsecond, unterminated")
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %s)", exitCode, stderr)
+	}
+	prompts := linesOfTypeN(t, lines, "turn:prompt", 2)
+	if got, _ := prompts[1].raw["prompt"].(string); got != "second, unterminated" {
+		t.Errorf("turn:prompt[1].prompt = %q, want the unterminated final line", got)
+	}
+	if n := fake.callCount(); n < 2 {
+		t.Fatalf("backend respond calls = %d, want 2 — the final prompt never ran", n)
+	}
+}
+
+// TestBinaryJSONMultiTurnHandlesCRLFAndUnknownCommands covers two script-authoring
+// realities at once: a prompt file written on Windows, and a typo.
+func TestBinaryJSONMultiTurnHandlesCRLFAndUnknownCommands(t *testing.T) {
+	fake := newFakeBackend(t, plainRound("Answered."))
+	lines, exitCode, stderr := runMultiTurnRaw(t, fake, "/claer\r\nask something\r\n")
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0 — an unknown command is not fatal (stderr: %s)", exitCode, stderr)
+	}
+	assertOneTranscript(t, lines)
+
+	// CRLF: the \r is trimmed, so the prompt reaches the backend clean.
+	prompts := linesOfTypeN(t, lines, "turn:prompt", 1)
+	if got, _ := prompts[0].raw["prompt"].(string); got != "ask something" {
+		t.Errorf("turn:prompt.prompt = %q, want the CRLF stripped", got)
+	}
+
+	// The typo is machine-detectable. This is the field's entire reason to exist: the
+	// handler still "handles" an unknown command (the cockpit gets a card), so only a
+	// registry lookup can tell a script that /claer is not a command at all.
+	c := linesOfTypeN(t, lines, "command:result", 1)[0].raw
+	if got, _ := c["command"].(string); got != "/claer" {
+		t.Errorf("command:result.command = %q, want %q", got, "/claer")
+	}
+	if handled, _ := c["handled"].(bool); handled {
+		t.Errorf("command:result.handled = true for /claer, want false — a typo must be detectable")
+	}
+}
+
+// TestBinaryJSONMultiTurnQuitStopsTheScript: /quit ends input consumption, so the
+// prompts after it must never reach the backend.
+func TestBinaryJSONMultiTurnQuitStopsTheScript(t *testing.T) {
+	fake := newFakeBackend(t, plainRound("Only ", "answer."))
+	lines, exitCode, stderr := runMultiTurn(t, fake, "ask this", "/quit", "never asked")
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %s)", exitCode, stderr)
+	}
+	assertOneTranscript(t, lines)
+	linesOfTypeN(t, lines, "turn:prompt", 1)
+	if n := fake.callCount(); n != 1 {
+		t.Errorf("backend respond calls = %d, want 1 — /quit must stop the script", n)
+	}
+	c := linesOfTypeN(t, lines, "command:result", 1)[0].raw
+	if quit, _ := c["quit"].(bool); !quit {
+		t.Errorf("command:result.quit = false for /quit, want true")
+	}
+}
+
+// TestBinaryJSONMultiTurnTimeoutBeforeAnyPromptReportsCancelled is the regression for
+// the sharpest edge of the bound: it expires while the loop is still waiting for the
+// FIRST line. Nothing failed and nothing ran, so the run is cancelled (exit 2) — not the
+// error/exit-1 that a pessimistic default sentinel would otherwise report, and not the
+// "no prompts on stdin" complaint about a script that may well have had some.
+func TestBinaryJSONMultiTurnTimeoutBeforeAnyPromptReportsCancelled(t *testing.T) {
+	fake := newFakeBackend(t, plainRound("never asked"))
+	// A pipe that is never written to and never closed: stdin exists but no line arrives.
+	//
+	// os.Pipe, NOT io.Pipe. exec hands a *os.File straight to the child as a file
+	// descriptor, but wraps any other reader in a copying goroutine that Wait blocks on —
+	// and that goroutine would never finish here, so Run would hang forever after the
+	// child had already exited, turning a 3-second test into a suite timeout.
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	t.Cleanup(func() { _ = pw.Close(); _ = pr.Close() })
+
+	bin := buildBinary(t)
+	cmd := exec.Command(bin, "--json", "--multi-turn", "--timeout", "3s")
+	cmd.Env = append(cmd.Environ(),
+		"DAINTREE_BACKEND_URL="+fake.baseURL(),
+		"DAINTREE_ASSISTANT_STATE_DIR="+t.TempDir(),
+		"DAINTREE_ASSISTANT_TIER=operator",
+		"DAINTREE_ASSISTANT_DEBUG_LOG=0",
+		"DAINTREE_MCP_URL=",
+		"DAINTREE_MCP_TOKEN=",
+	)
+	cmd.Stdin = pr
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+
+	exitCode := 0
+	if err := cmd.Run(); err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("run binary: %v (stderr: %s)", err, stderr.String())
+		}
+		exitCode = ee.ExitCode()
+	}
+	if exitCode != 2 {
+		t.Fatalf("exit code = %d, want 2 (cancelled) — nothing failed, the bound expired.\nstdout:\n%s\nstderr:\n%s",
+			exitCode, stdout.String(), stderr.String())
+	}
+
+	var result map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			t.Fatalf("non-JSON line on stdout: %q", line)
+		}
+		if raw["type"] == "result" {
+			result = raw
+		}
+		// An assistant event outside a bracket would break the transcript contract, and
+		// a setup/idle timeout is exactly where one used to be invented.
+		if raw["type"] == "assistant:cancelled" || raw["type"] == "assistant:start" {
+			t.Errorf("%v emitted with no turn ever opened:\n%s", raw["type"], stdout.String())
+		}
+	}
+	if result == nil {
+		t.Fatalf("no result line on stdout:\n%s", stdout.String())
+	}
+	if got, _ := result["status"].(string); got != "cancelled" {
+		t.Errorf("result.status = %q, want cancelled", got)
 	}
 }
 

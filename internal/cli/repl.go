@@ -37,8 +37,9 @@ func clearHostTerminal() {
 func startRepl(ctx context.Context, a *app.App) int {
 	r := render.Stdout()
 	// Shared with the --json --multi-turn loop (internal/cli/lineinput.go): the same
-	// stdin contract drives both, so it is stated once.
-	lines := streamLines(ctx, os.Stdin)
+	// stdin contract drives both, so it is stated once. Unbounded (limit 0) keeps the
+	// REPL exactly as it was — an interactive line has a human typing the end of it.
+	lines := streamLines(ctx, os.Stdin, 0)
 
 	// Keep the read error alongside the line so EOF is distinguishable from an
 	// intentionally empty submission. Reading on a goroutine also lets SIGTERM or

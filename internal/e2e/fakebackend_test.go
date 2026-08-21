@@ -49,6 +49,11 @@ type sseRound struct {
 	// so a test exercises the client's decode and the session's projection rather than
 	// a pre-shaped struct.
 	skills map[string]any
+	// errorMessage, when non-empty, ends the round with a terminal `error` event instead
+	// of `done` — a backend-side failure mid-stream, which is how a real turn fails. The
+	// meta event still goes out first, because the client requires it before anything
+	// else and a failure that skipped it would be testing the wrong error path.
+	errorMessage string
 }
 
 // defaultSkillsBlock is the "selector did not run" block every round sends unless the
@@ -207,6 +212,10 @@ func (f *fakeBackend) handleRespond(w http.ResponseWriter, r *http.Request) {
 			"total_tokens":      round.usage.total,
 			"cached_tokens":     round.usage.cached,
 		}
+	}
+	if round.errorMessage != "" {
+		writeEvent("error", map[string]any{"message": round.errorMessage, "type": "server_error"})
+		return
 	}
 	writeEvent("done", map[string]any{"finish_reason": finish, "usage": usage})
 }
