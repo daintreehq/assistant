@@ -227,3 +227,15 @@ func isFailureReply(reply string) bool {
 		reply == domain.CancelledReply ||
 		(len(reply) >= 2 && reply[0] == '[')
 }
+
+// switchBackend applies a `/backend` selection and returns the card text. It runs on the
+// event loop rather than off it, deliberately: the swap is a pointer store and a small
+// file write, not a network call, so there is nothing to wait on and routing it through
+// a command future would only add a frame where the sheet is gone and nothing has
+// replaced it.
+func (c *controller) switchBackend(target string) string {
+	if c.app == nil {
+		return "No backend to switch."
+	}
+	return commands.BackendSwitchText(c.app, target)
+}

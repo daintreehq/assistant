@@ -33,12 +33,22 @@ func renderQuestion(th theme.Theme, q *pendingQuestion, width int) string {
 	// Title — Daintree's own voice (accent), led by the decision glyph. The blank line
 	// after it gives the question breathing room so it reads as the prompt, not as the
 	// second row of a dense block.
-	b.WriteString(th.Accent().Render(truncateCells(th.Glyphs.Approval+" Daintree needs a decision", width)))
+	// A tool-driven question is Daintree asking; a picker the user opened is not, and
+	// saying "Daintree needs a decision" over a sheet they just summoned reads as the
+	// assistant having interrupted them.
+	title := th.Glyphs.Approval + " Daintree needs a decision"
+	if q.local != nil {
+		title = th.Glyphs.Approval + " " + req.Question
+	}
+	b.WriteString(th.Accent().Render(truncateCells(title, width)))
 	b.WriteString("\n\n")
 
-	// The question itself, wrapped and capped.
-	b.WriteString(th.Body().Render(capWrap(req.Question, width, maxQuestionRows)))
-	b.WriteByte('\n')
+	// The question itself, wrapped and capped. Skipped when it is already the title
+	// (a user-opened picker) so the same line does not appear twice.
+	if q.local == nil {
+		b.WriteString(th.Body().Render(capWrap(req.Question, width, maxQuestionRows)))
+		b.WriteByte('\n')
+	}
 
 	// The option list is framed by a solid rule above and below. This is footer-only
 	// chrome, re-rendered at the live width every frame, so a full-width rule can't go
@@ -83,6 +93,11 @@ func renderQuestion(th theme.Theme, q *pendingQuestion, width int) string {
 	// Hint row — spells the answerable letter range so "A–<last>" is always accurate.
 	last := req.Options[len(req.Options)-1].Label
 	hint := "↑/↓ select · A–" + last + " answer · Enter confirm · Esc cancel"
+	if q.local != nil {
+		// "cancel" means "cancel the turn" everywhere else in this cockpit. Here it only
+		// closes the sheet, and using the loaded word would imply work was thrown away.
+		hint = "↑/↓ select · A–" + last + " answer · Enter confirm · Esc dismiss"
+	}
 	b.WriteString(th.Dim().Render(truncateCells(hint, width)))
 	return b.String()
 }

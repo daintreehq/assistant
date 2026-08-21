@@ -26,10 +26,10 @@ guarantees, and the SQLite schema is a single clean baseline rather than a migra
   whose credential it just probed, and routes a rejection to whoever can fix it — the
   backend's own is a backend-side problem, not yours. A `bearer token` row appears only
   when `DAINTREE_API_KEY` is actually set.
-- **`/backend` replaces `/login`'s endpoint picker.** With no argument it lists the
-  endpoints and marks the live one — since the sign-in went away, nothing else named it
-  on demand. With a target (`local`, `official`, a number, or a URL) it switches in place
-  and **remembers the choice across restarts**, in a 0600 `endpoint.json` at the per-user
+- **`/backend` replaces `/login`'s endpoint picker.** In the cockpit, bare `/backend`
+  opens a selection sheet — ↑/↓, letter keys, Enter — marking the live endpoint. With a
+  target (`local`, `official`, a number, or a URL) it switches straight away. Either path
+  **remembers the choice across restarts**, in a 0600 `endpoint.json` at the per-user
   state root holding only `{backend_url}`. `/backend default` forgets it.
   `DAINTREE_BACKEND_URL` and `--backend-url` still outrank it, so a harness is never
   redirected — and `/backend` says when that is happening, rather than looking broken.

@@ -53,6 +53,19 @@ type pendingQuestion struct {
 	selected int
 	reply    chan questionReply
 	shownAt  int64
+	// local, when non-nil, marks a sheet the USER opened (a picker command like
+	// /backend) rather than one a blocked tool goroutine is waiting on. It changes
+	// three things, and every one of them matters:
+	//
+	//   - reply is nil, so nothing is unblocked on answer or cancel;
+	//   - Esc DISMISSES instead of cancelling the turn, because no turn is waiting on
+	//     this decision and killing a running one for a picker the user opened by hand
+	//     would be a destructive surprise;
+	//   - answering runs this function and renders its result as a command card,
+	//     instead of resuming a tool round.
+	//
+	// It returns the card to show (title, body).
+	local func(index int) (string, string)
 }
 
 // Model is the root cockpit model.

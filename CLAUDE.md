@@ -58,9 +58,13 @@ the local one (`http://127.0.0.1:8473`) you get by running `../assistant-backend
 `--backend-url` → `DAINTREE_BACKEND_URL` (trusted env) → the endpoint **stored by
 `/backend`** (`internal/config/endpoint.go`, a 0600 `endpoint.json` at the per-user state
 root, holding ONLY `{backend_url}` — it is a preference, never a credential) → the
-default. `/backend` with no argument lists and marks the live one; with a target
-(`local`, `official`, a number, or a URL) it swaps the `Swappable` in place AND persists;
-`/backend default` forgets. Env deliberately outranks the stored choice so a harness or
+default. In the cockpit `/backend` with no argument opens a
+SELECTION SHEET (↑/↓, letter keys, Enter) reusing the question sheet the model's
+`user.askMultipleChoice` uses — `pendingQuestion.local` marks it user-opened so Esc
+dismisses instead of cancelling the turn, and nothing blocks on a reply channel. With a
+target (`local`, `official`, a number, or a URL) it swaps the `Swappable` in place AND
+persists; `/backend default` forgets. The classic REPL, which has no sheet, prints the
+list instead. Env deliberately outranks the stored choice so a harness or
 CI is never silently redirected — and because that would otherwise look like a broken
 feature, `cfg.BackendURLPinnedByEnv` makes `/backend` say so.
 

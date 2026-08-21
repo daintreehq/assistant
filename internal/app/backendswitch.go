@@ -184,3 +184,10 @@ func (a *App) ResetBackendURL() (string, error) {
 	}
 	return target, nil
 }
+
+// HasStoredBackendURL reports whether a choice is currently remembered. The picker uses
+// it to offer "forget it" only when there is something to forget, so the option never
+// appears as a no-op.
+func (a *App) HasStoredBackendURL() bool {
+	return config.LoadBackendURL(a.snapshotConfig().EndpointPath) != ""
+}

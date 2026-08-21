@@ -596,25 +596,19 @@ func modelsText(a *app.App) string {
 		padRight("model", 8) + ": daintree-assistant"
 }
 
-// backendText powers /backend: a switcher with no argument, a switch with one.
-//
-// The bare form LISTS rather than doing anything, which is the whole reason it is a
-// switcher and not just a setter: since the sign-in went away nothing else names the
-// live endpoint on demand, and "which backend am I talking to" is asked far more often
-// than "change it".
-//
-// The choice PERSISTS: it is a developer's standing preference (local day to day, the
-// deployed one to compare against), not a per-session toggle. `/backend default` forgets
-// it again.
-//
-// The cockpit refuses this mid-turn before reaching here (see ui.onSubmit): a turn is
-// multi-round, and swapping between rounds would send the next round to a different
-// endpoint carrying a state token the previous one signed.
 func backendText(a *app.App, arg string) string {
 	arg = strings.TrimSpace(arg)
 	if arg == "" {
 		return a.DescribeBackendChoices()
 	}
+	return BackendSwitchText(a, arg)
+}
+
+// BackendSwitchText applies a backend selection and renders the result. Exported so the
+// cockpit's picker sheet reports in exactly the same words as the typed command — two
+// surfaces describing the same action differently is how a user ends up unsure whether
+// the sheet did the same thing.
+func BackendSwitchText(a *app.App, arg string) string {
 	var (
 		target string
 		err    error
@@ -638,6 +632,7 @@ func backendText(a *app.App, arg string) string {
 	// "from your next message", not "switched": a turn already streaming finishes on the
 	// client it started on, so claiming the change is live would be false for a few more
 	// seconds in exactly the case someone would notice.
+	//
 	// The two outcomes say opposite things about the FILE, and saying the wrong one is
 	// worse than saying nothing: "remembered" after a reset would leave the user
 	// believing a preference exists that was just deleted.

@@ -246,13 +246,21 @@ func (m Model) onSubmit(text string) (tea.Model, tea.Cmd) {
 		// /backend is REFUSED while a turn runs, and only the cockpit can know that. A
 		// turn is multi-round (Session re-calls RespondStream after every tool round),
 		// so swapping between rounds would send the next round to a different endpoint
-		// carrying a `state` token the previous one signed. The bare listing form is
-		// harmless, so only an actual switch is blocked.
-		if m.inFlight && isBackendSwitch(text) {
+		// carrying a `state` token the previous one signed. This covers the PICKER too:
+		// opening a chooser that cannot act on its choice is worse than refusing it.
+		if m.inFlight && isBackendCommand(text) {
 			return m.onCommandComplete(CommandCompleteMsg{
 				Title: "Backend",
 				Text:  "A turn is running. Switching endpoints mid-turn would send its next round somewhere that cannot read it — wait for this one to finish.",
 			})
+		}
+		// Bare /backend opens the selection sheet. Intercepted here for the same reason
+		// as /approvals: the sheet is cockpit state, which the commands package — which
+		// only sees *app.App — cannot touch. With an argument it falls through to the
+		// normal handler, so a scripted or typed `/backend local` still works and the
+		// classic REPL (which has no sheet) keeps the printed list.
+		if isBackendCommand(text) && !isBackendSwitch(text) {
+			return m.openBackendPicker()
 		}
 		// Slash command: run off the loop (some hit the model). Keep single-flight
 		// independent — a command isn't a model turn. Track it so the composer shows a
@@ -940,6 +948,13 @@ func (m Model) answerQuestion(idx int) (tea.Model, tea.Cmd) {
 // with a cancel reply, then cancels the in-flight turn — a required decision the user
 // declines to make ends the work, mirroring Esc-to-cancel elsewhere.
 func (m Model) cancelQuestion() (tea.Model, tea.Cmd) {
+	// A picker the USER opened is dismissed, never escalated. Nothing is blocked on it,
+	// so cancelling a running turn because someone changed their mind about /backend
+	// would destroy work they never offered up.
+	if q := m.pendingQuestion; q != nil && q.local != nil {
+		m.pendingQuestion = nil
+		return m.afterStateChange(nil)
+	}
 	m.replyQuestion(questionReply{cancelled: true})
 	m.pendingQuestion = nil
 	return m.onCancel()
@@ -950,6 +965,14 @@ func (m Model) cancelQuestion() (tea.Model, tea.Cmd) {
 func (m Model) resolveQuestion(r questionReply) (tea.Model, tea.Cmd) {
 	if m.pendingQuestion == nil {
 		return m, nil
+	}
+	// A user-opened picker runs its action and reports as a command card. It must not
+	// touch the turn phase below: there is no tool round to resume, and stamping
+	// PhaseToolRunning on an idle session would show a turn that is not happening.
+	if fn := m.pendingQuestion.local; fn != nil {
+		m.pendingQuestion = nil
+		title, text := fn(r.index)
+		return m.onCommandComplete(CommandCompleteMsg{Title: title, Text: text})
 	}
 	m.replyQuestion(r)
 	m.pendingQuestion = nil
@@ -963,7 +986,7 @@ func (m Model) resolveQuestion(r questionReply) (tea.Model, tea.Cmd) {
 // replyQuestion sends the reply on the pending question's channel (non-blocking — the
 // channel is buffered 1 and a second send is a harmless no-op).
 func (m *Model) replyQuestion(r questionReply) {
-	if m.pendingQuestion == nil {
+	if m.pendingQuestion == nil || m.pendingQuestion.reply == nil {
 		return
 	}
 	select {
@@ -1455,8 +1478,15 @@ func (m *Model) sealedBlock(i int) ScrollbackBlock {
 	return ScrollbackBlock{ID: cell.ID(), Kind: kind, Rendered: rendered, Plain: stripAnsi(rendered), Width: w}
 }
 
-// isBackendSwitch reports whether a submitted command is `/backend` WITH an argument —
-// i.e. one that would actually swap the client, as opposed to the bare listing form.
+// isBackendCommand reports whether a submitted command is `/backend`, with or without
+// an argument.
+func isBackendCommand(text string) bool {
+	fields := strings.Fields(strings.TrimPrefix(strings.TrimSpace(text), "/"))
+	return len(fields) > 0 && strings.EqualFold(fields[0], "backend")
+}
+
+// isBackendSwitch narrows that to the form carrying an argument — the one that acts
+// immediately rather than opening the picker.
 func isBackendSwitch(text string) bool {
 	fields := strings.Fields(strings.TrimPrefix(strings.TrimSpace(text), "/"))
 	return len(fields) > 1 && strings.EqualFold(fields[0], "backend")
