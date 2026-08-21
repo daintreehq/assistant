@@ -62,11 +62,12 @@ const longURL = "https://github.com/daintreehq/daintree/issues/11874#issuecommen
 // OSC-8 span pointing at the COMPLETE URL, all sharing one id. If a glamour or
 // lipgloss bump ever stops reopening the span per row, this fails.
 //
-// KNOWN GAP, upstream: a URI containing ';' defeats the OSC parsing in lipgloss's
-// own dependency (it splits the sequence on every ';' and requires exactly three
-// fields), so such a link is tracked on its first row only and the rows after it
-// carry no target at all. Nothing in this package can close that, so this test
-// uses a semicolon-free URL rather than asserting a behaviour we cannot deliver.
+// The URL here is semicolon-free ON PURPOSE: that keeps this test on the plain
+// path, where lipgloss's WrapWriter does the reopening itself, so a regression
+// there fails HERE rather than being masked by our own repair. A URI containing
+// ';' defeats lipgloss's OSC parser (it splits on every ';' and then demands
+// exactly three fields), which is why reopenAcrossRows exists — do not remove it,
+// TestSemicolonURLWrapsAsOneHyperlink pins that half of the guarantee.
 func TestLongURLWrapsAsOneHyperlink(t *testing.T) {
 	r := New(darkTheme())
 	out := r.Render("See "+longURL+" ok", 20, false)
