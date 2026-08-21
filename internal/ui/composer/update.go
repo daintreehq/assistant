@@ -129,8 +129,8 @@ func (m *Model) handleKey(k keyMsg) Outcome {
 	}
 
 	// 3) Slash-palette navigation. While the palette has MULTIPLE matches, ↑/↓ move
-	// the highlighted row. A single exact match leaves those keys to history/line motion, so
-	// recalling "/status" does not trap the user on that history entry. Shift-Tab still moves
+	// the highlighted row. A single match — exact or not — leaves those keys to history/line
+	// motion, so recalling "/status" does not trap the user on that history entry. Shift-Tab still moves
 	// (or harmlessly wraps a single row), and Tab ACCEPTS the highlight (fills "<cmd> ").
 	if sugg := m.activeSuggestions(); len(sugg) > 0 {
 		switch {
