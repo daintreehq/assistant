@@ -52,6 +52,24 @@ const (
 	// mastheadText is the distinctive masthead substring committed once per scrollback
 	// commit. Mirrors internal/ui render_chrome.go renderMasthead.
 	mastheadText = "Daintree Assistant"
+	// noDaemonEnv is load-bearing isolation for every PTY cockpit launch, not hygiene.
+	//
+	// A normal interactive launch takes the project owner lease via
+	// supervisor.AcquireOwnership with SpawnDaemon=true, so when no supervisor is
+	// running it spawns `<self> daemon` DETACHED (Setsid, own session) against the
+	// same DAINTREE_ASSISTANT_STATE_DIR — here, the test's t.TempDir(). That daemon
+	// deliberately OUTLIVES the cockpit: the instant /quit releases the owner flock it
+	// re-acquires it, reopens state.db (recreating state.db-wal / state.db-shm) and
+	// starts ticking the 3s scheduler + 1s coordinator. By then the test body has
+	// returned, so Go's t.TempDir() cleanup is calling RemoveAll on a directory a live
+	// process is still creating files in — which surfaces as a nondeterministic
+	// "TempDir RemoveAll cleanup: … directory not empty" failure on a DIFFERENT test
+	// each run, always AFTER that test's own assertions passed. (It also leaks one
+	// 15-minute-idle daemon per test onto the machine.)
+	//
+	// These tests exercise cockpit RENDERING, not supervision handover, so they take
+	// the documented kill switch (internal/cli.NoDaemonEnv) and run solo on the flock.
+	noDaemonEnv = "DAINTREE_ASSISTANT_NO_DAEMON=1"
 )
 
 func TestPTYCockpitRenderHarness(t *testing.T) {
@@ -118,7 +136,8 @@ func TestPTYCockpitRenderHarness(t *testing.T) {
 		"DAINTREE_ASSISTANT_TIER=operator",
 		"DAINTREE_ASSISTANT_DEBUG_LOG=0",
 		"DAINTREE_ASSISTANT_NO_SPLASH=1", // skip the raw-ANSI boot splash for stable timing
-		"DAINTREE_MCP_URL=",              // no MCP → clean degraded local mode
+		noDaemonEnv,
+		"DAINTREE_MCP_URL=", // no MCP → clean degraded local mode
 		"DAINTREE_MCP_TOKEN=",
 		"TERM=xterm-256color",
 	)
@@ -390,7 +409,7 @@ func runSplashConnectKeepsFooter(
 		"DAINTREE_ASSISTANT_STATE_DIR="+stateDir,
 		"DAINTREE_ASSISTANT_LOG_DIR="+stateDir+"/logs",
 		"DAINTREE_ASSISTANT_DEBUG_LOG=1", // matches the reported logging-badge geometry
-		"DAINTREE_ASSISTANT_NO_DAEMON=1", // isolate this process's single boot attempt
+		noDaemonEnv,                      // isolate this process's single boot attempt
 		"DAINTREE_ASSISTANT_TIER=system",
 		"DAINTREE_MCP_URL="+mcpServer.url(),
 		"DAINTREE_MCP_TOKEN=fake-token",
@@ -630,6 +649,7 @@ func TestPTYLargePasteScrollback(t *testing.T) {
 		"DAINTREE_ASSISTANT_TIER=operator",
 		"DAINTREE_ASSISTANT_DEBUG_LOG=0",
 		"DAINTREE_ASSISTANT_NO_SPLASH=1",
+		noDaemonEnv,
 		"DAINTREE_MCP_URL=",
 		"DAINTREE_MCP_TOKEN=",
 		"TERM=xterm-256color",
@@ -818,6 +838,7 @@ func TestPTYStreamingMarkdownNoChurn(t *testing.T) {
 		"DAINTREE_ASSISTANT_TIER=operator",
 		"DAINTREE_ASSISTANT_DEBUG_LOG=0",
 		"DAINTREE_ASSISTANT_NO_SPLASH=1",
+		noDaemonEnv,
 		"DAINTREE_MCP_URL=",
 		"DAINTREE_MCP_TOKEN=",
 		"TERM=xterm-256color",
@@ -1002,6 +1023,7 @@ func TestPTYStreamingBulletListNoChurn(t *testing.T) {
 		"DAINTREE_ASSISTANT_TIER=operator",
 		"DAINTREE_ASSISTANT_DEBUG_LOG=0",
 		"DAINTREE_ASSISTANT_NO_SPLASH=1",
+		noDaemonEnv,
 		"DAINTREE_MCP_URL=",
 		"DAINTREE_MCP_TOKEN=",
 		"TERM=xterm-256color",

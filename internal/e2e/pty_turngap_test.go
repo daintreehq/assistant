@@ -74,6 +74,7 @@ func TestPTYGapBetweenConsecutiveTurns(t *testing.T) {
 		"DAINTREE_ASSISTANT_TIER=operator",
 		"DAINTREE_ASSISTANT_DEBUG_LOG=0",
 		"DAINTREE_ASSISTANT_NO_SPLASH=1",
+		noDaemonEnv,
 		"DAINTREE_MCP_URL=",
 		"DAINTREE_MCP_TOKEN=",
 		"TERM=xterm-256color",
