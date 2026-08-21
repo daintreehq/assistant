@@ -665,6 +665,13 @@ func TestRunEventsReachTheCaller(t *testing.T) {
 	fake.script = func(sink agent.EventSink) {
 		sink.AssistantStart()
 		sink.SkillLoaded([]string{"Orchestration"})
+		sink.SkillDecision(agent.SkillDecisionEvent{
+			Active: []agent.SkillRef{
+				{ID: "orchestration", Title: "Orchestration"},
+				{ID: "bare_id"}, // no title: falls back to the id, never a blank row
+			},
+			Selector: agent.SkillSelectorOutcome{Ran: true, Degraded: true},
+		})
 		sink.ToolCall(agent.ToolCallEvent{ID: "c1", Name: "terminal.list"})
 		sink.ToolResult(agent.ToolResultEvent{ID: "c1", Name: "terminal.list", Result: domain.Ok("2 terminals", nil)})
 		sink.ToolCall(agent.ToolCallEvent{ID: "c2", Name: "artifact.read"})
@@ -687,11 +694,36 @@ func TestRunEventsReachTheCaller(t *testing.T) {
 	for _, e := range run.Events {
 		seen[e.Type]++
 	}
-	for _, want := range []string{"assistant:start", "skill:loaded", "tool:call", "tool:result", "assistant:end"} {
+	for _, want := range []string{"assistant:start", "skill:loaded", "skill:decision", "tool:call", "tool:result", "assistant:end"} {
 		if seen[want] == 0 {
 			t.Errorf("no %q event in the recorded timeline: %+v", want, run.Events)
 		}
 	}
+	// The decision's projection: the ACTIVE set (not the delta) plus the one selector
+	// fact a driving agent can act on. Ids and the rest of the telemetry stay on the
+	// --json stream — this transcript is a digest, which is also why it drops tool args.
+	var decision *Event
+	for i := range run.Events {
+		if run.Events[i].Type == "skill:decision" {
+			decision = &run.Events[i]
+		}
+	}
+	if decision == nil {
+		t.Fatalf("no skill:decision event recorded: %+v", run.Events)
+	}
+	if len(decision.Skills) != 2 || decision.Skills[0] != "Orchestration" || decision.Skills[1] != "bare_id" {
+		t.Errorf("decision skills = %v, want the active titles with an id fallback", decision.Skills)
+	}
+	if !decision.SkillsDegraded {
+		t.Error("skillsDegraded lost; a fail-open round would read as a clean one")
+	}
+	// The marker is omitted everywhere else, so it can never be read off an unrelated event.
+	for _, e := range run.Events {
+		if e.Type != "skill:decision" && e.SkillsDegraded {
+			t.Errorf("skillsDegraded set on a %q event", e.Type)
+		}
+	}
+
 	if run.Stats.Rounds != 1 || run.Stats.ToolCalls != 2 || run.Stats.ToolErrors != 1 {
 		t.Errorf("stats = %+v, want rounds=1 toolCalls=2 toolErrors=1", run.Stats)
 	}

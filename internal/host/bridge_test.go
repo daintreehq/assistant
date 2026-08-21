@@ -140,6 +140,31 @@ func TestBridgeTurnLifecycle(t *testing.T) {
 	}
 }
 
+// Neither backend-skill event has a host-protocol channel. Pinned alongside the
+// turn-lifecycle assertions because the decision event carries the richest payload of the
+// two, and "just forward it" is the reflex this guards against — a host that wants it
+// reads the --json stream or the run transcript.
+func TestBridgeSkillEventsPostNothing(t *testing.T) {
+	c := &collector{}
+	b := NewBridge(BridgeOptions{SessionID: "s", Post: c.post})
+
+	b.StartExchange()
+	b.AssistantStart()
+	b.SkillLoaded([]string{"Multi-agent orchestration"})
+	b.SkillDecision(agent.SkillDecisionEvent{
+		Active:   []agent.SkillRef{{ID: "multi_agent", Title: "Multi-agent orchestration"}},
+		Selector: agent.SkillSelectorOutcome{Ran: true, Degraded: true},
+	})
+	b.AssistantToken("hi")
+	b.AssistantEnd("answer", "")
+
+	got := c.types()
+	want := []string{"turn:start", "turn:end", "turn:start", "turn:token", "turn:end"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("skill events reached the host protocol: got %v want %v", got, want)
+	}
+}
+
 func TestBridgeInterruptSuppresses(t *testing.T) {
 	c := &collector{}
 	b := NewBridge(BridgeOptions{SessionID: "s", Post: c.post})

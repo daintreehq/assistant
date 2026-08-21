@@ -216,7 +216,8 @@ from 0. Types:
 | `assistant:end` | `content` | final answer (authoritative) |
 | `assistant:cancelled` | `content` | aborted; the streamed buffer is dropped |
 | `user:interjection` | `text` | a prompt folded into the running turn |
-| `skill:loaded` | `titles[]` | the backend's selector loaded runbooks |
+| `skill:loaded` | `titles[]` | the backend's selector loaded runbooks (early cue, not authoritative) |
+| `skill:decision` | `active[]`, `newlyLoaded[]`, `selector` | the committed skill outcome for a round |
 | `tool:call` | `id`, `name`, `args` | a call is starting |
 | `tool:result` | `id`, `name`, `ok`, `summary`, `error`, `auditId?`, `async?` | settled |
 | `info` / `warning` | `message` | non-fatal; **neither changes the exit code** |
@@ -225,6 +226,33 @@ from 0. Types:
 
 **Do not treat a `warning` as failure, and do not decide the outcome from an `error`
 line.** Gate on the terminal `result` envelope — it is the only authority.
+
+`skill:decision` is what a skill test asserts on. It is emitted once per round that
+reaches committed metadata — **including rounds where nothing new loaded**, so the active
+set is reported even when it did not change:
+
+```json
+{"type":"skill:decision","ts":1787300000002,"seq":9,
+ "active":[{"id":"multi_agent","title":"Multi-agent orchestration"},
+           {"id":"daintree_foundation","title":"Daintree orchestration foundation"}],
+ "newlyLoaded":[{"id":"multi_agent","title":"Multi-agent orchestration"}],
+ "selector":{"ran":true,"degraded":false,"taskType":"orchestration",
+             "confidence":0.96,"reason":"coordinating multiple agents"}}
+```
+
+`active` and `newlyLoaded` are always arrays, never `null`, and every entry carries both
+`id` and `title` exactly as the backend sent them. All five `selector` keys are always
+present; `confidence` is `null` when the selector reported none, and `taskType`/`reason`
+are `""` rather than absent.
+
+**`selector.degraded` is the field to gate on.** A degraded selector fails open and reuses
+the previous round's active set, so a run can carry precisely the right runbook for
+entirely the wrong reason — `active` alone cannot tell you that happened.
+
+`skill:loaded` still fires, unchanged, and remains titles-only. Its value is *timing*: it
+is the only skill signal available before the upstream model connects. It is **not**
+authoritative — it fires per attempt on a delta, so a retried round can report a load that
+the committed round did not repeat. Never reconstruct the active set from it.
 
 `session` answers "where do I look when this goes wrong". It is emitted once the
 runtime exists, so it precedes every assistant and tool event — but a failure *before*

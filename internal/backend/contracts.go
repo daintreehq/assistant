@@ -827,8 +827,11 @@ type StreamDone struct {
 
 // SkillsBlock is the dynamic-skill outcome for a turn. NONE of it is folded into the
 // conversation: NewlyLoaded rides the eager OnSkillLoaded callback to the diagnostic sinks
-// (run log, --json, debug trace), Selector is read by the debug trace, and Active/Prelude
-// are decoded off the wire but unused — nothing reports the active set. The backend no longer
+// (run log, --json, debug trace), while Active + NewlyLoaded + Selector ride the COMMITTED
+// OnMeta callback to the same sinks as one per-round skill:decision event — the
+// authoritative record of what the backend actually selected, and the only one that can
+// report the active set on a round that loaded nothing or a selector that failed open.
+// Prelude alone is decoded but unused. The backend no longer
 // injects anything into the upstream transcript — a newly-active skill reaches
 // the model as its body in a "# Loaded skills" system message (plain context),
 // so Prelude is now vestigial metadata the client neither replays nor renders.

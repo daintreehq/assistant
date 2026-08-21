@@ -117,6 +117,16 @@ func FormatRunTimeline(events []domain.RunEventRecord, auditRows []domain.AuditR
 			if titles := strList(payload["titles"]); len(titles) > 0 {
 				lines = append(lines, "✦ skill loaded: "+strings.Join(titles, ", "))
 			}
+		case "skill:decision":
+			// Persisted every committed round, rendered almost never. A clean decision
+			// only repeats what the ✦ skill loaded row above already said, and a line per
+			// round would bury the tool calls this replay exists to show. The one case
+			// worth a human's attention is a selector that FAILED OPEN: the round kept
+			// the prior active set without deciding on it, so the run may have used
+			// exactly the right runbook for entirely the wrong reason.
+			if line := degradedSkillLine(payload); line != "" {
+				lines = append(lines, line)
+			}
 		case "info":
 			lines = append(lines, "· "+str(payload["message"]))
 		default:
@@ -315,6 +325,53 @@ func indent(s string, pad int) string {
 		lines[i] = prefix + lines[i]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// degradedSkillLine renders a skill:decision row ONLY when its selector degraded,
+// returning "" otherwise so a clean per-round decision leaves no trace in the replay.
+// The active set is named because "which runbook did it fall open into" is the whole
+// question a reader has at that point.
+func degradedSkillLine(payload map[string]any) string {
+	sel, ok := payload["selector"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	if degraded, _ := sel["degraded"].(bool); !degraded {
+		return ""
+	}
+	line := "⚠ skill selector degraded (reused the prior set)"
+	if titles := skillRefTitles(payload["active"]); len(titles) > 0 {
+		line += ": " + strings.Join(titles, ", ")
+	}
+	if reason := strings.TrimSpace(str(sel["reason"])); reason != "" {
+		line += " — " + reason
+	}
+	return line
+}
+
+// skillRefTitles coerces a decoded array of {id,title} skill objects to display labels,
+// falling back to the id for a ref the backend sent without a title.
+func skillRefTitles(v any) []string {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, e := range arr {
+		ref, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		label := strings.TrimSpace(str(ref["title"]))
+		if label == "" {
+			label = strings.TrimSpace(str(ref["id"]))
+		}
+		if label == "" {
+			continue
+		}
+		out = append(out, label)
+	}
+	return out
 }
 
 func str(v any) string {

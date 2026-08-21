@@ -107,6 +107,31 @@ func TestConsoleSinkSkillLoadedIsSilent(t *testing.T) {
 // visible cue called closeAnswer() before printing, which was right for it and wrong for
 // a silent event: keeping that call would end the open paragraph and start a second one
 // with no visible cause. So the answer must read as one continuous block.
+// The committed per-round decision is silent for the same reason, and more so: it fires
+// on EVERY round, so even a muted cue would print a line per round for prompt-assembly
+// machinery the operator cannot act on.
+func TestConsoleSinkSkillDecisionIsSilent(t *testing.T) {
+	s, buf := newSink(false)
+	s.AssistantToken("before ")
+	s.SkillDecision(agent.SkillDecisionEvent{
+		Active:   []agent.SkillRef{{ID: "orchestrate", Title: "Orchestrate agents"}},
+		Selector: agent.SkillSelectorOutcome{Ran: true, Degraded: true},
+	})
+	if !s.answerOpen {
+		t.Fatal("a silent skill decision closed the open answer")
+	}
+	s.AssistantToken("after")
+	s.AssistantEnd("", "")
+
+	got := buf.String()
+	if strings.Contains(got, "Orchestrate agents") || strings.Contains(got, "degraded") {
+		t.Fatalf("skill decisions must print nothing, got %q", got)
+	}
+	if !strings.Contains(got, "before after") {
+		t.Fatalf("the answer was split by a mid-stream skill decision: %q", got)
+	}
+}
+
 func TestConsoleSinkSkillLoadedDoesNotSplitAnswer(t *testing.T) {
 	s, buf := newSink(false)
 	s.AssistantToken("before ")

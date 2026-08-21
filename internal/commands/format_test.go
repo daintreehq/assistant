@@ -143,3 +143,70 @@ func jsonStr(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+// A clean skill:decision leaves NO trace in the replay. It is persisted every committed
+// round, so rendering each one would put a line per round between the tool calls this
+// timeline exists to show — and it would only repeat what the ✦ skill loaded row already
+// said. Pinned so a later "surface the active set" reflex has to argue with a test.
+func TestFormatRunTimelineHidesCleanSkillDecision(t *testing.T) {
+	events := []domain.RunEventRecord{
+		{RunID: "r", Seq: 0, Type: "skill:decision", Payload: strPtr(
+			`{"active":[{"id":"multi_agent","title":"Multi-agent orchestration"}],` +
+				`"newlyLoaded":[],"selector":{"ran":true,"degraded":false,"taskType":"orchestration",` +
+				`"confidence":0.9,"reason":"agents"}}`)},
+	}
+	out := FormatRunTimeline(events, nil)
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("a clean per-round decision must render nothing, got %q", out)
+	}
+	// Specifically not the default "· skill:decision" fallthrough, which would be noise
+	// with none of the information.
+	if strings.Contains(out, "skill:decision") {
+		t.Fatalf("bare event type leaked into the replay: %q", out)
+	}
+}
+
+// The degraded case IS shown: the selector failed open and reused the prior set, so the
+// run carries a runbook it never actually chose — and `active` alone looks healthy.
+func TestFormatRunTimelineSurfacesDegradedSkillSelector(t *testing.T) {
+	events := []domain.RunEventRecord{
+		{RunID: "r", Seq: 0, Type: "skill:decision", Payload: strPtr(
+			`{"active":[{"id":"multi_agent","title":"Multi-agent orchestration"},{"id":"bare_id"}],` +
+				`"newlyLoaded":[],"selector":{"ran":true,"degraded":true,"taskType":"",` +
+				`"confidence":null,"reason":"selector timed out"}}`)},
+	}
+	out := FormatRunTimeline(events, nil)
+	if !strings.Contains(out, "degraded") {
+		t.Fatalf("degraded selector not surfaced: %q", out)
+	}
+	// Naming the set answers the reader's actual next question: fell open into WHAT.
+	if !strings.Contains(out, "Multi-agent orchestration") {
+		t.Fatalf("the reused active set is not named: %q", out)
+	}
+	// A ref the backend sent without a title still shows as something addressable.
+	if !strings.Contains(out, "bare_id") {
+		t.Fatalf("a title-less ref must fall back to its id: %q", out)
+	}
+	if !strings.Contains(out, "selector timed out") {
+		t.Fatalf("the selector's reason is the diagnostic payload: %q", out)
+	}
+}
+
+// A malformed payload must not panic or emit a half-line; /explain parses defensively
+// throughout because these rows are replayed from a database, not constructed in-process.
+func TestFormatRunTimelineToleratesMalformedSkillDecision(t *testing.T) {
+	events := []domain.RunEventRecord{
+		{RunID: "r", Seq: 0, Type: "skill:decision", Payload: strPtr(`{"selector":"not-an-object"}`)},
+		{RunID: "r", Seq: 1, Type: "skill:decision", Payload: strPtr(`{}`)},
+		{RunID: "r", Seq: 2, Type: "skill:decision", Payload: strPtr(
+			`{"active":"not-an-array","selector":{"degraded":true}}`)},
+	}
+	out := FormatRunTimeline(events, nil)
+	// The third row is degraded, so it renders — but without an active set to name.
+	if !strings.Contains(out, "degraded") {
+		t.Fatalf("a degraded row with an unusable active set should still warn: %q", out)
+	}
+	if strings.Contains(out, "not-an-array") {
+		t.Fatalf("garbage leaked into the replay: %q", out)
+	}
+}

@@ -106,6 +106,11 @@ func (s *consoleSink) Interjection(text string) {
 // answer into two paragraphs for no visible reason.
 func (s *consoleSink) SkillLoaded([]string) {}
 
+// SkillDecision is silent for the same reason, and more so: it fires on EVERY round,
+// including ones that changed nothing. It exists for the --json stream and the durable
+// run log, not for a person reading an answer scroll past.
+func (s *consoleSink) SkillDecision(agent.SkillDecisionEvent) {}
+
 // ToolBatch / ToolState / ToolProgress are live-footer-only; the console prints
 // concrete tool calls + results, not the per-call substep stream.
 func (s *consoleSink) ToolBatch([]agent.BatchedToolCall) {}

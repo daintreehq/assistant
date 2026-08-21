@@ -27,6 +27,14 @@ func (s *orderSink) Interjection(t string)       { s.log = append(s.log, "interj
 func (s *orderSink) SkillLoaded(titles []string) {
 	s.log = append(s.log, "skill:"+strings.Join(titles, ","))
 }
+func (s *orderSink) SkillDecision(ev SkillDecisionEvent) {
+	ids := make([]string, 0, len(ev.Active))
+	for _, ref := range ev.Active {
+		ids = append(ids, ref.ID)
+	}
+	s.log = append(s.log, "decision:"+strings.Join(ids, ",")+":degraded="+
+		map[bool]string{true: "true", false: "false"}[ev.Selector.Degraded])
+}
 func (s *orderSink) ToolCall(ev ToolCallEvent) { s.log = append(s.log, "call:"+ev.Name+":"+ev.ID) }
 func (s *orderSink) ToolResult(ev ToolResultEvent) {
 	ok := "false"
@@ -64,7 +72,13 @@ func TestEmitStreamsTokensThenEnds(t *testing.T) {
 	}
 	// turn:prompt is emitted FIRST (before the assistant round) so /explain can
 	// label the run by what prompted it.
-	want := []string{"prompt:hi", "start", "tok:Hel", "tok:lo", "end:Hello"}
+	//
+	// The bare decision in the middle is deliberate: EVERY committed round reports one,
+	// including this one, where the backend selected nothing at all. Suppressing the
+	// empty case would make the event's absence ambiguous — "no skills were active" and
+	// "this build does not report skills" would look identical to a consumer — and
+	// selector.ran=false is itself the answer to "did selection even run".
+	want := []string{"prompt:hi", "start", "decision::degraded=false", "tok:Hel", "tok:lo", "end:Hello"}
 	if !equalStrings(sink.log, want) {
 		t.Fatalf("event log = %v want %v", sink.log, want)
 	}
@@ -80,10 +94,22 @@ func (eagerSkillBackend) RespondStream(_ context.Context, _ backend.RespondReque
 		{ID: "fallback_skill"}, // no title: the label falls back to the id
 		{},                     // malformed refs never produce a blank label
 	}
+	conf := 0.91
 	meta := backend.StreamMeta{
-		Model:  "daintree-assistant",
-		State:  "dst1.skill",
-		Skills: backend.SkillsBlock{NewlyLoaded: refs},
+		Model: "daintree-assistant",
+		State: "dst1.skill",
+		Skills: backend.SkillsBlock{
+			// Active is a SUPERSET of the delta: the retained foundation skill is
+			// exactly what the eager titles-only cue could never report.
+			Active: []backend.SkillRef{
+				{ID: "multi_agent", Title: "Multi-agent orchestration"},
+				{ID: "daintree_foundation", Title: "Daintree orchestration foundation"},
+			},
+			NewlyLoaded: refs,
+			Selector: backend.SelectorMeta{
+				Ran: true, TaskType: "orchestration", Confidence: &conf, Reason: "agents",
+			},
+		},
 	}
 	if cb.OnRawMeta != nil {
 		cb.OnRawMeta(meta)
@@ -132,7 +158,12 @@ func TestEmitSkillLoadBeforeFirstToken(t *testing.T) {
 	want := []string{
 		"prompt:use agents",
 		"start",
+		// The eager cue lands FIRST (before the model connects), the committed decision
+		// after it and still ahead of the first token — so a trace can time selection
+		// separately from generation, and a consumer sees the authoritative record
+		// before any of the round's output.
 		"skill:Multi-agent orchestration,fallback_skill",
+		"decision:multi_agent,daintree_foundation:degraded=false",
 		"tok:answer",
 		"end:answer",
 	}

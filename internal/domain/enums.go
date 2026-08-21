@@ -235,8 +235,14 @@ const (
 	JsonlError              JsonlEventType = "error"
 	JsonlInfo               JsonlEventType = "info"
 	JsonlSkillLoaded        JsonlEventType = "skill:loaded" // server-side runbook load; payload {titles:[]}
-	JsonlWarning            JsonlEventType = "warning"      // non-fatal; does NOT change the terminal status
-	JsonlInterjection       JsonlEventType = "user:interjection"
+	// JsonlSkillDecision is the committed per-round skill outcome: the whole active set
+	// (id + title), the newly-loaded delta, and the selector's verdict including the
+	// degraded/fail-open flag. Emitted every round that reaches committed meta, so it
+	// reports the active set even when nothing new loaded. This is the line a scripted
+	// consumer asserts on; skill:loaded is an earlier, titles-only, per-attempt cue.
+	JsonlSkillDecision JsonlEventType = "skill:decision"
+	JsonlWarning       JsonlEventType = "warning" // non-fatal; does NOT change the terminal status
+	JsonlInterjection  JsonlEventType = "user:interjection"
 	// JsonlSession is the one-time header line: sessionId, project, tier, backend
 	// endpoint, debug-log path, MCP connectivity. Emitted before the first round so a
 	// consumer can reach the trace for a run that then fails.

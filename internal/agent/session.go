@@ -1004,6 +1004,12 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			},
 			OnMeta: func(m backend.StreamMeta) {
 				s.applyStreamMeta(m)
+				// The committed round's skill outcome. Emitted here rather than inside
+				// applyStreamMeta so that function stays about state persistence, and
+				// emitted unconditionally so a consumer sees the active set on a round
+				// that loaded nothing — the eager OnSkillLoaded cue above fires only on a
+				// delta, and can report a load the committed attempt did not repeat.
+				s.events.SkillDecision(skillDecisionFrom(m.Skills))
 				s.traceBackendMeta(runID, turnID, iter, m)
 			},
 			OnStatus: func(st backend.StreamStatus) {
@@ -1992,9 +1998,10 @@ func (s *Session) backendStatePtr() *string {
 // (best-effort) so a DIFFERENT process — the supervisor daemon picking this session
 // up after a detach, or the next cockpit after the daemon — replays the same token
 // instead of forcing the backend to re-run skill selection from scratch
-// mid-conversation. The round's skill outcome (meta.Skills) is deliberately NOT retained:
-// nothing in the CLI reports it to the user, and the debug trace already logs the active
-// and newly-loaded sets per round for selector tuning.
+// mid-conversation. The round's skill outcome (meta.Skills) is deliberately NOT retained
+// as session state: it is reported per round as it arrives (the caller emits
+// SkillDecision from the same OnMeta callback) and logged by the debug trace, so there is
+// nothing for a later round to read back.
 func (s *Session) applyStreamMeta(m backend.StreamMeta) {
 	s.mu.Lock()
 	s.backendState = m.State
@@ -2028,8 +2035,47 @@ func skillLabels(refs []backend.SkillRef) []string {
 	return labels
 }
 
+// skillDecisionFrom projects the committed stream meta's skills block onto the
+// backend-independent event DTO the sinks consume.
+//
+// Refs are copied VERBATIM — same order, no title fallback, no dropping of malformed
+// entries — because this event is the machine-facing record of what the backend actually
+// decided, and laundering it would hide exactly the selector bug a consumer is looking
+// for. (skillLabels' cosmetic fallback stays on the human-readable SkillLoaded path.)
+// Both slices are allocated even when empty so they marshal as [] rather than null.
+//
+// Selector.Usage and the vestigial Prelude are intentionally dropped; see
+// SkillSelectorOutcome for why usage does not belong on this seam.
+func skillDecisionFrom(b backend.SkillsBlock) SkillDecisionEvent {
+	return SkillDecisionEvent{
+		Active:      copySkillRefs(b.Active),
+		NewlyLoaded: copySkillRefs(b.NewlyLoaded),
+		Selector: SkillSelectorOutcome{
+			Ran:        b.Selector.Ran,
+			Degraded:   b.Selector.Degraded,
+			TaskType:   b.Selector.TaskType,
+			Confidence: b.Selector.Confidence,
+			Reason:     b.Selector.Reason,
+		},
+	}
+}
+
+// copySkillRefs converts wire refs to event refs, always returning a non-nil slice.
+func copySkillRefs(refs []backend.SkillRef) []SkillRef {
+	out := make([]SkillRef, 0, len(refs))
+	for _, ref := range refs {
+		out = append(out, SkillRef{ID: ref.ID, Title: ref.Title})
+	}
+	return out
+}
+
 // emitSkillLoads surfaces newly-loaded runbooks as a dedicated SkillLoaded event, fed
-// by StreamCallbacks.OnSkillLoaded as soon as the SSE meta arrives. It is a
+// by StreamCallbacks.OnSkillLoaded as soon as the SSE meta arrives. Its distinct value is
+// TIMING — it is the only skill signal available before the upstream model connects, so a
+// trace separates selection latency from generation. It is NOT authoritative: it fires per
+// attempt on a delta, so a retried round can report a load the committed attempt never
+// repeated. SkillDecision (from the committed meta) is the record a consumer asserts on.
+// It is a
 // DIAGNOSTIC/AUTOMATION signal only — the durable run log, the --json stream, and the
 // debug trace consume it; nothing folds it into the live conversation, and the one place
 // it reaches a human is an explicit `/explain <run>` replay of that run's timeline.

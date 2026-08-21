@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/domain"
 )
 
@@ -66,6 +67,25 @@ func TestPump_SkillLoadedEmitsNothing(t *testing.T) {
 	if got := drainToSentinel(t, p); len(got) != 0 {
 		t.Fatalf("SkillLoaded queued %d pump event(s) (first kind %v); backend skill loads "+
 			"must be inert in the cockpit", len(got), got[0].kind)
+	}
+}
+
+// The committed per-round decision is dropped just as completely. It carries strictly
+// MORE than the old card did (the whole active set, the selector's verdict), which makes
+// it the most tempting thing to surface — and the least suitable, since it fires every
+// round whether anything changed or not.
+func TestPump_SkillDecisionEmitsNothing(t *testing.T) {
+	p := newEventPump()
+	p.SkillDecision(agent.SkillDecisionEvent{
+		Active: []agent.SkillRef{
+			{ID: "supervise", Title: "Supervise a fleet of agents"},
+		},
+		Selector: agent.SkillSelectorOutcome{Ran: true, Degraded: true},
+	})
+
+	if got := drainToSentinel(t, p); len(got) != 0 {
+		t.Fatalf("SkillDecision queued %d pump event(s) (first kind %v); the backend skill "+
+			"decision must be inert in the cockpit", len(got), got[0].kind)
 	}
 }
 
