@@ -4,17 +4,92 @@ How to drive the assistant from a script, a test harness, or another agent — w
 a terminal, without the cockpit, and without rewriting the process environment to say
 what argv says perfectly well.
 
-There are three headless surfaces. Pick by how many turns you need.
+There are four headless surfaces. Pick by how many turns you need, and by whether the
+caller is a script or another agent.
 
 | Surface | Turns | Output | Use it when |
 |---|---|---|---|
+| `mcp --stdio` | many | MCP tools | **another agent drives the assistant as a sub-agent** |
 | `--json <prompt>` | one | JSONL on stdout | scripting, CI gates, one-shot queries |
 | `--classic` + piped stdin | many | human-rendered | a multi-turn exchange in one process |
 | `host --stdio` | many | NDJSON, protocol v2 | you are Daintree, or reimplementing it |
 
-`host --stdio` is Daintree's own contract — the first stdin line must be a valid
+If the caller is itself an agent — Claude Code, most immediately — reach for
+`mcp --stdio` first. `host --stdio` is Daintree's own contract — the first stdin line must be a valid
 `SessionDescriptor` and the surrounding app owns the lifecycle. It is the wrong shape
 for a test harness. See `docs/DAINTREE_HOST.md`.
+
+
+## `mcp --stdio` — the assistant as an MCP server
+
+```json
+{ "mcpServers": { "daintree": {
+    "command": "/path/to/bin/daintree-assistant",
+    "args": ["mcp", "--stdio"],
+    "env": { "DAINTREE_API_KEY": "sk-or-v1-…" } } } }
+```
+
+Two decisions shape this surface, both forced by what an MCP client is.
+
+**It is async-first, because a turn takes minutes.** `daintree.ask` returns a run handle
+*immediately* and `daintree.poll` reads it incrementally. A synchronous ask would be
+unusable for exactly the work this assistant exists to do — spawning a cohort of agents
+and supervising them. It is the same shape the assistant already uses internally for its
+own long work (`terminal.run.async` returns a handle a coordinator settles later).
+
+**The server holds no configuration.** A client launches this process once and keeps the
+pipe for its whole session; it cannot restart it when you want a different project or a
+locally-rebuilt backend. So project, endpoint, tier, MCP credentials and state dir are
+all arguments to `daintree.session.open`, and the process env supplies defaults only.
+Repointing is a close/open pair, never a reconnect.
+
+### The tools
+
+| Tool | What it does |
+|---|---|
+| `daintree.session.open` | bind a session to a project; returns `sessionId` + warnings |
+| `daintree.session.list` | open sessions, and whether the binary went stale |
+| `daintree.session.close` | cancel any turn, tear down, **release the project lease** |
+| `daintree.ask` | start a turn; returns `runId` immediately |
+| `daintree.poll` | read a run: status, event window, answer, stats |
+| `daintree.inject` | fold a message into the **running** turn |
+| `daintree.interrupt` | cancel the running turn, keep the session |
+| `daintree.attention` | read what settled in the background |
+
+Every tool has a generated input *and* output schema, so a caller discovers the exact
+argument shape rather than guessing it.
+
+Things worth knowing before you drive it:
+
+- **One turn at a time per session.** A second `ask` is rejected — the assistant's turn
+  loop is single-flight and a concurrent turn would corrupt the conversation. To steer
+  work already running, use `inject`; to abandon it, `interrupt`.
+- **`poll` returns a window.** Pass the previous response's `nextSeq` as `sinceSeq` to
+  read only what is new. When the window truncates, `withheldEvents` says by how much —
+  it never silently hands you a partial timeline as a complete one.
+- **Background work reports through `attention`, never as a late run event.** A tool that
+  accepted async work shows up as `pendingAsync` on the run; the completion arrives in
+  the inbox, carrying `asyncId` so you can match the two. `attention` acknowledges by
+  default so a polling caller sees each item once; pass `acknowledge:false` to peek.
+- **Always close what you open.** A session holds the project's owner lease for its whole
+  life, and a leaked one blocks every other process from opening that project.
+- **Confirmations are auto-declined** unless the session sets `autoApprove`, exactly as
+  in a one-shot: there is no human on this pipe to answer one, and a parked dispatch
+  would hang the session. The declined call appears in the run's timeline.
+- Unlike a one-shot, an MCP session **does** run the scheduler, so watchers, timers and
+  async futures actually settle while it is open.
+
+### When the binary changes underneath it
+
+This is the one thing a session argument cannot fix. `make build` replaces the
+executable, but the client is still holding a pipe to the old image, and MCP has no way
+for a server to say "I have been replaced".
+
+So the server reports it instead. Both `session.open` and `session.list` carry a
+structured `server` block with `staleBinary` and the on-disk build time, and `open` adds
+a warning naming the remedy — reconnect the MCP server. That turns "why is my fix not taking effect" from a mystery
+into a stated fact. Everything *else* you might want to change needs no reconnect at
+all, which is the whole reason configuration lives on the session.
 
 ## `--json` — the scriptable path
 

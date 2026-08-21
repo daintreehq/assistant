@@ -74,6 +74,8 @@ func main() {
 		code = cli.RunDoctor(ctx, opts)
 	case routeHost:
 		code = cli.RunHost(ctx, opts)
+	case routeMCP:
+		code = cli.RunMCPServe(ctx, opts)
 	case routeDaemon:
 		code = cli.RunDaemon(ctx, opts)
 	case routeDaemonStop:
@@ -103,6 +105,7 @@ const (
 	routeDefault route = iota
 	routeDoctor
 	routeHost
+	routeMCP
 	routeDaemon
 	routeDaemonStop
 	routeStatus
@@ -258,6 +261,11 @@ func parseArgs(args []string) (parsedArgs, error) {
 				return parsedArgs{}, err
 			}
 			parsed.Route = routeHost
+		case "mcp":
+			if err := rejectCommandArgs("mcp", positionals[1:]); err != nil {
+				return parsedArgs{}, err
+			}
+			parsed.Route = routeMCP
 		case "daemon":
 			switch {
 			case len(positionals) == 1:
@@ -309,7 +317,7 @@ func parseArgs(args []string) (parsedArgs, error) {
 			parsed.SupportBundle = cli.SupportBundleOptions{Out: *bundleOut, Yes: *yes, IncludeAudit: *bundleAudit}
 		}
 		if parsed.Route != routeDefault {
-			if *stdio && parsed.Route != routeHost {
+			if *stdio && parsed.Route != routeHost && parsed.Route != routeMCP {
 				return parsedArgs{}, stdioRequiresHostError()
 			}
 			return parsed, nil
@@ -408,7 +416,7 @@ func rejectCommandArgs(command string, args []string) error {
 }
 
 func stdioRequiresHostError() error {
-	return fmt.Errorf("--stdio is only valid with the host command")
+	return fmt.Errorf("--stdio is only valid with the host or mcp commands")
 }
 
 // writeUsage owns the human help layout instead of flag.PrintDefaults: requested
@@ -428,6 +436,7 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "  daemon              run the project supervisor in the foreground")
 	fmt.Fprintln(w, "  daemon stop         stop the project supervisor")
 	fmt.Fprintln(w, "  host [--stdio]      serve embedded-host NDJSON over stdio")
+	fmt.Fprintln(w, "  mcp [--stdio]       serve the assistant AS an MCP server, for another agent to drive")
 	fmt.Fprintln(w, "  support-bundle      write a redacted diagnostics archive to send to a maintainer")
 	fmt.Fprint(w, cli.ResetUsage())
 	fmt.Fprintln(w, "\nOptions:")
