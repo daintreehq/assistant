@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/app"
@@ -26,8 +27,10 @@ type Runtime interface {
 	//
 	// The sink is per-TURN, not per-runtime, because each turn records into its own
 	// Run. Passing it here rather than wiring it once at construction is what makes it
-	// impossible to build a runtime that silently records nothing.
-	Send(ctx context.Context, prompt string, sink agent.EventSink) (string, error)
+	// impossible to build a runtime that silently records nothing. runID travels for
+	// the same reason: an approval raised mid-turn has to name the run it is blocking,
+	// or every run in the session reports itself blocked by it.
+	Send(ctx context.Context, prompt, runID string, sink agent.EventSink) (string, error)
 	// InjectPrompt folds a message into the RUNNING turn at its next tool boundary.
 	InjectPrompt(text string)
 	// DiscardPendingInjections drops messages that were buffered but never folded in.
@@ -39,17 +42,22 @@ type Runtime interface {
 	// events not yet delivered to this caller; acknowledge marks the batch delivered so
 	// the next call reports only what is NEW.
 	Attention(ctx context.Context, acknowledge bool) ([]domain.QueueEvent, error)
+	// Approvals brokers this runtime's tool confirmations. Never nil.
+	Approvals() *Approvals
 	// Close tears the runtime down and releases the project lease.
 	Close() error
 }
 
 // RuntimeFacts is the immutable description of what a session is bound to.
 type RuntimeFacts struct {
-	Project      string `json:"project"`
-	Tier         string `json:"tier"`
-	BackendURL   string `json:"backendUrl"`
-	LogPath      string `json:"logPath"`
-	AutoApprove  bool   `json:"autoApprove"`
+	Project     string `json:"project"`
+	Tier        string `json:"tier"`
+	BackendURL  string `json:"backendUrl"`
+	LogPath     string `json:"logPath"`
+	AutoApprove bool   `json:"autoApprove"`
+	// ApprovalMode is how this session answers a mutating tool: decline (skip it and
+	// carry on), ask (park it for the caller to decide), or auto (never ask).
+	ApprovalMode string `json:"approvalMode"`
 	MCPConnected bool   `json:"mcpConnected"`
 	MCPTransport string `json:"mcpTransport,omitempty"`
 }
@@ -58,16 +66,20 @@ type RuntimeFacts struct {
 // falls back to the process environment — the server itself holds no binding, so that a
 // client which cannot restart this process can still repoint it.
 type OpenParams struct {
-	Project     string
-	BackendURL  string
-	APIKeyFile  string
-	Tier        string
-	McpURL      string
-	McpToken    string
-	StateDir    string
-	LogDir      string
-	AutoApprove *bool
-	DebugLog    *bool
+	Project    string
+	BackendURL string
+	APIKeyFile string
+	Tier       string
+	McpURL     string
+	McpToken   string
+	StateDir   string
+	LogDir     string
+	DebugLog   *bool
+	// Approvals selects the confirmation mode. Empty inherits the process default
+	// (auto when --auto-approve/DAINTREE_ASSISTANT_AUTO_APPROVE is set, else decline).
+	Approvals ApprovalMode
+	// ApprovalTimeout bounds a parked approval; zero uses DefaultApprovalTimeout.
+	ApprovalTimeout time.Duration
 }
 
 // RuntimeFactory builds a runtime for one session. cli supplies the real one.
@@ -252,12 +264,21 @@ func (s *Session) close() error {
 	if current != nil {
 		current.Cancel()
 	}
+	// Reject before waiting, not after: turns.Wait() would otherwise block on a
+	// dispatch parked on an approval nobody is left to answer.
+	s.runtime.Approvals().RejectAll()
 	s.turns.Wait()
 	return s.runtime.Close()
 }
 
 // Facts describes what this session is bound to.
 func (s *Session) Facts() RuntimeFacts { return s.facts }
+
+// Approvals is this session's confirmation broker.
+func (s *Session) Approvals() *Approvals { return s.runtime.Approvals() }
+
+// ApprovalTimeout is how long this session parks an unanswered approval.
+func (s *Session) ApprovalTimeout() time.Duration { return s.runtime.Approvals().Timeout() }
 
 // Busy reports whether a turn is in flight.
 func (s *Session) Busy() bool {
@@ -339,7 +360,7 @@ func (s *Session) Ask(parent context.Context, prompt string) (*Run, error) {
 			}
 			s.mu.Unlock()
 		}()
-		reply, err := s.runtime.Send(ctx, prompt, NewRecorder(run))
+		reply, err := s.runtime.Send(ctx, prompt, run.ID, NewRecorder(run))
 		// settle is first-wins, so in the normal case the recorder has already
 		// classified this from the terminal event. These are the backstops, and their
 		// ORDER is the point: a cancelled context is a cancellation however the runtime
@@ -396,6 +417,12 @@ func (s *Session) Interrupt() bool {
 		return false
 	}
 	current.Cancel()
+	// Unpark this RUN's confirmations. Cancelling the context resolves them anyway, but
+	// doing it here means the pending list is empty the moment interrupt returns rather
+	// than whenever each dispatch goroutine notices. Scoped to the run, not the session:
+	// the captured run can finish and a new one start before this lands, and cancelling
+	// the new turn's approvals would abort work nobody asked to stop.
+	s.runtime.Approvals().RejectRun(current.ID)
 	// Discard here as well as at the next Ask: an interrupt is the likeliest way for an
 	// injection to miss its fold window, and leaving it buffered means the next turn
 	// silently inherits an instruction meant for the abandoned one.
@@ -412,9 +439,14 @@ func (s *Session) Attention(ctx context.Context, acknowledge bool) ([]domain.Que
 // than in cli so the adaptation is testable alongside the registry, but it is
 // constructed by cli, which owns the lease and the App wiring.
 type appRuntime struct {
-	app     *app.App
-	facts   RuntimeFacts
-	release func()
+	app       *app.App
+	facts     RuntimeFacts
+	release   func()
+	approvals *Approvals
+	// runMu guards currentRunID, which the confirm hook reads from the DISPATCH
+	// goroutine while Send sets it from the turn goroutine.
+	runMu        sync.Mutex
+	currentRunID string
 	// attentionMu serializes the read-and-acknowledge pair. MCP handlers run
 	// concurrently, so two attention calls could otherwise both Digest the same fresh
 	// rows before either marked them — and the conditional mark protects an UPDATED row
@@ -423,10 +455,14 @@ type appRuntime struct {
 }
 
 // NewAppRuntime wraps a constructed App. release hands the project lease back.
-func NewAppRuntime(a *app.App, facts RuntimeFacts, release func()) Runtime {
-	return &appRuntime{app: a, facts: facts, release: release}
+func NewAppRuntime(a *app.App, facts RuntimeFacts, approvals *Approvals, release func()) Runtime {
+	if approvals == nil {
+		approvals = NewApprovals(ApprovalDecline, 0)
+	}
+	return &appRuntime{app: a, facts: facts, approvals: approvals, release: release}
 }
 
+func (a *appRuntime) Approvals() *Approvals     { return a.approvals }
 func (a *appRuntime) SessionID() string         { return a.app.SessionID }
 func (a *appRuntime) Facts() RuntimeFacts       { return a.facts }
 func (a *appRuntime) InjectPrompt(t string)     { a.app.Session.InjectPrompt(t) }
@@ -459,8 +495,25 @@ func sendWithSink(ctx context.Context, hooks hookInstaller, sender turnSender, p
 	return sender.Send(ctx, prompt, agent.SendOptions{})
 }
 
-func (a *appRuntime) Send(ctx context.Context, prompt string, sink agent.EventSink) (string, error) {
+func (a *appRuntime) Send(ctx context.Context, prompt, runID string, sink agent.EventSink) (string, error) {
+	a.runMu.Lock()
+	a.currentRunID = runID
+	a.runMu.Unlock()
+	defer func() {
+		a.runMu.Lock()
+		if a.currentRunID == runID {
+			a.currentRunID = ""
+		}
+		a.runMu.Unlock()
+	}()
 	return sendWithSink(ctx, a.app, a.app.Session, prompt, sink)
+}
+
+// CurrentRunID is the run a confirmation raised right now belongs to ("" between turns).
+func (a *appRuntime) CurrentRunID() string {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
+	return a.currentRunID
 }
 
 func (a *appRuntime) Attention(ctx context.Context, acknowledge bool) ([]domain.QueueEvent, error) {

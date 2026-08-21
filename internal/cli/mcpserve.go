@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/daintreehq/assistant/internal/app"
 	"github.com/daintreehq/assistant/internal/cli/render"
+	"github.com/daintreehq/assistant/internal/config"
 	"github.com/daintreehq/assistant/internal/debuglog"
 	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/mcp"
@@ -24,6 +26,35 @@ import (
 // it when the operator wants a different project or backend. Making the binding a
 // session argument turns "restart the server" into "close and open a session".
 func RunMCPServe(ctx context.Context, opts Options) int {
+	// Resolve the process-level defaults ONCE. The auto-approve default in particular
+	// cannot be read off opts: a nil Options.AutoApprove means "the environment
+	// decides", so inspecting the pointer would silently report false for a process
+	// launched with DAINTREE_ASSISTANT_AUTO_APPROVE=1 and then suppress it.
+	var defaultAutoApprove bool
+	if cfg, err := loadConfigFromOptions(opts); err == nil {
+		defaultAutoApprove = cfg.AutoApprove
+	}
+
+	// One debug log for the PROCESS, not one per session. debuglog keeps a single
+	// package-global active path, so a per-session start would silently redirect every
+	// earlier session's writes into the newest session's file and leave the paths those
+	// sessions reported pointing at a log that stopped growing. Sessions stay
+	// distinguishable inside the one file by their sessionId fields.
+	var logOnce sync.Once
+	var processLogPath string
+	startProcessLog := func(cfg config.AppConfig) string {
+		logOnce.Do(func() {
+			processLogPath = debuglog.StartDebugLog(
+				debuglog.Config{DebugLog: cfg.DebugLog, LogDir: cfg.LogDir},
+				map[string]any{"sessionId": "mcp-server", "project": cfg.ProjectPath})
+		})
+		// Prefer the live value: a log started by an earlier session is the one in use.
+		if path := debuglog.CurrentDebugLogPath(); path != "" {
+			return path
+		}
+		return processLogPath
+	}
+
 	// Serving on stdout means every diagnostic must go to stderr. A single stray byte on
 	// stdout corrupts the JSON-RPC framing and the client drops the connection.
 	factory := func(bootstrap, lifetime context.Context, p mcpserver.OpenParams) (mcpserver.Runtime, error) {
@@ -41,9 +72,11 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 		applyIfSet(&sessionOpts.McpToken, p.McpToken)
 		applyIfSet(&sessionOpts.StateDir, p.StateDir)
 		applyIfSet(&sessionOpts.LogDir, p.LogDir)
-		if p.AutoApprove != nil {
-			sessionOpts.AutoApprove = p.AutoApprove
-		}
+		// The mode decides both the confirm hook's behaviour and, for "auto", the
+		// runtime's own auto-approve (which makes dispatch skip the hook entirely —
+		// they are two different layers and both have to agree).
+		mode, auto := resolveApprovalMode(p.Approvals, defaultAutoApprove)
+		sessionOpts.AutoApprove = &auto
 		if p.DebugLog != nil {
 			sessionOpts.DebugLog = p.DebugLog
 		}
@@ -76,23 +109,38 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 		}
 		a.AdoptAsCurrentSession()
 
-		logPath := debuglog.StartDebugLog(
-			debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir},
-			map[string]any{"sessionId": a.SessionID, "project": a.Config.ProjectPath})
+		logPath := startProcessLog(a.Config)
 
-		// Non-interactive, exactly like a one-shot: with auto-approve off every
-		// confirmation is DECLINED rather than parked, because there is no human on this
-		// pipe to answer one and a blocked dispatch would hang the session until the
-		// caller gave up. The declined call is reported in the run's timeline.
+		// Confirmations go through the session's broker, which is what makes "ask" more
+		// than a slogan: it parks the dispatch, surfaces the call with its risk,
+		// consequence and redacted args, and fails closed on a timer so a forgotten
+		// approval can never pin the turn forever.
 		//
 		// The event sink is NOT set here. It is per-TURN — each turn records into its own
 		// Run — and appRuntime.Send installs it. Wiring one here would be wrong twice
 		// over: it would mix turns together, and it would look like the recording is
 		// handled when it is not.
-		confirm := func(_ context.Context, req tools.ConfirmRequest) (bool, error) {
-			return false, nil
-		}
-		a.SetHooks(app.AppHooks{Confirm: confirm})
+		approvals := mcpserver.NewApprovals(mode, p.ApprovalTimeout)
+		// runtime is captured by the hook so an approval can name the run it blocks.
+		// Assigned below, after the facts are built; the hook only ever reads it on a
+		// dispatch, which cannot happen before the runtime exists.
+		var runtime interface{ CurrentRunID() string }
+		a.SetHooks(app.AppHooks{
+			Confirm: func(cctx context.Context, req tools.ConfirmRequest) (bool, error) {
+				runID := ""
+				if runtime != nil {
+					runID = runtime.CurrentRunID()
+				}
+				return approvals.Confirm(cctx, mcpserver.ApprovalRequest{
+					Tool:        req.ToolName,
+					Risk:        req.Risk,
+					Consequence: req.Consequence,
+					Summary:     req.Summary,
+					RawArgs:     string(req.Args),
+					RunID:       runID,
+				}), nil
+			},
+		})
 
 		st := a.ConnectMcp(bootstrap)
 		// LIFETIME, not bootstrap: the SDK cancels a request context the moment its
@@ -114,10 +162,15 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 			BackendURL:   mcp.SanitizeURL(a.Config.BackendURL),
 			LogPath:      logPath,
 			AutoApprove:  a.Config.AutoApprove,
+			ApprovalMode: string(mode),
 			MCPConnected: st.Connected,
 			MCPTransport: st.Transport,
 		}
-		return mcpserver.NewAppRuntime(a, facts, own.Release), nil
+		rt := mcpserver.NewAppRuntime(a, facts, approvals, own.Release)
+		if withRun, ok := rt.(interface{ CurrentRunID() string }); ok {
+			runtime = withRun
+		}
+		return rt, nil
 	}
 
 	err := mcpserver.Serve(ctx, mcpserver.Options{
@@ -130,6 +183,30 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 		return domain.OneShotExitCode.Error
 	}
 	return domain.OneShotExitCode.Success
+}
+
+// resolveApprovalMode decides the session's approval mode and the Config.AutoApprove
+// that must accompany it.
+//
+// The two are separate layers and both have to agree: Config.AutoApprove makes
+// tools.Dispatch skip the confirm hook ENTIRELY, while the mode governs what the hook
+// does when it IS consulted. Auto-approve is therefore set if and only if the mode is
+// "auto" — anything else would either ask nobody while claiming to ask, or park a call
+// that dispatch already waved through.
+//
+// defaultAutoApprove comes from the RESOLVED process config, not from an Options
+// pointer: a nil Options.AutoApprove means "the environment decides", so reading the
+// pointer would report false for a process launched with
+// DAINTREE_ASSISTANT_AUTO_APPROVE=1 and then write an explicit false that suppressed it.
+func resolveApprovalMode(requested mcpserver.ApprovalMode, defaultAutoApprove bool) (mcpserver.ApprovalMode, bool) {
+	mode := requested
+	if mode == "" {
+		mode = mcpserver.ApprovalDecline
+		if defaultAutoApprove {
+			mode = mcpserver.ApprovalAuto
+		}
+	}
+	return mode, mode == mcpserver.ApprovalAuto
 }
 
 // applyIfSet overwrites dst only when the session supplied a value, so an unset session

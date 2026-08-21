@@ -64,6 +64,7 @@ func Serve(ctx context.Context, opts Options) error {
 		Instructions: instructions,
 	})
 	Register(s, reg, NewBinaryInfo(version), lifetime)
+	RegisterResources(s, reg)
 
 	if opts.Diagnostics != nil {
 		fmt.Fprintf(opts.Diagnostics, "daintree-assistant %s: serving MCP over stdio\n", version)
@@ -93,4 +94,14 @@ Use it like this:
    project's owner lease and blocks other processes from opening the same project.
 
 One turn runs at a time per session. To steer a turn already running, use
-daintree.inject rather than a second ask; to abandon it, daintree.interrupt.`
+daintree.inject rather than a second ask; to abandon it, daintree.interrupt.
+
+Mutating tools — terminal commands, git operations — need approval. By default they are
+DECLINED and the turn carries on without them, so if you want the assistant to actually
+change something, open the session with approvals:"ask" and answer with daintree.approve
+(a parked call blocks the turn), or approvals:"auto" to skip asking entirely.
+
+When a run needs diagnosing rather than summarising, read its resources instead of
+polling harder: daintree://session/{id}/run/{runId} is the complete timeline poll
+truncates, and daintree://session/{id}/log is the structured trace of every backend
+request and tool call.`

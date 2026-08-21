@@ -23,18 +23,25 @@ import (
 // test can observe a run mid-flight — which is the state most of this surface exists to
 // manage.
 type fakeRuntime struct {
-	id    string
-	facts RuntimeFacts
+	id        string
+	facts     RuntimeFacts
+	approvals *Approvals
 
 	// script runs inside Send with the REAL sink the session installed. Driving events
 	// through it is deliberate: recording used to be broken in production precisely
 	// because tests reached for NewRecorder directly and never exercised the wiring.
 	script func(sink agent.EventSink)
+	// confirmInSend, when set, raises a confirmation ON THE SEND GOROUTINE, the way a
+	// real dispatch does. Detaching it to a goroutine would let turns.Wait() return
+	// while a dispatch was still parked — the exact ordering these tests exist to pin.
+	confirmInSend *ApprovalRequest
+	confirmResult chan bool
 
 	mu           sync.Mutex
 	release      chan struct{}
 	sends        int
 	sendInFlight bool
+	lastRunID    string
 	discards     int
 	// closedDuringSend records the bug this design exists to prevent: tearing the
 	// runtime down while Send is still unwinding would close the store underneath it.
@@ -48,14 +55,17 @@ type fakeRuntime struct {
 
 func newFakeRuntime(id string) *fakeRuntime {
 	return &fakeRuntime{
-		id:      id,
-		facts:   RuntimeFacts{Project: "/repo", Tier: "operator", BackendURL: "http://127.0.0.1:8473", LogPath: "/logs/x.log", MCPConnected: true, MCPTransport: "streamable-http"},
-		release: make(chan struct{}),
+		id:            id,
+		facts:         RuntimeFacts{Project: "/repo", Tier: "operator", BackendURL: "http://127.0.0.1:8473", LogPath: "/logs/x.log", MCPConnected: true, MCPTransport: "streamable-http", ApprovalMode: string(ApprovalDecline)},
+		release:       make(chan struct{}),
+		approvals:     NewApprovals(ApprovalDecline, 0),
+		confirmResult: make(chan bool, 4),
 	}
 }
 
-func (f *fakeRuntime) SessionID() string   { return f.id }
-func (f *fakeRuntime) Facts() RuntimeFacts { return f.facts }
+func (f *fakeRuntime) Approvals() *Approvals { return f.approvals }
+func (f *fakeRuntime) SessionID() string     { return f.id }
+func (f *fakeRuntime) Facts() RuntimeFacts   { return f.facts }
 
 func (f *fakeRuntime) DiscardPendingInjections() {
 	f.mu.Lock()
@@ -63,15 +73,23 @@ func (f *fakeRuntime) DiscardPendingInjections() {
 	f.discards++
 }
 
-func (f *fakeRuntime) Send(ctx context.Context, prompt string, sink agent.EventSink) (string, error) {
+func (f *fakeRuntime) Send(ctx context.Context, prompt, runID string, sink agent.EventSink) (string, error) {
 	f.mu.Lock()
 	f.sends++
 	f.sendInFlight = true
+	f.lastRunID = runID
 	release := f.release
 	script := f.script
+	confirmReq := f.confirmInSend
 	f.mu.Unlock()
 	if script != nil {
 		script(sink)
+	}
+	if confirmReq != nil {
+		req := *confirmReq
+		req.RunID = runID
+		// Blocks HERE, on the turn goroutine, exactly as a parked dispatch does.
+		f.confirmResult <- f.approvals.Confirm(ctx, req)
 	}
 	defer func() {
 		f.mu.Lock()
@@ -874,4 +892,235 @@ func TestErrorsNameTheRemedy(t *testing.T) {
 		}
 	}
 	fake.letFinish()
+}
+
+// TestApprovalFlowThroughTheTools walks the whole "ask" mode as a caller sees it: a
+// mutating tool parks, the run reports itself BLOCKED rather than merely slow, the
+// caller approves, and the call proceeds.
+func TestApprovalFlowThroughTheTools(t *testing.T) {
+	fake := newFakeRuntime("ses_test")
+	fake.approvals = NewApprovals(ApprovalAsk, 0)
+	fake.facts.ApprovalMode = string(ApprovalAsk)
+	fake.confirmInSend = &ApprovalRequest{
+		Tool: "git.push", Risk: domain.RiskGit,
+		Consequence: "pushes 3 commits to origin/main",
+	}
+	fake.script = func(sink agent.EventSink) {
+		sink.AssistantStart()
+		sink.ToolCall(agent.ToolCallEvent{ID: "c1", Name: "git.push"})
+	}
+	cs, _ := connectWithApprovals(t, fake)
+	sess := openSession(t, cs)
+
+	var run RunOutput
+	if err := call(t, cs, "daintree.ask", AskInput{SessionID: sess.SessionID, Prompt: "push it"}, &run); err != nil {
+		t.Fatalf("ask: %v", err)
+	}
+	waitForPending(t, fake.approvals, 1)
+
+	// The list tool shows it with everything needed to decide.
+	var list ApprovalsOutput
+	if err := call(t, cs, "daintree.approvals", SessionRefInput{SessionID: sess.SessionID}, &list); err != nil {
+		t.Fatalf("approvals: %v", err)
+	}
+	if list.Count != 1 || list.Mode != string(ApprovalAsk) {
+		t.Fatalf("approvals = %+v", list)
+	}
+	if list.Pending[0].Consequence == "" || list.Pending[0].Risk != string(domain.RiskGit) {
+		t.Errorf("a caller cannot decide without risk + consequence: %+v", list.Pending[0])
+	}
+
+	// And a poll reports the run as BLOCKED, not merely running — polling harder would
+	// never move it.
+	var polled RunOutput
+	if err := call(t, cs, "daintree.poll", PollInput{SessionID: sess.SessionID, RunID: run.RunID}, &polled); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if len(polled.PendingApprovals) != 1 {
+		t.Fatalf("the poll must surface the blocking approval, got %+v", polled)
+	}
+	if !strings.Contains(polled.NextAction, "BLOCKED") || !strings.Contains(polled.NextAction, "daintree.approve") {
+		t.Errorf("nextAction must say the run is blocked and how to unblock it, got %q", polled.NextAction)
+	}
+
+	var acted ActedOutput
+	if err := call(t, cs, "daintree.approve", ApproveInput{
+		SessionID: sess.SessionID, ApprovalID: list.Pending[0].ID, Approve: true,
+	}, &acted); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if !acted.Acted {
+		t.Fatalf("approve reported no action: %+v", acted)
+	}
+	select {
+	case ok := <-fake.confirmResult:
+		if !ok {
+			t.Error("the approved call was refused")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the parked dispatch was never released")
+	}
+	fake.letFinish()
+}
+
+// TestApprovingASettledApprovalExplainsItself: a caller that answers just after the
+// timer fired must learn what happened, not get a bare "not found".
+func TestApprovingASettledApprovalExplainsItself(t *testing.T) {
+	fake := newFakeRuntime("ses_test")
+	fake.approvals = NewApprovals(ApprovalAsk, 0)
+	cs, _ := connectWithApprovals(t, fake)
+	sess := openSession(t, cs)
+	fake.letFinish()
+
+	go fake.approvals.Confirm(context.Background(), ApprovalRequest{Tool: "terminal.run"})
+	pa := waitForPending(t, fake.approvals, 1)[0]
+	fake.approvals.Resolve(pa.ID, DecisionTimeout)
+
+	var acted ActedOutput
+	if err := call(t, cs, "daintree.approve", ApproveInput{
+		SessionID: sess.SessionID, ApprovalID: pa.ID, Approve: true,
+	}, &acted); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if acted.Acted {
+		t.Error("a settled approval cannot be acted on again")
+	}
+	if !strings.Contains(acted.Message, "timeout") {
+		t.Errorf("the message must say WHY it is gone, got %q", acted.Message)
+	}
+
+	// A never-real id is a different case and must be a hard error.
+	if err := call(t, cs, "daintree.approve", ApproveInput{
+		SessionID: sess.SessionID, ApprovalID: "apr_nope", Approve: true,
+	}, &acted); err == nil {
+		t.Error("an unknown approval id must be an error")
+	}
+}
+
+// TestDeclineModeExplainsWhyNothingIsPending: "0 pending" otherwise reads as "nothing
+// wanted approval", when the truth is that everything was refused outright.
+func TestDeclineModeExplainsWhyNothingIsPending(t *testing.T) {
+	fake := newFakeRuntime("ses_test")
+	cs, _ := connectWithApprovals(t, fake)
+	sess := openSession(t, cs)
+	fake.letFinish()
+
+	var list ApprovalsOutput
+	if err := call(t, cs, "daintree.approvals", SessionRefInput{SessionID: sess.SessionID}, &list); err != nil {
+		t.Fatalf("approvals: %v", err)
+	}
+	if list.Count != 0 || list.Mode != string(ApprovalDecline) {
+		t.Fatalf("approvals = %+v", list)
+	}
+	if !strings.Contains(list.Note, "approvals") {
+		t.Errorf("an empty list in decline mode must explain itself, got %q", list.Note)
+	}
+}
+
+// TestSessionCloseWaitsForAParkedDispatch is the deadlock guard, and it only means
+// anything because the fake parks ON THE SEND GOROUTINE. Detaching the confirm to its
+// own goroutine — as an earlier version of this test did — would let turns.Wait() return
+// while a dispatch was still blocked, so the test would pass with RejectAll moved after
+// the wait, i.e. with the deadlock reintroduced.
+func TestSessionCloseWaitsForAParkedDispatch(t *testing.T) {
+	fake := newFakeRuntime("ses_test")
+	fake.approvals = NewApprovals(ApprovalAsk, 0)
+	fake.confirmInSend = &ApprovalRequest{Tool: "git.push", Risk: domain.RiskGit}
+
+	cs, _ := connectWithApprovals(t, fake)
+	sess := openSession(t, cs)
+	if err := call(t, cs, "daintree.ask", AskInput{SessionID: sess.SessionID, Prompt: "push"}, &RunOutput{}); err != nil {
+		t.Fatalf("ask: %v", err)
+	}
+	waitForPending(t, fake.approvals, 1)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = call(t, cs, "daintree.session.close", SessionRefInput{SessionID: sess.SessionID}, &ActedOutput{})
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("session.close deadlocked on a parked approval")
+	}
+	select {
+	case ok := <-fake.confirmResult:
+		if ok {
+			t.Error("teardown must deny, never allow")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("close left the dispatch parked")
+	}
+	if !fake.isClosed() {
+		t.Error("the runtime must be torn down after the dispatch unwound")
+	}
+}
+
+// TestPendingApprovalsAreScopedToTheirRun: a blanket match would report every completed
+// run in the session as BLOCKED whenever any turn was parked.
+func TestPendingApprovalsAreScopedToTheirRun(t *testing.T) {
+	fake := newFakeRuntime("ses_test")
+	fake.approvals = NewApprovals(ApprovalAsk, 0)
+	cs, _ := connectWithApprovals(t, fake)
+	sess := openSession(t, cs)
+
+	// Run A completes cleanly.
+	fake.letFinish()
+	var runA RunOutput
+	if err := call(t, cs, "daintree.ask", AskInput{SessionID: sess.SessionID, Prompt: "first", Wait: true, WaitMs: 5000}, &runA); err != nil {
+		t.Fatalf("ask A: %v", err)
+	}
+
+	// An approval is raised naming a DIFFERENT run.
+	go fake.approvals.Confirm(context.Background(), ApprovalRequest{Tool: "git.push", RunID: "mrun_other"})
+	waitForPending(t, fake.approvals, 1)
+
+	var polled RunOutput
+	if err := call(t, cs, "daintree.poll", PollInput{SessionID: sess.SessionID, RunID: runA.RunID}, &polled); err != nil {
+		t.Fatalf("poll A: %v", err)
+	}
+	if len(polled.PendingApprovals) != 0 {
+		t.Errorf("run A must not report another run's approval as blocking it: %+v", polled.PendingApprovals)
+	}
+	if strings.Contains(polled.NextAction, "BLOCKED") {
+		t.Errorf("a finished run must not be reported as blocked: %q", polled.NextAction)
+	}
+	fake.approvals.RejectAll()
+}
+
+// TestProductionApprovalsCarryTheirRunID: the scoping above is only correct if the run
+// id actually reaches the approval, which is the adapter's job.
+func TestProductionApprovalsCarryTheirRunID(t *testing.T) {
+	fake := newFakeRuntime("ses_test")
+	fake.approvals = NewApprovals(ApprovalAsk, 0)
+	fake.confirmInSend = &ApprovalRequest{Tool: "git.push"}
+	cs, _ := connectWithApprovals(t, fake)
+	sess := openSession(t, cs)
+
+	var run RunOutput
+	if err := call(t, cs, "daintree.ask", AskInput{SessionID: sess.SessionID, Prompt: "push"}, &run); err != nil {
+		t.Fatalf("ask: %v", err)
+	}
+	pa := waitForPending(t, fake.approvals, 1)[0]
+	if pa.RunID != run.RunID {
+		t.Errorf("approval RunID = %q, want the run that raised it (%q)", pa.RunID, run.RunID)
+	}
+	// And the run reports itself blocked by it.
+	var polled RunOutput
+	if err := call(t, cs, "daintree.poll", PollInput{SessionID: sess.SessionID, RunID: run.RunID}, &polled); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if len(polled.PendingApprovals) != 1 {
+		t.Fatalf("the run must surface its own blocking approval, got %+v", polled.PendingApprovals)
+	}
+	fake.approvals.RejectAll()
+	fake.letFinish()
+}
+
+// connectWithApprovals wires the resource templates too, so approval tests exercise the
+// same server surface a real client sees.
+func connectWithApprovals(t *testing.T, fake *fakeRuntime) (*mcp.ClientSession, *Registry) {
+	t.Helper()
+	return connectWithResources(t, func(_, _ context.Context, _ OpenParams) (Runtime, error) { return fake, nil })
 }

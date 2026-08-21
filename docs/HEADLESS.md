@@ -55,6 +55,8 @@ Repointing is a close/open pair, never a reconnect.
 | `daintree.inject` | fold a message into the **running** turn |
 | `daintree.interrupt` | cancel the running turn, keep the session |
 | `daintree.attention` | read what settled in the background |
+| `daintree.approvals` | list confirmations the session is **parked** on |
+| `daintree.approve` | answer one, releasing or refusing the blocked call |
 
 Every tool has a generated input *and* output schema, so a caller discovers the exact
 argument shape rather than guessing it.
@@ -73,11 +75,41 @@ Things worth knowing before you drive it:
   default so a polling caller sees each item once; pass `acknowledge:false` to peek.
 - **Always close what you open.** A session holds the project's owner lease for its whole
   life, and a leaked one blocks every other process from opening that project.
-- **Confirmations are auto-declined** unless the session sets `autoApprove`, exactly as
-  in a one-shot: there is no human on this pipe to answer one, and a parked dispatch
-  would hang the session. The declined call appears in the run's timeline.
+- **Mutating tools need approval,** and the mode is per session:
+  - `decline` (default) — refuse immediately and carry on. Safe for an unattended
+    caller, but the session can never actually change anything.
+  - `ask` — park the call and surface it with its risk, consequence and redacted args.
+    A parked call **blocks the whole turn**, so only choose this if you will poll. It
+    fails closed on a timer (`approvalTimeoutMs`, default 5 minutes), and interrupt or
+    close releases everything outstanding. Cancellation always wins: a call approved
+    after you interrupted the turn does not run.
+  - `auto` — never ask. Equivalent to `--auto-approve`.
+
+  A blocked run is reported as blocked: pending approvals ride the run's `poll` response
+  and its `nextAction` says so, because "still running" would send you polling harder at
+  something that will never move on its own.
 - Unlike a one-shot, an MCP session **does** run the scheduler, so watchers, timers and
   async futures actually settle while it is open.
+
+### Diagnosing a run
+
+Two resources exist for when the poll digest is not enough. They are resources rather
+than tool results so their cost is paid once, when diagnosing, instead of on every poll:
+
+| URI | What it is |
+|---|---|
+| `daintree://session/{sessionId}/run/{runId}` | the **complete** event timeline `poll` truncates |
+| `daintree://session/{sessionId}/log` | the tail of the structured debug trace |
+
+The log is **per process, not per session** — `debuglog` keeps one active file, so a
+per-session log would silently redirect earlier sessions' writes into the newest
+session's file. Every session in this server therefore reports the same path; grep it by
+`sessionId` to separate them.
+
+Read the transcript when a poll reported a non-zero `withheldEvents`. Read the log when
+you need what actually happened rather than what the answer claims — it is bounded to
+the last 256 KB (the tail, because that is where a failure is), passed through the
+redactor, and only exists if the session was opened with `debugLog:true`.
 
 ### When the binary changes underneath it
 

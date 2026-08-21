@@ -32,16 +32,22 @@ const maxBlockWait = 2 * time.Minute
 
 // OpenInput is the argument shape of daintree.session.open.
 type OpenInput struct {
-	Project     string `json:"project,omitempty" jsonschema:"Absolute path to the project the assistant should operate on. Defaults to the server process's working directory."`
-	BackendURL  string `json:"backendUrl,omitempty" jsonschema:"Assistant backend endpoint, e.g. http://127.0.0.1:8473 for a local backend. Defaults to the environment or the deployed endpoint."`
-	APIKeyFile  string `json:"apiKeyFile,omitempty" jsonschema:"Path to a file containing the API key. There is deliberately no way to pass the key inline."`
-	Tier        string `json:"tier,omitempty" jsonschema:"Permission tier: supervisor, operator, or system."`
-	McpURL      string `json:"mcpUrl,omitempty" jsonschema:"Daintree MCP endpoint. Without it the assistant runs in degraded local mode and every orchestration tool reports 'not connected'."`
-	McpToken    string `json:"mcpToken,omitempty" jsonschema:"Daintree MCP bearer token. These expire roughly 12 minutes after minting."`
-	StateDir    string `json:"stateDir,omitempty" jsonschema:"State and credentials root. Use a scratch path to isolate from the developer's real state."`
-	LogDir      string `json:"logDir,omitempty" jsonschema:"Directory for the debug log."`
-	AutoApprove *bool  `json:"autoApprove,omitempty" jsonschema:"Run mutating tools without confirmation. Without it every confirmation is auto-declined and mutating work is skipped."`
-	DebugLog    *bool  `json:"debugLog,omitempty" jsonschema:"Write a structured session trace to the log directory. Strongly recommended: it is the only way to diagnose a bad run."`
+	Project    string `json:"project,omitempty" jsonschema:"Absolute path to the project the assistant should operate on. Defaults to the server process's working directory."`
+	BackendURL string `json:"backendUrl,omitempty" jsonschema:"Assistant backend endpoint, e.g. http://127.0.0.1:8473 for a local backend. Defaults to the environment or the deployed endpoint."`
+	APIKeyFile string `json:"apiKeyFile,omitempty" jsonschema:"Path to a file containing the API key. There is deliberately no way to pass the key inline."`
+	Tier       string `json:"tier,omitempty" jsonschema:"Permission tier: supervisor, operator, or system."`
+	McpURL     string `json:"mcpUrl,omitempty" jsonschema:"Daintree MCP endpoint. Without it the assistant runs in degraded local mode and every orchestration tool reports 'not connected'."`
+	McpToken   string `json:"mcpToken,omitempty" jsonschema:"Daintree MCP bearer token. These expire roughly 12 minutes after minting."`
+	StateDir   string `json:"stateDir,omitempty" jsonschema:"State and credentials root. Use a scratch path to isolate from the developer's real state."`
+	LogDir     string `json:"logDir,omitempty" jsonschema:"Directory for the debug log."`
+	DebugLog   *bool  `json:"debugLog,omitempty" jsonschema:"Write a structured session trace to the log directory. Strongly recommended: it is the only way to diagnose a bad run."`
+	// Approvals is a tri-state rather than a bool because the two obvious answers are
+	// both wrong on their own: always approving lets the assistant push and run
+	// commands unwatched, always declining means a session can never do the mutating
+	// work it exists for.
+	Approvals string `json:"approvals,omitempty" jsonschema:"How to answer a mutating tool. decline: skip it and carry on (the safe default). ask: park it for you to decide with daintree.approve. auto: never ask. Choose ask only if you will actually poll for approvals - a parked call blocks the whole turn until it is answered or times out."`
+	// ApprovalTimeoutMs bounds a parked approval so a forgotten one cannot pin the turn.
+	ApprovalTimeoutMs int `json:"approvalTimeoutMs,omitempty" jsonschema:"How long a parked approval waits before it is denied, in milliseconds. Default 300000 (5 minutes). Only meaningful when approvals is ask."`
 }
 
 // SessionOutput describes an open session.
@@ -86,6 +92,10 @@ type RunOutput struct {
 	// PendingAsync lists async handles this run accepted. They settle OUTSIDE the run
 	// and are reported through daintree.attention, never as a late event here.
 	PendingAsync []string `json:"pendingAsync,omitempty"`
+	// PendingApprovals are confirmations this session is PARKED on. A run showing these
+	// is not merely slow — it is stopped until they are answered, which is invisible
+	// from `status` alone.
+	PendingApprovals []PendingApproval `json:"pendingApprovals,omitempty"`
 	// NextAction spells out what to do with this response. It exists because the two
 	// pathologies a polling surface invites — hammering poll in a tight loop, and
 	// treating a still-running turn as a finished one — are both prevented by saying
@@ -101,6 +111,23 @@ type PollInput struct {
 	SinceSeq  int    `json:"sinceSeq,omitempty" jsonschema:"Return only events with seq >= this. Pass the previous response's nextSeq to read incrementally."`
 	MaxEvents int    `json:"maxEvents,omitempty" jsonschema:"Cap on events in this response. Default 40."`
 	WaitMs    int    `json:"waitMs,omitempty" jsonschema:"Block up to this long for the run to settle before responding. Capped at 120000. Use it to avoid a tight polling loop."`
+}
+
+// ApprovalsOutput lists what a session is parked on.
+type ApprovalsOutput struct {
+	Mode    string            `json:"mode" jsonschema:"decline, ask, or auto."`
+	Pending []PendingApproval `json:"pending"`
+	Count   int               `json:"count"`
+	// Note explains an empty list when the reason is the MODE rather than the absence
+	// of mutating work — otherwise "0 pending" reads as "nothing wanted approval".
+	Note string `json:"note,omitempty"`
+}
+
+// ApproveInput answers one parked confirmation.
+type ApproveInput struct {
+	SessionID  string `json:"sessionId"`
+	ApprovalID string `json:"approvalId" jsonschema:"The id from daintree.approvals or from a run's pendingApprovals."`
+	Approve    bool   `json:"approve" jsonschema:"true to allow the tool call, false to refuse it. Refusing lets the turn continue without that call."`
 }
 
 // SessionRefInput is the shape of every tool that only needs a session.
@@ -171,11 +198,22 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 			"All configuration is per-session, so repointing at a different backend or project is a close/open pair rather than a server restart. " +
 			"Without mcpUrl/mcpToken the assistant runs in degraded local mode where it cannot see or drive terminals.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in OpenInput) (*mcp.CallToolResult, SessionOutput, error) {
+		mode := ApprovalMode(strings.TrimSpace(in.Approvals))
+		if mode != "" && !mode.Valid() {
+			return nil, SessionOutput{}, fmt.Errorf(
+				"unknown approvals mode %q — use \"decline\", \"ask\" or \"auto\"", in.Approvals)
+		}
+		if in.ApprovalTimeoutMs < 0 {
+			return nil, SessionOutput{}, fmt.Errorf(
+				"approvalTimeoutMs must not be negative (got %d) — the timeout is the only thing that bounds a parked approval",
+				in.ApprovalTimeoutMs)
+		}
 		sess, err := reg.Open(ctx, OpenParams{
 			Project: in.Project, BackendURL: in.BackendURL, APIKeyFile: in.APIKeyFile,
 			Tier: in.Tier, McpURL: in.McpURL, McpToken: in.McpToken,
-			StateDir: in.StateDir, LogDir: in.LogDir,
-			AutoApprove: in.AutoApprove, DebugLog: in.DebugLog,
+			StateDir: in.StateDir, LogDir: in.LogDir, DebugLog: in.DebugLog,
+			Approvals:       mode,
+			ApprovalTimeout: time.Duration(in.ApprovalTimeoutMs) * time.Millisecond,
 		})
 		if err != nil {
 			return nil, SessionOutput{}, err
@@ -212,7 +250,7 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 		Name: "daintree.ask",
 		Description: "Ask the assistant something. Returns a runId IMMEDIATELY by default — an orchestration turn spawns agents " +
 			"and waits on them, which takes minutes. Poll the runId with daintree.poll. Set wait:true only for a quick question.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in AskInput) (*mcp.CallToolResult, RunOutput, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in AskInput) (*mcp.CallToolResult, RunOutput, error) {
 		if strings.TrimSpace(in.Prompt) == "" {
 			return nil, RunOutput{}, errors.New("prompt is required")
 		}
@@ -220,6 +258,11 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 		if err != nil {
 			return nil, RunOutput{}, err
 		}
+		// Bind approvals to the client session that is driving this turn, so a parked
+		// confirmation can be PUSHED to it rather than only waiting to be polled. Re-bound
+		// per ask because that client is the one currently asking; harmless when the
+		// client cannot elicit, since Elicit then errors and the approval stays parked.
+		sess.Approvals().SetNotify(elicitNotifier(req.Session, sess.Approvals(), sess.ApprovalTimeout()))
 		run, err := sess.Ask(lifetime, in.Prompt)
 		if err != nil {
 			return nil, RunOutput{}, err
@@ -227,7 +270,7 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 		if in.Wait {
 			waitFor(ctx, run, in.WaitMs)
 		}
-		return nil, renderRun(run, 0, defaultPollEvents), nil
+		return nil, renderRun(run, 0, defaultPollEvents, sess.Approvals()), nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -250,7 +293,7 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 		if max <= 0 {
 			max = defaultPollEvents
 		}
-		return nil, renderRun(run, in.SinceSeq, max), nil
+		return nil, renderRun(run, in.SinceSeq, max, sess.Approvals()), nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -283,6 +326,58 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 			return nil, ActedOutput{Acted: false, Message: "no turn is running"}, nil
 		}
 		return nil, ActedOutput{Acted: true, Message: "cancelling the running turn"}, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "daintree.approvals",
+		Description: "List the confirmations this session is PARKED on. A mutating tool (a terminal command, a git operation) " +
+			"blocks the whole turn until it is answered, so a run that seems slow may simply be waiting here. " +
+			"Only sessions opened with approvals:\"ask\" ever park; the default declines and carries on.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, in SessionRefInput) (*mcp.CallToolResult, ApprovalsOutput, error) {
+		sess, err := reg.Get(in.SessionID)
+		if err != nil {
+			return nil, ApprovalsOutput{}, err
+		}
+		pending := sess.Approvals().Pending()
+		out := ApprovalsOutput{
+			Mode:    string(sess.Approvals().Mode()),
+			Pending: pending,
+			Count:   len(pending),
+		}
+		if out.Pending == nil {
+			out.Pending = []PendingApproval{}
+		}
+		if len(pending) == 0 && out.Mode != string(ApprovalAsk) {
+			out.Note = "This session does not park approvals — mode is " + out.Mode +
+				". Open a session with approvals:\"ask\" if you want to decide each mutating call."
+		}
+		return nil, out, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "daintree.approve",
+		Description: "Answer one parked confirmation, releasing (or refusing) the blocked tool call. " +
+			"Read its risk, consequence and args first — approving is how this assistant is allowed to change anything.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, in ApproveInput) (*mcp.CallToolResult, ActedOutput, error) {
+		sess, err := reg.Get(in.SessionID)
+		if err != nil {
+			return nil, ActedOutput{}, err
+		}
+		decision := DecisionRejected
+		if in.Approve {
+			decision = DecisionApproved
+		}
+		if sess.Approvals().Resolve(in.ApprovalID, decision) {
+			return nil, ActedOutput{Acted: true, Message: "approval " + in.ApprovalID + " " + string(decision)}, nil
+		}
+		// Not pending: either already settled (very likely a timeout, if the caller was
+		// slow) or never real. Say which — "not found" alone sends a caller hunting.
+		if prior, ok := sess.Approvals().Outcome(in.ApprovalID); ok {
+			return nil, ActedOutput{Acted: false, Message: "approval " + in.ApprovalID +
+				" was already settled as " + string(prior) + "; the tool call has moved on. Ask again if you still want the work done."}, nil
+		}
+		return nil, ActedOutput{}, fmt.Errorf(
+			"no approval %q is pending in this session — call daintree.approvals to see what is waiting", in.ApprovalID)
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -360,8 +455,8 @@ func waitFor(ctx context.Context, run *Run, waitMs int) {
 	}
 }
 
-// renderRun projects a run into its tool response.
-func renderRun(run *Run, sinceSeq, maxEvents int) RunOutput {
+// renderRun projects a run into its tool response. approvals may be nil (tests).
+func renderRun(run *Run, sinceSeq, maxEvents int, approvals *Approvals) RunOutput {
 	evs, withheld, status, content, errMsg, stats, startedAt, endedAt := run.Snapshot(sinceSeq, maxEvents)
 	out := RunOutput{
 		RunID:          run.ID,
@@ -390,12 +485,34 @@ func renderRun(run *Run, sinceSeq, maxEvents int) RunOutput {
 	} else {
 		out.DurationMs = int(domain.NowMS() - startedAt)
 	}
+	if approvals != nil {
+		// Only this run's approvals: a stale one from an abandoned turn would read as a
+		// blocker on work that is not actually waiting.
+		// This run's approvals ONLY. A blanket match would report every completed run in
+		// the session as BLOCKED while any turn was parked.
+		for _, pa := range approvals.Pending() {
+			if pa.RunID == run.ID {
+				out.PendingApprovals = append(out.PendingApprovals, pa)
+			}
+		}
+	}
 	out.NextAction = nextAction(out)
 	return out
 }
 
 // nextAction is the one-line instruction attached to every run response.
 func nextAction(out RunOutput) string {
+	// A parked approval outranks everything else this could say: the run is not slow,
+	// it is STOPPED, and polling harder will never move it.
+	if n := len(out.PendingApprovals); n > 0 {
+		names := make([]string, 0, n)
+		for _, pa := range out.PendingApprovals {
+			names = append(names, pa.Tool)
+		}
+		return fmt.Sprintf(
+			"BLOCKED on %d approval(s) for %s. The turn cannot proceed until you call daintree.approve for each id in pendingApprovals; unanswered ones are denied on a timer.",
+			n, strings.Join(names, ", "))
+	}
 	switch RunStatus(out.Status) {
 	case RunRunning:
 		// Naming waitMs is the point: without it a model polls in a tight loop, which

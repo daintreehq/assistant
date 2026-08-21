@@ -211,8 +211,10 @@ internal/
   mcpserver/     the assistant AS an MCP server (`mcp --stdio`) so another agent can drive
                  it as a sub-agent: per-session config (no server-held binding, because an
                  MCP client cannot restart us), async-first ask/poll because a turn takes
-                 minutes, and stale-binary reporting for the one thing a session argument
-                 cannot fix. See docs/HEADLESS.md
+                 minutes, per-session approval brokering (decline/ask/auto, always
+                 bounded so a parked dispatch cannot wedge a turn), run-transcript and
+                 debug-log resources, and stale-binary reporting for the one thing a
+                 session argument cannot fix. See docs/HEADLESS.md
   terminal/      TTY-gated raw escapes (clear.go) — the ONLY host-scrollback wipe path
   deps/          build-time blank-import anchor (deps.go) — pins go.mod modules; NO runtime effect
   e2e/           end-to-end tests only: built-binary, fake backend/MCP, inline-contract, turn/race
