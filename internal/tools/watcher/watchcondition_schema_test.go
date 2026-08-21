@@ -3,6 +3,8 @@ package watcher
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -48,6 +50,13 @@ func terminalCreateProps(t *testing.T) map[string]any {
 // identical union, or the model gets a weaker contract for alertWhen and can emit a
 // shape the domain validator then rejects (the exact class of failure the schema
 // exists to make impossible).
+//
+// This comparison is NARROW, and it is worth being honest about how narrow. Both
+// copies render from ONE template (watchConditionSchema), so a keyword deleted from
+// that template disappears from both and this test still passes. It catches a future
+// hand-inlined second copy drifting from the generated one — nothing else. The
+// regression it cannot see (a lost enum value, a dropped bound) is pinned against a
+// hardcoded expectation in TestBothConditionsCarryTheFullUnion instead.
 func TestStopWhenAndAlertWhenAreStructurallyIdentical(t *testing.T) {
 	props := terminalCreateProps(t)
 	stop := stripDescriptions(props["stopWhen"])
@@ -63,9 +72,30 @@ func TestStopWhenAndAlertWhenAreStructurallyIdentical(t *testing.T) {
 // encoding. A terse rendering that quietly dropped a leaf would silently remove a
 // capability from alertWhen.
 func TestBothConditionsCarryTheFullUnion(t *testing.T) {
-	wantKeys := []string{
-		"stateIs", "runtimeStatusIs", "contains", "regex",
-		"noOutputForMs", "modelJudge", "all", "any", "not",
+	// Pinned by SHAPE against a hardcoded expectation, not just by key name. Keys
+	// alone would pass while an enum value, a type or a bound went missing from the
+	// shared template — and because both copies come from that one template, the
+	// identity comparison above cannot see it either.
+	wantLeaves := map[string]struct {
+		typ    string
+		enum   []string
+		bounds map[string]float64
+	}{
+		"stateIs": {typ: "string", enum: []string{
+			"idle", "working", "waiting", "directing", "completed", "exited",
+		}},
+		"runtimeStatusIs": {typ: "string", enum: []string{"running", "exited"}},
+		"contains":        {typ: "string", bounds: map[string]float64{"minLength": 1}},
+		"regex":           {typ: "string", bounds: map[string]float64{"minLength": 1}},
+		"noOutputForMs":   {typ: "integer", bounds: map[string]float64{"minimum": 1}},
+		// Watchers DO support modelJudge (unlike the extract tools' wait, which
+		// rejects it) — so here it must stay generable.
+		"modelJudge": {typ: "string", bounds: map[string]float64{"minLength": 1}},
+		"all":        {typ: "array", bounds: map[string]float64{"minItems": 1}},
+		"any":        {typ: "array", bounds: map[string]float64{"minItems": 1}},
+		"not": {typ: "object", bounds: map[string]float64{
+			"minProperties": 1, "maxProperties": 1,
+		}},
 	}
 	props := terminalCreateProps(t)
 	for _, role := range []string{"stopWhen", "alertWhen"} {
@@ -84,14 +114,34 @@ func TestBothConditionsCarryTheFullUnion(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s has no properties", role)
 		}
-		if len(leaves) != len(wantKeys) {
-			t.Errorf("%s has %d union keys, want %d", role, len(leaves), len(wantKeys))
+		if len(leaves) != len(wantLeaves) {
+			t.Errorf("%s has %d union keys, want %d", role, len(leaves), len(wantLeaves))
 		}
-		for _, k := range wantKeys {
+		for k, want := range wantLeaves {
 			leaf, ok := leaves[k].(map[string]any)
 			if !ok {
 				t.Errorf("%s is missing union key %q", role, k)
 				continue
+			}
+			if leaf["type"] != want.typ {
+				t.Errorf("%s.%s has type %v, want %q", role, k, leaf["type"], want.typ)
+			}
+			if want.enum != nil {
+				raw, _ := leaf["enum"].([]any)
+				got := make([]string, 0, len(raw))
+				for _, v := range raw {
+					str, _ := v.(string)
+					got = append(got, str)
+				}
+				if !slices.Equal(got, want.enum) {
+					t.Errorf("%s.%s enum is %v, want %v — a state dropped here is one no watcher can stop on",
+						role, k, got, want.enum)
+				}
+			}
+			for kw, n := range want.bounds {
+				if leaf[kw] != n {
+					t.Errorf("%s.%s lost %s (got %v, want %v)", role, k, kw, leaf[kw], n)
+				}
 			}
 			// Every leaf must still be DOCUMENTED — terse is fine, absent is not.
 			if d, _ := leaf["description"].(string); d == "" {
@@ -117,5 +167,40 @@ func TestTerminalCreateSchemaStaysBounded(t *testing.T) {
 	const ceiling = 4500
 	if len(b) > ceiling {
 		t.Errorf("watcher.terminal.create schema is %d bytes, ceiling %d — did the leaf prose get duplicated again?", len(b), ceiling)
+	}
+}
+
+// The split only pays if the two roles are wired to DIFFERENT modes, and nothing
+// else in this file notices if they are not: both renderings satisfy every
+// structural assertion and both document every leaf, so flipping either call site
+// in terminalCreateSchema passes the whole file. The byte ceiling above is not a
+// backstop in the other direction either — making stopWhen terse SHRINKS the
+// schema, so it sails under the ceiling while silently deleting the hard-won
+// warnings (the stateIs:'waiting' trap, the modelJudge cost note) that are the
+// reason stopWhen is the verbose copy.
+func TestLeafDocsAreWiredToTheRightRoles(t *testing.T) {
+	// A clause that exists ONLY in the verbose rendering.
+	const verboseOnly = "A bare stateIs:'waiting' fires too early"
+	stateIsDesc := func(role string) string {
+		leaf, _ := terminalCreateProps(t)[role].(map[string]any)
+		leaves, _ := leaf["properties"].(map[string]any)
+		s, _ := leaves["stateIs"].(map[string]any)
+		d, _ := s["description"].(string)
+		return d
+	}
+
+	if !strings.Contains(stateIsDesc("stopWhen"), verboseOnly) {
+		t.Error("stopWhen must carry the FULL leaf prose — it is the copy alertWhen points at")
+	}
+	if strings.Contains(stateIsDesc("alertWhen"), verboseOnly) {
+		t.Error("alertWhen is rendering the verbose leaves — the duplication this split removed is back")
+	}
+
+	// And the terse rendering must actually be smaller, or the split has eroded to
+	// a no-op that still passes every assertion above.
+	const minSaving = 400
+	saved := len(watchConditionSchema("role.", true)) - len(watchConditionSchema("role.", false))
+	if saved < minSaving {
+		t.Errorf("the terse rendering now saves only %d bytes (want >= %d) — the leafDocs split has eroded", saved, minSaving)
 	}
 }
