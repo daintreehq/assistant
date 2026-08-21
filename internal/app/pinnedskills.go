@@ -156,9 +156,16 @@ func validatePinnedSkillIDs(pins []string, catalog []backend.SkillRef) error {
 		noun, strings.Join(bad, ", "))
 }
 
-// nearestSkillID returns the catalog id within two edits of want, or "" when nothing is
-// close enough to be worth guessing at. Ties break on the lexicographically smallest id
-// so the suggestion is deterministic rather than dependent on catalog order.
+// maxSkillSuggestionDistance is how wrong an id may be and still be worth guessing at.
+// Two edits catches the typos that actually happen — a transposition, a dropped
+// character, a wrong case — while staying far short of the distance at which a
+// suggestion starts naming an unrelated runbook and sending the reader to fix something
+// that was never the problem.
+const maxSkillSuggestionDistance = 2
+
+// nearestSkillID returns the catalog id within maxSkillSuggestionDistance edits of want,
+// or "" when nothing is close enough. Ties break on the lexicographically smallest id so
+// the suggestion is deterministic rather than dependent on catalog order.
 //
 // This deliberately does not reuse internal/commands.suggestCommand: that package
 // imports app, so the dependency can only run the other way.
@@ -167,14 +174,20 @@ func nearestSkillID(want string, catalog []backend.SkillRef) string {
 	if want == "" {
 		return ""
 	}
-	best, bestD := "", 3 // strictly < 3, i.e. at most 2 edits
+	best, bestD := "", maxSkillSuggestionDistance+1
 	for _, ref := range catalog {
 		id := strings.TrimSpace(ref.ID)
 		if id == "" {
 			continue
 		}
 		d := levenshtein(want, strings.ToLower(id))
-		if d < bestD || (d == bestD && id < best) {
+		// Checked FIRST and separately from the tie-break below. Folding the two
+		// together works only because nothing sorts before the empty initial best, which
+		// is the kind of accident that survives until someone seeds `best` differently.
+		if d > maxSkillSuggestionDistance {
+			continue
+		}
+		if best == "" || d < bestD || (d == bestD && id < best) {
 			best, bestD = id, d
 		}
 	}

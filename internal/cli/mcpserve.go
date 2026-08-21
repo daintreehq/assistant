@@ -90,19 +90,23 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 			own.Release()
 			return nil, err
 		}
-		a.AdoptAsCurrentSession()
-
 		// Negotiate the pins before the session is handed back, so a bad id fails the
 		// session.open tool call — where the caller is looking — instead of silently
 		// producing turns that never load the runbook they named. Uses the BOOTSTRAP
 		// context: this is work the open must finish, and a client that gave up should
 		// stop us waiting on it.
+		//
+		// Ordered ahead of AdoptAsCurrentSession: adoption writes the project's durable
+		// current-session pointer and shutdown does not restore the previous value, so a
+		// session.open that FAILS its preflight would otherwise leave the supervisor
+		// resuming a conversation that never ran a turn.
 		pinNotice, perr := a.PreparePinnedSkills(bootstrap)
 		if perr != nil {
 			_ = a.Shutdown()
 			own.Release()
 			return nil, perr
 		}
+		a.AdoptAsCurrentSession()
 
 		logPath := startProcessLog(a.Config)
 
@@ -160,8 +164,9 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 			ApprovalMode: string(mode),
 			MCPConnected: st.Connected,
 			MCPTransport: st.Transport,
-			// Reported so a caller that inherited a server-level --skill can see what its
-			// turns actually load; the advisory rides SessionOutput.Warnings via describe.
+			// Reported so a caller that inherited a server-level --skill can see what this
+			// session REQUESTS on every turn (not what the backend honours — the pin
+			// warnings own that); the advisory rides SessionOutput.Warnings via describe.
 			PinnedSkills:        a.PinnedSkillIDs(),
 			PinPreflightWarning: pinNotice,
 		}

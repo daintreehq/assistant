@@ -527,6 +527,12 @@ func TestParseArgsRejectsMeaninglessSkillCombinations(t *testing.T) {
 		{name: "pin on doctor", args: []string{"--skill", "a.one", "doctor"}, want: "never runs a turn"},
 		{name: "pin on status", args: []string{"--skill", "a.one", "status"}, want: "never runs a turn"},
 		{name: "pin on daemon", args: []string{"--skill", "a.one", "daemon"}, want: "never runs a turn"},
+		{name: "pin on daemon stop", args: []string{"--skill", "a.one", "daemon", "stop"}, want: "never runs a turn"},
+		{name: "pin on reset", args: []string{"--skill", "a.one", "reset", "project-state"}, want: "never runs a turn"},
+		{name: "pin on support-bundle", args: []string{"--skill", "a.one", "support-bundle"}, want: "never runs a turn"},
+		// A trailing --skill with nothing after it is caught by splitInterspersedArgs,
+		// before the value type ever sees it.
+		{name: "trailing skill with no value", args: []string{"hi", "--skill"}, want: "requires a value"},
 		{name: "list with a prompt", args: []string{"--list-skills", "hello"}, want: "does not take a prompt"},
 		{name: "list with a command", args: []string{"--list-skills", "doctor"}, want: "does not take a prompt"},
 		{name: "list plus pin", args: []string{"--list-skills", "--skill", "a.one"}, want: "do not go together"},
@@ -579,6 +585,22 @@ func TestParseArgsRoutesListSkills(t *testing.T) {
 	// The general rule it is carved out of must still hold for everyone else.
 	if _, err := parseArgs([]string{"--json"}); err == nil {
 		t.Fatal("a bare --json must still require a prompt")
+	}
+
+	// A TRAILING terminator does not retroactively turn the flag into a prompt, matching
+	// how `status --` keeps its command.
+	if got, err := parseArgs([]string{"--list-skills", "--"}); err != nil || got.Route != routeListSkills {
+		t.Fatalf(`parseArgs("--list-skills", "--") = (%v, %v), want the list route`, got.Route, err)
+	}
+	// A LEADING terminator does: `-- --list-skills` is someone asking the assistant about
+	// the flag, which is exactly what `--` is for. It never reaches the flag set, so the
+	// carve-out's indifference to forcePrompt is correct rather than a gap.
+	got, err := parseArgs([]string{"--", "--list-skills"})
+	if err != nil {
+		t.Fatalf(`parseArgs("--", "--list-skills") error = %v`, err)
+	}
+	if got.Route != routeDefault || got.Options.Prompt != "--list-skills" {
+		t.Fatalf("a leading terminator must make it a prompt, got route %v prompt %q", got.Route, got.Options.Prompt)
 	}
 }
 

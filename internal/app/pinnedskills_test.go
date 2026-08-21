@@ -251,3 +251,44 @@ func TestPinnedSkillIDsReturnsACopy(t *testing.T) {
 		t.Fatalf("caller mutated the App's pins through the returned slice: %v", again)
 	}
 }
+
+// The suggestion has to be deterministic — catalog order must not decide which of two
+// equally-close ids gets named, or the same typo produces different advice on different
+// deployments and the reader cannot tell whether the answer means anything.
+func TestNearestSkillIDIsDeterministicAndBounded(t *testing.T) {
+	catalog := []backend.SkillRef{
+		{ID: "zeta.one"},
+		{ID: "beta.one"}, // same distance from "xeta.one" as zeta.one; smaller id wins
+		{ID: "completely.different.runbook"},
+	}
+	for _, tc := range []struct {
+		name string
+		want string
+		got  string
+	}{
+		{"tie breaks lexicographically, not on catalog order", "xeta.one", "beta.one"},
+		{"exact-ish match still wins over a tie", "beta.on", "beta.one"},
+		// Three edits is past the bound: naming an unrelated runbook sends the reader to
+		// fix something that was never the problem.
+		{"far-off id is not guessed at", "qqqqqqqqqq", ""},
+		{"empty want is not guessed at", "  ", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nearestSkillID(tc.want, catalog); got != tc.got {
+				t.Fatalf("nearestSkillID(%q) = %q, want %q", tc.want, got, tc.got)
+			}
+		})
+	}
+
+	// Reversing the catalog must not change the answer.
+	reversed := []backend.SkillRef{catalog[2], catalog[1], catalog[0]}
+	if a, b := nearestSkillID("xeta.one", catalog), nearestSkillID("xeta.one", reversed); a != b {
+		t.Fatalf("catalog order changed the suggestion: %q vs %q", a, b)
+	}
+
+	// A blank catalog entry must be skipped rather than returned as a suggestion — an
+	// empty "did you mean" is worse than no suggestion at all.
+	if got := nearestSkillID("x", []backend.SkillRef{{ID: "   "}}); got != "" {
+		t.Fatalf("nearestSkillID suggested a blank id: %q", got)
+	}
+}

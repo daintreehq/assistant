@@ -237,6 +237,25 @@ func (e *env) trustedOrOwnGet(key string) string {
 // stateDir/logDir are read ONLY from the trusted snapshot or an explicit
 // override — a bound project's .env must never escalate the assistant.
 func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
+	return loadConfig(overrides, true)
+}
+
+// LoadConfigForProbe resolves the same configuration as LoadConfig but does NOT create
+// the state directory.
+//
+// It exists for the read-only probes that need only the endpoint, the optional bearer
+// and the routing posture — `--list-skills` today. Those answer a question about the
+// BACKEND, and creating a directory on the user's disk to ask it is both a side effect
+// nobody requested and a way to fail for a reason that has nothing to do with the
+// question: `--state-dir` pointing somewhere unwritable would abort a listing that never
+// wanted a state dir at all.
+//
+// cfg.DBPath is still computed. Nothing on a probe path may open it.
+func LoadConfigForProbe(overrides ConfigOverrides) (AppConfig, error) {
+	return loadConfig(overrides, false)
+}
+
+func loadConfig(overrides ConfigOverrides, ensureStateDir bool) (AppConfig, error) {
 	// 1. Snapshot the trusted environment BEFORE any .env mutates os.Environ.
 	//    Rationale: the bound project is arbitrary/untrusted code; a repo-local
 	//    .env must not be able to silently escalate the assistant.
@@ -341,8 +360,11 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 	}
 	// 0700: the state dir holds conversations, the audit trail, automation grants, and
 	// memories — owner-only, never world/group readable (mirrors the debug-log dir perms).
-	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
-		return AppConfig{}, fmt.Errorf("create state dir: %w", err)
+	// Skipped for a read-only probe, which resolves the endpoint and nothing else.
+	if ensureStateDir {
+		if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+			return AppConfig{}, fmt.Errorf("create state dir: %w", err)
+		}
 	}
 	cfg.DBPath = filepath.Join(cfg.StateDir, "state.db")
 

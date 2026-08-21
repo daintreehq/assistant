@@ -96,9 +96,12 @@ Things worth knowing before you drive it:
   not drift). Omitting it inherits whatever `--skill` this server process was launched
   with; passing an explicit `[]` clears those defaults for this session. An id the
   backend cannot accept fails the **open**, not the first turn, so the failure lands
-  where the caller is looking. `facts.pinnedSkills` reports what the session ended up
-  pinning, which is the only way a caller that inherited a server-level default can see
-  it.
+  where the caller is looking — when there is a catalog to check it against. Against a
+  backend that advertises none, the open succeeds with a warning and the bad id is
+  reported on the first turn instead. `facts.pinnedSkills` reports what the session REQUESTS on
+  every turn — the only way a caller that inherited a server-level default can see them.
+  It is not a claim the backend honoured each one: an id can be in the catalog and still
+  come back `pinned_skill_not_executable` or `pinned_skill_over_cap`.
 
 ### Diagnosing a run
 

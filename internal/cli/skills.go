@@ -24,11 +24,15 @@ import (
 // produces a run that looks fine. This is deliberately the LIGHTEST route in the binary:
 // one capability GET. No owner lease, no database, no MCP, no App, no turn. Listing what
 // a backend can load is a question about the backend, and it must be answerable while
-// another assistant owns the project.
+// another assistant owns the project — and, for the same reason, without creating a
+// state directory the caller never asked for (config.LoadConfigForProbe).
 
-// listSkillsTimeout bounds the single capability read. A listing that hangs is worse
-// than one that fails: the caller is usually a human mid-sentence, or a script about to
-// choose an id.
+// listSkillsTimeout bounds the capability read END TO END, retries included. A listing
+// that hangs is worse than one that fails: the caller is usually a human mid-sentence,
+// or a script about to choose an id. The shared client retries a transient failure, so
+// this is ONE logical read rather than literally one request — which is the right
+// trade, since a catalog that vanishes on a blip would send someone hunting a backend
+// problem that healed a second later.
 const listSkillsTimeout = 15 * time.Second
 
 // SkillCatalogJSON is the `--list-skills --json` document.
@@ -72,22 +76,35 @@ func RunListSkills(ctx context.Context, opts Options) int {
 // runListSkills is RunListSkills with the streams injected, so the exact bytes of every
 // output shape are testable without a subprocess.
 func runListSkills(ctx context.Context, opts Options, stdout, stderr io.Writer) int {
+	// fail routes every failure to the active output contract and picks the exit code.
+	//
+	// Cancellation is decided from the PARENT context, never the child: the internal
+	// listSkillsTimeout below expires only cctx, so a listing that outran its own bound
+	// is an error (1), while a SIGINT or a caller-owned deadline is a cancellation (2).
+	// Any non-nil parent error counts — a caller's DeadlineExceeded is no less a
+	// "you stopped us" than Canceled is.
+	//
+	// It still writes a document in JSON mode, including when cancelled. "Exactly one
+	// JSON document on stdout" has to hold on every path or it is not a contract a
+	// script can rely on, and an interrupted run that emitted nothing is the case a
+	// parser handles worst.
 	fail := func(code string, err error) int {
-		if errors.Is(ctx.Err(), context.Canceled) {
-			return domain.OneShotExitCode.Cancelled
+		exit := domain.OneShotExitCode.Error
+		if ctx.Err() != nil {
+			exit, code = domain.OneShotExitCode.Cancelled, "cancelled"
 		}
 		if opts.JSON {
 			var doc skillCatalogErrorJSON
 			doc.Error.Code = code
 			doc.Error.Message = err.Error()
-			writeIndentedJSON(stdout, doc)
+			_ = writeIndentedJSON(stdout, doc)
 		} else {
 			render.New(stderr).Error(err.Error())
 		}
-		return domain.OneShotExitCode.Error
+		return exit
 	}
 
-	cfg, err := loadConfigFromOptions(opts)
+	cfg, err := loadProbeConfigFromOptions(opts)
 	if err != nil {
 		return fail("config_failed", err)
 	}
@@ -108,7 +125,13 @@ func runListSkills(ctx context.Context, opts Options, stdout, stderr io.Writer) 
 
 	// Sorted defensively. The backend documents sorted-by-id, but this is a listing a
 	// human scans and a script may diff — it must not depend on a server-side promise.
-	refs := append([]backend.SkillRef(nil), caps.Skills.Catalog...)
+	//
+	// Copied into a NON-NIL slice, which matters only in the empty case and matters a
+	// lot there: `append([]backend.SkillRef(nil), empty...)` stays nil and marshals to
+	// `"skills": null`, undoing the nil-versus-empty distinction three lines above and
+	// breaking `jq '.skills[]'` on exactly the backend that answered honestly.
+	refs := make([]backend.SkillRef, len(caps.Skills.Catalog))
+	copy(refs, caps.Skills.Catalog)
 	sort.Slice(refs, func(i, j int) bool { return refs[i].ID < refs[j].ID })
 
 	if opts.JSON {

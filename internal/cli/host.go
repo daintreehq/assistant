@@ -71,17 +71,22 @@ func RunHost(ctx context.Context, opts Options) int {
 			own.Release()
 			return nil, err
 		}
-		a.AdoptAsCurrentSession()
-		// Negotiate --skill before the host serves a frame. The protocol has no warning
-		// frame, so both halves go to stderr — the same channel the auto-approve notice
-		// below uses, and for the same reason: a condition that changes what every turn
-		// means must not be invisible just because the wire cannot carry it.
+		// Negotiate --skill before the host serves a frame, and before adopting: adoption
+		// writes the project's durable current-session pointer and shutdown does not
+		// restore the previous value, so a failed preflight would leave the supervisor
+		// resuming a session that never ran a turn.
+		//
+		// The protocol has no warning frame, so both halves of the result go to stderr —
+		// the same channel the auto-approve notice below uses, and for the same reason: a
+		// condition that changes what every turn means must not be invisible just because
+		// the wire cannot carry it.
 		pinNotice, perr := a.PreparePinnedSkills(fctx)
 		if perr != nil {
 			_ = a.Shutdown()
 			own.Release()
 			return nil, perr
 		}
+		a.AdoptAsCurrentSession()
 		if pinNotice != "" {
 			fmt.Fprintf(os.Stderr, "daintree-assistant host: %s\n", pinNotice)
 		}

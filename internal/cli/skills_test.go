@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/daintreehq/assistant/internal/domain"
 )
@@ -31,10 +34,20 @@ func capabilitiesServer(t *testing.T, body string) string {
 
 // listOpts isolates the run from the developer's real environment: a listing must never
 // depend on, or write to, the state dir of a live assistant.
+//
+// The state dir names a path INSIDE a temp dir that does not exist yet, on purpose.
+// Handing it an already-created directory would hide the very thing this route promises:
+// a listing asks the backend a question and must not make a directory to do it.
 func listOpts(t *testing.T, baseURL string, asJSON bool) Options {
 	t.Helper()
 	dir := t.TempDir()
-	return Options{BackendURL: baseURL, StateDir: dir, Project: dir, JSON: asJSON, Offline: boolp(true)}
+	return Options{
+		BackendURL: baseURL,
+		StateDir:   filepath.Join(dir, "never-created"),
+		Project:    dir,
+		JSON:       asJSON,
+		Offline:    boolp(true),
+	}
 }
 
 func boolp(b bool) *bool { return &b }
@@ -115,6 +128,12 @@ func TestListSkillsEmptyCatalogSucceeds(t *testing.T) {
 	}
 	if len(doc.Skills) != 0 {
 		t.Fatalf("skills = %+v, want empty", doc.Skills)
+	}
+	// An EMPTY ARRAY, never null. len() accepts both, which is exactly how a nil slice
+	// sneaks back in — and `jq '.skills[]'` fails on null while it happily yields nothing
+	// on []. Assert the raw bytes.
+	if !strings.Contains(stdout, `"skills": []`) {
+		t.Fatalf("an advertised empty catalog must serialize as [], not null:\n%s", stdout)
 	}
 }
 
@@ -200,5 +219,66 @@ func TestListSkillsReportsCancellation(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := runListSkills(ctx, listOpts(t, srv.URL, false), &out, &errOut); code != domain.OneShotExitCode.Cancelled {
 		t.Fatalf("exit = %d, want 2 (cancelled)", code)
+	}
+}
+
+// A listing is a question about the BACKEND. Creating a state directory to ask it is a
+// side effect nobody requested, and it turns an unwritable --state-dir into a failure of
+// something that never wanted a state dir — which is the difference between a listing
+// that works everywhere and one that works only where a session could have run.
+func TestListSkillsTouchesNoState(t *testing.T) {
+	opts := listOpts(t, capabilitiesServer(t, twoSkillCatalog), false)
+	code, _, stderr := runList(t, opts)
+	if code != domain.OneShotExitCode.Success {
+		t.Fatalf("exit = %d, want 0 (stderr: %s)", code, stderr)
+	}
+	if _, err := os.Stat(opts.StateDir); !os.IsNotExist(err) {
+		t.Fatalf("--list-skills created %s (stat err = %v); it must touch no state", opts.StateDir, err)
+	}
+}
+
+// The one-document contract has to hold on EVERY path or a parser cannot rely on it, and
+// an interrupted run that wrote nothing is the case a parser handles worst.
+func TestListSkillsCancellationStillAnswersInJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var out, errOut bytes.Buffer
+	code := runListSkills(ctx, listOpts(t, srv.URL, true), &out, &errOut)
+	if code != domain.OneShotExitCode.Cancelled {
+		t.Fatalf("exit = %d, want 2 (cancelled)", code)
+	}
+	var doc struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(out.String()), &doc); err != nil {
+		t.Fatalf("a cancelled --json run wrote no parseable document (%v): %q", err, out.String())
+	}
+	if doc.Error.Code != "cancelled" {
+		t.Fatalf("error code = %q, want cancelled", doc.Error.Code)
+	}
+}
+
+// A caller-owned deadline is a "you stopped us", exactly like a SIGINT — not a failure of
+// the listing. Reporting it as an error (1) would send a script hunting a backend problem
+// that never happened.
+func TestListSkillsParentDeadlineIsCancellation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	<-ctx.Done()
+	var out, errOut bytes.Buffer
+	if code := runListSkills(ctx, listOpts(t, srv.URL, false), &out, &errOut); code != domain.OneShotExitCode.Cancelled {
+		t.Fatalf("exit = %d, want 2 — a caller's expired deadline is a cancellation", code)
 	}
 }

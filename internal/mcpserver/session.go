@@ -60,9 +60,12 @@ type RuntimeFacts struct {
 	ApprovalMode string `json:"approvalMode"`
 	MCPConnected bool   `json:"mcpConnected"`
 	MCPTransport string `json:"mcpTransport,omitempty"`
-	// PinnedSkills are the backend runbooks every turn of this session loads. Reported
-	// because a caller that inherited a server-level default did not choose them and
-	// would otherwise have no way to see what its turns are actually loading.
+	// PinnedSkills are the ids this session ASKS for on every turn — what was requested,
+	// not what the backend ended up loading. Preflight can only prove an id exists in the
+	// catalog; whether it is executable under this profile, and whether it survives the
+	// active-skill cap, is decided per turn and reported through the pin warnings.
+	// Reported at all because a caller that inherited a server-level default did not
+	// choose these and would otherwise have no way to see them.
 	PinnedSkills []string `json:"pinnedSkills,omitempty"`
 	// PinPreflightWarning is the non-fatal pin advisory. NOT part of the facts wire
 	// shape — describe() folds it into SessionOutput.Warnings, which is the field a

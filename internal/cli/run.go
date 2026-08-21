@@ -167,6 +167,18 @@ func loadConfigFromOptions(opts Options) (config.AppConfig, error) {
 	return config.LoadConfig(o)
 }
 
+// loadProbeConfigFromOptions is loadConfigFromOptions for a read-only probe: same
+// resolution, but it does not create the state directory. See config.LoadConfigForProbe
+// — a question about the backend must not have a side effect on the user's disk, nor
+// fail because a state dir it never wanted is unwritable.
+func loadProbeConfigFromOptions(opts Options) (config.AppConfig, error) {
+	o, err := overridesFromOptions(opts)
+	if err != nil {
+		return config.AppConfig{}, err
+	}
+	return config.LoadConfigForProbe(o)
+}
+
 // readAPIKeyFile reads a single-line credential file.
 //
 // This is the OPTIONAL caller-key path. The CLI needs no credential — the backend funds
@@ -728,13 +740,15 @@ func runInteractive(ctx context.Context, opts Options, ttyOK bool) int {
 		return domain.OneShotExitCode.Error
 	}
 	debuglog.BootTrace("boot.app.created")
-	// This conversation is now the project's current session — the one the
-	// daemon's detached wake turns continue after we exit.
-	a.AdoptAsCurrentSession()
-
-	// Negotiate `--skill` before either front end opens. A no-op without pins; with
-	// them, a failure aborts the launch rather than dropping the operator into a
-	// cockpit whose every turn silently ignores the runbook they named.
+	// Negotiate `--skill` BEFORE adopting, and before either front end opens. A no-op
+	// without pins; with them, a failure aborts the launch rather than dropping the
+	// operator into a cockpit whose every turn silently ignores the runbook they named.
+	//
+	// Ordered ahead of AdoptAsCurrentSession deliberately. Adoption writes the project's
+	// durable current-session pointer and shutdown does not put back what was there, so
+	// adopting first would let a launch that never ran a turn — a mistyped `--skill` —
+	// permanently displace the real conversation: the supervisor's detached wake turns
+	// would resume the empty session instead of the one the user was actually having.
 	pinNotice, perr := a.PreparePinnedSkills(ctx)
 	if perr != nil {
 		_ = a.Shutdown()
@@ -744,6 +758,10 @@ func runInteractive(ctx context.Context, opts Options, ttyOK bool) int {
 	if pinNotice != "" {
 		r.Warn(pinNotice)
 	}
+
+	// This conversation is now the project's current session — the one the
+	// daemon's detached wake turns continue after we exit.
+	a.AdoptAsCurrentSession()
 
 	if wantsCockpit {
 		// Cockpit: open the debug log (header badge shows it, print nothing).

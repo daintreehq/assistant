@@ -1401,3 +1401,40 @@ func TestSessionOpenSurfacesThePinPreflightAdvisory(t *testing.T) {
 		t.Fatalf("a caller that inherited a server-level pin must be able to see it: %+v", out.Facts)
 	}
 }
+
+// The nil-versus-empty distinction has to survive the SDK's decode, not just
+// applySliceIfSet's unit test — an explicit `"skills": []` is a caller CLEARING the
+// server's `--skill` defaults for this session, and if it arrived as nil the server
+// would do the opposite of what was asked and pin runbooks the caller declined.
+//
+// Sent as raw arguments deliberately: a typed OpenInput{Skills: []string{}} cannot
+// express this, because the field's own `omitempty` drops an empty slice on the way out.
+func TestSessionOpenDistinguishesEmptySkillsFromOmitted(t *testing.T) {
+	var got OpenParams
+	opened := 0
+	cs, _ := connect(t, func(_, _ context.Context, p OpenParams) (Runtime, error) {
+		got = p
+		opened++
+		return newFakeRuntime(fmt.Sprintf("ses_raw_%d", opened)), nil
+	})
+
+	var out SessionOutput
+	if err := call(t, cs, "daintree.session.open",
+		map[string]any{"project": "/repo", "skills": []any{}}, &out); err != nil {
+		t.Fatalf("session.open: %v", err)
+	}
+	if got.Skills == nil {
+		t.Fatal(`an explicit "skills": [] decoded to nil — the session cannot clear a server-level default`)
+	}
+	if len(got.Skills) != 0 {
+		t.Fatalf("Skills = %v, want an empty (but non-nil) slice", got.Skills)
+	}
+
+	got = OpenParams{}
+	if err := call(t, cs, "daintree.session.open", map[string]any{"project": "/repo"}, &out); err != nil {
+		t.Fatalf("session.open: %v", err)
+	}
+	if got.Skills != nil {
+		t.Fatalf("an omitted skills argument must stay nil so it inherits the default, got %#v", got.Skills)
+	}
+}

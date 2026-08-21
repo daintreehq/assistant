@@ -124,3 +124,61 @@ func TestBinaryUnpinnedRunOmitsThePinField(t *testing.T) {
 		t.Fatalf("an unpinned run put the field on the wire: %+v", sel)
 	}
 }
+
+// The fatal preflight, end to end and asserted on the SERVER: a mistyped id must cost
+// zero turns. This is the test that catches the preflight being skipped, or moved after
+// the first /respond — at which point --skill would still "work" in every other test
+// while quietly having spent a turn to discover the typo.
+func TestBinaryUnknownPinnedSkillSpendsNoTurn(t *testing.T) {
+	be := newFakeBackend(t, sseRound{contentTokens: []string{"ok"}})
+
+	// Human mode first: the message belongs on stderr, and stdout — the ANSWER channel —
+	// must stay empty so a caller capturing it gets nothing rather than an error rendered
+	// as the reply.
+	stdout, stderr, code := runSkillsCLI(t, be.baseURL(), "--skill", "daintree.foundatoin", "hello")
+	if code == 0 {
+		t.Fatalf("a mistyped --skill must fail the launch (stdout %q)", stdout)
+	}
+	if strings.TrimSpace(stdout) != "" {
+		t.Fatalf("stdout must stay empty on a failed human run, got %q", stdout)
+	}
+	// The near miss is the whole point: "unknown id" alone leaves you re-reading the
+	// backend's source, which is what --list-skills and this check exist to end.
+	if !strings.Contains(stderr, "daintree.foundation") {
+		t.Fatalf("stderr does not offer the near miss: %q", stderr)
+	}
+
+	// Under --json the SAME failure rides the JSONL stream instead, because stdout is the
+	// only channel a scripted caller reads. The message must survive the change of
+	// channel — a machine-readable failure that dropped the near miss would be strictly
+	// worse than the human one.
+	stdout, _, code = runSkillsCLI(t, be.baseURL(), "--json", "--skill", "daintree.foundatoin", "hello")
+	if code == 0 {
+		t.Fatal("a mistyped --skill must fail the launch under --json too")
+	}
+	var sawError bool
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("stdout is not JSONL (%v): %q", err, line)
+		}
+		if ev.Type == "error" && strings.Contains(ev.Message, "daintree.foundation") {
+			sawError = true
+		}
+	}
+	if !sawError {
+		t.Fatalf("no JSONL error event carried the near miss:\n%s", stdout)
+	}
+
+	// The point of the whole test: neither run reached the backend. Checked LAST so it
+	// covers both invocations at once.
+	if n := be.callCount(); n != 0 {
+		t.Fatalf("the backend served %d /respond request(s); an unknown pin must be caught before any turn", n)
+	}
+}
