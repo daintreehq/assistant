@@ -371,6 +371,11 @@ func TestBuildWakePromptWatcherOnlyUnchangedByAsyncBranch(t *testing.T) {
 // guards. Deliberately family-agnostic too: keying on known prefixes (terminal|queue)
 // would miss a future prompt naming, say, watcher.cancel.
 //
+// It does assume the convention every registered tool follows — lowercase-initial dotted
+// segments — rather than the wider shape the registry would technically accept. Matching
+// a digit-initial segment (to catch a hypothetical "queue.resolve.2") would false-positive
+// on every decimal in prose, which costs more than the case it buys.
+//
 // The two awkward real shapes both split correctly on word boundaries: the slash-joined
 // run "terminal.read/terminal.summarize/terminal.extract" yields three names, and the
 // JSON literal `queue.resolve {"id":"…"}` yields one. Sentence-ending periods do not
@@ -380,20 +385,25 @@ func TestBuildWakePromptWatcherOnlyUnchangedByAsyncBranch(t *testing.T) {
 // nuisance failure, not a hole: fix it by rewording the prompt or masking the phrase.
 var wakePromptToolNamePattern = regexp.MustCompile(`\b[a-z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*)+\b`)
 
-// wakePromptProhibitions are the EXACT sentences that earn a tool id its exemption from
-// the core check — the prompt tells the model NOT to call it, so it has no claim on
-// coreToolNames. Masking the PHRASE (not exempting the name globally) is what keeps the
-// exemption honest: reword "do NOT call async.list" into "DO call async.list", or add a
-// second positive mention elsewhere, and the surviving occurrence is still extracted and
-// still checked. Every phrase must still appear somewhere, or its entry is stale.
+// wakePromptProhibitions are the COMPLETE prohibition clauses that give a tool id its
+// exemption from the core check — the prompt tells the model not to call it, so this
+// prompt gives it no claim on coreToolNames. Masking the whole clause (rather than
+// exempting the bare name) is what keeps the exemption honest: flip it to "DO call
+// async.list", weaken it to "do NOT call async.list UNLESS …", or add a second positive
+// mention elsewhere, and the surviving occurrence is still extracted and still checked.
+// Match the clause through its last stable word, so a trailing qualifier breaks the
+// match instead of riding along inside it. Every clause must still render, or it is
+// stale.
 var wakePromptProhibitions = []string{
-	"do NOT call async.list",
+	"do NOT call async.list to double-check",
 }
 
-// assertWakePromptToolsAreCore extracts every tool id the rendered prompt NAMES AS A
-// CALL and reports each one that is not in coreToolNames. Shared with the supervisor's
-// daemon-note guard so both halves of the assembled wake prompt are held to one rule.
-// It returns the names it saw, so a caller can verify its prohibitions still render.
+// assertWakePromptToolsAreCore masks the known prohibition clauses, extracts every
+// dotted tool-id candidate left in the rendered prompt, and reports each one that is not
+// in coreToolNames. internal/supervisor/wake_test.go duplicates this logic for the
+// daemon note it appends, so both halves of the assembled wake prompt meet one rule —
+// change them together. The returned set holds the extracted names AND the prohibition
+// clauses that matched, so a caller can tell a stale clause from a live one.
 func assertWakePromptToolsAreCore(t *testing.T, label, prompt string, prohibitions []string) map[string]struct{} {
 	t.Helper()
 	core := setOf(coreToolNames...)

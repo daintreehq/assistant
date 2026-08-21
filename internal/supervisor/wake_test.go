@@ -13,15 +13,18 @@ import (
 // wakePromptToolNamePattern in internal/agent/wake_test.go, which carries the full
 // rationale; the two are duplicated rather than shared because the assembled daemon
 // prompt is built HERE (BuildWakePrompt + unattendedWakeNote) while the branch coverage
-// lives over there, and a test helper cannot cross package boundaries.
+// lives over there. Sharing one copy would mean a non-_test.go support package (an
+// _test.go helper cannot be imported) — more machinery than one regexp is worth. Change
+// the two together.
 var toolNamePattern = regexp.MustCompile(`\b[a-z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*)+\b`)
 
-// noteProhibitions are the EXACT sentences whose tool ids the note tells the model NOT
-// to call, so they earn no place in coreToolNames. Masking the phrase rather than the
-// bare name keeps the exemption honest: reword it into an instruction to CALL the tool
-// and the surviving occurrence is extracted and checked like any other.
+// noteProhibitions are the COMPLETE prohibition clauses whose tool ids the note tells
+// the model not to call, so this prompt gives them no claim on coreToolNames. Masking
+// the whole clause rather than the bare name keeps the exemption honest: reword it into
+// an instruction to CALL the tool, or weaken it with a trailing "unless …", and the
+// surviving occurrence is extracted and checked like any other.
 var noteProhibitions = []string{
-	"Never call user.askMultipleChoice here",
+	"Never call user.askMultipleChoice here;",
 }
 
 // TestUnattendedWakeNoteNamesOnlyCoreTools is the daemon half of issue #370's guard.
