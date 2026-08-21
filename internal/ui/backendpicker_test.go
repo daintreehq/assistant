@@ -127,3 +127,38 @@ func TestLocalQuestionSheetEscapeDoesNotCancelTheTurn(t *testing.T) {
 		t.Errorf("dismissing must not choose anything, but option %d ran", got)
 	}
 }
+
+// THE reason render priority must mirror input priority, and the most dangerous bug in
+// this feature.
+//
+// onKey routes to the approval sheet FIRST. If View rendered the question sheet on top
+// of a live approval, the user would see a picker and be typing into an invisible
+// approval: `A` means "pick option A" on the sheet they can see and "approve, and stop
+// asking" on the one they cannot. The old sign-in sheet carried this guard; the question
+// sheet argued it away on the grounds that only one TOOL can block at a time, which
+// stopped being true when /backend began opening this sheet from an idle cockpit — an
+// attention event can start an autonomous wake underneath it that then asks to approve
+// a mutating tool.
+func TestApprovalRendersOverAPickerBecauseItOwnsTheKeys(t *testing.T) {
+	got := -1
+	m := testModel(100)
+	m.pendingQuestion = localPickerFixture(t, &got)
+	m.pending = &pendingConfirm{
+		req:     tools.ConfirmRequest{ToolName: "terminal.run", Summary: "rm -rf something"},
+		shownAt: domain.NowMS(),
+	}
+
+	out := m.View().Content
+	if strings.Contains(out, "Backend endpoint") {
+		t.Error("the picker must NOT render over a live approval — its keys go to the approval")
+	}
+	if !strings.Contains(out, "terminal.run") {
+		t.Errorf("the approval owns the keys, so it must be what is on screen:\n%s", out)
+	}
+
+	// The picker is not destroyed, only yielded: it comes back once the approval is gone.
+	m.pending = nil
+	if back := m.View().Content; !strings.Contains(back, "Backend endpoint") {
+		t.Errorf("the picker should reappear after the approval is answered:\n%s", back)
+	}
+}

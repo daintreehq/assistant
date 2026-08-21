@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -37,23 +38,49 @@ type storedEndpoint struct {
 // EndpointPath returns the preference file path for a resolved directory.
 func EndpointPath(dir string) string { return filepath.Join(dir, EndpointFileName) }
 
-// LoadBackendURL reads the stored endpoint, or "" when none is stored.
+// maxEndpointFileBytes bounds the read. The path is not attacker-chosen, but it can be
+// a symlink to something that is not a small regular file, and a startup that hangs on a
+// FIFO or eats a huge file is a bad way to learn that.
+const maxEndpointFileBytes = 64 << 10
+
+// LoadBackendURL reads the stored endpoint. It returns "" when nothing is stored, and a
+// non-nil error when something IS stored but could not be used.
 //
-// A missing OR malformed file resolves to "" rather than an error, and that is
-// deliberate: this is a preference, not state. Erroring here would make an unparseable
-// file brick every launch — including the `/backend` command that exists to rewrite it —
-// leaving "delete this file yourself" as the only way out of a stray keystroke.
-// Resolving to "" falls back to the deployed default, which always works.
-func LoadBackendURL(path string) string {
-	raw, err := os.ReadFile(path)
+// The two cases are separated deliberately, and the reason is privacy rather than
+// tidiness. Collapsing them means an unreadable or corrupt file silently resolves to the
+// DEPLOYED backend: someone who chose local on purpose gets their next conversation sent
+// to a remote host because of a permissions error they were never shown. The caller
+// still falls back to the default in both cases (a preference must never brick a launch,
+// least of all the `/backend` command that exists to rewrite it), but with the error in
+// hand it can say so.
+func LoadBackendURL(path string) (string, error) {
+	f, err := os.Open(path)
 	if err != nil {
-		return ""
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil // no preference — the ordinary case
+		}
+		return "", fmt.Errorf("read endpoint: %w", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", fmt.Errorf("read endpoint: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("read endpoint: %s is not a regular file", path)
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxEndpointFileBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read endpoint: %w", err)
+	}
+	if len(raw) > maxEndpointFileBytes {
+		return "", fmt.Errorf("read endpoint: %s is larger than %d bytes", path, maxEndpointFileBytes)
 	}
 	var s storedEndpoint
 	if err := json.Unmarshal(raw, &s); err != nil {
-		return ""
+		return "", fmt.Errorf("read endpoint: %s is not valid JSON: %w", path, err)
 	}
-	return strings.TrimSpace(s.BackendURL)
+	return strings.TrimSpace(s.BackendURL), nil
 }
 
 // SaveBackendURL writes the stored endpoint atomically.

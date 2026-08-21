@@ -196,6 +196,14 @@ type App struct {
 	// lock too.
 	cfgMu sync.RWMutex
 
+	// switchMu serializes a WHOLE endpoint switch. cfgMu guards one config access and
+	// Swappable guards one delegate access, but a switch is three writes (delegate,
+	// config, disk) and nothing made them one transaction: two concurrent switches could
+	// interleave and leave the live delegate on one endpoint, App.Config on another, and
+	// the stored preference on a third, permanently. Held across resolve → gate → swap →
+	// publish → persist. NEVER nest cfgMu outside this.
+	switchMu sync.Mutex
+
 	// InitialTier is the boot-time tier resolved from env/overrides/DEFAULTS, captured
 	// once in Create and NEVER mutated by SetTier. /permissions compares the live tier
 	// against it to warn that a narrowed/broadened tier is session-only and reverts next

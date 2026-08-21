@@ -107,7 +107,7 @@ func TestSetBackendURLPersistsAcrossSessions(t *testing.T) {
 		t.Fatalf("SetBackendURL: %v", err)
 	}
 	path := a.SnapshotConfig().EndpointPath
-	if got := config.LoadBackendURL(path); got != backend.LocalBaseURL {
+	if got, _ := config.LoadBackendURL(path); got != backend.LocalBaseURL {
 		t.Fatalf("stored endpoint = %q, want the local backend — the choice did not survive", got)
 	}
 
@@ -116,7 +116,69 @@ func TestSetBackendURLPersistsAcrossSessions(t *testing.T) {
 	if _, err := a.ResetBackendURL(); err != nil {
 		t.Fatalf("ResetBackendURL: %v", err)
 	}
-	if got := config.LoadBackendURL(path); got != "" {
+	if got, _ := config.LoadBackendURL(path); got != "" {
 		t.Errorf("reset left %q stored; it should leave nothing", got)
+	}
+}
+
+// Validation matrix. The old sign-in flow normalised endpoints and was deleted with it;
+// this is the one door a custom endpoint comes through now, and every rejection below is
+// something that fails silently or dangerously if it is allowed past.
+func TestResolveBackendTargetRejectsDangerousURLs(t *testing.T) {
+	for name, in := range map[string]string{
+		// Go's http.Client turns URL userinfo into a Basic Authorization header when no
+		// other one is set — silently authenticating every request, in a CLI whose whole
+		// contract is that it sends no credential.
+		"userinfo":         "https://user:pass@backend.example",
+		"userinfo no pass": "https://user@backend.example",
+		// The API path is JOINED onto the base, so these never reach the API at all.
+		"query":    "https://backend.example?token=x",
+		"fragment": "https://backend.example#frag",
+		// Every turn, its tool arguments and its tool results would cross this in the
+		// clear, and an on-path attacker could rewrite the stream to inject tool calls.
+		"remote plaintext":  "http://backend.example",
+		"no host":           "https://",
+		"control character": "https://backend.example\x1b[2J",
+	} {
+		if got, err := ResolveBackendTarget(in); err == nil {
+			t.Errorf("%s: ResolveBackendTarget(%q) = %q, want an error", name, in, got)
+		}
+	}
+}
+
+// …while the things that MUST keep working, do. Loopback over plaintext is the local
+// development loop: there is no network to intercept.
+func TestResolveBackendTargetAcceptsWhatItShould(t *testing.T) {
+	for _, in := range []string{
+		"https://backend.example",
+		"https://backend.example:8443",
+		"https://backend.example/proxy-prefix",
+		"http://127.0.0.1:8473",
+		"http://localhost:8473",
+	} {
+		if _, err := ResolveBackendTarget(in); err != nil {
+			t.Errorf("ResolveBackendTarget(%q) rejected a valid endpoint: %v", in, err)
+		}
+	}
+}
+
+// Choosing the endpoint you are ALREADY on is how someone pins it — `/backend official`
+// on a fresh install, or `/backend local` while the environment happens to supply local.
+// Returning early skipped the write while still reporting "Remembered for future
+// sessions", which is a lie the user cannot see.
+func TestSetBackendURLPersistsEvenWhenAlreadyLive(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+
+	live := a.SnapshotConfig().BackendURL
+	if _, err := a.SetBackendURL(live); err != nil {
+		t.Fatalf("SetBackendURL: %v", err)
+	}
+	stored, err := config.LoadBackendURL(a.SnapshotConfig().EndpointPath)
+	if err != nil {
+		t.Fatalf("LoadBackendURL: %v", err)
+	}
+	if stored != live {
+		t.Errorf("selecting the live endpoint must still persist it, stored %q want %q", stored, live)
 	}
 }

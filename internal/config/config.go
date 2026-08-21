@@ -78,6 +78,12 @@ type AppConfig struct {
 	// case it follows the override so tests and harnesses stay isolated from a
 	// developer's real preference.
 	EndpointPath string
+	// EndpointLoadError is non-nil when a stored endpoint EXISTS but could not be read
+	// (bad permissions, corrupt JSON, not a regular file). The resolved BackendURL falls
+	// back as if nothing were stored, so the CLI still launches; this field is what lets
+	// a surface say the preference was ignored rather than silently honouring the
+	// default. Nil both when a preference loaded cleanly and when there is none.
+	EndpointLoadError error
 	// BackendURLPinnedByEnv reports that DAINTREE_BACKEND_URL (or --backend-url) is
 	// deciding the endpoint, so a STORED choice is being overridden.
 	//
@@ -362,10 +368,17 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 	// BackendURLPinnedByEnv exists to let `/backend` explain.
 	envURL := e.trustedGet("DAINTREE_BACKEND_URL")
 	cfg.BackendURLPinnedByEnv = strings.TrimSpace(envURL) != "" || strings.TrimSpace(deref(overrides.BackendURL)) != ""
+	// A stored preference that cannot be READ is not the same as no preference, and the
+	// difference matters: silently falling back would send the next conversation to the
+	// deployed backend for someone who deliberately chose a local one. Never fatal — a
+	// preference must not brick a launch, least of all the `/backend` command that
+	// rewrites it — so the error is carried for the caller to surface instead.
+	stored, storedErr := LoadBackendURL(cfg.EndpointPath)
+	cfg.EndpointLoadError = storedErr
 	cfg.BackendURL = FirstString(
 		deref(overrides.BackendURL),
 		envURL,
-		LoadBackendURL(cfg.EndpointPath),
+		stored,
 		backend.DefaultBaseURL,
 	)
 	cfg.APIKey = FirstString(

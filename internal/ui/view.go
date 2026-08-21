@@ -191,9 +191,20 @@ func (m Model) bottomBand(w int) string {
 		b.WriteString("\n\n")
 	}
 	// A pending multiple-choice question REPLACES the composer entirely: the sheet IS the
-	// input surface until the user answers or cancels. (An approval and a question can't
-	// both be pending — tool dispatch is sequential, so only one tool blocks at a time.)
-	if m.pendingQuestion != nil {
+	// input surface until the user answers or cancels.
+	//
+	// It YIELDS to a pending approval, and that guard is load-bearing, not cosmetic.
+	// onKey routes to the approval FIRST, so rendering a question on top of a live
+	// approval would put the user's keystrokes into an invisible sheet: `A`, meaning
+	// "pick option A" on the picker they can see, is "approve and remember" on the
+	// approval they cannot. RENDER PRIORITY MUST MIRROR INPUT PRIORITY.
+	//
+	// This used to be argued away — tool dispatch is sequential, so only one TOOL can
+	// block at a time. That stopped being true when `/backend` began opening this sheet
+	// from an idle cockpit: an attention event can start an autonomous wake underneath
+	// it, and that turn can request an approval while the picker is still up. The
+	// question state survives underneath and reappears once the approval is answered.
+	if m.pendingQuestion != nil && m.pending == nil {
 		b.WriteString(indentLines(renderQuestion(m.theme, m.pendingQuestion, w), LeftPad))
 		return b.String()
 	}

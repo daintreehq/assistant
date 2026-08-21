@@ -501,6 +501,38 @@ func (s *Session) clearLocked() {
 	s.persistMessageLocked(models.TextMessage("system", domain.ClearMarker))
 }
 
+// DropBackendState forgets the opaque backend state token, for use when the session
+// changes which BACKEND it is talking to.
+//
+// The token is server-SIGNED and endpoint-specific. Replaying one issued by the deployed
+// backend to a local one (or the reverse) hands it a token it cannot verify, so the next
+// turn after an endpoint switch fails on a token the user has no way to see, and keeps
+// failing until /clear. The conversation itself is fine and must survive: only the
+// server-side selection state is endpoint-bound, and dropping it just makes the new
+// backend re-run skill selection from scratch, which is exactly right for a backend that
+// has never seen this conversation.
+//
+// The durable mirror goes with it, for the same reason /clear clears it: a handover to
+// the supervisor daemon would otherwise resurrect the token this just dropped.
+//
+// Returns ErrTurnInProgress when a turn is in flight. That is the load-bearing half: a
+// turn is multi-round, and swapping the endpoint between rounds would send the next
+// round to a backend that cannot read the state token the previous one signed. Every
+// surface that can switch endpoints goes through here, so the guard cannot be bypassed
+// by a caller that forgot about it.
+func (s *Session) DropBackendState() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inFlight {
+		return ErrTurnInProgress
+	}
+	s.backendState = ""
+	if s.deps.BackendStateStore != nil {
+		_ = s.deps.BackendStateStore.PutSessionBackendState(s.deps.SessionID, "")
+	}
+	return nil
+}
+
 // Compact replaces the working history with one "[checkpoint…]" user note plus a
 // small verbatim tail of the most-recent messages, persisting a system marker then
 // the note. The tail mirrors the healthy auto-compact path (same keepValidTail

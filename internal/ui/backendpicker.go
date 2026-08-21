@@ -5,6 +5,7 @@ import (
 
 	"github.com/daintreehq/assistant/internal/app"
 	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/mcp"
 	"github.com/daintreehq/assistant/internal/tools"
 
 	tea "charm.land/bubbletea/v2"
@@ -71,9 +72,11 @@ func backendPickerOptions(current string, hasStored bool) ([]tools.ChoiceOption,
 	opts := make([]tools.ChoiceOption, 0, len(app.BackendChoices)+1)
 	targets := make([]string, 0, len(app.BackendChoices)+1)
 	selected := 0
+	currentIsListed := false
 	for _, c := range app.BackendChoices {
 		text := fmt.Sprintf("%-9s %s", c.Alias, c.URL)
 		if c.URL == current {
+			currentIsListed = true
 			// Marked in the option TEXT, not only by the highlight: the highlight tracks
 			// where the cursor is, which moves the instant someone presses ↓, and the
 			// answer to "which am I on" has to survive that.
@@ -82,6 +85,18 @@ func backendPickerOptions(current string, hasStored bool) ([]tools.ChoiceOption,
 		}
 		opts = append(opts, tools.ChoiceOption{Label: choiceLabel(len(opts)), Text: text})
 		targets = append(targets, c.URL)
+	}
+	// A CUSTOM current endpoint is not in the menu but IS what is answering, so it needs
+	// its own row. Without one nothing is marked, `selected` stays 0, and opening the
+	// picker just to see where you are and pressing Enter silently switches you to
+	// official — the exact opposite of what the sheet is for.
+	if current != "" && !currentIsListed {
+		opts = append(opts, tools.ChoiceOption{
+			Label: choiceLabel(len(opts)),
+			Text:  fmt.Sprintf("%-9s %s   (current)", "custom", mcp.SanitizeURL(current)),
+		})
+		targets = append(targets, current)
+		selected = len(opts) - 1
 	}
 	// Offered only when there is something to forget, so the common case stays a
 	// two-row menu and the option never reads as a no-op.

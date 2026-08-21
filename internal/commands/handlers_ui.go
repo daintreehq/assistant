@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -620,6 +621,12 @@ func BackendSwitchText(a *app.App, arg string) string {
 		target, err = a.SetBackendURL(arg)
 	}
 	if err != nil {
+		if errors.Is(err, agent.ErrTurnInProgress) {
+			// Not a user error. Say what to do about it rather than surfacing a
+			// single-flight sentinel written for a wiring bug.
+			return "A turn is running. Switching endpoints mid-turn would send its next round " +
+				"somewhere that cannot read it — wait for this one to finish, then try again."
+		}
 		if target == "" {
 			return "Cannot switch backend: " + err.Error() + "\n\nRun /backend with no argument to see the choices."
 		}
