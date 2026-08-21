@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -356,5 +357,131 @@ func TestBuildWakePromptWatcherOnlyUnchangedByAsyncBranch(t *testing.T) {
 	events := []domain.QueueEvent{termWakeEvent("t1", nil)}
 	if got, want := BuildWakePrompt(events, nil), buildWatcherWakePrompt(events, nil); got != want {
 		t.Fatalf("watcher-only burst diverged from the watcher prompt:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// --- wake-prompt / coreToolNames drift guard (issue #370) ---
+
+// wakePromptToolNamePattern matches a dotted tool id the way one actually appears in
+// RENDERED prompt text: lowercase-initial segments joined by dots with no whitespace
+// across a dot. Prose cannot forge one by accident — a sentence-ending period is
+// followed by a space ("needing attention. When"), and a possessive ("that event's
+// line") carries no dot — while the two awkward real shapes both split cleanly on word
+// boundaries: the slash-joined run "terminal.read/terminal.summarize/terminal.extract"
+// and the JSON literal `queue.resolve {"id":"…"}`. Deliberately family-agnostic: keying
+// on a known prefix set (terminal|queue|async) would silently miss the very drift this
+// guards against — a future prompt naming, say, watcher.cancel.
+var wakePromptToolNamePattern = regexp.MustCompile(`\b[a-z][A-Za-z0-9]*(?:\.[a-z][A-Za-z0-9]*)+\b`)
+
+// TestBuildWakePromptNamesOnlyCoreTools pins the invariant behind issue #370: every
+// tool the autonomous wake prompt tells the model to CALL must be in coreToolNames.
+// A wake turn is the zero-skill case — nothing loads a skill that could reintroduce a
+// tool the prompt assumed — so once the backend projects a SUBSET of the registry
+// rather than all of it, a prompt naming a non-core tool becomes an instruction the
+// model cannot follow. coreToolNames ⊆ registry is already closed at boot by
+// AssertRegistered("core tools"); this test closes the remaining link,
+// prompt-names ⊆ coreToolNames, so the chain holds end to end.
+func TestBuildWakePromptNamesOnlyCoreTools(t *testing.T) {
+	// Every interpolated event field is set explicitly and kept DOT-FREE. Event text is
+	// rendered verbatim into the prompt, so a tool-shaped fixture value would be
+	// indistinguishable from a real instruction and could fake either verdict.
+	watcherEvent := func(inboxID, terminalID string) domain.QueueEvent {
+		return termWakeEvent(terminalID, func(e *domain.QueueEvent) {
+			e.ID = inboxID
+			e.Title = "supervised finished"
+			e.Summary = "agent finished cleanly"
+		})
+	}
+	asyncEvent := asyncWakeEvent(func(e *domain.QueueEvent) {
+		e.ID = "inbox-async"
+		e.Title = "async finished"
+		e.Summary = "one terminal finished"
+		e.Target = &domain.EventTarget{TerminalID: "term-async", AsyncInvocationID: "asy-async"}
+	})
+
+	// One scenario per RENDERED branch. The marker proves the branch actually rendered,
+	// so a refactor that stops emitting one can't quietly shrink the surface under test.
+	scenarios := []struct {
+		name              string
+		events            []domain.QueueEvent
+		alreadySummarized map[string]struct{}
+		branchMarker      string
+	}{
+		{
+			name:         "watcher summarize guidance",
+			events:       []domain.QueueEvent{watcherEvent("inbox-new", "term-new")},
+			branchMarker: "give the user a concise update",
+		},
+		{
+			name:              "watcher acknowledge-only guidance",
+			events:            []domain.QueueEvent{watcherEvent("inbox-known", "term-known")},
+			alreadySummarized: setOf("term-known"),
+			branchMarker:      "Every event below is a terminal you have already reported this session",
+		},
+		{
+			name: "watcher mixed new and already-reported",
+			events: []domain.QueueEvent{
+				watcherEvent("inbox-known", "term-known"),
+				watcherEvent("inbox-new", "term-new"),
+			},
+			alreadySummarized: setOf("term-known"),
+			branchMarker:      "Some events below are marked (already reported)",
+		},
+		{
+			name:         "async-only burst",
+			events:       []domain.QueueEvent{asyncEvent},
+			branchMarker: "Asynchronous operation(s) you started earlier have finished",
+		},
+		{
+			name:         "mixed watcher and async section",
+			events:       []domain.QueueEvent{watcherEvent("inbox-new", "term-new"), asyncEvent},
+			branchMarker: "Also: asynchronous operation(s) you started earlier have finished",
+		},
+	}
+
+	// async.list is named ONLY as a prohibition ("do NOT call async.list to
+	// double-check") — the wake turn is told not to reach for it, so it has no claim on
+	// coreToolNames. Every OTHER rendered name is an instruction to CALL that tool.
+	// Before adding to this list, read the new mention: only a genuine "do NOT call X"
+	// belongs here.
+	negativeOnly := []string{"async.list"}
+
+	core := setOf(coreToolNames...)
+	excluded := setOf(negativeOnly...)
+	seen := map[string]struct{}{}
+	var missing []string
+
+	for _, tc := range scenarios {
+		prompt := BuildWakePrompt(tc.events, tc.alreadySummarized)
+		if !strings.Contains(prompt, tc.branchMarker) {
+			t.Errorf("%s: branch never rendered, missing marker %q:\n%s", tc.name, tc.branchMarker, prompt)
+		}
+		for _, name := range wakePromptToolNamePattern.FindAllString(prompt, -1) {
+			if _, dup := seen[name]; dup {
+				continue
+			}
+			seen[name] = struct{}{}
+			if _, skip := excluded[name]; skip {
+				continue
+			}
+			if _, ok := core[name]; !ok {
+				missing = append(missing, name)
+			}
+		}
+	}
+
+	// A prohibition that gets reworded or deleted must not leave a silent exclusion
+	// behind — that would hide the next real drift instead of reporting it.
+	var stale []string
+	for _, name := range negativeOnly {
+		if _, ok := seen[name]; !ok {
+			stale = append(stale, name)
+		}
+	}
+	if len(stale) > 0 {
+		t.Errorf("negative-only exclusions no longer mentioned in any wake prompt (drop them): %s", strings.Join(stale, ", "))
+	}
+	if len(missing) > 0 {
+		t.Fatalf("wake prompt names tools that are not in coreToolNames: %s", strings.Join(missing, ", "))
 	}
 }

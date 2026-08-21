@@ -30,9 +30,20 @@ var coreToolNames = []string{
 	"fs.list",
 	"fs.search",
 	"queue.digest",
+	// queue.resolve is core: the autonomous wake prompt tells the reactor to clear a
+	// handled inbox item with it (both the watcher branch's hygiene line and the async
+	// completion guidance name it literally), and a wake turn carries no skill that
+	// could reintroduce it. A wake that cannot resolve leaves the badge lit forever, so
+	// it must be asserted-to-exist at boot. Its confirm/tier gate still governs it.
+	"queue.resolve",
 	"daintree.status",
 	"tool.search",
 	"terminal.read",
+	// terminal.summarize is core: it is the DEFAULT the wake prompt names for reading a
+	// finished agent's output (raw scrollback is garbled TUI noise), in both the watcher
+	// and the async branch. It is the one read a zero-skill autonomous turn is told to
+	// reach for first, so it must be asserted-to-exist at boot. Read-only, no gate.
+	"terminal.summarize",
 	"terminal.extract",
 	// terminal.awaitAll is core: waiting for a spawned cohort to finish is a
 	// fundamental in-turn orchestration step and the base prompt names it as always
