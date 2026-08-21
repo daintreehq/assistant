@@ -394,13 +394,21 @@ func TestPollIsIncrementalAndReportsWhatItWithheld(t *testing.T) {
 			sink.Info("step")
 		}
 	}
-	cs, _ := connect(t, func(_, _ context.Context, _ OpenParams) (Runtime, error) { return fake, nil })
+	cs, reg := connect(t, func(_, _ context.Context, _ OpenParams) (Runtime, error) { return fake, nil })
 	sess := openSession(t, cs)
+	live, err := reg.Get(sess.SessionID)
+	if err != nil {
+		t.Fatalf("registry.Get: %v", err)
+	}
 
 	var run RunOutput
 	if err := call(t, cs, "daintree.ask", AskInput{SessionID: sess.SessionID, Prompt: "work"}, &run); err != nil {
 		t.Fatalf("ask: %v", err)
 	}
+	// ask is ASYNC: it answers the moment the turn is admitted, which can be before the
+	// turn goroutine has entered Send and run the script at all. Wait for the ten events
+	// to be recorded, or the first window is legitimately — and misleadingly — empty.
+	waitForRecordedEvents(t, live, run.RunID, 10)
 	var first RunOutput
 	if err := call(t, cs, "daintree.poll", PollInput{SessionID: sess.SessionID, RunID: run.RunID, MaxEvents: 4}, &first); err != nil {
 		t.Fatalf("poll: %v", err)
@@ -448,13 +456,20 @@ func TestAsyncHandlesSurfaceAsPendingNotAsResults(t *testing.T) {
 			},
 		})
 	}
-	cs, _ := connect(t, func(_, _ context.Context, _ OpenParams) (Runtime, error) { return fake, nil })
+	cs, reg := connect(t, func(_, _ context.Context, _ OpenParams) (Runtime, error) { return fake, nil })
 	sess := openSession(t, cs)
+	live, err := reg.Get(sess.SessionID)
+	if err != nil {
+		t.Fatalf("registry.Get: %v", err)
+	}
 
 	var run RunOutput
 	if err := call(t, cs, "daintree.ask", AskInput{SessionID: sess.SessionID, Prompt: "spawn"}, &run); err != nil {
 		t.Fatalf("ask: %v", err)
 	}
+	// Same async-ask race as the poll-window test: the tool result the script emits has
+	// to be recorded before polling can see its pending handle.
+	waitForRecordedEvents(t, live, run.RunID, 1)
 
 	var polled RunOutput
 	if err := call(t, cs, "daintree.poll", PollInput{SessionID: sess.SessionID, RunID: run.RunID}, &polled); err != nil {
@@ -779,8 +794,12 @@ func TestSentinelTurnFailureIsReportedAsError(t *testing.T) {
 // instruction nobody issued for that work.
 func TestStaleInjectionsAreDiscarded(t *testing.T) {
 	fake := newFakeRuntime("ses_test")
-	cs, _ := connect(t, func(_, _ context.Context, _ OpenParams) (Runtime, error) { return fake, nil })
+	cs, reg := connect(t, func(_, _ context.Context, _ OpenParams) (Runtime, error) { return fake, nil })
 	sess := openSession(t, cs)
+	live, err := reg.Get(sess.SessionID)
+	if err != nil {
+		t.Fatalf("registry.Get: %v", err)
+	}
 
 	if err := call(t, cs, "daintree.ask", AskInput{SessionID: sess.SessionID, Prompt: "first"}, &RunOutput{}); err != nil {
 		t.Fatalf("ask: %v", err)
@@ -798,6 +817,14 @@ func TestStaleInjectionsAreDiscarded(t *testing.T) {
 
 	// And the next ask discards again, covering an injection that missed its window
 	// without an interrupt (a turn that simply finished first).
+	//
+	// interrupt is ASYNCHRONOUS by design: it cancels the turn's context and returns,
+	// while the turn GOROUTINE is still unwinding Send, and only that goroutine clears
+	// s.current. Until it does, Ask correctly reports ErrBusy — Send is single-flight in
+	// the underlying assistant, so admitting a second turn early would be the bug. So
+	// wait on the session's own liveness state before asking again, rather than assuming
+	// the interrupt landed synchronously.
+	waitIdle(t, live)
 	before = fake.discardCount()
 	fake.letFinish()
 	if err := call(t, cs, "daintree.ask", AskInput{SessionID: sess.SessionID, Prompt: "second"}, &RunOutput{}); err != nil {
@@ -806,6 +833,40 @@ func TestStaleInjectionsAreDiscarded(t *testing.T) {
 	if fake.discardCount() <= before {
 		t.Error("a new turn must start from a clean injection buffer")
 	}
+}
+
+// waitForRecordedEvents blocks until a run has recorded at least n events. The recorder
+// writes them on the turn goroutine, so a test that asserts on a window straight after
+// an async ask is racing that goroutine's first scheduling.
+func waitForRecordedEvents(t *testing.T, s *Session, runID string, n int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	got := 0
+	for time.Now().Before(deadline) {
+		if run, err := s.Run(runID); err == nil {
+			evs, _, _, _, _, _, _, _ := run.Snapshot(0, 0)
+			if got = len(evs); got >= n {
+				return
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d recorded events; got %d", n, got)
+}
+
+// waitIdle blocks until the session has no turn in flight, i.e. the turn goroutine has
+// finished unwinding and released the single-flight slot. Busy() is the same state Ask
+// gates on, so this waits on the real signal rather than on elapsed time.
+func waitIdle(t *testing.T, s *Session) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if !s.Busy() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for the session's turn to release; a cancelled turn is not unwinding")
 }
 
 // TestBlockingWaitHonoursCallerCancellation: the SDK waits for in-flight handlers before
