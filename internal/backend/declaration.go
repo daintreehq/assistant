@@ -1,6 +1,9 @@
 package backend
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // The response-declaration markers. The model is asked to open its reply with one of
 // these so the backend learns, from the first bytes, whether the turn is finishing or
@@ -25,6 +28,9 @@ const (
 // brackets. Mirrors MAX_LEADING_WHITESPACE in the backend's own scanner: the two
 // implementations must agree about where a marker ends and the reply begins, or the
 // client would eat text the server meant to keep.
+//
+// Counted in RUNES, matching Python's character-wise count. Bytes would let a
+// multi-byte space consume several of the eight.
 const declarationMaxLeadingWhitespace = 8
 
 // declarationFilter removes a leading declaration marker from a reply that arrives in
@@ -113,11 +119,23 @@ func (f *declarationFilter) drain(final bool) string {
 // the marker and the whitespace before it are already off the buffer.
 func (f *declarationFilter) resolve(final bool) (hadMarker, settled bool) {
 	buf := f.buffer
-	lead := len(buf) - len(strings.TrimLeft(buf, " \t\r\n\v\f"))
-	if lead > declarationMaxLeadingWhitespace {
+	// Unicode whitespace, counted in runes — the same predicate Python's str.lstrip()
+	// applies. A narrower ASCII-only test would read "\u00a0[[DAINTREE:FINAL]]" as
+	// ordinary prose while the server read it as a marker, and the one moment that
+	// disagreement matters is the one this guard exists for: a server-side strip that
+	// regressed and let the marker through.
+	leadBytes, leadRunes := 0, 0
+	for _, r := range buf {
+		if !unicode.IsSpace(r) {
+			break
+		}
+		leadBytes += len(string(r))
+		leadRunes++
+	}
+	if leadRunes > declarationMaxLeadingWhitespace {
 		return false, true
 	}
-	body := buf[lead:]
+	body := buf[leadBytes:]
 	if body == "" {
 		// Whitespace only so far. Under the bound, so a marker may still follow —
 		// unless the reply has ended, in which case none did.

@@ -24,9 +24,17 @@ const (
 	// 90s tolerates several missed heartbeats before declaring the stream dead.
 	sseIdleTimeout = 90 * time.Second
 	// maxSSELineBytes bounds one SSE line. A single line carries at most one event's
-	// JSON payload fragment; 1 MiB is far beyond anything the backend legitimately
-	// emits, so exceeding it is a protocol error, not a big answer.
-	maxSSELineBytes = 1 << 20 // 1 MiB
+	// JSON payload fragment, and exceeding the bound is a protocol error that aborts
+	// the whole stream.
+	//
+	// Sized against the largest thing the backend legitimately emits on one line: a
+	// compaction block, capped at 262,144 CODE POINTS but written as JSON, where a
+	// control byte becomes six characters of \u0000 escape — a worst case near 1.6 MiB
+	// for a block that is entirely within contract. At the old 1 MiB that block aborted
+	// the stream AFTER the answer had already streamed (past the retry boundary), so an
+	// optional optimisation could destroy a reply the user had already read. It is now
+	// matched to the event bound, which always had the headroom.
+	maxSSELineBytes = 4 << 20 // 4 MiB
 	// maxSSEEventBytes bounds one accumulated event payload (all its data lines).
 	// Exceeding it aborts the stream with a typed protocol error rather than letting
 	// a misbehaving peer grow the buffer without limit.
@@ -456,10 +464,12 @@ finish:
 		ReasoningContent: reasoning.String(),
 		ToolCalls:        acc.build(),
 	}
-	// Commit barrier: the block is handed over only by a stream that reached `done`
-	// (the checks below still turn a missing meta/done into an error, and the caller
-	// discards the whole result then).
-	if doneSeen && !compactionInvalid {
+	// Commit barrier: the block is handed over only by a stream that COMMITTED — meta
+	// seen and `done` reached. The caller already discards a result it got an error
+	// with, so this is belt and braces; but "the field is set only on a committed
+	// stream" is the property the splice depends on, and it should hold at this layer
+	// rather than rely on every future caller checking the error first.
+	if metaSeen && doneSeen && !compactionInvalid {
 		result.Compaction = compaction
 	}
 

@@ -18,11 +18,24 @@ import (
 // asserted (the agent MessageStore seam — storage.Store satisfies it in prod).
 type recordingStore struct {
 	msgs []domain.ConversationMessageRecord
+	// failGroupAt makes an atomic group write fail at this 1-based row (0 = never).
+	failGroupAt int
 }
 
 func (s *recordingStore) InsertMessage(rec domain.ConversationMessageRecord) (domain.ConversationMessageRecord, error) {
 	s.msgs = append(s.msgs, rec)
 	return rec, nil
+}
+
+// InsertMessages mirrors the real store's atomic group write (AtomicMessageStore): all
+// rows land or none do. failGroupAt, when positive, fails on that 1-based row WITHOUT
+// appending any of them, which is the whole point of the guarantee under test.
+func (s *recordingStore) InsertMessages(recs []domain.ConversationMessageRecord) error {
+	if s.failGroupAt > 0 && s.failGroupAt <= len(recs) {
+		return errors.New("simulated group write failure")
+	}
+	s.msgs = append(s.msgs, recs...)
+	return nil
 }
 
 // compactSession builds a session wired through the backend-from-router adapter + a

@@ -5,6 +5,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/models"
 )
 
@@ -36,6 +37,7 @@ const (
 	compactionRejectToolSplit   compactionRejectReason = "span_splits_tool_transaction"
 	compactionRejectBlockShape  compactionRejectReason = "block_shape_invalid"
 	compactionRejectBlockSize   compactionRejectReason = "block_over_byte_cap"
+	compactionRejectPersist     compactionRejectReason = "boundary_not_durably_writable"
 )
 
 // applyServerCompaction splices the backend's compacted context block into this
@@ -81,7 +83,10 @@ func (s *Session) applyServerCompaction(c *backend.StreamCompaction, sentLen int
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	start, end := c.Replaces.StartIndex, c.Replaces.EndIndex
+	start, end, haveSpan := c.Replaces.Bounds()
+	if !haveSpan {
+		return false, compactionRejectSpanBounds
+	}
 	// end < sentLen rather than <=: the span always stops short of the newest user
 	// message (the backend's selector ends there deliberately), so a span reaching the
 	// end of the sent array is a contract this code does not implement.
@@ -118,6 +123,21 @@ func (s *Session) applyServerCompaction(c *backend.StreamCompaction, sentLen int
 	// Copy the tail before reslicing so the re-append cannot alias the array it is
 	// about to overwrite (the same hazard keepValidTail guards on the /compact path).
 	tail := append([]models.ChatMessage(nil), s.messages[end:]...)
+
+	// Durable form FIRST, and atomically. The marker row is what moves the rehydration
+	// boundary, so a marker that commits without the block and tail behind it would hide
+	// intact rows and resume a conversation that was never written — the live turn
+	// succeeding all the while, which is the worst way to lose history. Writing the group
+	// as one transaction before touching live history means the two outcomes are the
+	// complete old conversation or the complete new one, never a hybrid.
+	//
+	// A store that cannot promise that (or a failed commit) declines the compaction
+	// outright rather than splicing memory it cannot back: the block is worth one turn's
+	// prompt savings and nothing is worth risking the transcript for.
+	if !s.persistServerCompactionLocked(block, tail) {
+		return false, compactionRejectPersist
+	}
+
 	s.messages = append(s.messages[:start:start], block)
 	s.messages = append(s.messages, tail...)
 
@@ -129,17 +149,55 @@ func (s *Session) applyServerCompaction(c *backend.StreamCompaction, sentLen int
 	// for the same reason.
 	s.lastPromptTokens = 0
 
-	// Durable form: the marker moves the rehydration boundary, then the block and the
-	// tail are re-persisted after it. The rows the block replaced are left in place,
-	// behind the marker — an append-only log, exactly as /compact leaves them. The tail
-	// is small here (the span stops at the newest user message, so what follows is this
-	// turn's own messages), which is what makes re-persisting it cheap.
-	s.persistMessageLocked(models.TextMessage("system", serverCompactionMarker))
-	s.persistMessageLocked(block)
-	for _, m := range tail {
-		s.persistMessageLocked(m)
-	}
 	return true, ""
+}
+
+// persistServerCompactionLocked writes the compaction boundary as ONE unit: the marker
+// that moves the rehydration boundary, the block, then the retained tail. Reports
+// whether the group is durably safe. Caller MUST hold s.mu (it reads/bumps s.seq).
+//
+// The rows the block replaced are left in place, behind the marker — an append-only log,
+// exactly as /compact leaves them. The tail is small (the span stops at the newest user
+// message, so what follows is this turn's own messages), which is what makes
+// re-persisting it cheap.
+//
+// A session with NO store is memory-only by construction — every test, and any caller
+// that opted out of persistence — so there is no durable log to make inconsistent and
+// the splice proceeds. A store that cannot write the group atomically is a different
+// answer: it CAN be made inconsistent, so the compaction is declined instead.
+func (s *Session) persistServerCompactionLocked(block models.ChatMessage, tail []models.ChatMessage) (ok bool) {
+	// A persistence failure must never break a live turn — the same contract every other
+	// write on this path honours.
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	if s.deps.Store == nil {
+		return true
+	}
+	atomic, canGroup := s.deps.Store.(AtomicMessageStore)
+	if !canGroup {
+		return false
+	}
+	msgs := make([]models.ChatMessage, 0, len(tail)+2)
+	msgs = append(msgs, models.TextMessage("system", serverCompactionMarker), block)
+	msgs = append(msgs, tail...)
+
+	recs := make([]domain.ConversationMessageRecord, 0, len(msgs))
+	seq := s.seq
+	for _, m := range msgs {
+		rec := s.conversationRecord(m, seq)
+		seq++
+		recs = append(recs, rec)
+	}
+	if err := atomic.InsertMessages(recs); err != nil {
+		return false
+	}
+	// Only advance the sequence once the group is committed, so a refused compaction
+	// leaves no gap in the durable log.
+	s.seq = seq
+	return true
 }
 
 // validateCompactionBlock checks the block itself, before any index arithmetic.
@@ -169,6 +227,11 @@ func isCompactionBlockMessage(m models.ChatMessage) bool {
 	return m.Role == "user" && m.Name == backend.ContextCompactionBlockName
 }
 
+// isCompactionBlockName is the wire encoder's and the persister's shared test for
+// "this Name belongs on the wire / in the durable row". Same predicate as above,
+// named for the question those two callers are actually asking.
+func isCompactionBlockName(m models.ChatMessage) bool { return isCompactionBlockMessage(m) }
+
 // compactionSpanToolClosed reports whether every tool call in [start,end) has its
 // result there too, and vice versa.
 //
@@ -181,20 +244,31 @@ func isCompactionBlockMessage(m models.ChatMessage) bool {
 // result answering nothing, which the upstream rejects outright.
 func compactionSpanToolClosed(messages []models.ChatMessage, start, end int) bool {
 	inside := map[string]bool{}
+	outside := map[string]bool{}
 	for i, m := range messages {
 		if len(m.ToolCalls) == 0 {
 			continue
 		}
-		callInside := i >= start && i < end
+		target := outside
+		if i >= start && i < end {
+			target = inside
+		}
 		for _, tc := range m.ToolCalls {
 			if tc.ID == "" {
 				// An unidentifiable call cannot be paired either way, so the span
 				// cannot be shown safe. Refuse rather than guess.
 				return false
 			}
-			if callInside {
-				inside[tc.ID] = true
-			}
+			target[tc.ID] = true
+		}
+	}
+	// Tracking BOTH sides, not just the inside: an id declared on both sides of the
+	// boundary reads as "inside" to a one-set check, which would accept a span that
+	// deletes one declaration and leaves the other. Rare, but it is precisely the shape
+	// the backend's own check refuses, and the two must not disagree about safety.
+	for id := range inside {
+		if outside[id] {
+			return false
 		}
 	}
 	for i, m := range messages {

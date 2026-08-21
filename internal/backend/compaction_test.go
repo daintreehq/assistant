@@ -6,6 +6,12 @@ import (
 	"testing"
 )
 
+func intPtr(v int) *int { return &v }
+
+func spanOf(start, end int) StreamCompactionSpan {
+	return StreamCompactionSpan{StartIndex: intPtr(start), EndIndex: intPtr(end)}
+}
+
 // A minimal well-formed stream: meta, then whatever the caller adds, then done.
 func compactionStream(middle string) string {
 	return "event: meta\ndata: {\"state\":\"st_1\"}\n\n" +
@@ -29,8 +35,8 @@ func TestParseRespondStream_CompactionBeforeDoneReachesResult(t *testing.T) {
 	if res.Compaction.TurnID != "turn_abc" {
 		t.Errorf("turn id = %q", res.Compaction.TurnID)
 	}
-	if got := res.Compaction.Replaces; got.StartIndex != 0 || got.EndIndex != 4 {
-		t.Errorf("span = %+v", got)
+	if start, end, ok := res.Compaction.Replaces.Bounds(); !ok || start != 0 || end != 4 {
+		t.Errorf("span = (%d,%d,%v)", start, end, ok)
 	}
 	if b := res.Compaction.Block; b.Role != "user" || b.Name != ContextCompactionBlockName || b.Content != "Frozen state." {
 		t.Errorf("block = %+v", b)
@@ -110,14 +116,15 @@ func TestParseRespondStream_CompactionAfterDoneIsIgnored(t *testing.T) {
 	}
 }
 
-// A 256 KiB block is the contract's ceiling and must fit comfortably inside the SSE
-// event bound — the point where a wrong constant would silently disable the feature
-// for exactly the long conversations it exists to serve.
+// 256 KiB is the PROTOCOL maximum (the wire model's code-point cap and the ceiling on
+// the configurable byte cap), not what a deployment serves by default. It must fit
+// comfortably inside the SSE bounds — the point where a wrong constant would silently
+// disable the feature for exactly the long conversations it exists to serve.
 func TestParseRespondStream_MaxSizedCompactionBlockFits(t *testing.T) {
 	content := strings.Repeat("x", 262_144)
 	payload, err := json.Marshal(StreamCompaction{
 		TurnID:   "turn_abc",
-		Replaces: StreamCompactionSpan{StartIndex: 0, EndIndex: 2},
+		Replaces: spanOf(0, 2),
 		Block:    StreamCompactionBlock{Role: "user", Name: ContextCompactionBlockName, Content: content},
 	})
 	if err != nil {
@@ -196,12 +203,15 @@ func validCompactionCaps() ContextCompactionCaps {
 		BlockMessageName: ContextCompactionBlockName,
 		Span: ContextCompactionSpanCaps{
 			Collection:           "input.messages",
-			IndexBase:            0,
+			IndexBase:            intPtr(0),
 			EndExclusive:         true,
 			ExcludesCurrentReply: true,
 		},
-		TurnIDMatchRequired:  true,
-		MaxBlockContentBytes: 262_144,
+		TurnIDMatchRequired: true,
+		// The backend's DEFAULT (cap_compaction_block_bytes, config.py). 256 KiB is the
+		// configurable ceiling, exercised separately by the parser size tests — the
+		// oracle fixture should be what a deployment actually serves.
+		MaxBlockContentBytes: 65_536,
 	}
 }
 
@@ -224,7 +234,7 @@ func TestContextCompactionCaps_ReplayCompatibleRejectsEveryDeviation(t *testing.
 		"not append only":       func(c *ContextCompactionCaps) { c.AppendOnly = false },
 		"other block name":      func(c *ContextCompactionCaps) { c.BlockMessageName = "summary" },
 		"other collection":      func(c *ContextCompactionCaps) { c.Span.Collection = "history" },
-		"one-based indices":     func(c *ContextCompactionCaps) { c.Span.IndexBase = 1 },
+		"one-based indices":     func(c *ContextCompactionCaps) { c.Span.IndexBase = intPtr(1) },
 		"inclusive end":         func(c *ContextCompactionCaps) { c.Span.EndExclusive = false },
 		"reply inside the span": func(c *ContextCompactionCaps) { c.Span.ExcludesCurrentReply = false },
 		"no turn id match":      func(c *ContextCompactionCaps) { c.TurnIDMatchRequired = false },
@@ -280,7 +290,7 @@ func TestCapabilities_ContextCompactionDecodesFromTheTopLevel(t *testing.T) {
 	    "at_most_once": true, "streaming_only": true, "best_effort": true,
 	    "append_only": true, "block_message_name": "daintree_compaction",
 	    "span": {"collection":"input.messages","index_base":0,"end_exclusive":true,"excludes_current_reply":true},
-	    "turn_id_match_required": true, "max_block_content_bytes": 262144
+	    "turn_id_match_required": true, "max_block_content_bytes": 65536
 	  }
 	}`
 	var caps Capabilities

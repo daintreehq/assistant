@@ -857,9 +857,23 @@ const ContextCompactionBlockName = "daintree_compaction"
 //
 // EndIndex is EXCLUSIVE and always greater than StartIndex (an empty span is never
 // emitted). The assistant reply currently streaming is not in that array.
+// Both fields are POINTERS because both have a legitimate zero. `start_index: 0` is
+// the ordinary case — a span opening at the very first message — so a plain int cannot
+// tell it apart from a field the payload never sent. That distinction is load-bearing
+// here in a way it usually is not: an absent start silently read as 0 would widen the
+// span back to the beginning of the conversation and destroy history the server never
+// asked to replace. Absent means invalid, and Bounds says so.
 type StreamCompactionSpan struct {
-	StartIndex int `json:"start_index"`
-	EndIndex   int `json:"end_index"`
+	StartIndex *int `json:"start_index"`
+	EndIndex   *int `json:"end_index"`
+}
+
+// Bounds returns the half-open span, reporting false when either edge was missing.
+func (s StreamCompactionSpan) Bounds() (start, end int, ok bool) {
+	if s.StartIndex == nil || s.EndIndex == nil {
+		return 0, 0, false
+	}
+	return *s.StartIndex, *s.EndIndex, true
 }
 
 // StreamCompactionBlock is the reconciled message that replaces the span. Role is
@@ -892,10 +906,14 @@ type StreamCompaction struct {
 // the splice arithmetic is built on, and a backend that changed one of them without
 // the client noticing would splice the wrong messages away.
 type ContextCompactionSpanCaps struct {
-	Collection           string `json:"collection"`
-	IndexBase            int    `json:"index_base"`
-	EndExclusive         bool   `json:"end_exclusive"`
-	ExcludesCurrentReply bool   `json:"excludes_current_reply"`
+	Collection string `json:"collection"`
+	// IndexBase is a pointer for the same reason the span's edges are: the value this
+	// client requires IS zero, so a plain int would read a descriptor that never
+	// mentioned index_base as though it had promised zero-based indices — opening the
+	// gate on a contract nobody stated.
+	IndexBase            *int `json:"index_base"`
+	EndExclusive         bool `json:"end_exclusive"`
+	ExcludesCurrentReply bool `json:"excludes_current_reply"`
 }
 
 // ContextCompactionCaps is the top-level `context_compaction` capability block —
@@ -942,7 +960,7 @@ func (c *ContextCompactionCaps) ReplayCompatible() bool {
 		c.AppendOnly &&
 		c.BlockMessageName == ContextCompactionBlockName &&
 		c.Span.Collection == "input.messages" &&
-		c.Span.IndexBase == 0 &&
+		c.Span.IndexBase != nil && *c.Span.IndexBase == 0 &&
 		c.Span.EndExclusive &&
 		c.Span.ExcludesCurrentReply &&
 		c.TurnIDMatchRequired &&

@@ -57,6 +57,12 @@ func TestDeclarationFilterStripsLeakedMarkerAtEveryFragmentation(t *testing.T) {
 // The far more important half: the filter must be invisible on every ordinary reply.
 // A guard that eats real prose to catch a marker that never arrives is worse than the
 // leak it guards against.
+//
+// Two cases below look like leaks and are not. A marker past the whitespace bound, and a
+// marker that is not at the very start, are BOTH ordinary content by the server's own
+// rule — its scanner would not have stripped them either, so what arrives is a reply the
+// model wrote that merely contains those characters, not a declaration. Diverging from
+// the oracle to "catch" them would mean deleting text the server deliberately kept.
 func TestDeclarationFilterPassesOrdinaryProseThrough(t *testing.T) {
 	cases := []string{
 		"The worktree is ready.",
@@ -64,7 +70,7 @@ func TestDeclarationFilterPassesOrdinaryProseThrough(t *testing.T) {
 		"[[not a marker]] still prose",
 		"[[DAINTREE:OTHER]] unknown marker stays",
 		"mid-reply [[DAINTREE:FINAL]] is not a declaration",
-		"\n\n\n\n\n\n\n\n\n\n[[DAINTREE:FINAL]] past the whitespace bound",
+		"\n\n\n\n\n\n\n\n\n\n[[DAINTREE:FINAL]] past the whitespace bound", // prose by the oracle's rule too
 		"  leading spaces then prose",
 		"",
 		"[",

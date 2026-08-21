@@ -2800,6 +2800,16 @@ func (s *Session) persistMessageLocked(m models.ChatMessage) {
 	if s.deps.Store == nil {
 		return
 	}
+	rec := s.conversationRecord(m, s.seq)
+	s.seq++
+	_, _ = s.deps.Store.InsertMessage(rec)
+}
+
+// conversationRecord projects a chat message into its durable row at the given seq.
+// Split out of persistMessageLocked so the grouped compaction write (which stamps
+// several rows before committing any of them) cannot drift from the single-row path —
+// the reasoning and name rules below are subtle enough that two copies would.
+func (s *Session) conversationRecord(m models.ChatMessage, seq int) domain.ConversationMessageRecord {
 	var toolCallsJSON *string
 	if len(m.ToolCalls) > 0 {
 		if b, err := json.Marshal(m.ToolCalls); err == nil {
@@ -2819,16 +2829,18 @@ func (s *Session) persistMessageLocked(m models.ChatMessage) {
 		r := m.ReasoningContent
 		reasoning = &r
 	}
-	// Persist the wire `name` so the compacted context block rehydrates as a boundary
-	// the backend still recognises; nil on every other row.
+	// Persist the wire `name` for the compacted context block ONLY, so it rehydrates as
+	// a boundary the backend still recognises. Scoped the same way the wire encoder is,
+	// and for the same reason: a tool result's Name is the tool's internal name, kept
+	// for local bookkeeping, and it has no business in the durable transcript.
 	var name *string
-	if m.Name != "" {
+	if isCompactionBlockMessage(m) {
 		n := m.Name
 		name = &n
 	}
-	rec := domain.ConversationMessageRecord{
+	return domain.ConversationMessageRecord{
 		SessionID:        s.deps.SessionID,
-		Seq:              s.seq,
+		Seq:              seq,
 		Role:             m.Role,
 		Content:          m.ContentToText(),
 		Name:             name,
@@ -2836,8 +2848,6 @@ func (s *Session) persistMessageLocked(m models.ChatMessage) {
 		ToolCallsJson:    toolCallsJSON,
 		ToolCallID:       toolCallID,
 	}
-	s.seq++
-	_, _ = s.deps.Store.InsertMessage(rec)
 }
 
 // EstimateTokens exposes the working-history size estimate to surfaces that report

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/asyncwork"
@@ -261,6 +262,16 @@ type App struct {
 	// endpoint, so a mismatched answer is simply not believed.
 	backendCaps atomic.Pointer[backendCapsSnapshot]
 
+	// compactionCaps is the boot warm-up's answer, read ONLY by
+	// backendContextCompaction. Server-side compaction has to negotiate on every
+	// surface — a classic REPL and the supervisor daemon run the long sessions it
+	// exists for, and neither performs the cockpit's explicit handshake — but
+	// publishing a boot-time answer into backendCaps above would also change when the
+	// display and pinned-skill gates start sending, which is a decision about other
+	// features. Kept separate so this one negotiates for itself and moves nothing else.
+	// Endpoint-pinned for the same reason backendCaps is.
+	compactionCaps atomic.Pointer[backendCapsSnapshot]
+
 	// pinnedSkillIDs are the runbooks the LAUNCH named (`--skill`, or `skills` on
 	// daintree.session.open) and every turn of this session must load. Immutable after
 	// Create: argv and the session-open arguments are both session-constant, so there
@@ -323,6 +334,11 @@ func (a *App) SetDisplaySize(columns, contentWidth int) {
 // must never mutate it in place; publish a new one instead.
 func (a *App) DisplaySize() *prompts.DisplayContext { return a.display.Load() }
 
+// backendCapabilityWarmupTimeout bounds the detached boot-time capability read. Short:
+// nothing waits on it, and an answer that arrives after the session has been talking for
+// half a minute has already missed the turns it would have helped.
+const backendCapabilityWarmupTimeout = 10 * time.Second
+
 // backendCapsSnapshot is one capability descriptor together with the endpoint that
 // answered it. The pairing is the point: a descriptor alone cannot say WHICH backend
 // it describes, and this session's backend client can be replaced mid-flight.
@@ -344,8 +360,17 @@ func (a *App) BackendCapabilities(ctx context.Context) (backend.Capabilities, er
 	if a.Backend == nil {
 		return backend.Capabilities{}, errors.New("no backend client")
 	}
-	asked := a.Backend.BaseURL()
-	caps, err := a.Backend.Capabilities(ctx)
+	// Capture the delegate ONCE. Reading BaseURL() and Capabilities() through two
+	// separate atomic loads of a Swappable would let a /backend switch land between
+	// them, and the answer from the NEW endpoint would then be filed under the OLD
+	// one — the exact confusion the pin exists to prevent, arrived at from the other
+	// direction. Pinning the delegate makes "the endpoint that answered" literally true.
+	client := a.Backend
+	if sw, ok := client.(*backend.Swappable); ok {
+		client = sw.Current()
+	}
+	asked := client.BaseURL()
+	caps, err := client.Capabilities(ctx)
 	if err != nil {
 		return backend.Capabilities{}, err
 	}
@@ -381,14 +406,26 @@ func (a *App) backendAcceptsDisplayContext() bool {
 // client does not recognise all read as "not supported", which is simply today's
 // behaviour: full history, every round.
 func (a *App) backendContextCompaction() (backend.ContextCompactionCaps, bool) {
-	snap := a.backendCaps.Load()
-	if snap == nil || a.Backend == nil || snap.baseURL != a.Backend.BaseURL() {
+	if a.Backend == nil {
 		return backend.ContextCompactionCaps{}, false
 	}
-	if !snap.caps.ContextCompaction.ReplayCompatible() {
+	live := a.Backend.BaseURL()
+	// An explicit handshake first (the cockpit's, or /doctor's, or a pinned-skill
+	// negotiation) — it is the same question, already asked. The boot warm-up is the
+	// fallback for every surface that never asks it. Both are endpoint-pinned, so
+	// either is safe; neither is trusted for an endpoint it did not describe.
+	for _, snap := range [...]*backendCapsSnapshot{a.backendCaps.Load(), a.compactionCaps.Load()} {
+		if snap == nil || snap.baseURL != live {
+			continue
+		}
+		if snap.caps.ContextCompaction.ReplayCompatible() {
+			return *snap.caps.ContextCompaction, true
+		}
+		// An answer FOR THIS ENDPOINT that is not compatible is a real answer, not a
+		// gap to paper over with the other cache.
 		return backend.ContextCompactionCaps{}, false
 	}
-	return *snap.caps.ContextCompaction, true
+	return backend.ContextCompactionCaps{}, false
 }
 
 // Tier returns the current permission tier under the read lock.
@@ -779,7 +816,53 @@ func Create(opts CreateOptions) (*App, error) {
 		Trace: traceFn,
 	})
 
+	a.warmBackendCapabilities()
+
 	return a, nil
+}
+
+// warmBackendCapabilities fetches the endpoint's capability descriptor once, DETACHED,
+// into the COMPACTION-ONLY cache.
+//
+// Every gate in this file fails closed on an unknown backend, which is right — but
+// "unknown" was the permanent state on most surfaces. Only the cockpit handshakes at
+// boot; a classic REPL, an embedded host, the MCP server and the supervisor daemon
+// reached a capability answer only by accident, when `--skill` forced the negotiation.
+// Server-side compaction would then be parsed and refused on every turn of a long-lived
+// session, silently, with nothing but a debug trace to say why. Failing closed is a
+// safety posture, not a reason to never ask the question.
+//
+// It writes its OWN cache rather than the shared one on purpose. The display-context and
+// pinned-skill gates read the shared cache and were deliberately built around an
+// EXPLICIT handshake — geometry is withheld until a front end has negotiated, and the
+// tests pin that. Publishing a boot-time answer into the shared cache would quietly
+// change when those two start sending, which is a decision about other features that
+// does not belong to this one. So compaction negotiates for itself and touches nothing
+// else; an explicit handshake still serves it too (see backendContextCompaction).
+//
+// Detached and best-effort: it must not add latency to boot or to the first turn, and a
+// backend that cannot answer simply leaves the gate shut — exactly where it already was.
+// Bounded so a wedged endpoint cannot outlive the app, and parented on baseCtx so
+// Shutdown cancels it.
+func (a *App) warmBackendCapabilities() {
+	if a.Backend == nil {
+		return
+	}
+	go func() {
+		defer func() { _ = recover() }()
+		ctx, cancel := context.WithTimeout(a.baseCtx, backendCapabilityWarmupTimeout)
+		defer cancel()
+		client := a.Backend
+		if sw, ok := client.(*backend.Swappable); ok {
+			client = sw.Current()
+		}
+		asked := client.BaseURL()
+		caps, err := client.Capabilities(ctx)
+		if err != nil {
+			return
+		}
+		a.compactionCaps.Store(&backendCapsSnapshot{baseURL: asked, caps: caps})
+	}()
 }
 
 // loadPersistedBackendState loads the durable backend state token for a RESUMED

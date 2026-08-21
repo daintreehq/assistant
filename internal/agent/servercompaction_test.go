@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/models"
 )
 
@@ -14,17 +15,18 @@ import (
 func openCompactionGate() func() (backend.ContextCompactionCaps, bool) {
 	return func() (backend.ContextCompactionCaps, bool) {
 		return backend.ContextCompactionCaps{
-			Enabled:              true,
-			StreamEvent:          "compaction",
-			Delivery:             "before_done",
-			AtMostOnce:           true,
-			StreamingOnly:        true,
-			BestEffort:           true,
-			AppendOnly:           true,
-			BlockMessageName:     backend.ContextCompactionBlockName,
-			Span:                 backend.ContextCompactionSpanCaps{Collection: "input.messages", EndExclusive: true, ExcludesCurrentReply: true},
-			TurnIDMatchRequired:  true,
-			MaxBlockContentBytes: 262_144,
+			Enabled:             true,
+			StreamEvent:         "compaction",
+			Delivery:            "before_done",
+			AtMostOnce:          true,
+			StreamingOnly:       true,
+			BestEffort:          true,
+			AppendOnly:          true,
+			BlockMessageName:    backend.ContextCompactionBlockName,
+			Span:                backend.ContextCompactionSpanCaps{Collection: "input.messages", IndexBase: new(int), EndExclusive: true, ExcludesCurrentReply: true},
+			TurnIDMatchRequired: true,
+			// The backend's default cap (cap_compaction_block_bytes).
+			MaxBlockContentBytes: 65_536,
 		}, true
 	}
 }
@@ -41,6 +43,9 @@ type compactionBackend struct {
 	// promptTokens, when set, makes the fake report a provider prompt-token figure the
 	// way a real round does — the value the session stashes for the auto-compact gate.
 	promptTokens int
+	// keepBlockTurnID delivers the block with its own turn id instead of stamping the
+	// request's, so a FOREIGN block can be pushed through the live loop.
+	keepBlockTurnID bool
 }
 
 func (b *compactionBackend) RespondStream(ctx context.Context, req backend.RespondRequest, cb backend.StreamCallbacks) (backend.RespondResult, error) {
@@ -57,7 +62,9 @@ func (b *compactionBackend) RespondStream(ctx context.Context, req backend.Respo
 		// Stamp the block with THIS request's turn id, the way the real backend does —
 		// so the turn-id gate is genuinely exercised rather than bypassed by a fixture.
 		block := *b.block
-		block.TurnID = req.Session.TurnID
+		if !b.keepBlockTurnID {
+			block.TurnID = req.Session.TurnID
+		}
 		res.Compaction = &block
 	}
 	return res, err
@@ -103,7 +110,7 @@ func seedHistory() []models.ChatMessage {
 func validBlock(turnID string, start, end int) *backend.StreamCompaction {
 	return &backend.StreamCompaction{
 		TurnID:   turnID,
-		Replaces: backend.StreamCompactionSpan{StartIndex: start, EndIndex: end},
+		Replaces: backend.StreamCompactionSpan{StartIndex: &start, EndIndex: &end},
 		Block: backend.StreamCompactionBlock{
 			Role:    "user",
 			Name:    backend.ContextCompactionBlockName,
@@ -228,7 +235,7 @@ func TestApplyServerCompactionRejectsMalformedBlocks(t *testing.T) {
 		"blank content":  {func(c *backend.StreamCompaction) { c.Block.Content = "   \n\t" }, compactionRejectBlockShape},
 		"invalid utf-8":  {func(c *backend.StreamCompaction) { c.Block.Content = string([]byte{0xff, 0xfe}) }, compactionRejectBlockShape},
 		"over the byte cap": {func(c *backend.StreamCompaction) {
-			c.Block.Content = strings.Repeat("x", 262_145)
+			c.Block.Content = strings.Repeat("x", 65_537)
 		}, compactionRejectBlockSize},
 	}
 	for name, tc := range mutations {
@@ -370,44 +377,50 @@ func TestTurnLoopSendsTheCompactedPrefixOnTheNextRequest(t *testing.T) {
 	if next[0].Role != "user" || next[0].Name != backend.ContextCompactionBlockName {
 		t.Fatalf("the request must open with the reserved block, got role=%q name=%q", next[0].Role, next[0].Name)
 	}
-	// The replaced messages must be gone. Matched by EXACT encoded content rather than
-	// substring: the block's own prose names the turns it reconciled, so a substring
-	// test would fire on the very message that proves compaction worked.
+	// Assert the EXACT ordered sequence, not a count plus an absence. Uncompacted, the
+	// follow-up would carry [u1,a1,u2,a2,u5,a5,u6]; the block stands in for the first
+	// two. A count alone would let a compensating drop-and-duplicate, or a reordering,
+	// through — and either would be a broken conversation, not a smaller one.
+	wantRoles := []string{"user", "user", "assistant", "user", "assistant", "user"}
+	if len(next) != len(wantRoles) {
+		t.Fatalf("expected %d messages (block + u2,a2,u5,a5,u6), got %d", len(wantRoles), len(next))
+	}
+	for i, want := range wantRoles {
+		if next[i].Role != want {
+			t.Errorf("message %d role = %q, want %q", i, next[i].Role, want)
+		}
+	}
 	for _, m := range next {
 		if body := string(m.Content); body == `"u1"` || body == `"a1"` {
 			t.Errorf("the replaced prefix was re-sent: %s", body)
 		}
 	}
-	// And the saving must be real, counted exactly. Uncompacted, the follow-up would
-	// carry [u1,a1,u2,a2,u5,a5,u6] — seven. The block stands in for the first two, so
-	// six is the compacted figure. Asserting the exact number rather than "fewer" is
-	// what makes a splice that quietly dropped or duplicated a message a failure here.
-	if len(next) != 6 {
-		t.Errorf("expected 6 messages (block + u2,a2,u5,a5,u6), got %d", len(next))
-	}
 }
 
-// A block stamped with someone else's turn must not be applied even when it arrives
-// through the live loop — the gate has to hold on the real path, not only in a unit
-// test that calls the splice directly.
+// A block stamped with someone else's turn, delivered through the LIVE loop. The weak
+// version of this test called applyServerCompaction directly, which would still have
+// passed if the turn loop had handed the block its OWN turn id as the expected one —
+// accepting every foreign block ever sent.
 func TestTurnLoopIgnoresABlockStampedWithAnotherTurn(t *testing.T) {
-	s, _, be := compactionTestSession(t, seedHistory())
+	s, store, be := compactionTestSession(t, seedHistory())
 	be.onRound = 0
-	be.block = validBlock("", 0, 2)
-	// Defeat the fake's turn-id stamping by pinning a foreign id after the fact.
-	be.backendFromRouter = backendFromRouter{r: plainRouter()}
-	foreign := validBlock("turn_from_another_session", 0, 2)
-	be.block = foreign
-	be.onRound = -1
+	be.keepBlockTurnID = true
+	be.block = validBlock("turn_from_another_session", 0, 2)
 
 	if _, err := s.Send(context.Background(), "u5", SendOptions{}); err != nil {
-		t.Fatalf("turn failed: %v", err)
+		t.Fatalf("a foreign block must not break the turn: %v", err)
 	}
-	// Applied directly with the mismatched id the loop would have seen.
-	if applied, reason := s.applyServerCompaction(foreign, 5, "turn_real"); applied {
-		t.Fatal("a foreign turn id must not be applied")
-	} else if reason != compactionRejectTurnID {
-		t.Errorf("reason = %q", reason)
+	got := roles(s.Messages())
+	if strings.Contains(got, "BLOCK:") {
+		t.Fatalf("a foreign block was applied; history = %s", got)
+	}
+	if !strings.HasPrefix(got, "user:u1|assistant:a1|") {
+		t.Errorf("the replaced prefix must be intact; history = %s", got)
+	}
+	for _, r := range store.msgs {
+		if r.Name != nil {
+			t.Errorf("a foreign block reached the durable log: %+v", r)
+		}
 	}
 }
 
@@ -418,8 +431,7 @@ func TestTurnLoopIgnoresABlockStampedWithAnotherTurn(t *testing.T) {
 func TestServerCompactionSurvivesAStoreRehydrateRoundTrip(t *testing.T) {
 	s, store, _ := compactionTestSession(t, nil)
 	for _, m := range seedHistory() {
-		s.pushMessage(m)
-		s.persistMessage(m)
+		s.pushMessage(m) // pushMessage persists
 	}
 	if applied, reason := s.applyServerCompaction(validBlock("turn_1", 0, 2), 4, "turn_1"); !applied {
 		t.Fatalf("block refused as %q", reason)
@@ -555,5 +567,210 @@ func TestTurnLoopKeepsThePromptStashWhenNothingCompacted(t *testing.T) {
 	s.mu.Unlock()
 	if stash != 12_345 {
 		t.Fatalf("lastPromptTokens = %d, want the round's reported figure preserved", stash)
+	}
+}
+
+// nonAtomicStore records rows but cannot write a group as one unit — the shape of any
+// store that has not opted into AtomicMessageStore.
+type nonAtomicStore struct {
+	msgs []domain.ConversationMessageRecord
+}
+
+func (s *nonAtomicStore) InsertMessage(rec domain.ConversationMessageRecord) (domain.ConversationMessageRecord, error) {
+	s.msgs = append(s.msgs, rec)
+	return rec, nil
+}
+
+// The compaction boundary must be durably safe or not written at all. A marker row that
+// committed without the block and tail behind it would hide intact history and resume a
+// conversation that was never written — while the live turn reported success, which is
+// the worst way to lose a transcript.
+func TestApplyServerCompactionDeclinesWhenTheBoundaryCannotBeWrittenAtomically(t *testing.T) {
+	for name, tc := range map[string]struct {
+		store   MessageStore
+		rows    func() int
+		wantErr compactionRejectReason
+	}{
+		"store cannot group":  {store: &nonAtomicStore{}, wantErr: compactionRejectPersist},
+		"group write refused": {store: &recordingStore{failGroupAt: 2}, wantErr: compactionRejectPersist},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := NewSession(SessionDeps{
+				Backend: backendFromRouter{r: plainRouter()}, Tools: &fakeTools{},
+				Store: tc.store, SessionID: "ses_atomic", Events: NoopEventSink{},
+				BackendContextCompaction: openCompactionGate(),
+			})
+			for _, m := range seedHistory() {
+				s.pushMessage(m)
+			}
+			before := roles(s.Messages())
+
+			applied, reason := s.applyServerCompaction(validBlock("turn_1", 0, 2), 4, "turn_1")
+			if applied {
+				t.Fatal("a boundary that cannot be written atomically must not be applied")
+			}
+			if reason != tc.wantErr {
+				t.Errorf("reason = %q, want %q", reason, tc.wantErr)
+			}
+			// The live history must be untouched too: a splice in memory that the log
+			// cannot back would diverge from what a resume replays.
+			if got := roles(s.Messages()); got != before {
+				t.Errorf("history changed despite the refusal:\n got %s\nwant %s", got, before)
+			}
+		})
+	}
+}
+
+// A refused group leaves NO durable trace and no gap in the sequence — the next ordinary
+// message must number where the refused block would have.
+func TestRefusedCompactionLeavesNoDurableGap(t *testing.T) {
+	store := &recordingStore{failGroupAt: 1}
+	s := NewSession(SessionDeps{
+		Backend: backendFromRouter{r: plainRouter()}, Tools: &fakeTools{},
+		Store: store, SessionID: "ses_gap", Events: NoopEventSink{},
+		BackendContextCompaction: openCompactionGate(),
+	})
+	for _, m := range seedHistory() {
+		s.pushMessage(m) // pushMessage persists; a second write would double every row
+	}
+	seedRows := len(store.msgs)
+	nextSeq := store.msgs[seedRows-1].Seq + 1
+
+	if applied, _ := s.applyServerCompaction(validBlock("turn_1", 0, 2), 4, "turn_1"); applied {
+		t.Fatal("the block must have been refused")
+	}
+	if n := len(store.msgs); n != seedRows {
+		t.Fatalf("a refused group wrote %d rows, want none beyond the seed", n-seedRows)
+	}
+	s.persistMessage(models.TextMessage("user", "after"))
+	if got := store.msgs[len(store.msgs)-1].Seq; got != nextSeq {
+		t.Errorf("next row seq = %d, want %d — a refused compaction must not burn sequence numbers", got, nextSeq)
+	}
+}
+
+// A compaction arriving on a LATER round of a tool loop, which is where the prompt cost
+// of a long turn actually accumulates. The retained tail then contains a live tool
+// transaction, and it must survive the splice intact and in order.
+func TestCompactionOnAToolRoundKeepsTheLiveTransactionIntact(t *testing.T) {
+	s, store, _ := compactionTestSession(t, seedHistory())
+	// The live turn so far: a user message, an assistant tool-call turn, its result.
+	s.pushMessage(models.TextMessage("user", "u5"))
+	s.pushMessage(models.ChatMessage{Role: "assistant", ContentNull: true,
+		ToolCalls: []models.ToolCallRequest{{ID: "tc_1", Type: "function"}}})
+	s.pushMessage(models.ChatMessage{Role: "tool", StringContent: "terminal listed", ToolCallID: "tc_1"})
+
+	// [u1,a1,u2,a2,u5,asst(tc_1),tool] — replacing [0,2) keeps the whole live transaction.
+	applied, reason := s.applyServerCompaction(validBlock("turn_1", 0, 2), 7, "turn_1")
+	if !applied {
+		t.Fatalf("a mid-turn block was refused as %q", reason)
+	}
+	got := s.Messages()
+	if len(got) != 6 || !isCompactionBlockMessage(got[0]) {
+		t.Fatalf("history = %s", roles(got))
+	}
+	if len(got[4].ToolCalls) != 1 || got[4].ToolCalls[0].ID != "tc_1" {
+		t.Errorf("the assistant tool-call turn did not survive: %+v", got[4])
+	}
+	if got[5].Role != "tool" || got[5].ToolCallID != "tc_1" {
+		t.Errorf("the tool result did not survive: %+v", got[5])
+	}
+
+	// And it must still rehydrate as a VALID history — an orphaned tool result here
+	// would 400 the next request rather than merely lose context.
+	res, ok := RehydrateSession(store.msgs)
+	if !ok {
+		t.Fatal("rehydration reported no history")
+	}
+	if res.DroppedRows != 0 {
+		t.Errorf("rehydration dropped %d rows — the tail was not persisted validly", res.DroppedRows)
+	}
+	if roles(res.RestoredMessages) != roles(got) {
+		t.Errorf("resumed history diverged:\n got %s\nwant %s", roles(res.RestoredMessages), roles(got))
+	}
+	if _, err := ToBackendMessages(res.RestoredMessages); err != nil {
+		t.Errorf("the resumed history is not encodable: %v", err)
+	}
+}
+
+// Rejection must be OBSERVATIONALLY silent, not merely undocumented. Every rejection test
+// above runs on a NoopEventSink, so they would all still pass if a future change started
+// emitting a warning on every turn of a session the server keeps trying to compact.
+func TestRejectedServerCompactionEmitsNothing(t *testing.T) {
+	sink := &recordingSink{}
+	store := &recordingStore{}
+	s := NewSession(SessionDeps{
+		Backend: backendFromRouter{r: plainRouter()}, Tools: &fakeTools{},
+		Store: store, SessionID: "ses_silent", Events: sink,
+		BackendContextCompaction: openCompactionGate(),
+	})
+	for _, m := range seedHistory() {
+		s.pushMessage(m)
+	}
+	before := len(sink.log)
+
+	// One of each rejection class.
+	for _, block := range []*backend.StreamCompaction{
+		validBlock("turn_other", 0, 2), // turn id
+		validBlock("turn_1", 0, 9),     // bounds
+		validBlock("turn_1", 1, 2),     // boundary
+	} {
+		if applied, _ := s.applyServerCompaction(block, 4, "turn_1"); applied {
+			t.Fatal("expected a rejection")
+		}
+	}
+	if got := len(sink.log); got != before {
+		t.Errorf("a rejected compaction emitted %d event(s); it must be invisible", got-before)
+	}
+}
+
+// Two compaction mechanisms can run over one session — the server's and the client's
+// /compact — and both write a boundary marker. Resume must follow the NEWEST one.
+func TestRehydrateFollowsTheNewestBoundaryAcrossBothMechanisms(t *testing.T) {
+	s, store, _ := compactionTestSession(t, nil)
+	for _, m := range seedHistory() {
+		s.pushMessage(m) // pushMessage persists
+	}
+	if applied, reason := s.applyServerCompaction(validBlock("turn_1", 0, 2), 4, "turn_1"); !applied {
+		t.Fatalf("server block refused as %q", reason)
+	}
+	// Now the CLIENT compacts on top of the server's block.
+	if err := s.Compact("client-side summary"); err != nil {
+		t.Fatalf("/compact failed: %v", err)
+	}
+
+	res, ok := RehydrateSession(store.msgs)
+	if !ok {
+		t.Fatal("rehydration reported no history")
+	}
+	if roles(res.RestoredMessages) != roles(s.Messages()) {
+		t.Errorf("resume did not follow the newest boundary:\n got %s\nwant %s",
+			roles(res.RestoredMessages), roles(s.Messages()))
+	}
+}
+
+// The byte cap is measured in UTF-8 BYTES, not runes — the unit the capability names and
+// the unit prompt cost is actually paid in. An ASCII-only test cannot tell the two apart.
+func TestApplyServerCompactionMeasuresTheByteCapInBytes(t *testing.T) {
+	s, _, _ := compactionTestSession(t, seedHistory())
+	// "é" is two bytes. 200 of them is 400 bytes — over a 300-byte cap, but only 200 runes.
+	gate := func() (backend.ContextCompactionCaps, bool) {
+		caps, _ := openCompactionGate()()
+		caps.MaxBlockContentBytes = 300
+		return caps, true
+	}
+	s.deps.BackendContextCompaction = gate
+
+	block := validBlock("turn_1", 0, 2)
+	block.Block.Content = strings.Repeat("é", 200)
+	if applied, reason := s.applyServerCompaction(block, 4, "turn_1"); applied {
+		t.Fatal("400 bytes must exceed a 300-byte cap even at 200 runes")
+	} else if reason != compactionRejectBlockSize {
+		t.Errorf("reason = %q", reason)
+	}
+
+	// 150 of them is 300 bytes — exactly at the cap, and allowed.
+	block.Block.Content = strings.Repeat("é", 150)
+	if applied, reason := s.applyServerCompaction(block, 4, "turn_1"); !applied {
+		t.Errorf("a block exactly at the cap must be accepted, refused as %q", reason)
 	}
 }

@@ -93,6 +93,18 @@ type MessageStore interface {
 	InsertMessage(rec domain.ConversationMessageRecord) (domain.ConversationMessageRecord, error)
 }
 
+// AtomicMessageStore is the OPTIONAL extension a store implements when it can write a
+// group of conversation rows as one unit. The compaction boundary needs it: a marker row
+// moves where rehydration starts reading, so a marker that commits without the block and
+// tail behind it hides intact history and resumes a conversation that was never written.
+//
+// Optional rather than folded into MessageStore because a store that cannot offer the
+// guarantee should say so by not implementing it, and the caller then declines to
+// compact rather than writing a boundary it cannot make safe.
+type AtomicMessageStore interface {
+	InsertMessages(recs []domain.ConversationMessageRecord) error
+}
+
 // MemoryStore is the distill-on-compact persistence seam (satisfied by
 // *storage.Store). Just before auto-compact discards the working history, the session
 // extracts durable facts and saves the novel ones via this seam. Optional: a nil
