@@ -4,12 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/daintreehq/assistant/internal/ipc"
 )
 
 // buildBinary compiles cmd/daintree-assistant once for the whole package into an
@@ -386,8 +389,10 @@ func TestBinaryOneShotSchedulerActiveOnTheWire(t *testing.T) {
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("run %v: %v (stderr: %s)", args, err, stderr.String())
 		}
-		if fake.callCount() == 0 {
-			t.Fatalf("backend served no respond requests (stderr: %s)", stderr.String())
+		// Exactly one round: the fixture is a single prose-only reply, which is what
+		// makes "the FIRST request" and "the only request" the same assertion below.
+		if n := fake.callCount(); n != 1 {
+			t.Fatalf("backend served %d respond requests, want 1 (stderr: %s)", n, stderr.String())
 		}
 		return fake, dir
 	}
@@ -404,13 +409,39 @@ func TestBinaryOneShotSchedulerActiveOnTheWire(t *testing.T) {
 		if !schedulerActiveOnWire(t, fake, 0) {
 			t.Error("runtime.scheduler_active = false with --run-scheduler, want true on the FIRST round")
 		}
-		// The lease must be free the moment the process is gone: a one-shot that takes
-		// the lease and starts ticking still has to leave nothing behind.
-		if entries, err := os.ReadDir(dir); err == nil {
-			for _, e := range entries {
-				if strings.Contains(e.Name(), "daemon") {
-					t.Errorf("one-shot left a daemon artifact behind: %s", e.Name())
-				}
+		// A one-shot that takes the lease and starts ticking still must not spawn a
+		// supervisor. daemon.lock is created by any daemon that reaches lock acquisition
+		// and is deliberately left on disk, so its ABSENCE anywhere under the state dir
+		// is real evidence that no daemon was started. A walk error is a failure, not a
+		// silent pass — a check that cannot run proves nothing.
+		found := []string{}
+		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !d.IsDir() && d.Name() == ipc.DaemonLockName {
+				found = append(found, path)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walking the state dir: %v", err)
+		}
+		if len(found) > 0 {
+			t.Errorf("one-shot spawned a daemon: found %v", found)
+		}
+		// The owner lease must be free the instant the process is gone. Taking it here
+		// is the only check that actually proves release rather than inferring it.
+		lockPath := ownerLockPath(t, dir)
+		if lockPath != "" {
+			l := ipc.NewFileLock(lockPath)
+			ok, err := l.TryAcquire()
+			if err != nil {
+				t.Errorf("probing the owner lease: %v", err)
+			} else if !ok {
+				t.Error("owner lease still held after the one-shot exited")
+			} else {
+				l.Release()
 			}
 		}
 	})
@@ -435,7 +466,43 @@ func TestBinaryRunSchedulerRequiresTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatalf("--run-scheduler without --timeout exited 0 (stdout: %q)", stdout.String())
 	}
+	ee, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("run binary: %v (stderr: %s)", err, stderr.String())
+	}
+	// 2 is the argv-error code every bad invocation gets (main.go's parseArgs handler),
+	// NOT domain.OneShotExitCode — a run that never started has no run-level outcome to
+	// report. The two vocabularies collide on the number and mean different things.
+	if got := ee.ExitCode(); got != 2 {
+		t.Errorf("exit code = %d, want 2 (the argv-error code)", got)
+	}
 	if !strings.Contains(stderr.String(), "--timeout") {
 		t.Errorf("rejection does not name --timeout:\n%s", stderr.String())
 	}
+	// The rejection happens at the argument boundary — before a lease is taken or a
+	// turn is spent — so stdout stays empty and no owner lease is left on disk.
+	if stdout.String() != "" {
+		t.Errorf("stdout = %q, want empty (the run never started)", stdout.String())
+	}
+}
+
+// ownerLockPath finds the owner lease under a state dir. The per-project subdir name is
+// derived internally, so the file is located rather than reconstructed; "" means the
+// run never created one, which is itself a pass for the caller.
+func ownerLockPath(t *testing.T, stateDir string) string {
+	t.Helper()
+	var found string
+	err := filepath.WalkDir(stateDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && d.Name() == ipc.OwnerLockName {
+			found = path
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the state dir: %v", err)
+	}
+	return found
 }

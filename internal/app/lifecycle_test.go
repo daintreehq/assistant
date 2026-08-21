@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -386,97 +388,175 @@ func asyncRec(id, sessionID string) domain.AsyncInvocationRecord {
 	}
 }
 
+// spyContext records whether anyone consulted Done(). It is how the fast-path tests
+// below assert "returned without entering the poll loop" WITHOUT timing anything: any
+// implementation that reaches the select must consult Done(), whatever the machine is
+// doing, so the spy is a load-bearing property where an elapsed-time bound is only a
+// guess about scheduler load. blocked closes once Done() is first consulted, which also
+// gives the blocking tests a deterministic "the waiter is in the select now" signal.
+type spyContext struct {
+	context.Context
+	once     sync.Once
+	blocked  chan struct{}
+	consults atomic.Int32
+}
+
+func newSpyContext(parent context.Context) *spyContext {
+	return &spyContext{Context: parent, blocked: make(chan struct{})}
+}
+
+func (c *spyContext) Done() <-chan struct{} {
+	c.consults.Add(1)
+	c.once.Do(func() { close(c.blocked) })
+	return c.Context.Done()
+}
+
+// enteredWait reports whether the waiter reached its blocking select.
+func (c *spyContext) enteredWait() bool { return c.consults.Load() > 0 }
+
+// shutdownOnce guards a test's App teardown so an explicit Shutdown and a t.Cleanup
+// safety net cannot both fire. Shutdown is documented safe to call ONCE, and a test
+// that Fatalf's before its explicit call would otherwise leave a real scheduler and
+// coordinator ticking against a Store whose temp dir is about to be removed.
+func shutdownOnce(t *testing.T, a *App) func() {
+	t.Helper()
+	var once sync.Once
+	stop := func() { once.Do(func() { _ = a.Shutdown() }) }
+	t.Cleanup(stop)
+	return stop
+}
+
 // TestWaitForSessionAsyncIsFreeWithoutWork: the common flagged run starts no async work
-// at all, and it must not pay a ticker interval to learn that. Also covers the
+// at all, and it must not pay a poll interval to learn that. Also covers the
 // never-started-scheduler case, where the barrier has to be an outright no-op — that is
 // what keeps the DEFAULT one-shot path unchanged.
 func TestWaitForSessionAsyncIsFreeWithoutWork(t *testing.T) {
 	a := newOfflineApp(t)
-	defer a.Shutdown()
+	shutdownOnce(t, a)
 
-	start := time.Now()
-	if err := a.WaitForSessionAsync(context.Background()); err != nil {
+	spy := newSpyContext(context.Background())
+	if err := a.WaitForSessionAsync(spy); err != nil {
 		t.Fatalf("WaitForSessionAsync before StartScheduler = %v, want nil", err)
 	}
 	a.StartScheduler(context.Background(), nil)
-	if err := a.WaitForSessionAsync(context.Background()); err != nil {
+	if err := a.WaitForSessionAsync(spy); err != nil {
 		t.Fatalf("WaitForSessionAsync with no work = %v, want nil", err)
 	}
-	if elapsed := time.Since(start); elapsed > asyncQuiesceInterval {
-		t.Errorf("no-work wait took %v, want a fast path shorter than one poll interval (%v)", elapsed, asyncQuiesceInterval)
+	if spy.enteredWait() {
+		t.Error("the no-work barrier consulted ctx.Done(); it must return on the fast path without entering the poll loop")
 	}
 }
 
-// TestWaitForSessionAsyncIgnoresForeignSessionWork: Start adopts every live row in the
-// PROJECT, which is correct — whoever holds the lease supervises everything — but an
+// TestWaitForSessionAsyncIgnoresForeignSessionWork: Start adopts every live async row in
+// the PROJECT, which is correct — whoever holds the lease supervises everything — but an
 // inherited backlog must never decide when a script exits.
 func TestWaitForSessionAsyncIgnoresForeignSessionWork(t *testing.T) {
 	a := newOfflineApp(t)
-	defer a.Shutdown()
+	shutdownOnce(t, a)
 	a.StartScheduler(context.Background(), nil)
 
 	if err := a.asyncCoordinator.Register(asyncRec("asy_theirs", "ses_someone_else"), []string{"term-1"}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	start := time.Now()
-	if err := a.WaitForSessionAsync(ctx); err != nil {
+	spy := newSpyContext(context.Background())
+	if err := a.WaitForSessionAsync(spy); err != nil {
 		t.Fatalf("WaitForSessionAsync with only foreign work = %v, want nil", err)
 	}
-	if elapsed := time.Since(start); elapsed > asyncQuiesceInterval {
-		t.Errorf("foreign-work wait took %v, want the fast path (%v)", elapsed, asyncQuiesceInterval)
+	if spy.enteredWait() {
+		t.Error("foreign-session work made the barrier block; only THIS session's work may gate the exit")
 	}
 }
 
 // TestWaitForSessionAsyncBlocksOnOwnWorkUntilDeadline: the whole point of the barrier is
-// that the run does NOT exit while its own handles are live. When the bound expires with
-// work still running it reports the context error, and Shutdown must still complete
-// afterwards — a timeout that fires mid-poll cannot be allowed to strand teardown.
+// that the run does NOT exit while its own handles are live. The waiter is proven to be
+// IN the select before the context is killed — otherwise a fast machine could satisfy
+// this test without the barrier ever blocking — and Shutdown must still complete after a
+// cancellation that lands mid-poll.
 func TestWaitForSessionAsyncBlocksOnOwnWorkUntilDeadline(t *testing.T) {
 	a := newOfflineApp(t)
+	stop := shutdownOnce(t, a)
 	a.StartScheduler(context.Background(), nil)
 
 	if err := a.asyncCoordinator.Register(asyncRec("asy_mine", a.SessionID), []string{"term-1"}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	// A deadline far enough out that only the explicit cancel below ends the wait, so
+	// the test never depends on how fast the machine gets there.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	err := a.WaitForSessionAsync(ctx)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("WaitForSessionAsync = %v, want context.DeadlineExceeded", err)
+	spy := newSpyContext(ctx)
+	done := make(chan error, 1)
+	go func() { done <- a.WaitForSessionAsync(spy) }()
+
+	select {
+	case <-spy.blocked: // the waiter reached its select
+	case err := <-done:
+		t.Fatalf("WaitForSessionAsync returned %v without blocking, but this session has live work", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("WaitForSessionAsync never entered its poll loop")
 	}
+	// Still blocked: the work has not cleared, so nothing may release it.
+	select {
+	case err := <-done:
+		t.Fatalf("WaitForSessionAsync returned %v while its own work is still live", err)
+	default:
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("WaitForSessionAsync = %v, want the context error", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("WaitForSessionAsync did not return after its context was cancelled")
+	}
+
 	// The work is still live: the barrier never cancels or abandons it, so the next
 	// owner can adopt it.
 	if n := a.asyncCoordinator.ActiveCountForSession(a.SessionID); n != 1 {
 		t.Errorf("live session work after the timeout = %d, want 1 (the wait must not mutate it)", n)
 	}
-	if err := a.Shutdown(); err != nil {
-		t.Fatalf("Shutdown after a mid-wait timeout: %v", err)
-	}
+	// Teardown after a cancellation that landed mid-poll must still complete.
+	stop()
 }
 
 // TestWaitForSessionAsyncReturnsWhenOwnWorkClears: the barrier releases as soon as the
 // last of this session's invocations deregisters (which publishGroup does after the
-// completion event is published), not on the next scheduler tick.
+// completion event is published). Deregistering only AFTER the waiter is provably in its
+// select keeps this from passing vacuously through the fast path.
 func TestWaitForSessionAsyncReturnsWhenOwnWorkClears(t *testing.T) {
 	a := newOfflineApp(t)
-	defer a.Shutdown()
+	shutdownOnce(t, a)
 	a.StartScheduler(context.Background(), nil)
 
 	if err := a.asyncCoordinator.Register(asyncRec("asy_mine", a.SessionID), []string{"term-1"}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	go func() {
-		time.Sleep(150 * time.Millisecond)
-		a.asyncCoordinator.Deregister("asy_mine")
-	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := a.WaitForSessionAsync(ctx); err != nil {
-		t.Fatalf("WaitForSessionAsync = %v, want nil once the work cleared", err)
+	spy := newSpyContext(ctx)
+	done := make(chan error, 1)
+	go func() { done <- a.WaitForSessionAsync(spy) }()
+
+	select {
+	case <-spy.blocked:
+	case err := <-done:
+		t.Fatalf("WaitForSessionAsync returned %v without blocking on its own live work", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("WaitForSessionAsync never entered its poll loop")
+	}
+
+	a.asyncCoordinator.Deregister("asy_mine")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("WaitForSessionAsync = %v, want nil once the work cleared", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("WaitForSessionAsync did not return after its last invocation deregistered")
 	}
 }

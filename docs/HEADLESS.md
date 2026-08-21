@@ -163,10 +163,12 @@ Every knob is a flag, and every flag shadows a trusted env var and wins over it.
 | `--timeout DURATION` | — | one-shot only; `0` means no limit |
 | `--run-scheduler` | — | one-shot only; run the scheduler and await this run's async work. Requires a positive `--timeout` |
 
-`--timeout` and `--run-scheduler` are silently ignored on every other route
-(interactive, `daemon`, `doctor`) — only `RunOneShot` consults them, and the interactive
-routes already run a scheduler of their own. `--run-scheduler` without a positive
-`--timeout` is rejected at the argument boundary; see
+`--timeout` and `--run-scheduler` are only ever *read* on the one-shot route — the
+interactive routes already run a scheduler of their own, and `daemon` / `doctor` have no
+use for either. Their **validation**, though, is route-independent and happens at the
+argument boundary: a negative `--timeout`, or `--run-scheduler` without a positive
+`--timeout`, is rejected whatever follows it. Accepting a flag someone typed on purpose
+and then doing nothing with it is the worse answer. See
 [Background work in a one-shot is opt-in](#background-work-in-a-one-shot-is-opt-in).
 `--prompt-file` follows the same route rule: a command word is
 chosen before the prompt is, so `--prompt-file - mcp --stdio` serves MCP and never reads
@@ -377,8 +379,16 @@ daintree-assistant --json --run-scheduler --timeout 15m \
 `--run-scheduler` **requires a positive `--timeout`**. Settling is not guaranteed — an
 invocation whose terminals stay unreadable does not advance toward expiry — so an
 unbounded flagged run could wait forever. If the bound expires with work still live, the
-run warns, exits `2` (cancelled) with the answer still in `result.content`, and leaves
-the work durably live for the next owner. Nothing is cancelled or abandoned.
+run warns and leaves that work durably live for the next owner; nothing is cancelled or
+abandoned. A run whose turn otherwise succeeded then reports `cancelled` and exits `2`,
+with the answer still in `result.content`. A run that already **failed** keeps its
+`error` status and exit `1` — an expired wait never downgrades a real failure into a
+cancellation.
+
+The bound is cooperative, not a hard kill. Teardown joins any in-flight scheduler tick
+before closing the database, so a transport that ignores cancellation can push the exit
+slightly past the deadline. That is the deliberate trade: a bounded delay beats a data
+race against a closing store.
 
 Four things are worth knowing before you reach for it:
 
@@ -386,10 +396,13 @@ Four things are worth knowing before you reach for it:
   row in the project when it starts — whoever holds the lease supervises everything — but
   an inherited backlog never decides how long your script runs. Adopted work is polled
   opportunistically and stays live for the next owner if it outlasts the run.
-- **Watchers and timers tick, but never hold the run open.** A watcher is long-lived and
-  a timer can be scheduled arbitrarily far out, so neither has a "quiescent" state; if
-  they gated the exit, `--timeout` would become the normal way a flagged run ends. Due
-  work fires during the turn and during the wait; the rows persist either way.
+- **Watcher and timer rows never hold the run open.** A watcher is long-lived and a
+  timer can be scheduled arbitrarily far out, so neither has a "quiescent" state; if they
+  gated the exit, `--timeout` would become the normal way a flagged run ends. Due work
+  fires during the turn and during the wait; the rows persist either way. One consequence
+  worth stating plainly: if a timer fires **during** the run and itself starts async
+  work, that async work is this run's — same session — so it does gate the exit like any
+  other. Supervising it is the point; abandoning it at exit would be worse.
 - **Completions do not come back as tool results.** They land in the durable attention
   inbox, which the next session reads. The attention callback is deliberately nil for the
   same reason it is under `mcp --stdio`: a callback with nowhere to render would mark

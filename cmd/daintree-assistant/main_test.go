@@ -432,3 +432,22 @@ func TestUsageDocumentsRunScheduler(t *testing.T) {
 		t.Errorf("usage does not mention the --timeout requirement:\n%s", help)
 	}
 }
+
+// TestParseArgsRunSchedulerTimeoutRuleIsRouteIndependent pins a deliberate choice: the
+// --timeout requirement is checked before the route is picked, so `daemon
+// --run-scheduler` is REJECTED rather than silently ignored. Only RunOneShot reads the
+// flag, so the alternative would be accepting an explicit request and doing nothing with
+// it — silence is the worse answer for a flag someone typed on purpose.
+func TestParseArgsRunSchedulerTimeoutRuleIsRouteIndependent(t *testing.T) {
+	for _, route := range []string{"daemon", "doctor", "host"} {
+		if _, err := parseArgs([]string{"--run-scheduler", route}); err == nil {
+			t.Errorf("parseArgs(--run-scheduler %s) = nil error, want the --timeout rejection", route)
+		}
+	}
+	// With a bound it parses; the route handlers simply never consult the flag.
+	for _, route := range []string{"doctor", "daemon"} {
+		if _, err := parseArgs([]string{"--run-scheduler", "--timeout", "1m", route}); err != nil {
+			t.Errorf("parseArgs(--run-scheduler --timeout 1m %s) errored: %v", route, err)
+		}
+	}
+}

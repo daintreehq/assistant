@@ -601,7 +601,11 @@ func RunOneShot(ctx context.Context, opts Options) int {
 			// The bound expired with work still live. Say so, and mark the RUN cancelled —
 			// but at the run level only, so an answer that did complete survives into the
 			// terminal line. The work itself stays durably live for the next owner.
-			msg := fmt.Sprintf("timed out after %s waiting for async work to settle; it stays live for the next session", opts.Timeout)
+			// Never claim a duration was SPENT waiting: the same --timeout bounds the whole
+			// run, so a deadline that expired during the turn reaches the barrier already
+			// dead and it returns without polling once. Name the bound, not an elapsed
+			// time we did not measure.
+			msg := fmt.Sprintf("--timeout (%s) expired with async work still running; it stays live for the next session", opts.Timeout)
 			if !timedOut() {
 				msg = "stopped waiting for async work to settle; it stays live for the next session"
 			}
