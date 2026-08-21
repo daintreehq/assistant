@@ -22,28 +22,36 @@ type Command struct {
 }
 
 // suggestionsFor filters + ranks the command list for a draft. A palette is meaningful only
-// when the draft starts with "/". It matches on the FIRST whitespace token (so the palette
-// stays open while typing arguments) and ranks by a fuzzy hierarchy: exact name > name prefix
-// > name subsequence > description substring. "/" alone shows the whole list. The result is
-// intentionally NOT capped: keyboard navigation must be able to reach every matching command;
-// View applies the five-row display cap with paletteWindow.
+// when the draft starts with "/". The decision tree is:
 //
-// The whitespace that ends the command token is a SEMANTIC boundary, not just a split point.
-// While the token is still open the draft is a discovery query, so the loose tiers earn their
-// keep: "/back" should surface /models too, because its description mentions the backend.
-// Once whitespace closes an exact command name the draft is no longer a query — the user has
-// committed to that command (Tab writes exactly "<name> ") and wants its usage hint, so a
-// command that merely NAMES it in prose is noise. Hence a closed exact name owns the palette
-// alone; every other state falls through to the unchanged ranking below.
+//   - an EMPTY command token ("/", and "/ ") — the whole list, unranked;
+//   - a token CLOSED by a space or tab that exactly names a command — that command, alone;
+//   - anything else — the fuzzy ranking: exact name > name prefix > name subsequence >
+//     description substring. That ranking is never capped here, because keyboard navigation
+//     must reach every command it matched; View applies the five-row display cap instead,
+//     with paletteWindow.
+//
+// The space or tab that ends the command token is a SEMANTIC boundary, not just a split
+// point. While the token is still open the draft is a discovery QUERY, so the loose tiers
+// earn their keep: "/back" should surface /models too, because its description mentions the
+// backend. Once a separator closes an EXACT command name the draft stops being a query — the
+// user has committed to that command (Tab writes exactly "<name> ") and wants its usage hint,
+// so a command that merely NAMES it in prose is noise (#359). A closed token that names
+// nothing is still a search and must stay one: Enter completes "/inb urgent" to "/inbox
+// urgent".
+//
+// "Separator" here means space or tab only, matching acceptSuggestion. Dispatch's parseCommand
+// splits on strings.Fields, so a newline ends the command token for EXECUTION but not for the
+// palette — a pre-existing divergence this function should not paper over on its own.
 func suggestionsFor(cmds []Command, value string) []Command {
 	if !strings.HasPrefix(value, "/") {
 		return nil
 	}
 	q := strings.ToLower(value[1:])
-	// Match on the command token only — arguments after the first space don't filter, so the
-	// palette stays visible (with its usage hint) as you type "/audit 5". Keep WHETHER the
-	// separator was there: that bit is what distinguishes a committed command from a token
-	// still being typed, and dropping it is what let description matches outlive Tab (#359).
+	// Match on the command token only — arguments after the first space or tab don't filter,
+	// so the palette stays visible (with its usage hint) as you type "/audit 5". Keep WHETHER
+	// that separator was there: that bit is what tells a committed command from a token still
+	// being typed, and dropping it is what let description matches outlive Tab (#359).
 	closed := false
 	if i := strings.IndexAny(q, " \t"); i >= 0 {
 		q = q[:i]

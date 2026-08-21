@@ -134,9 +134,11 @@ func TestPaletteStaysOpenWhileTypingArgs(t *testing.T) {
 // exactly the discovery affordance we want to keep.
 func TestPaletteTabCompletionCollapsesDescriptionMatches(t *testing.T) {
 	m := New(theme.Theme{Glyphs: unicodeGlyphsForTest()})
+	// Registry order: /models really does precede /backend, so expecting /backend to LEAD
+	// below proves the prefix tier outranks the description tier, not that slice order won.
 	m.SetCommands([]Command{
-		{Name: "/backend", Desc: "which backend answers", Syntax: "/backend [target]"},
 		{Name: "/models", Desc: "backend-owned model routing", Syntax: "/models"},
+		{Name: "/backend", Desc: "which backend answers", Syntax: "/backend [target]"},
 	})
 	typeRunes(&m, "/back")
 
@@ -162,6 +164,14 @@ func TestPaletteTabCompletionCollapsesDescriptionMatches(t *testing.T) {
 	if !strings.Contains(frame, "/backend [target]") {
 		t.Fatalf("rendered palette lost the accepted command's usage hint:\n%s", frame)
 	}
+
+	// Shift-Tab wraps within the collapsed list, so re-accepting can only land on /backend.
+	// While /models survived, Shift-Tab moved ONTO it and the next Tab wrote "/models ".
+	press(&m, tea.KeyTab, tea.ModShift)
+	press(&m, tea.KeyTab, 0)
+	if got := m.Value(); got != "/backend " {
+		t.Fatalf("Shift-Tab then Tab on a collapsed palette = %q, want %q", got, "/backend ")
+	}
 }
 
 // TestPaletteCommandTokenClosure pins the boundary semantics the fix turns on: only a token
@@ -170,9 +180,11 @@ func TestPaletteTabCompletionCollapsesDescriptionMatches(t *testing.T) {
 // first so "/workflow" can't hide "/workflows" mid-keystroke, the second so Enter can still
 // complete "/inb urgent" to "/inbox urgent".
 func TestPaletteCommandTokenClosure(t *testing.T) {
+	// Registry order (/models precedes /backend), so a ranked expectation below can't be
+	// satisfied by fixture order alone.
 	descCollision := []Command{
-		{Name: "/backend", Desc: "which backend answers"},
 		{Name: "/models", Desc: "backend-owned model routing"},
+		{Name: "/backend", Desc: "which backend answers"},
 	}
 	prefixCollision := []Command{
 		{Name: "/workflows", Desc: "workflow runs"},
@@ -196,13 +208,13 @@ func TestPaletteCommandTokenClosure(t *testing.T) {
 		{"closed exact match is case-insensitive", descCollision,
 			"/BACKEND ", []string{"/backend"}},
 		{"a closed EMPTY token still lists everything", descCollision,
-			"/ ", []string{"/backend", "/models"}},
+			"/ ", []string{"/models", "/backend"}},
 		{"closed partial name keeps the fuzzy fallback", descCollision,
 			"/back local", []string{"/backend", "/models"}},
 		{"closed description-only match keeps the fuzzy fallback", descCollision,
-			"/routing local", []string{"/models"}},
+			"/owned local", []string{"/models"}},
 		{"closed token naming nothing matches nothing", descCollision,
-			"/nope ", nil},
+			"/nope ", []string{}},
 		// Fixture order is the registry's (/workflows precedes /workflow), so this also
 		// proves the exact tier — not slice order — decides who leads.
 		{"open exact name keeps its longer sibling reachable", prefixCollision,
