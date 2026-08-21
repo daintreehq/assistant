@@ -87,7 +87,12 @@ func newErrorsRecentTool() *tools.Tool {
 			if !ok {
 				return failMalformed("errors.recent")
 			}
-			errs, _ := obj["errors"].([]any)
+			// Presence-checked: a missing `errors` reported as "Read 0 recent error(s)"
+			// would assert nothing went wrong, from a payload that said nothing at all.
+			errs, ok2 := obj["errors"].([]any)
+			if !ok2 {
+				return failMalformed("errors.recent")
+			}
 			return tools.Ok(
 				fmt.Sprintf("Read %d recent error(s) from the diagnostics log (the notification inbox is a separate store).", len(errs)),
 				map[string]any{"errors": errs})
@@ -103,17 +108,19 @@ var notificationTypes = map[string]bool{
 }
 
 type notificationsRecentArgs struct {
-	Limit      *int   `json:"limit,omitempty"`
-	Type       string `json:"type,omitempty"`
-	UnreadOnly *bool  `json:"unreadOnly,omitempty"`
+	Limit *int `json:"limit,omitempty"`
+	// Pointer so an explicit "" is rejected as the enum violation it is on the host,
+	// rather than dropped — dropping it would silently widen the read to every type.
+	Type       *string `json:"type,omitempty"`
+	UnreadOnly *bool   `json:"unreadOnly,omitempty"`
 }
 
 func (a notificationsRecentArgs) Validate() error {
 	if err := validateDiagnosticsLimit("notifications.recent", a.Limit); err != nil {
 		return err
 	}
-	if a.Type != "" && !notificationTypes[a.Type] {
-		return fmt.Errorf("type %q is not one of success, error, info, warning", a.Type)
+	if a.Type != nil && !notificationTypes[*a.Type] {
+		return fmt.Errorf("type %q is not one of success, error, info, warning", *a.Type)
 	}
 	return nil
 }
@@ -148,8 +155,8 @@ func newNotificationsRecentTool() *tools.Tool {
 			if a.Limit != nil {
 				fwd["limit"] = *a.Limit
 			}
-			if a.Type != "" {
-				fwd["type"] = a.Type
+			if a.Type != nil {
+				fwd["type"] = *a.Type
 			}
 			if a.UnreadOnly != nil {
 				fwd["unreadOnly"] = *a.UnreadOnly
@@ -162,7 +169,10 @@ func newNotificationsRecentTool() *tools.Tool {
 			if !ok {
 				return failMalformed("notifications.recent")
 			}
-			notes, _ := obj["notifications"].([]any)
+			notes, ok2 := obj["notifications"].([]any)
+			if !ok2 {
+				return failMalformed("notifications.recent")
+			}
 			return tools.Ok(
 				fmt.Sprintf("Read %d recent notification(s) from the inbox (the diagnostics error log is a separate store).", len(notes)),
 				map[string]any{"notifications": notes})

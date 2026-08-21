@@ -25,20 +25,23 @@ const (
 // guard and quietly widen the listing. Rejecting it here keeps that promise at the first
 // boundary the model touches, with a message that says what to do instead.
 type agentSessionHistoryListArgs struct {
-	WorktreeID string `json:"worktreeId,omitempty"`
-	ProjectID  string `json:"projectId,omitempty"`
-	Limit      *int   `json:"limit,omitempty"`
-	Offset     *int   `json:"offset,omitempty"`
+	// Pointers, not string+omitempty: StrictDecoder re-marshals, so a plain string could
+	// not tell an explicit "" from an absent key, and dropping an explicit "" is exactly
+	// the silent widening the host's `.min(1)` exists to prevent.
+	WorktreeID *string `json:"worktreeId,omitempty"`
+	ProjectID  *string `json:"projectId,omitempty"`
+	Limit      *int    `json:"limit,omitempty"`
+	Offset     *int    `json:"offset,omitempty"`
 }
 
 func (a agentSessionHistoryListArgs) Validate() error {
-	// The `omitempty` tags mean a supplied-but-blank id is indistinguishable from an
-	// absent one AFTER forwarding, so it has to be rejected here or it becomes an
-	// unscoped listing the caller never asked for.
-	if a.WorktreeID != "" && strings.TrimSpace(a.WorktreeID) == "" {
+	// A supplied-but-blank id must be rejected, never forwarded and never dropped: the
+	// host declares both `.min(1)` because a blank one falls through its
+	// `if (!worktreeId)` guard and quietly widens the listing to every project.
+	if a.WorktreeID != nil && strings.TrimSpace(*a.WorktreeID) == "" {
 		return fmt.Errorf("worktreeId is blank; omit it to fall back to this session's scope rather than passing an empty id")
 	}
-	if a.ProjectID != "" && strings.TrimSpace(a.ProjectID) == "" {
+	if a.ProjectID != nil && strings.TrimSpace(*a.ProjectID) == "" {
 		return fmt.Errorf("projectId is blank; omit it to fall back to this session's scope rather than passing an empty id")
 	}
 	if a.Limit != nil && (*a.Limit < 1 || *a.Limit > sessionListMaxLimit) {
@@ -86,11 +89,11 @@ func newAgentSessionHistoryListTool() *tools.Tool {
 				return res
 			}
 			fwd := map[string]any{}
-			if a.WorktreeID != "" {
-				fwd["worktreeId"] = a.WorktreeID
+			if a.WorktreeID != nil {
+				fwd["worktreeId"] = *a.WorktreeID
 			}
-			if a.ProjectID != "" {
-				fwd["projectId"] = a.ProjectID
+			if a.ProjectID != nil {
+				fwd["projectId"] = *a.ProjectID
 			}
 			if a.Limit != nil {
 				fwd["limit"] = *a.Limit
@@ -106,7 +109,13 @@ func newAgentSessionHistoryListTool() *tools.Tool {
 			if !ok {
 				return failMalformed("agentSessionHistory.list")
 			}
-			sessions, _ := obj["sessions"].([]any)
+			// Presence-checked: a missing `sessions` would be reported as "Found 0
+			// resumable session(s)", which the description explicitly warns must not be
+			// read as "none exist". A malformed payload must not be the thing that says it.
+			sessions, ok2 := obj["sessions"].([]any)
+			if !ok2 {
+				return failMalformed("agentSessionHistory.list")
+			}
 			out := map[string]any{"sessions": sessions}
 			for _, k := range []string{"total", "hasMore"} {
 				if v, present := obj[k]; present {

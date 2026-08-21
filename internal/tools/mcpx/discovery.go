@@ -297,6 +297,33 @@ var denylistLookup = func() map[string]string {
 	return m
 }()
 
+// IsWrappedMCPName reports whether daintree.call refuses this raw MCP action because a
+// typed wrapper governs it. Exported for the cross-package parity test in internal/app:
+// the wrapper lives in mcpwrap and the denylist lives here, neither package may import
+// the other, and a wrapper registered without an entry silently leaves the raw bypass
+// open.
+func IsWrappedMCPName(name string) bool {
+	_, found := denylistLookup[normalizeMCPName(name)]
+	return found
+}
+
+// WrappedMCPNames returns the raw action names daintree.call refuses, sorted for a
+// deterministic test failure order.
+func WrappedMCPNames() []string {
+	names := make([]string, 0, len(wrappedMCPTools))
+	for k := range wrappedMCPTools {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// WrappedMCPRedirect returns the wrapper a refused raw name points at, or "" when the
+// name is not refused.
+func WrappedMCPRedirect(name string) string {
+	return denylistLookup[normalizeMCPName(name)]
+}
+
 // normalizeMCPName trims surrounding (and embedded control) whitespace from a
 // requested MCP tool name so a padded/case-shifted variant ("  Recipe.Run\t")
 // can't slip past the exact-match denylist. Internal whitespace is stripped too

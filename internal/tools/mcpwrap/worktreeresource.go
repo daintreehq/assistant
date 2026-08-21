@@ -11,15 +11,25 @@ import (
 
 /* ------------------------ worktree.resource.status ------------------------ */
 
+// WorktreeID is a pointer with NO minLength, mirroring the host's plain optional string.
+//
+// This is the sharpest case for presence-awareness in the whole family. The host resolves
+// `args?.worktreeId ?? ctx.focusedWorktreeId ?? ctx.activeWorktreeId`, and `??` keeps an
+// explicit "" — so on the host an empty id fails with "Worktree not found". If this
+// wrapper dropped an empty id instead, the call would fall through to the FOCUSED
+// worktree and EXECUTE ITS CONFIGURED STATUS COMMAND: a shell command run against a
+// resource the caller never named. Daintree's own locationArgs.ts warns about exactly
+// this ("an empty selector ... would retarget a destructive call at whatever happens to
+// be active"). So an explicit "" is forwarded verbatim and fails honestly on the host.
 type worktreeResourceStatusArgs struct {
-	WorktreeID string `json:"worktreeId,omitempty"`
+	WorktreeID *string `json:"worktreeId,omitempty"`
 }
 
 var worktreeResourceStatusSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "worktreeId": { "type": "string", "minLength": 1, "description": "The worktree whose remote resource to check. Omit for the focused or active worktree; the call fails when neither resolves." }
+    "worktreeId": { "type": "string", "description": "The worktree whose remote resource to check. Omit for the focused or active worktree; the call fails when neither resolves." }
   }
 }`)
 
@@ -63,8 +73,8 @@ func newWorktreeResourceStatusTool() *tools.Tool {
 				return res
 			}
 			fwd := map[string]any{}
-			if a.WorktreeID != "" {
-				fwd["worktreeId"] = a.WorktreeID
+			if a.WorktreeID != nil {
+				fwd["worktreeId"] = *a.WorktreeID
 			}
 			res := passthrough(ctx, tctx, "worktree.resource.status", fwd, "")
 			if !res.Ok {

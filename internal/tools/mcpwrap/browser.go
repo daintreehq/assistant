@@ -21,15 +21,22 @@ var browserConsoleLevels = map[string]bool{
 // browserGetConsoleMessagesArgs mirrors getConsoleMessagesArgsSchema. Limit is a pointer
 // because the host treats OMITTED as "all captured" — a defaulted number here would
 // silently cap a read the caller asked to be complete.
+// TerminalID is a pointer with NO minLength in the schema, mirroring the host: it
+// declares a plain optional string, and its `terminalId ?? focusedId` fallback keeps an
+// explicit "" (only null/undefined fall through), which then fails the dev-preview check
+// with a clear message. Dropping an explicit "" here would instead retarget the read at
+// the FOCUSED panel — a different panel than the one that was named.
 type browserGetConsoleMessagesArgs struct {
-	TerminalID string `json:"terminalId,omitempty"`
-	Level      string `json:"level,omitempty"`
-	Limit      *int   `json:"limit,omitempty"`
+	TerminalID *string `json:"terminalId,omitempty"`
+	Level      *string `json:"level,omitempty"`
+	Limit      *int    `json:"limit,omitempty"`
 }
 
 func (a browserGetConsoleMessagesArgs) Validate() error {
-	if a.Level != "" && !browserConsoleLevels[a.Level] {
-		return fmt.Errorf("level %q is not one of log, info, warning, error", a.Level)
+	// An explicit "" is an enum violation on the host, so it is rejected here rather
+	// than dropped — dropping it would silently widen the read to every level.
+	if a.Level != nil && !browserConsoleLevels[*a.Level] {
+		return fmt.Errorf("level %q is not one of log, info, warning, error", *a.Level)
 	}
 	if a.Limit != nil && (*a.Limit < 1 || *a.Limit > 500) {
 		return fmt.Errorf("limit is %d; Daintree accepts 1–500 (omit it for every captured message)", *a.Limit)
@@ -41,7 +48,7 @@ var browserGetConsoleMessagesSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "terminalId": { "type": "string", "minLength": 1, "description": "The dev preview panel to read. Omit for the focused panel." },
+    "terminalId": { "type": "string", "description": "The dev preview panel to read. Omit for the focused panel." },
     "level": { "type": "string", "enum": ["log", "info", "warning", "error"], "description": "Return only messages at this level." },
     "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Max messages, newest kept. Omit for every captured message." }
   }
@@ -74,11 +81,11 @@ func newBrowserGetConsoleMessagesTool() *tools.Tool {
 				return res
 			}
 			fwd := map[string]any{}
-			if a.TerminalID != "" {
-				fwd["terminalId"] = a.TerminalID
+			if a.TerminalID != nil {
+				fwd["terminalId"] = *a.TerminalID
 			}
-			if a.Level != "" {
-				fwd["level"] = a.Level
+			if a.Level != nil {
+				fwd["level"] = *a.Level
 			}
 			if a.Limit != nil {
 				fwd["limit"] = *a.Limit
@@ -91,7 +98,13 @@ func newBrowserGetConsoleMessagesTool() *tools.Tool {
 			if !ok {
 				return failMalformed("browser.getConsoleMessages")
 			}
-			messages, _ := obj["messages"].([]any)
+			// Presence-checked: a missing `messages` reported as "Read 0 console
+			// message(s)" would read as "the page logged nothing", which is the opposite
+			// of "we could not tell".
+			messages, ok2 := obj["messages"].([]any)
+			if !ok2 {
+				return failMalformed("browser.getConsoleMessages")
+			}
 			out := map[string]any{"messages": messages}
 			for _, k := range []string{"paneId", "counts"} {
 				if v, present := obj[k]; present {

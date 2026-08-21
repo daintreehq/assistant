@@ -407,13 +407,15 @@ func (a storeToolAdapter) ConsumeGrant(_ context.Context, actorID string, actorT
 // maxToolCallTimeout bounds what a tool handler may ask for as a wire deadline.
 //
 // It is the largest server-side budget any Daintree action accepts (project.runCheck
-// caps timeoutMs at one hour) plus the settlement margin a handler adds on top, so a
-// legitimate request always passes through untouched. Anything larger is a caller
+// caps timeoutMs at one hour) plus the preflight-and-settlement margin a handler adds on
+// top (mcpwrap's projectCheckSettleMargin), so a legitimate request always passes through
+// untouched. Keep the two in step: a ceiling below what the handler computes would clamp
+// exactly the caller this mechanism exists for. Anything larger is a caller
 // bug, and honouring it would let one tool call pin an MCP slot indefinitely — the
 // exact failure mode internal/mcp's own defaultCallTimeout exists to prevent. Clamped
 // HERE, at the one boundary where every handler's request becomes a real deadline,
 // rather than in each handler that computes one.
-const maxToolCallTimeout = 60*time.Minute + 30*time.Second
+const maxToolCallTimeout = 60*time.Minute + 2*time.Minute
 
 // mcpToolAdapter adapts the concrete mcp.Client (CallTool with CallOptions →
 // CallResult) onto the narrow tools.MCPClient seam tool handlers forward to.
@@ -421,18 +423,25 @@ type mcpToolAdapter struct{ c *mcp.Client }
 
 func (m mcpToolAdapter) Connected() bool { return m.c.IsConnected() }
 
+// clampMCPCallTimeout is the whole timeout policy, as a pure function so it can be
+// tested for what it IS rather than re-implemented in a test that would agree with
+// itself. Zero (or a meaningless negative) means "no opinion" and falls through to the
+// transport's own defaultCallTimeout; anything past the ceiling is a caller bug.
+func clampMCPCallTimeout(d time.Duration) time.Duration {
+	if d < 0 {
+		return 0 // negative is meaningless; fall back to the transport default
+	}
+	if d > maxToolCallTimeout {
+		return maxToolCallTimeout
+	}
+	return d
+}
+
 func (m mcpToolAdapter) CallTool(ctx context.Context, name string, args map[string]any, opts tools.MCPCallOptions) (tools.MCPCallResult, error) {
 	// Only Timeout crosses. Retries is deliberately NOT forwarded — see the note on
 	// tools.MCPCallOptions: retry-safety is decided per tool inside internal/mcp, not
 	// requested by a handler that may be wrapping a non-idempotent action.
-	timeout := opts.Timeout
-	if timeout < 0 {
-		timeout = 0 // negative is meaningless; fall back to the transport default
-	}
-	if timeout > maxToolCallTimeout {
-		timeout = maxToolCallTimeout
-	}
-	res, err := m.c.CallTool(ctx, name, args, mcp.CallOptions{Timeout: timeout})
+	res, err := m.c.CallTool(ctx, name, args, mcp.CallOptions{Timeout: clampMCPCallTimeout(opts.Timeout)})
 	if err != nil {
 		return tools.MCPCallResult{}, err
 	}

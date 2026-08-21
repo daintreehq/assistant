@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/tools"
@@ -19,15 +20,28 @@ import (
 // is a value the host accepts and it is NOT the same as no cursor, and a zero PerPage
 // must fail the declared minimum rather than quietly become the default.
 type forgeListIssueCommentsArgs struct {
-	CWD          string  `json:"cwd,omitempty"`
-	WorktreeID   string  `json:"worktreeId,omitempty"`
-	WorktreePath string  `json:"worktreePath,omitempty"`
+	CWD          *string `json:"cwd,omitempty"`
+	WorktreeID   *string `json:"worktreeId,omitempty"`
+	WorktreePath *string `json:"worktreePath,omitempty"`
 	IssueNumber  int     `json:"issueNumber"`
 	Cursor       *string `json:"cursor,omitempty"`
 	PerPage      *int    `json:"perPage,omitempty"`
 }
 
 func (a forgeListIssueCommentsArgs) Validate() error {
+	// The host's shared selector fields are `.min(1)` (locationArgs.ts), and its own
+	// comment says why: an empty selector that parsed would fall through to "use the
+	// active worktree", retargeting the call at whatever happens to be active. A plain
+	// string+omitempty here could not tell "" from absent after StrictDecoder
+	// re-marshals, so the locators are pointers and an empty one is rejected outright.
+	for _, l := range []struct {
+		name string
+		val  *string
+	}{{"cwd", a.CWD}, {"worktreeId", a.WorktreeID}, {"worktreePath", a.WorktreePath}} {
+		if l.val != nil && strings.TrimSpace(*l.val) == "" {
+			return fmt.Errorf("%s is empty; omit it to use the active worktree rather than passing a blank locator", l.name)
+		}
+	}
 	if a.IssueNumber <= 0 {
 		return fmt.Errorf("issueNumber must be a positive integer")
 	}
@@ -42,9 +56,9 @@ var forgeListIssueCommentsSchema = json.RawMessage(`{
   "additionalProperties": false,
   "required": ["issueNumber"],
   "properties": {
-    "cwd": { "type": "string", "description": "Legacy alias for worktreePath." },
-    "worktreeId": { "type": "string", "description": "Worktree id. Takes precedence over a path." },
-    "worktreePath": { "type": "string", "description": "Absolute worktree path." },
+    "cwd": { "type": "string", "minLength": 1, "description": "Legacy alias for worktreePath." },
+    "worktreeId": { "type": "string", "minLength": 1, "description": "Worktree id. Takes precedence over a path." },
+    "worktreePath": { "type": "string", "minLength": 1, "description": "Absolute worktree path." },
     "issueNumber": { "type": "integer", "minimum": 1, "description": "The issue whose comments to read (positive integer)." },
     "cursor": { "type": "string", "description": "Opaque cursor — pass the previous response's nextCursor for the next page." },
     "perPage": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Comments per page." }
@@ -57,14 +71,14 @@ var forgeListIssueCommentsSchema = json.RawMessage(`{
 // with no path at all. Precedence (id beats path) is the forge action's rule and stays
 // there; re-implementing it here would be a second authority on one question.
 func (a forgeListIssueCommentsArgs) forwardLocation(fwd map[string]any) {
-	if a.CWD != "" {
-		fwd["cwd"] = a.CWD
+	if a.CWD != nil {
+		fwd["cwd"] = *a.CWD
 	}
-	if a.WorktreeID != "" {
-		fwd["worktreeId"] = a.WorktreeID
+	if a.WorktreeID != nil {
+		fwd["worktreeId"] = *a.WorktreeID
 	}
-	if a.WorktreePath != "" {
-		fwd["worktreePath"] = a.WorktreePath
+	if a.WorktreePath != nil {
+		fwd["worktreePath"] = *a.WorktreePath
 	}
 }
 
@@ -106,7 +120,14 @@ func newForgeListIssueCommentsTool() *tools.Tool {
 			if !ok {
 				return failMalformed("forge.listIssueComments")
 			}
-			items, _ := obj["items"].([]any)
+			// Presence-checked: a missing `items` decoded with `_` becomes a nil slice
+			// reported as "Read 0 comment(s)", which is indistinguishable from a genuinely
+			// empty thread — and the description tells the reader an empty page means
+			// nobody commented. A payload that never carried items must not say that.
+			items, ok2 := obj["items"].([]any)
+			if !ok2 {
+				return failMalformed("forge.listIssueComments")
+			}
 			out := map[string]any{"issueNumber": a.IssueNumber, "items": items}
 			// hasMore/nextCursor/totalCount are copied only when the forge actually sent
 			// them. A defaulted hasMore:false would read as "you have the whole thread",

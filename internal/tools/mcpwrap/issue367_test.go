@@ -3,9 +3,11 @@ package mcpwrap
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/tools"
@@ -171,8 +173,11 @@ func TestProjectRunCheckWireDeadline(t *testing.T) {
 		args  string
 		want  time.Duration
 	}{
-		{"omitted uses the host default", `{"projectId":"p","runnerId":"r"}`,
-			projectCheckDefaultTimeoutMS*time.Millisecond + projectCheckSettleMargin},
+		// Omitted sizes from the host MAXIMUM, not our copy of its default: the default
+		// is deliberately not forwarded, so coupling the deadline to it would abort at
+		// our ten minutes if Daintree ever raised its own.
+		{"omitted sizes from the host maximum", `{"projectId":"p","runnerId":"r"}`,
+			projectCheckMaxTimeoutMS*time.Millisecond + projectCheckSettleMargin},
 		{"explicit budget", `{"projectId":"p","runnerId":"r","timeoutMs":900000}`,
 			900000*time.Millisecond + projectCheckSettleMargin},
 		{"the host maximum", `{"projectId":"p","runnerId":"r","timeoutMs":3600000}`,
@@ -239,50 +244,57 @@ func TestProjectRunCheckRejectsBadArgs(t *testing.T) {
 	}
 }
 
-// TestProjectRunCheckTrimsOutputFromTheStart pins the one transformation this wrapper
-// makes. The trim is from the FRONT because a runner prints its failure summary last,
-// and it is ANNOUNCED, because an unannounced trim reads as the whole output — which is
-// how a model concludes a suite passed from a fragment that never reached the errors.
-func TestProjectRunCheckTrimsOutputFromTheStart(t *testing.T) {
-	huge := strings.Repeat("a", projectCheckOutputBudget+500) + "TAIL-MARKER"
+// TestProjectRunCheckForwardsOutputVerbatim pins the deliberate decision NOT to trim.
+//
+// An earlier draft trimmed `output` to keep the result inline. That destroyed diagnostic
+// output with no way to get it back: project.runCheck is on the daintree.call denylist,
+// so the raw route cannot recover it, and agent.SerializeToolResult would have preserved
+// the whole thing as a pageable artifact if we had simply passed it through. This test
+// exists so "keep the result inline" is never re-introduced as an optimisation.
+func TestProjectRunCheckForwardsOutputVerbatim(t *testing.T) {
+	// Well past domain.MaxToolResultChars, and newline-dense so its ESCAPED form is far
+	// larger again — the shape that tempts a truncation.
+	huge := strings.Repeat("noise\n", 20_000) + "TAIL-MARKER"
 	m := &fakeMCP{connected: true, result: structured(map[string]any{
-		"passed": false, "output": huge, "runnerName": "test",
+		"passed": false, "output": huge, "runnerName": "test", "exitCode": float64(1),
 	})}
 	res := run(t, findTool(issue367Tools(t), "project.runCheck"), m, `{"projectId":"p","runnerId":"r"}`)
 	if !res.Ok {
 		t.Fatalf("unexpected failure: %+v", res.Error)
 	}
 	out := res.Result.(map[string]any)
-	got := out["output"].(string)
-	if !strings.HasSuffix(got, "TAIL-MARKER") {
-		t.Error("the TAIL must survive the trim — it holds the failure summary")
+	if out["output"] != huge {
+		got, _ := out["output"].(string)
+		t.Errorf("output was modified: %d chars kept of %d — it must pass through verbatim so the runtime can archive it losslessly",
+			len([]rune(got)), len([]rune(huge)))
 	}
-	if len([]rune(got)) > projectCheckOutputBudget {
-		t.Errorf("output is %d runes, over the %d budget", len([]rune(got)), projectCheckOutputBudget)
+	// No invented truncation bookkeeping: fields that once announced OUR trim must be
+	// gone, or a reader would look for a trim that no longer happens.
+	for _, k := range []string{"outputTrimmedByAssistant", "outputCharsDropped", "outputTrimmedFrom"} {
+		if _, present := out[k]; present {
+			t.Errorf("%s is still reported, but this wrapper no longer trims", k)
+		}
 	}
-	if out["outputTrimmedByAssistant"] != true {
-		t.Error("a trim must be announced in the result, not left for the reader to notice")
+	// The verdict has to survive the overflow path. SerializeToolResult's preview is the
+	// HEAD of the serialized envelope, which begins with ok+summary — so the summary is
+	// what the model still sees when the output is archived rather than inlined.
+	if !strings.Contains(res.Summary, "FAILED") || !strings.Contains(res.Summary, "exit 1") {
+		t.Errorf("the summary must carry the verdict — it is the part that survives archiving. Got %q", res.Summary)
 	}
-	if out["outputTrimmedFrom"] != "start" {
-		t.Errorf("outputTrimmedFrom = %v, want \"start\"", out["outputTrimmedFrom"])
-	}
-	if !strings.Contains(res.Summary, "trimmed") {
-		t.Errorf("the summary must mention the trim, got %q", res.Summary)
+	if utf8.RuneCountInString(res.Summary) > domain.TruncationPreviewChars {
+		t.Errorf("summary is %d chars; it must fit the overflow preview", utf8.RuneCountInString(res.Summary))
 	}
 }
 
-func TestProjectRunCheckKeepsShortOutputWhole(t *testing.T) {
-	m := &fakeMCP{connected: true, result: structured(map[string]any{"passed": true, "output": "ok\n"})}
+// The host reports its OWN capture cap in `outputTruncated`; that is a different fact
+// from anything we do and must be relayed, not swallowed.
+func TestProjectRunCheckRelaysHostTruncationFlag(t *testing.T) {
+	m := &fakeMCP{connected: true, result: structured(map[string]any{
+		"passed": false, "output": "tail", "outputTruncated": true,
+	})}
 	res := run(t, findTool(issue367Tools(t), "project.runCheck"), m, `{"projectId":"p","runnerId":"r"}`)
-	out := res.Result.(map[string]any)
-	if out["output"] != "ok\n" {
-		t.Errorf("short output must pass through verbatim, got %q", out["output"])
-	}
-	if out["outputTrimmedByAssistant"] != false {
-		t.Error("outputTrimmedByAssistant must be false when nothing was dropped")
-	}
-	if _, present := out["outputCharsDropped"]; present {
-		t.Error("outputCharsDropped must be absent when nothing was dropped")
+	if res.Result.(map[string]any)["outputTruncated"] != true {
+		t.Error("the host's own outputTruncated flag must be relayed")
 	}
 }
 
@@ -648,6 +660,182 @@ func TestIssue367WrappersMapMCPFailures(t *testing.T) {
 		res = run(t, findTool(all, name), refused, args)
 		if res.Ok || res.Error == nil || res.Error.Code != codeMCPToolError {
 			t.Errorf("%s refusal: want %s, got %+v", name, codeMCPToolError, res.Error)
+		}
+	}
+}
+
+/* ---------------------- presence: omitted vs "" vs null ------------------- */
+
+// An OPTIONAL argument has three states the model can send — omitted, explicitly empty,
+// and explicitly null — and collapsing them is how a call quietly retargets. Daintree's
+// own locationArgs.ts spells out the danger: "an empty string must be a validation error,
+// not a silent fallback to the active worktree ... an empty selector that parsed
+// successfully would retarget a destructive call at whatever happens to be active."
+//
+// That is not hypothetical here. worktree.resource.status EXECUTES the target worktree's
+// configured shell command, so an empty worktreeId silently becoming "the focused one"
+// runs a command against a resource the caller never named. These tests pin the two
+// rules that prevent it:
+//
+//   - Where the host declares `.min(1)`, the wrapper REJECTS an empty value locally.
+//   - Where the host declares a plain optional string, the wrapper FORWARDS it verbatim,
+//     because the host's own `??` fallback keeps "" and fails on it — so passing it
+//     through preserves the host's answer instead of substituting ours.
+//
+// The one thing never allowed is dropping it.
+func TestEmptyOptionalIsNeverSilentlyDropped(t *testing.T) {
+	all := issue367Tools(t)
+
+	// Host `.min(1)` → reject locally, never reach Daintree.
+	rejects := []struct {
+		tool string
+		args string
+	}{
+		{"project.runCheck", `{"projectId":"p","runnerId":"r","cwd":""}`},
+		{"forge.listIssueComments", `{"issueNumber":1,"cwd":""}`},
+		{"forge.listIssueComments", `{"issueNumber":1,"worktreeId":""}`},
+		{"forge.listIssueComments", `{"issueNumber":1,"worktreePath":""}`},
+		{"agentSessionHistory.list", `{"worktreeId":""}`},
+		{"agentSessionHistory.list", `{"projectId":""}`},
+		// Enum members, where "" is a violation rather than "no filter".
+		{"browser.getConsoleMessages", `{"level":""}`},
+		{"notifications.recent", `{"type":""}`},
+	}
+	for _, c := range rejects {
+		m := &fakeMCP{connected: true, result: structured(map[string]any{})}
+		if _, err := decodeThenRun(t, findTool(all, c.tool), m, c.args); err == nil {
+			t.Errorf("%s accepted %s — an empty value the host rejects must not be accepted here", c.tool, c.args)
+		}
+		if m.lastName != "" {
+			t.Errorf("%s forwarded %s to Daintree; it must be rejected locally", c.tool, c.args)
+		}
+	}
+
+	// Host plain-optional string → forward verbatim so the host gives its own answer.
+	forwards := []struct {
+		tool  string
+		args  string
+		field string
+	}{
+		{"project.detectRunners", `{"projectId":""}`, "projectId"},
+		{"browser.getConsoleMessages", `{"terminalId":""}`, "terminalId"},
+		{"worktree.resource.status", `{"worktreeId":""}`, "worktreeId"},
+	}
+	for _, c := range forwards {
+		m := &fakeMCP{connected: true, result: structured(map[string]any{
+			"runners": []any{}, "messages": []any{}, "configured": false, "status": nil,
+		})}
+		if _, err := decodeThenRun(t, findTool(all, c.tool), m, c.args); err != nil {
+			t.Errorf("%s rejected %s; the host accepts a plain optional string here and fails on its own terms", c.tool, c.args)
+			continue
+		}
+		v, present := m.lastArgs[c.field]
+		if !present {
+			t.Errorf("%s DROPPED an explicit empty %s — the call would silently retarget at whatever is focused/active", c.tool, c.field)
+			continue
+		}
+		if v != "" {
+			t.Errorf("%s forwarded %s = %v, want the empty string it was given", c.tool, c.field, v)
+		}
+	}
+}
+
+/* -------------------- malformed results, per wrapper --------------------- */
+
+// A wrapper must never turn a payload that does not satisfy the host's result schema into
+// a confident-looking answer. The dangerous shape is a MISSING collection: decoded with a
+// bare `_`, it becomes a nil slice reported as "Read 0 …", which asserts that nothing was
+// found — from a payload that said nothing at all. "Nothing is wrong" and "we could not
+// tell" are opposite answers, and only one of them is safe to act on.
+func TestMalformedResultsNeverBecomeConfidentZeroes(t *testing.T) {
+	cases := []struct {
+		tool string
+		args string
+		bad  []tools.MCPCallResult
+	}{
+		{"project.detectRunners", `{}`, []tools.MCPCallResult{
+			structured(map[string]any{}),                  // no `runners`
+			structured(map[string]any{"runners": "none"}), // wrong type
+			{Text: "not json"},
+			{},
+		}},
+		{"forge.listIssueComments", `{"issueNumber":1}`, []tools.MCPCallResult{
+			structured(map[string]any{"hasMore": false}), // no `items`
+			structured(map[string]any{"items": 3}),
+			{Text: "not json"},
+		}},
+		{"agentSessionHistory.list", `{}`, []tools.MCPCallResult{
+			structured(map[string]any{"total": float64(0)}), // no `sessions`
+			structured(map[string]any{"sessions": "none"}),
+			{Text: "not json"},
+		}},
+		{"browser.getConsoleMessages", `{}`, []tools.MCPCallResult{
+			structured(map[string]any{"paneId": "p"}), // no `messages`
+			structured(map[string]any{"messages": 0}),
+			{Text: "not json"},
+		}},
+		{"errors.recent", `{}`, []tools.MCPCallResult{
+			structured(map[string]any{}), // no `errors`
+			structured(map[string]any{"errors": "none"}),
+			{Text: "not json"},
+		}},
+		{"notifications.recent", `{}`, []tools.MCPCallResult{
+			structured(map[string]any{}), // no `notifications`
+			structured(map[string]any{"notifications": 1}),
+			{Text: "not json"},
+		}},
+		{"worktree.resource.status", `{}`, []tools.MCPCallResult{
+			structured(map[string]any{"status": nil}), // no `configured`
+			structured(map[string]any{"configured": "yes"}),
+			{Text: "not json"},
+		}},
+	}
+	all := issue367Tools(t)
+	for _, c := range cases {
+		for i, bad := range c.bad {
+			m := &fakeMCP{connected: true, result: bad}
+			res := run(t, findTool(all, c.tool), m, c.args)
+			if res.Ok {
+				t.Errorf("%s case %d: a payload that does not satisfy the host result schema returned ok (%q) — it must fail honestly",
+					c.tool, i, res.Summary)
+			}
+		}
+	}
+}
+
+// A live link that fails at the transport (not an MCP-level refusal) is a distinct
+// outcome, and a cancelled turn must be reported as unrecoverable so the loop stops
+// rather than retrying into a turn that is already over.
+func TestIssue367WrappersMapTransportErrorAndCancellation(t *testing.T) {
+	cases := map[string]string{
+		"project.detectRunners":      `{}`,
+		"project.runCheck":           `{"projectId":"p","runnerId":"r"}`,
+		"forge.listIssueComments":    `{"issueNumber":1}`,
+		"agentSessionHistory.list":   `{}`,
+		"browser.getConsoleMessages": `{}`,
+		"errors.recent":              `{}`,
+		"notifications.recent":       `{}`,
+		"worktree.resource.status":   `{}`,
+	}
+	all := issue367Tools(t)
+	for name, args := range cases {
+		// Transport error on a connected link.
+		m := &fakeMCP{connected: true, err: errors.New("connection reset")}
+		res := run(t, findTool(all, name), m, args)
+		if res.Ok || res.Error == nil || res.Error.Code != codeMCPToolError {
+			t.Errorf("%s transport error: want %s, got %+v", name, codeMCPToolError, res.Error)
+		}
+
+		// Cancelled turn: the failure must be CANCELLED and unrecoverable, not a generic
+		// tool error the model would sensibly retry.
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		mc := &fakeMCP{connected: true, err: context.Canceled}
+		res = findTool(all, name).Handle(ctx, json.RawMessage(args), ctxWith(mc))
+		if res.Ok || res.Error == nil || res.Error.Code != codeCancelled {
+			t.Errorf("%s cancelled: want %s, got %+v", name, codeCancelled, res.Error)
+		} else if res.Error.Recoverable {
+			t.Errorf("%s cancelled: must be unrecoverable — the turn is already over", name)
 		}
 	}
 }

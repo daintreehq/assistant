@@ -94,6 +94,11 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 	all = append(all, addr(tools.SetRequires(mcpx.Tools(mcpx.Deps{
 		MCP:      mcpxMCPAdapter{c: a.MCP},
 		Observer: a.terminalObs,
+		// mcpwrap's wrappers are named for the raw MCP actions they govern, so
+		// tool.schema must know about them to warn that the local tool — not the raw
+		// schema it is handing back — is what the model actually calls. mcpx cannot
+		// import mcpwrap, so the names are injected here, where both are already held.
+		WrapperNames: mcpwrapToolNames(),
 	}), tools.RequiresDaintreeMCP))...)
 	all = append(all, addr(scratchx.Tools(scratchx.Deps{
 		Store: a.scratchStore,
@@ -229,4 +234,17 @@ func addr(in []tools.Tool) []*tools.Tool {
 		out = append(out, &in[i])
 	}
 	return out
+}
+
+// mcpwrapToolNames lists the mcpwrap family's tool names, for the tool.schema wrapper
+// annotation (see the mcpx.Deps.WrapperNames comment). Built from the family's own
+// registration rather than a hand-kept list, so a wrapper added later is covered without
+// anyone remembering this exists. Deps are irrelevant — only names are read.
+func mcpwrapToolNames() []string {
+	list := mcpwrap.Tools(mcpwrap.Deps{})
+	names := make([]string, 0, len(list))
+	for _, t := range list {
+		names = append(names, t.Name)
+	}
+	return names
 }

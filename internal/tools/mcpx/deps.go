@@ -83,6 +83,18 @@ type Deps struct {
 	// Observer records input injections into the shared settle memory. nil ⇒ no
 	// recording (tests / stripped tool sets).
 	Observer CommandObserver
+	// WrapperNames are local typed tools registered by OTHER families (mcpwrap's
+	// forge/worktree/project/diagnostic wrappers) whose names are also raw Daintree MCP
+	// action names.
+	//
+	// tool.schema uses it to annotate a raw schema whose call is actually governed by a
+	// local wrapper. Without it the annotation covers only THIS package's wrappers, so
+	// tool.schema would hand back the raw schema for e.g. project.runCheck with no hint
+	// that the tool the model must actually invoke declares its own — and that wrapper
+	// legitimately differs (it rejects an empty cwd the host would take, and validates
+	// bounds locally). Injected rather than imported because mcpx must not depend on
+	// mcpwrap; internal/app already holds both and wires this.
+	WrapperNames []string
 }
 
 // Tools returns the MCP family (discovery + passthrough + the wrappers in this

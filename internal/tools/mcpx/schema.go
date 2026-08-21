@@ -98,6 +98,19 @@ var (
 	localWrapperNamesMap  map[string]bool
 )
 
+// localWrapperIndex is every local tool name that could shadow a raw MCP action: this
+// family's own wrappers plus the ones other families registered (Deps.WrapperNames).
+func localWrapperIndex(deps Deps) map[string]bool {
+	idx := make(map[string]bool, len(getLocalWrapperNames())+len(deps.WrapperNames))
+	for n := range getLocalWrapperNames() {
+		idx[n] = true
+	}
+	for _, n := range deps.WrapperNames {
+		idx[n] = true
+	}
+	return idx
+}
+
 func getLocalWrapperNames() map[string]bool {
 	localWrapperNamesOnce.Do(func() {
 		localWrapperNamesMap = make(map[string]bool)
@@ -194,7 +207,7 @@ func newSchemaTool(deps Deps) tools.Tool {
 			if !found {
 				return schemaNotFound(list, requested)
 			}
-			return schemaResult(requested, match.InputSchema)
+			return schemaResult(requested, match.InputSchema, localWrapperIndex(deps))
 		},
 	}
 }
@@ -251,7 +264,7 @@ type serializedEnvelope struct {
 
 // schemaResult builds the success envelope, then enforces the inline size cap on
 // the WHOLE serialized envelope rather than the schema alone.
-func schemaResult(mcpName string, inputSchema map[string]any) tools.ToolResult {
+func schemaResult(mcpName string, inputSchema map[string]any, wrappers map[string]bool) tools.ToolResult {
 	result := map[string]any{
 		"name":        mcpName,
 		"inputSchema": inputSchema,
@@ -265,7 +278,7 @@ func schemaResult(mcpName string, inputSchema map[string]any) tools.ToolResult {
 	// registration (getLocalWrapperNames), not the daintree.call denylist — see
 	// the note above localWrapperNamesMap for why the denylist is not a valid
 	// index of the wrappers that exist.
-	if getLocalWrapperNames()[mcpName] {
+	if wrappers[mcpName] {
 		result["localWrapper"] = mcpName
 		result["note"] = fmt.Sprintf(
 			"A local typed tool named %s governs the actual call — invoke THAT with its own declared parameters, which differ from the raw schema below (a wrapper may make optional arguments required, add a batch form, or nest raw fields under `arguments`). Use the raw schema only to fill in values the wrapper forwards opaquely, such as the contents of an `arguments` record.",
