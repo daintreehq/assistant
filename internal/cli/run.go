@@ -62,11 +62,24 @@ type Options struct {
 	BackendURL string
 	// APIKeyFile is a path, never the key itself: argv is world-readable through `ps`,
 	// so there is deliberately no --api-key. Read once, in overridesFromOptions.
-	APIKeyFile  string
-	StateDir    string
-	LogDir      string
-	AutoApprove *bool
-	DebugLog    *bool
+	APIKeyFile string
+	// PromptFile is a path (or "-" for stdin) holding the one-shot prompt. It is a PATH,
+	// not the prompt itself, for the same reason parseArgs is I/O-free: the flag layer
+	// captures it and RunOneShot reads it, inside the --timeout bound.
+	PromptFile string
+	StateDir   string
+	LogDir     string
+	// ProjectID scopes StateDir into a per-project subdirectory, so it is how a harness
+	// gets project isolation without hand-rolling state directories. WindowID is the
+	// other half of looking like a real Daintree window rather than a bare cwd.
+	ProjectID string
+	WindowID  string
+	// ProjectInstructionsFile is a path, but the override it feeds carries CONTENT: the
+	// flag does the read, because config.LoadConfig never touches the filesystem for
+	// ProjectInstructions.
+	ProjectInstructionsFile string
+	AutoApprove             *bool
+	DebugLog                *bool
 
 	// Timeout bounds a one-shot run's wall clock (zero = unbounded). It is NOT a config
 	// value: it cancels the run context, so the turn unwinds through the same path as a
@@ -99,6 +112,8 @@ func overridesFromOptions(opts Options) (config.ConfigOverrides, error) {
 	set(&o.BackendURL, opts.BackendURL)
 	set(&o.StateDir, opts.StateDir)
 	set(&o.LogDir, opts.LogDir)
+	set(&o.ProjectID, opts.ProjectID)
+	set(&o.WindowID, opts.WindowID)
 	// Pass the booleans through as-is. They already carry the "was the flag passed"
 	// distinction as nil-ness, so re-deriving it here would throw it away again.
 	o.Offline = opts.Offline
@@ -110,6 +125,17 @@ func overridesFromOptions(opts Options) (config.ConfigOverrides, error) {
 			return config.ConfigOverrides{}, err
 		}
 		o.APIKey = &key
+	}
+	// A NON-NIL ProjectInstructions is the provenance signal every auto-load path below
+	// checks: it means a caller named the file explicitly, so no DAINTREE.md discovery
+	// may overwrite it. Setting it here (rather than in buildOverrides) is what makes
+	// that true for the host and MCP paths too, since both start from this function.
+	if opts.ProjectInstructionsFile != "" {
+		content, err := readProjectInstructionsFile(opts.ProjectInstructionsFile)
+		if err != nil {
+			return config.ConfigOverrides{}, err
+		}
+		o.ProjectInstructions = &content
 	}
 	return o, nil
 }
@@ -142,18 +168,13 @@ func loadConfigFromOptions(opts Options) (config.AppConfig, error) {
 // deadline cannot cover a syscall that never returns). One key plus generous slack is
 // all a valid file can hold.
 func readAPIKeyFile(path string) (string, error) {
-	f, err := os.Open(path)
+	// Through the same guard the other file flags use. The bound was already documented
+	// as covering a FIFO, and it did not: os.Open blocks on one before any LimitReader
+	// applies. An over-length file is now rejected outright rather than truncated into a
+	// shape error, which is the more honest failure for a credential.
+	key, err := readBoundedFile(path, backend.MaxKeyLength+1024, "--api-key-file", false)
 	if err != nil {
-		return "", fmt.Errorf("--api-key-file: %w", err)
-	}
-	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, backend.MaxKeyLength+1024))
-	if err != nil {
-		return "", fmt.Errorf("--api-key-file %s: %w", path, err)
-	}
-	key := strings.TrimSpace(string(raw))
-	if key == "" {
-		return "", fmt.Errorf("--api-key-file %s: file is empty", path)
+		return "", err
 	}
 	// The SAME structural check config.LoadConfig applies to DAINTREE_API_KEY, for the
 	// same reason: an embedded newline, a smart quote or an over-length paste becomes a
@@ -170,8 +191,130 @@ func readAPIKeyFile(path string) (string, error) {
 	return key, nil
 }
 
+// maxPromptFileBytes bounds --prompt-file. A prompt is prose, not a payload: a megabyte
+// is a very long runbook and still far short of anything a turn could carry. The bound
+// exists because stdin need not be a finite stream — /dev/zero or a live FIFO would
+// otherwise grow the read forever, which --timeout cannot preempt (a deadline does not
+// interrupt a syscall already in progress). A NAMED path is additionally required to be
+// a regular file; see readBoundedFile.
+const maxPromptFileBytes = 1 << 20 // 1 MiB
+
+// promptFileStdin is the literal token that means "read the prompt from stdin". Only the
+// exact token — `./-` stays an ordinary filename, which is the whole reason the
+// convention spells it as a single character.
+const promptFileStdin = "-"
+
+// readBoundedText is the shared shape behind --prompt-file and
+// --project-instructions-file: read at most limit+1 bytes so hitting exactly the limit
+// is accepted while anything larger is REJECTED rather than silently truncated, then
+// trim. A truncated prompt or a truncated brief is worse than a refusal, because the run
+// looks successful while the model was asked a different question.
+func readBoundedText(r io.Reader, limit int64, flag, path string) (string, error) {
+	raw, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return "", fmt.Errorf("%s %s: %w", flag, path, err)
+	}
+	if int64(len(raw)) > limit {
+		return "", fmt.Errorf("%s %s: larger than the %d-byte limit", flag, path, limit)
+	}
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
+		return "", fmt.Errorf("%s %s: file is empty", flag, path)
+	}
+	return text, nil
+}
+
+// readPromptFile resolves --prompt-file to the prompt text.
+//
+// Every failure is fatal: unlike a key file there is no other source to fall back TO —
+// the prompt is the caller's actual question, and a run that proceeded without it would
+// have nothing to ask. stdin is passed in rather than reached for so the bound is
+// testable, and it is NEVER closed: os.Stdin belongs to the process, not to this read.
+func readPromptFile(path string, stdin io.Reader) (string, error) {
+	if path == promptFileStdin {
+		return readBoundedText(stdin, maxPromptFileBytes, "--prompt-file", "-")
+	}
+	return readBoundedFile(path, maxPromptFileBytes, "--prompt-file", true)
+}
+
+// readBoundedFile opens a NAMED path and reads it under a byte bound.
+//
+// It insists on a regular file, which is a stronger check than it looks: os.Open on a
+// FIFO blocks until a writer appears, BEFORE any bound this code could apply, and
+// --timeout cannot preempt a syscall already in flight. Streaming input has a spelling
+// already — "-" — so a named pipe here is a mistake worth naming rather than a hang worth
+// waiting out. A directory becomes a clear message instead of an opaque read error.
+func readBoundedFile(path string, limit int64, flag string, stdinHint bool) (string, error) {
+	advice := ""
+	if stdinHint {
+		advice = " (use '-' to stream from stdin)"
+	}
+	notRegular := func(p string) error {
+		return fmt.Errorf("%s %s: not a regular file%s", flag, p, advice)
+	}
+	// Checked BEFORE the open, because that is the check that prevents the hang: os.Open
+	// on a FIFO blocks waiting for a writer, and an error we never reach is no bound.
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", flag, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", notRegular(path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", flag, err)
+	}
+	defer f.Close()
+	// And again on the DESCRIPTOR, which is a different question: stat-then-open is two
+	// syscalls, so whatever we actually opened is not provably what we stat'd. This
+	// closes the half that matters — we never READ a non-regular file — while the other
+	// half (a swap to a FIFO landing between the two calls, which would still block in
+	// Open) stays open, and needs a non-blocking open to shut. The path comes from argv,
+	// so an attacker who can win that race already has the caller's own trust.
+	if fi, err := f.Stat(); err != nil {
+		return "", fmt.Errorf("%s %s: %w", flag, path, err)
+	} else if !fi.Mode().IsRegular() {
+		return "", notRegular(path)
+	}
+	return readBoundedText(f, limit, flag, path)
+}
+
+// readProjectInstructionsFile resolves --project-instructions-file to DAINTREE.md
+// CONTENT (the override carries the text, not a path).
+//
+// It shares projectinstructions.MaxBytes because both sources land in the same prompt
+// field and so deserve the same budget. It does NOT share the implicit loader's symlink
+// rejection: that exists because the bound PROJECT is untrusted and could point its
+// DAINTREE.md at a secret, whereas this path came from argv, which carries the same
+// trust as the environment it shadows.
+//
+// A named file that cannot be read is fatal. Falling through to the repo's own
+// DAINTREE.md would run the job against a DIFFERENT brief than the caller named and hide
+// the typo behind a successful-looking run.
+func readProjectInstructionsFile(path string) (string, error) {
+	// stdinHint false: this flag has no "-" spelling, so advising one would send the
+	// caller looking for a file literally named "-".
+	return readBoundedFile(path, projectinstructions.MaxBytes, "--project-instructions-file", false)
+}
+
+// applyAutoProjectInstructions fills o.ProjectInstructions from an auto-DISCOVERED
+// source, and only when nothing explicit is already there. Both discovery paths (this
+// one's DAINTREE.md load and the host descriptor's) run after overridesFromOptions, so
+// without this guard either would silently clobber --project-instructions-file and
+// defeat the flag's whole purpose.
+func applyAutoProjectInstructions(o *config.ConfigOverrides, content string) {
+	if o.ProjectInstructions != nil || content == "" {
+		return
+	}
+	c := content
+	o.ProjectInstructions = &c
+}
+
 // buildOverrides resolves the overrides and loads the project DAINTREE.md (best
-// effort; a warning is non-fatal). Async-in-TS, here it just reads the file.
+// effort; a warning is non-fatal). The discovered content only fills a project-
+// instructions override that is still nil — an explicitly named
+// --project-instructions-file always wins over a file the repo happened to contain.
 func buildOverrides(opts Options, r *render.Renderer) (config.ConfigOverrides, error) {
 	o, err := overridesFromOptions(opts)
 	if err != nil {
@@ -187,10 +330,7 @@ func buildOverrides(opts Options, r *render.Renderer) (config.ConfigOverrides, e
 	if res.Warning != "" {
 		r.Warn(res.Warning)
 	}
-	if res.Content != "" {
-		c := res.Content
-		o.ProjectInstructions = &c
-	}
+	applyAutoProjectInstructions(&o, res.Content)
 	return o, nil
 }
 
@@ -268,6 +408,19 @@ func RunOneShot(ctx context.Context, opts Options) int {
 			return domain.OneShotExitCode.Cancelled
 		}
 		return domain.OneShotExitCode.Error
+	}
+
+	// The prompt file is read HERE, not in parseArgs: parsing stays I/O-free and
+	// table-tested, and the read lands inside the --timeout bound with every other piece
+	// of setup. HasPrompt was already true at the argument boundary, so this only fills
+	// in the text the flag promised.
+	if opts.PromptFile != "" {
+		prompt, err := readPromptFile(opts.PromptFile, os.Stdin)
+		if err != nil {
+			reportError(err)
+			return exitFor()
+		}
+		opts.Prompt = prompt
 	}
 
 	overrides, err := buildOverrides(opts, stderrR)

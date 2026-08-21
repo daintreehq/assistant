@@ -146,13 +146,26 @@ func parseArgs(args []string) (parsedArgs, error) {
 		// Harness knobs. Each shadows a trusted env var and wins over it; the point is
 		// that a scripted caller (a test harness, another agent) can say all of this in
 		// argv instead of having to rewrite the process environment.
-		backendURL  = fs.String("backend-url", "", "")
-		apiKeyFile  = fs.String("api-key-file", "", "")
-		stateDir    = fs.String("state-dir", "", "")
-		logDir      = fs.String("log-dir", "", "")
-		autoApprove = fs.Bool("auto-approve", false, "")
-		debugLog    = fs.Bool("debug-log", false, "")
-		timeout     = fs.Duration("timeout", 0, "")
+		backendURL = fs.String("backend-url", "", "")
+		apiKeyFile = fs.String("api-key-file", "", "")
+		// promptFile carries the one-shot prompt out of argv entirely. A skill-test prompt
+		// is long and multi-line and wants to live in a file next to the runbook it
+		// exercises, rather than being shell-quoted — and a prompt beginning with a dash
+		// no longer needs `--` first. "-" reads stdin.
+		promptFile = fs.String("prompt-file", "", "")
+		stateDir   = fs.String("state-dir", "", "")
+		logDir     = fs.String("log-dir", "", "")
+		// The project identity pair. --project-id is the load-bearing one: it scopes the
+		// state directory into a per-project subdirectory, which is how a harness gets
+		// isolation without hand-rolling paths.
+		projectID = fs.String("project-id", "", "")
+		windowID  = fs.String("window-id", "", "")
+		// A PATH whose CONTENT becomes the DAINTREE.md override, so a skill can be tested
+		// against a synthetic project brief without writing one into the repo under test.
+		projectInstructionsFile = fs.String("project-instructions-file", "", "")
+		autoApprove             = fs.Bool("auto-approve", false, "")
+		debugLog                = fs.Bool("debug-log", false, "")
+		timeout                 = fs.Duration("timeout", 0, "")
 		// `reset` flags. Parsed always (a FlagSet cannot be conditional here) but only
 		// consulted on the reset route, like every other subcommand-specific option.
 		yes      = fs.Bool("yes", false, "")
@@ -189,13 +202,30 @@ func parseArgs(args []string) (parsedArgs, error) {
 	// and silently deferring to the environment there is precisely the failure these
 	// flags exist to prevent: the run proceeds against a different key, or writes to the
 	// developer's real state dir. Fail at the argument boundary instead.
-	for _, name := range []string{"backend-url", "api-key-file", "state-dir", "log-dir", "mcp-url", "mcp-token", "project"} {
+	// "-" is a non-empty value, so --prompt-file's stdin spelling passes this check
+	// untouched; only a literally empty `--prompt-file=` is rejected.
+	//
+	// The advice differs by flag because the FALLBACK differs, and pointing someone at an
+	// environment variable that does not exist is worse than saying nothing: --prompt-file
+	// has no other source at all, and --project-instructions-file falls back to the
+	// project's own DAINTREE.md rather than to the environment.
+	emptyValueFallback := map[string]string{
+		"prompt-file":               "there is no other prompt source",
+		"project-instructions-file": "omit the flag to use the project's own DAINTREE.md",
+		"project":                   "omit the flag to use the current directory",
+	}
+	for _, name := range []string{"backend-url", "api-key-file", "prompt-file", "state-dir", "log-dir",
+		"mcp-url", "mcp-token", "project", "project-id", "window-id", "project-instructions-file"} {
 		f := fs.Lookup(name)
 		if f == nil || !flagWasSet(fs, name) {
 			continue
 		}
 		if strings.TrimSpace(f.Value.String()) == "" {
-			return parsedArgs{}, fmt.Errorf("--%s was given an empty value; omit the flag to fall back to the environment", name)
+			advice, ok := emptyValueFallback[name]
+			if !ok {
+				advice = "omit the flag to fall back to the environment"
+			}
+			return parsedArgs{}, fmt.Errorf("--%s was given an empty value; %s", name, advice)
 		}
 	}
 	// A boolean override is carried as a POINTER so an explicit --auto-approve=false can
@@ -211,21 +241,25 @@ func parseArgs(args []string) (parsedArgs, error) {
 	}
 
 	opts := cli.Options{
-		McpURL:      *mcpURL,
-		McpToken:    *mcpToken,
-		Project:     *project,
-		Tier:        tierValue,
-		Offline:     boolFlag("offline", offline),
-		Classic:     *classic,
-		JSON:        *jsonOut,
-		Inline:      *inline, // accepted and ignored (deprecated)
-		BackendURL:  *backendURL,
-		APIKeyFile:  *apiKeyFile,
-		StateDir:    *stateDir,
-		LogDir:      *logDir,
-		AutoApprove: boolFlag("auto-approve", autoApprove),
-		DebugLog:    boolFlag("debug-log", debugLog),
-		Timeout:     *timeout,
+		McpURL:                  *mcpURL,
+		McpToken:                *mcpToken,
+		Project:                 *project,
+		Tier:                    tierValue,
+		Offline:                 boolFlag("offline", offline),
+		Classic:                 *classic,
+		JSON:                    *jsonOut,
+		Inline:                  *inline, // accepted and ignored (deprecated)
+		BackendURL:              *backendURL,
+		APIKeyFile:              *apiKeyFile,
+		PromptFile:              *promptFile,
+		StateDir:                *stateDir,
+		LogDir:                  *logDir,
+		ProjectID:               *projectID,
+		WindowID:                *windowID,
+		ProjectInstructionsFile: *projectInstructionsFile,
+		AutoApprove:             boolFlag("auto-approve", autoApprove),
+		DebugLog:                boolFlag("debug-log", debugLog),
+		Timeout:                 *timeout,
 	}
 
 	parsed := parsedArgs{Options: opts, Route: routeDefault}
@@ -311,10 +345,24 @@ func parseArgs(args []string) (parsedArgs, error) {
 	if *stdio {
 		return parsedArgs{}, stdioRequiresHostError()
 	}
+	// Two prompt sources at once is a MISTAKE, not a precedence question. Picking one
+	// silently would run a prompt the caller can see they also passed the other way,
+	// which is the worst possible outcome for a harness whose whole job is reproducing
+	// an exact question.
+	if *promptFile != "" && len(positionals) > 0 {
+		return parsedArgs{}, fmt.Errorf("--prompt-file and a prompt argument cannot be combined; pass the prompt one way")
+	}
 	if len(positionals) > 0 {
 		// Join remaining tokens so an unquoted multi-word prompt still works; a single
 		// quoted arg passes through unchanged.
 		parsed.Options.Prompt = strings.Join(positionals, " ")
+		parsed.Options.HasPrompt = true
+	}
+	// HasPrompt WITHOUT Prompt: parseArgs is deliberately I/O-free, so the text arrives
+	// later (RunOneShot, inside the --timeout bound). Saying "there is a prompt" here is
+	// what routes the run to one-shot and satisfies the --json check below — both of
+	// which are decisions about whether a prompt exists, not about what it says.
+	if *promptFile != "" {
 		parsed.Options.HasPrompt = true
 	}
 	if *jsonOut && !parsed.Options.HasPrompt {
@@ -431,8 +479,13 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "  --mcp-token TOKEN   Daintree MCP token (env: DAINTREE_MCP_TOKEN)")
 	fmt.Fprintln(w, "  --backend-url URL   assistant backend (env: DAINTREE_BACKEND_URL)")
 	fmt.Fprintln(w, "  --api-key-file PATH read the API key from a file (env: DAINTREE_API_KEY)")
+	fmt.Fprintln(w, "  --prompt-file PATH  read the one-shot prompt from a file ('-' for stdin)")
 	fmt.Fprintln(w, "  --state-dir PATH    state root (env: DAINTREE_ASSISTANT_STATE_DIR)")
 	fmt.Fprintln(w, "  --log-dir PATH      debug-log directory (env: DAINTREE_ASSISTANT_LOG_DIR)")
+	fmt.Fprintln(w, "  --project-id ID     Daintree project id (env: DAINTREE_PROJECT_ID)")
+	fmt.Fprintln(w, "  --window-id ID      Daintree window id (env: DAINTREE_WINDOW_ID)")
+	fmt.Fprintln(w, "  --project-instructions-file PATH")
+	fmt.Fprintln(w, "                      read DAINTREE.md content from a file instead of the project")
 	fmt.Fprintln(w, "  --auto-approve      run mutating tools without confirmation")
 	fmt.Fprintln(w, "  --debug-log         write the session trace to the log directory")
 	fmt.Fprintln(w, "  --timeout DURATION  cancel a one-shot run after this long (e.g. 10m; 0 = no limit)")

@@ -40,7 +40,13 @@ type OpenInput struct {
 	McpToken   string `json:"mcpToken,omitempty" jsonschema:"Daintree MCP bearer token. These expire roughly 12 minutes after minting."`
 	StateDir   string `json:"stateDir,omitempty" jsonschema:"State root - the conversation database, artifacts and the owner lease. Use a scratch path to isolate from the developer's real state."`
 	LogDir     string `json:"logDir,omitempty" jsonschema:"Directory for the debug log."`
-	DebugLog   *bool  `json:"debugLog,omitempty" jsonschema:"Write a structured session trace to the log directory. Strongly recommended: it is the only way to diagnose a bad run."`
+	// Project identity. This surface exists so a client that cannot restart the process
+	// can repoint it, and identity is exactly the thing worth repointing: projectId
+	// scopes the state directory into a per-project subdirectory, so it isolates a
+	// session's database and lease as a side effect of naming the project.
+	ProjectID string `json:"projectId,omitempty" jsonschema:"Daintree project id. It scopes the DEFAULT state root into a per-project subdirectory, so sessions naming different projects get separate databases and leases - but only when stateDir is left unset, since an explicit stateDir wins outright. To guarantee isolation, give each session its own stateDir."`
+	WindowID  string `json:"windowId,omitempty" jsonschema:"Daintree window id. Identity only: it is reported by status and carried in config, and has no effect on where state is stored or on how a headless session behaves."`
+	DebugLog  *bool  `json:"debugLog,omitempty" jsonschema:"Write a structured session trace to the log directory. Strongly recommended: it is the only way to diagnose a bad run."`
 	// Approvals is a tri-state rather than a bool because the two obvious answers are
 	// both wrong on their own: always approving lets the assistant push and run
 	// commands unwatched, always declining means a session can never do the mutating
@@ -212,6 +218,7 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 			Project: in.Project, BackendURL: in.BackendURL, APIKeyFile: in.APIKeyFile,
 			Tier: in.Tier, McpURL: in.McpURL, McpToken: in.McpToken,
 			StateDir: in.StateDir, LogDir: in.LogDir, DebugLog: in.DebugLog,
+			ProjectID: in.ProjectID, WindowID: in.WindowID,
 			Approvals:       mode,
 			ApprovalTimeout: time.Duration(in.ApprovalTimeoutMs) * time.Millisecond,
 		})

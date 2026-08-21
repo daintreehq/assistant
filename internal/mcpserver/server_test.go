@@ -1229,3 +1229,72 @@ func connectWithApprovals(t *testing.T, fake *fakeRuntime) (*mcp.ClientSession, 
 	t.Helper()
 	return connectWithResources(t, func(_, _ context.Context, _ OpenParams) (Runtime, error) { return fake, nil })
 }
+
+// TestSessionOpenCarriesProjectIdentity: session.open exists so a client that cannot
+// restart this process can repoint it, and project identity is exactly the thing worth
+// repointing — projectId also decides which per-project state directory the session
+// opens, so a dropped field would quietly share one project's database with another.
+func TestSessionOpenCarriesProjectIdentity(t *testing.T) {
+	var got OpenParams
+	cs, _ := connect(t, func(_, _ context.Context, p OpenParams) (Runtime, error) {
+		got = p
+		return newFakeRuntime("ses_identity"), nil
+	})
+	in := OpenInput{Project: "/repo", ProjectID: "proj_fake_test", WindowID: "win_fake_test"}
+	if err := call(t, cs, "daintree.session.open", in, &SessionOutput{}); err != nil {
+		t.Fatalf("session.open: %v", err)
+	}
+	if got.ProjectID != "proj_fake_test" || got.WindowID != "win_fake_test" {
+		t.Errorf("OpenParams identity = %q/%q, want the input's", got.ProjectID, got.WindowID)
+	}
+}
+
+// TestSessionOpenSchemaDocumentsProjectIdentity: the schema is auto-derived from the
+// struct tags, so a field added without its json tag would be invisible to a caller
+// while still compiling. A caller that cannot see the field cannot pass it.
+func TestSessionOpenSchemaDocumentsProjectIdentity(t *testing.T) {
+	cs, _ := connect(t, func(_, _ context.Context, _ OpenParams) (Runtime, error) {
+		return newFakeRuntime("ses_test"), nil
+	})
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	for _, tool := range res.Tools {
+		if tool.Name != "daintree.session.open" {
+			continue
+		}
+		// The PROPERTIES map, not a substring of the marshalled blob: another field's
+		// description could mention "projectId" in prose and satisfy a text search while
+		// the property itself was missing.
+		raw, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatalf("marshal schema: %v", err)
+		}
+		// Decoded loosely on purpose: an optional field like debugLog carries a UNION
+		// type (["null","boolean"]), so a struct pinning `type` to a string fails to
+		// decode the whole schema over a field this test does not even look at.
+		var schema struct {
+			Properties map[string]map[string]any `json:"properties"`
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatalf("decode schema: %v (raw %s)", err, raw)
+		}
+		for _, want := range []string{"projectId", "windowId"} {
+			prop, ok := schema.Properties[want]
+			if !ok {
+				t.Errorf("session.open schema has no %q property:\n%s", want, raw)
+				continue
+			}
+			if typ, _ := prop["type"].(string); typ != "string" {
+				t.Errorf("%s type = %v, want string", want, prop["type"])
+			}
+			// A property a model cannot understand is barely better than a missing one.
+			if desc, _ := prop["description"].(string); strings.TrimSpace(desc) == "" {
+				t.Errorf("%s has no description — a caller would have to guess what it does", want)
+			}
+		}
+		return
+	}
+	t.Fatal("daintree.session.open is not offered")
+}

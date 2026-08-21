@@ -148,6 +148,7 @@ Every knob is a flag, and every flag shadows a trusted env var and wins over it.
 |---|---|---|
 | `--backend-url URL` | `DAINTREE_BACKEND_URL` | outranks the endpoint stored by `/backend` |
 | `--api-key-file PATH` | `DAINTREE_API_KEY` | OPTIONAL — see below. Deliberately **no `--api-key`** |
+| `--prompt-file PATH` | — | one-shot only; `-` reads stdin. Capped at 1 MiB |
 | `--state-dir PATH` | `DAINTREE_ASSISTANT_STATE_DIR` | the database, artifacts, and the owner lease |
 | `--log-dir PATH` | `DAINTREE_ASSISTANT_LOG_DIR` | |
 | `--debug-log` | `DAINTREE_ASSISTANT_DEBUG_LOG=1` | writes the session trace |
@@ -155,10 +156,53 @@ Every knob is a flag, and every flag shadows a trusted env var and wins over it.
 | `--tier TIER` | `DAINTREE_ASSISTANT_TIER` | `supervisor`\|`operator`\|`system` |
 | `--mcp-url` / `--mcp-token` | `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` | injected by Daintree |
 | `--project PATH` | — | default: the current directory |
+| `--project-id ID` | `DAINTREE_PROJECT_ID` | scopes the DEFAULT state root into a per-project subdirectory |
+| `--window-id ID` | `DAINTREE_WINDOW_ID` | identity only; no effect on where state is stored |
+| `--project-instructions-file PATH` | — | the file's CONTENT becomes `DAINTREE.md`. Capped at 16 KiB |
 | `--timeout DURATION` | — | one-shot only; `0` means no limit |
 
 `--timeout` is silently ignored on every other route (interactive, `daemon`, `doctor`).
-Only `RunOneShot` consults it.
+Only `RunOneShot` consults it. `--prompt-file` follows the same rule: a command word is
+chosen before the prompt is, so `--prompt-file - mcp --stdio` serves MCP and never reads
+the stream carrying the protocol.
+
+Two of these flags have no env counterpart because they carry a file's CONTENT rather
+than a setting:
+
+- **`--prompt-file PATH`** supplies the one-shot prompt, so a long multi-line prompt can
+  live in a file next to the runbook it exercises instead of being shell-quoted — and a
+  prompt beginning with a dash no longer needs `--` first. `-` reads stdin. Passing it
+  together with a positional prompt is an ERROR, not a precedence rule; a prompt supplied
+  this way satisfies `--json`'s requirement that a run have one. The read is bounded at
+  1 MiB and rejects rather than truncates, for the same reason `--api-key-file` is
+  bounded, and a named path must be a REGULAR file — a FIFO blocks in `open` before any
+  bound applies, and `-` is the spelling for streaming input. One caveat with `-`: an
+  input that never sends EOF cannot be preempted by `--timeout` or by Ctrl-C, because
+  neither interrupts a read already in flight. Close the stream to finish the prompt.
+- **`--project-instructions-file PATH`** puts that file's content where the project's own
+  `DAINTREE.md` would go, so a skill can be tested against a synthetic brief without
+  writing one into the repo under test. It WINS over any discovered `DAINTREE.md`
+  (including the one the embedded host loads per boot); without the flag, discovery is
+  unchanged. Unlike discovery, a named file that is missing, empty, or oversized is
+  FATAL — falling back to the repo's own brief would run the job against a different one
+  than the caller named. Like `--api-key-file` and a named `--prompt-file`, it must be a
+  REGULAR file (it has no `-` spelling, so a pipe has nowhere to go). It may be a symlink
+  to one, though: discovery refuses a symlink because the bound
+  project is untrusted, while argv carries the same trust as the environment it shadows.
+  Two limits worth knowing: on `mcp --stdio` the file is validated when a session opens
+  rather than at startup (there is no per-session override for it, so every open fails
+  until the path is fixed), and the content does NOT travel to the supervisor daemon —
+  a detached daemon rediscovers the project's own `DAINTREE.md`. Neither affects the
+  one-shot harness runs the flag exists for, since one-shot never spawns a daemon.
+
+`--project-id` is the load-bearing half of project identity: it scopes the default state
+root into a per-project subdirectory, which is how a harness gets isolation without
+hand-rolling state directories. An explicit `--state-dir` (or
+`DAINTREE_ASSISTANT_STATE_DIR`) still wins outright, so two runs sharing one state dir
+share its database and lease however they are named — give each its own `--state-dir`
+when isolation has to be guaranteed. Both it
+and `--window-id` are also accepted by `daintree.session.open` as `projectId`/`windowId`,
+since that surface exists to repoint a process a client cannot restart.
 
 Four rules worth knowing before you script against them:
 
