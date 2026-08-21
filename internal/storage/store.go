@@ -59,9 +59,11 @@ const (
 	// persistent-supervisor handoff surface: current session id + backend state token
 	// survive a process boundary); to 10 when the workflow-intelligence graph layer
 	// landed (workflow_graphs + workflow_events + workflow_resource_links +
-	// workflow_reconcile_runs) — a schema change is a hard-reset (make db-reset),
-	// not a migration.
-	schemaUserVersion = 10
+	// workflow_reconcile_runs); to 11 when conversation gained `name` (the reserved
+	// `daintree_compaction` marker on a server-delivered compacted context block, which
+	// has to survive a restart or the next request re-sends history the server already
+	// froze) — a schema change is a hard-reset (make db-reset), not a migration.
+	schemaUserVersion = 11
 )
 
 // SchemaVersion exposes the on-disk schema baseline to callers that need to REPORT it

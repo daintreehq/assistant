@@ -203,6 +203,7 @@ const (
 	sseEventMeta
 	sseEventStatus
 	sseEventDelta
+	sseEventCompaction
 	sseEventDone
 	sseEventError
 )
@@ -215,6 +216,8 @@ func parseSSEEventKind(name []byte) sseEventKind {
 		return sseEventStatus
 	case "delta":
 		return sseEventDelta
+	case "compaction":
+		return sseEventCompaction
 	case "done":
 		return sseEventDone
 	case "error":
@@ -258,6 +261,20 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 		acc       toolCallAccumulator
 		metaSeen  bool
 		doneSeen  bool
+		// declFilter is the leaked-declaration backstop (declaration.go). It sits on
+		// the content path so every downstream surface inherits it — the live
+		// OnContent callback and the assembled Message.Content alike, which is what
+		// makes a leak unrenderable rather than merely untested.
+		declFilter declarationFilter
+		// compaction holds the turn's block until the stream COMMITS. A block is
+		// released to the caller only from the finish block below, and only once
+		// `done` was seen: the event rides immediately ahead of `done`, so an attempt
+		// that died before it (or one the retry layer discards) must not be able to
+		// rewrite the caller's history. compactionInvalid latches the at_most_once
+		// violation — a second block means client and server disagree about what the
+		// first one replaced, and the only safe reading of that is neither.
+		compaction        *StreamCompaction
+		compactionInvalid bool
 	)
 
 	// dispatch decodes and applies one fully-buffered event, then clears the
@@ -307,9 +324,11 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 				}
 			}
 			if d.Content != "" {
-				content.WriteString(d.Content)
-				if cb.OnContent != nil {
-					cb.OnContent(d.Content)
+				if visible := declFilter.Feed(d.Content); visible != "" {
+					content.WriteString(visible)
+					if cb.OnContent != nil {
+						cb.OnContent(visible)
+					}
 				}
 			}
 			for _, tc := range d.ToolCalls {
@@ -318,6 +337,22 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 					cb.OnToolCallDelta(tc)
 				}
 			}
+		case sseEventCompaction:
+			// Best-effort by contract: a block this client cannot read is a turn that
+			// runs on full history, never a failed answer. So a decode error drops the
+			// candidate and the stream carries on — the reply the user is waiting for
+			// has already been generated, and losing it over an optional optimisation
+			// would be the worst possible trade.
+			var c StreamCompaction
+			if err := json.Unmarshal(data, &c); err != nil {
+				compactionInvalid = true
+				return nil
+			}
+			if compaction != nil {
+				compactionInvalid = true
+				return nil
+			}
+			compaction = &c
 		case sseEventDone:
 			var dn StreamDone
 			if err := json.Unmarshal(data, &dn); err != nil {
@@ -407,11 +442,25 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 	}
 
 finish:
+	// Release anything the declaration filter is still holding: a stream that ended
+	// mid-marker ("[[DAINT") held real characters that are still owed to the caller.
+	if tail := declFilter.Finish(); tail != "" {
+		content.WriteString(tail)
+		if cb.OnContent != nil {
+			cb.OnContent(tail)
+		}
+	}
 	result.Message = RespondMessage{
 		Role:             "assistant",
 		Content:          content.String(),
 		ReasoningContent: reasoning.String(),
 		ToolCalls:        acc.build(),
+	}
+	// Commit barrier: the block is handed over only by a stream that reached `done`
+	// (the checks below still turn a missing meta/done into an error, and the caller
+	// discards the whole result then).
+	if doneSeen && !compactionInvalid {
+		result.Compaction = compaction
 	}
 
 	if !metaSeen {

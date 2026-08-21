@@ -570,3 +570,36 @@ func skillRefLabels(refs []backend.SkillRef) []string {
 	}
 	return out
 }
+
+// traceServerCompaction records what the backend's compacted context block did to this
+// session's history — the span it named, whether the splice was applied, and if not,
+// which gate refused it.
+//
+// This is the ONLY place a compaction surfaces. There is no cockpit card, no cue, and
+// no /compaction command, for the same reason backend skill loads are invisible: it is
+// prompt assembly, not a step the operator takes, and a per-turn notice about a
+// server-side optimisation would be noise on every turn once the feature is switched
+// on. When it goes wrong, the reason belongs where archaeology already looks — beside
+// backend.respond.meta, keyed by the same runId/turnId/round.
+func (s *Session) traceServerCompaction(runID, turnID string, round int, c *backend.StreamCompaction, sentLen int, applied bool, reason compactionRejectReason) {
+	if c == nil {
+		return
+	}
+	s.safeTrace("backend.compaction", func() map[string]any {
+		fields := map[string]any{
+			"runId":        runID,
+			"turnId":       turnID,
+			"round":        round,
+			"blockTurnId":  c.TurnID,
+			"startIndex":   c.Replaces.StartIndex,
+			"endIndex":     c.Replaces.EndIndex,
+			"sentMessages": sentLen,
+			"blockBytes":   len(c.Block.Content),
+			"applied":      applied,
+		}
+		if reason != "" {
+			fields["reason"] = string(reason)
+		}
+		return fields
+	})
+}

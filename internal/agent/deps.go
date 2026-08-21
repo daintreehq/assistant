@@ -238,6 +238,20 @@ type SessionDeps struct {
 	// swappable: sending the field to a backend that forbids it 422s the whole turn.
 	// nil ⇒ fails closed (the default in tests), which with nil pins is a no-op.
 	BackendAcceptsPinnedSkillIDs func() bool
+	// BackendContextCompaction reports whether the endpoint about to be called
+	// advertises the EXACT server-side compaction contract this client implements, and
+	// hands back the descriptor (the byte cap the block is checked against lives on it).
+	// Consulted per round for the same reason as the gate above: the answer is pinned to
+	// an endpoint and the backend delegate is swappable.
+	//
+	// It gates ACCEPTANCE of an incoming block only. Once a block has been spliced into
+	// history it is part of the conversation and always sent — a later closed gate must
+	// not resurrect the transcript the block replaced, and dropping the reserved name
+	// would leave the server compacting that prefix all over again.
+	//
+	// nil ⇒ fails closed (the default in tests), which is exactly today's behaviour:
+	// full history, every round.
+	BackendContextCompaction func() (backend.ContextCompactionCaps, bool)
 	// WorkflowRunLister feeds the turn footer's active-workflow-runs block (optional;
 	// nil ⇒ the block is omitted). Read-only, best-effort, never breaks the turn.
 	WorkflowRunLister WorkflowRunLister

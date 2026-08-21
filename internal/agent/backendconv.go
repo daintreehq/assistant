@@ -66,7 +66,11 @@ func toBackendMessages(messages []models.ChatMessage) ([]backend.Message, error)
 			return nil, fmt.Errorf("unsupported message role %q for backend at index %d", m.Role, i)
 		}
 
-		bm := backend.Message{Role: m.Role}
+		// Name rides through verbatim. Only the compacted context block ever carries
+		// one, and it MUST come back — the backend's span selector reads it to find
+		// where already-frozen history ends (and the assembler drops it before the
+		// upstream call, so it costs nothing there).
+		bm := backend.Message{Role: m.Role, Name: m.Name}
 		switch m.Role {
 		case "tool":
 			c, err := json.Marshal(m.ContentToText())

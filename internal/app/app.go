@@ -366,6 +366,31 @@ func (a *App) backendAcceptsDisplayContext() bool {
 	return snap.baseURL == a.Backend.BaseURL() && snap.caps.Respond.DisplayContext
 }
 
+// backendContextCompaction reports whether it is safe to ACCEPT a compacted context
+// block from the endpoint about to be called, and hands back the descriptor it was
+// judged against (the block's byte cap rides on it).
+//
+// Same endpoint-pinned, fail-closed shape as the two gates above — but for a different
+// reason, and the difference is worth stating. Those two protect a request: guessing
+// wrong there 422s the whole turn. This one protects HISTORY. A block is applied by
+// splicing it over a span of the client's own conversation, using integers the server
+// chose; a deployment whose contract this client has not verified could name a span
+// meaning something else, and the damage would be silent and permanent. So the check is
+// ReplayCompatible (the whole advertised contract), not merely `enabled` — and an
+// unknown backend, a stale answer from a different endpoint, or a single field this
+// client does not recognise all read as "not supported", which is simply today's
+// behaviour: full history, every round.
+func (a *App) backendContextCompaction() (backend.ContextCompactionCaps, bool) {
+	snap := a.backendCaps.Load()
+	if snap == nil || a.Backend == nil || snap.baseURL != a.Backend.BaseURL() {
+		return backend.ContextCompactionCaps{}, false
+	}
+	if !snap.caps.ContextCompaction.ReplayCompatible() {
+		return backend.ContextCompactionCaps{}, false
+	}
+	return *snap.caps.ContextCompaction, true
+}
+
 // Tier returns the current permission tier under the read lock.
 func (a *App) Tier() domain.Tier {
 	a.cfgMu.RLock()
@@ -719,6 +744,7 @@ func Create(opts CreateOptions) (*App, error) {
 		// forbids. Nil pins make both inert.
 		PinnedSkillIDs:               a.PinnedSkillIDs(),
 		BackendAcceptsPinnedSkillIDs: a.backendAcceptsPinnedSkillIDs,
+		BackendContextCompaction:     a.backendContextCompaction,
 		// Live async futures for the turn context's async-operations block, re-read
 		// every round so the model sees (and never re-issues) its in-flight work.
 		AsyncInvocationLister: store,

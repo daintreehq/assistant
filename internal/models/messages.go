@@ -107,7 +107,13 @@ type ChatMessage struct {
 
 	ToolCalls  []ToolCallRequest
 	ToolCallID string
-	Name       string // internal helper field — DROPPED on the wire
+	// Name is the message's wire `name`, forwarded verbatim by the backend encoder.
+	// Nothing in this CLI sets it except the server-delivered compacted context block,
+	// which carries the reserved "daintree_compaction" — and sending that back on every
+	// later request is the ENTIRE mechanism by which the backend recognises frozen
+	// history without holding any state of its own. Dropping it here would leave the
+	// server re-compacting a prefix the client had already replaced.
+	Name string
 
 	// ReasoningContent is an assistant turn's chain-of-thought (DeepSeek thinking
 	// mode). Captured from the backend response and replayed verbatim on later

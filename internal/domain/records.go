@@ -134,6 +134,11 @@ type ConversationMessageRecord struct {
 	Seq       int    `json:"seq"`
 	Role      string `json:"role"` // system|user|assistant|tool
 	Content   string `json:"content"`
+	// Name is the message's wire `name`. Nil on every ordinary row; set only on the
+	// server-delivered compacted context block, which carries the reserved
+	// `daintree_compaction` — the marker the backend's span selector reads to find
+	// where already-frozen history ends.
+	Name *string `json:"name,omitempty"`
 	// ReasoningContent persists an assistant turn's chain-of-thought so it survives
 	// resume and replays correctly (DeepSeek 400s on a tool-call turn missing it).
 	// Nil for non-assistant rows and for the default thinking-off posture.
