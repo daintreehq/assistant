@@ -126,6 +126,107 @@ func TestPaletteStaysOpenWhileTypingArgs(t *testing.T) {
 	}
 }
 
+// TestPaletteTabCompletionCollapsesDescriptionMatches is the regression for #359. Tab writes
+// "<name> ", which CLOSES the command token — from that point a command that only matched
+// because the typed word appears in its DESCRIPTION ("/models: backend-owned model routing"
+// vs. a typed "/backend") is noise, not a suggestion. The mid-token half of the assertion is
+// the other side of the contract: while "/back" is still open, that same description match is
+// exactly the discovery affordance we want to keep.
+func TestPaletteTabCompletionCollapsesDescriptionMatches(t *testing.T) {
+	m := New(theme.Theme{Glyphs: unicodeGlyphsForTest()})
+	m.SetCommands([]Command{
+		{Name: "/backend", Desc: "which backend answers", Syntax: "/backend [target]"},
+		{Name: "/models", Desc: "backend-owned model routing", Syntax: "/models"},
+	})
+	typeRunes(&m, "/back")
+
+	before := m.activeSuggestions()
+	if len(before) != 2 || before[0].Name != "/backend" || before[1].Name != "/models" {
+		t.Fatalf("mid-token discovery should keep the description match; got %+v", before)
+	}
+
+	press(&m, tea.KeyTab, 0)
+	if got := m.Value(); got != "/backend " {
+		t.Fatalf("Tab completion = %q, want %q", got, "/backend ")
+	}
+
+	after := m.activeSuggestions()
+	if len(after) != 1 || after[0].Name != "/backend" {
+		t.Fatalf("a closed exact command should own the palette; got %+v", after)
+	}
+
+	frame := ansi.Strip(m.View(ViewParams{Width: 80, Placeholder: "Ask…"}))
+	if strings.Contains(frame, "/models") {
+		t.Fatalf("rendered palette kept the description-only match:\n%s", frame)
+	}
+	if !strings.Contains(frame, "/backend [target]") {
+		t.Fatalf("rendered palette lost the accepted command's usage hint:\n%s", frame)
+	}
+}
+
+// TestPaletteCommandTokenClosure pins the boundary semantics the fix turns on: only a token
+// CLOSED by space/tab AND naming a real command collapses the palette. An open token (even an
+// exact name) and a closed token that names nothing both stay fuzzy discovery queries — the
+// first so "/workflow" can't hide "/workflows" mid-keystroke, the second so Enter can still
+// complete "/inb urgent" to "/inbox urgent".
+func TestPaletteCommandTokenClosure(t *testing.T) {
+	descCollision := []Command{
+		{Name: "/backend", Desc: "which backend answers"},
+		{Name: "/models", Desc: "backend-owned model routing"},
+	}
+	prefixCollision := []Command{
+		{Name: "/workflows", Desc: "workflow runs"},
+		{Name: "/workflow", Desc: "workflow graph detail"},
+	}
+
+	cases := []struct {
+		name  string
+		cmds  []Command
+		value string
+		want  []string
+	}{
+		{"open exact name stays a discovery query", descCollision,
+			"/backend", []string{"/backend", "/models"}},
+		{"trailing space closes the command token", descCollision,
+			"/backend ", []string{"/backend"}},
+		{"arguments close the command token", descCollision,
+			"/backend local", []string{"/backend"}},
+		{"a tab closes the command token too", descCollision,
+			"/backend\tlocal", []string{"/backend"}},
+		{"closed exact match is case-insensitive", descCollision,
+			"/BACKEND ", []string{"/backend"}},
+		{"a closed EMPTY token still lists everything", descCollision,
+			"/ ", []string{"/backend", "/models"}},
+		{"closed partial name keeps the fuzzy fallback", descCollision,
+			"/back local", []string{"/backend", "/models"}},
+		{"closed description-only match keeps the fuzzy fallback", descCollision,
+			"/routing local", []string{"/models"}},
+		{"closed token naming nothing matches nothing", descCollision,
+			"/nope ", nil},
+		// Fixture order is the registry's (/workflows precedes /workflow), so this also
+		// proves the exact tier — not slice order — decides who leads.
+		{"open exact name keeps its longer sibling reachable", prefixCollision,
+			"/workflow", []string{"/workflow", "/workflows"}},
+		{"closed exact name beats its longer sibling", prefixCollision,
+			"/workflow ", []string{"/workflow"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := suggestionsFor(tc.cmds, tc.value)
+			if len(got) != len(tc.want) {
+				t.Fatalf("suggestionsFor(%q) = %+v, want names %v", tc.value, got, tc.want)
+			}
+			for i, want := range tc.want {
+				if got[i].Name != want {
+					t.Fatalf("suggestionsFor(%q)[%d] = %q, want %q; all=%+v",
+						tc.value, i, got[i].Name, want, got)
+				}
+			}
+		})
+	}
+}
+
 func TestPaletteNavAndTabAccept(t *testing.T) {
 	m := newModel()
 	typeRunes(&m, "/") // lists all commands

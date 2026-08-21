@@ -6,8 +6,9 @@ import (
 )
 
 // paletteCap bounds the RENDERED slash palette to 5 rows, so a long command
-// list never pushes the input off-screen. suggestionsFor deliberately returns
-// every match; paletteWindow selects the visible slice around paletteSel.
+// list never pushes the input off-screen. suggestionsFor never applies that cap
+// itself — whatever it returns stays fully navigable; paletteWindow selects the
+// visible slice around paletteSel.
 const paletteCap = 5
 
 // Command is one palette entry: the slash command name (with leading "/"), a short intent
@@ -26,21 +27,49 @@ type Command struct {
 // > name subsequence > description substring. "/" alone shows the whole list. The result is
 // intentionally NOT capped: keyboard navigation must be able to reach every matching command;
 // View applies the five-row display cap with paletteWindow.
+//
+// The whitespace that ends the command token is a SEMANTIC boundary, not just a split point.
+// While the token is still open the draft is a discovery query, so the loose tiers earn their
+// keep: "/back" should surface /models too, because its description mentions the backend.
+// Once whitespace closes an exact command name the draft is no longer a query — the user has
+// committed to that command (Tab writes exactly "<name> ") and wants its usage hint, so a
+// command that merely NAMES it in prose is noise. Hence a closed exact name owns the palette
+// alone; every other state falls through to the unchanged ranking below.
 func suggestionsFor(cmds []Command, value string) []Command {
 	if !strings.HasPrefix(value, "/") {
 		return nil
 	}
 	q := strings.ToLower(value[1:])
 	// Match on the command token only — arguments after the first space don't filter, so the
-	// palette stays visible (with its usage hint) as you type "/audit 5".
+	// palette stays visible (with its usage hint) as you type "/audit 5". Keep WHETHER the
+	// separator was there: that bit is what distinguishes a committed command from a token
+	// still being typed, and dropping it is what let description matches outlive Tab (#359).
+	closed := false
 	if i := strings.IndexAny(q, " \t"); i >= 0 {
 		q = q[:i]
+		closed = true
 	}
 
 	out := make([]Command, 0, len(cmds))
 	if q == "" {
+		// "/" — and "/ ", which is closed but names nothing — is still "show me everything".
 		out = append(out, cmds...)
 		return out
+	}
+
+	// A closed EXACT name collapses the palette to that one command. Gating on the separator
+	// rather than on exactness alone is deliberate: "/workflow" is a live command AND a strict
+	// prefix of "/workflows", so collapsing an open token would yank a reachable command away
+	// mid-keystroke. Gating on registry topology instead ("collapse when nobody extends me")
+	// would silently change a command's behaviour the day a longer sibling is added.
+	if closed {
+		for _, c := range cmds {
+			if strings.ToLower(strings.TrimPrefix(c.Name, "/")) == q {
+				return append(out, c)
+			}
+		}
+		// No such command ("/inb urgent", "/nope ") — the user is still searching, so the
+		// fuzzy tiers below stay in play and Enter can still complete "/inb" to "/inbox".
 	}
 
 	type scored struct {
