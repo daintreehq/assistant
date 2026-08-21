@@ -312,6 +312,17 @@ func terminalMoveToWorktreePassthrough(ctx context.Context, mcp MCPClient, ids [
 	var abort tools.ToolResult // the fatal result (dead link / cancel) that stopped the batch
 	aborted := false
 	for i, id := range ids {
+		// Re-check between moves rather than trusting the transport to reject a
+		// cancelled context: each iteration is a separate confirmed mutation, and an
+		// abandoned turn should stop at the last one it completed.
+		if ctx.Err() != nil {
+			failed = append(failed, id)
+			abort = tools.Fail(codeCancelled, fmt.Sprintf("Turn cancelled during %s.", "terminal.moveToWorktree"), tools.Unrecoverable())
+			refusals[id] = abort.Error.Message
+			aborted = true
+			notAttempted = append(notAttempted, ids[i+1:]...)
+			break
+		}
 		res := passthrough(ctx, mcp, "terminal.moveToWorktree",
 			map[string]any{"terminalId": id, "worktreeId": worktreeID}, "")
 		if res.Ok {
@@ -332,6 +343,12 @@ func terminalMoveToWorktreePassthrough(ctx context.Context, mcp MCPClient, ids [
 				break
 			}
 		}
+	}
+	// Normalize to an empty slice so the payload serializes as [] rather than null —
+	// the model reads this back, and `null` invites "the field is missing" rather than
+	// "nothing moved".
+	if moved == nil {
+		moved = []string{}
 	}
 	details["moved"] = moved
 	if len(failed) == 0 {

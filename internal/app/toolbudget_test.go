@@ -188,11 +188,18 @@ func TestToolProjectionTotalIsBounded(t *testing.T) {
 		// of headroom. The headroom is deliberate: a budget that fails on the next honest
 		// one-line addition is a budget somebody deletes. Raising either number is
 		// allowed — raising it WITHOUT noticing is not, which is the whole point.
-		{"default", ToolInventoryOptions{}, 80_000},
+		//
+		// Raised to 84 KB: two tools landed in the same window and together ate the
+		// remaining headroom — subagent.run (~1.8 KB) and terminal.moveToWorktree
+		// (~1.3 KB), measuring ~81.3 KB. Both are deliberate: the first keeps an
+		// expensive search out of the main conversation, the second replaces a
+		// hand-rolled passthrough. This is the noticing the budget exists to force.
+		{"default", ToolInventoryOptions{}, 84_000},
 		// The flag adds seven execution-graph tools. It is off by default and off in
 		// production, so it gets its own ceiling rather than eating the default's
 		// headroom — but it is still bounded, because a rollout flag is not an excuse.
-		{"workflow-intelligence", ToolInventoryOptions{WorkflowIntelligence: true}, 88_000},
+		// Raised in lockstep with the default for the same two additions (~88.1 KB).
+		{"workflow-intelligence", ToolInventoryOptions{WorkflowIntelligence: true}, 91_000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv, err := BuildToolInventory(tc.opts)

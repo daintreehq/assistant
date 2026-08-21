@@ -17,10 +17,10 @@ import (
 const codeTerminalNotFound = "TERMINAL_NOT_FOUND"
 
 // credibleTruncationRe matches the truncation the model actually produces: the
-// "terminal-" marker plus at least the leading 8 hex characters of the uuid. Anything
-// shorter is not a truncated id, it is a guess, and this family MUTATES after a human
-// confirmation — see resolveTerminalIDs for why that distinction is load-bearing here
-// and not in the read-only families.
+// "terminal-" marker plus at least the leading 8 hex characters of the uuid. It gates
+// PREFIX EXPANSION only — never an id we forward verbatim — because expanding is the
+// only operation that can send a mutation somewhere the human did not name. See
+// resolveTerminalIDs.
 var credibleTruncationRe = regexp.MustCompile(`^terminal-[0-9a-fA-F]{8}`)
 
 // resolveTerminalIDs canonicalizes a whole cohort of caller-supplied terminal ids
@@ -67,30 +67,14 @@ func resolveTerminalIDs(ctx context.Context, mcp MCPClient, ids []string) ([]str
 			break
 		}
 	}
+	// Check cancellation before the fast return too: an abandoned turn must not fall
+	// through into the mutation batch just because its ids happened to be canonical.
+	if ctx.Err() != nil {
+		fail := tools.Fail(codeCancelled, "Turn cancelled before terminal.moveToWorktree moved anything.", tools.Unrecoverable())
+		return nil, &fail
+	}
 	if allCanonical {
 		return ids, nil
-	}
-
-	// Expanding a prefix substitutes an id AFTER the human confirmed the call, because
-	// dispatch shows the raw args and there is no pre-confirmation hook. That is only
-	// safe while the expansion is the terminal the human actually saw — so a request
-	// too short to identify one is refused outright rather than resolved. Requiring the
-	// standard truncation (terminal- plus the first 8 hex of the uuid) makes a
-	// same-prefix collision between two live terminals negligible, which closes the
-	// window where a terminal closing mid-approval lets a DIFFERENT one become the sole
-	// match and get moved — along with its whole tab group — unapproved.
-	var vague []string
-	for _, id := range ids {
-		if !terminalid.LooksCanonical(id) && !credibleTruncationRe.MatchString(strings.TrimSpace(id)) {
-			vague = append(vague, id)
-		}
-	}
-	if len(vague) > 0 {
-		fail := tools.Fail(codeTerminalNotFound, fmt.Sprintf(
-			"terminal id(s) %s are too short to identify a terminal unambiguously, so nothing was moved. Pass the EXACT, FULL id (e.g. terminal-5284bfef-3d11-424c-90cb-136f24046295) from terminal.list.",
-			join(vague, ", ")),
-			tools.WithDetails(map[string]any{"tooShort": vague}))
-		return nil, &fail
 	}
 
 	if mcp == nil || !mcp.Connected() {
@@ -109,6 +93,42 @@ func resolveTerminalIDs(ctx context.Context, mcp MCPClient, ids []string) ([]str
 	live := terminalid.ParseListIDs(res.StructuredContent, res.Text)
 	if len(live) == 0 {
 		return ids, nil // fail open: an empty roster is also the hiccup symptom
+	}
+
+	// Guard SUBSTITUTION, not id shape. Expanding a prefix replaces an id AFTER the
+	// human confirmed the raw args (dispatch shows them, and there is no pre-confirm
+	// hook), so a request too weak to identify one terminal must be refused rather than
+	// expanded — otherwise the intended terminal closing mid-approval can leave a
+	// DIFFERENT one as the sole prefix match, and it moves, tab group and all, without
+	// anyone approving it. Requiring the standard truncation (terminal- plus the first
+	// 8 hex of the uuid) makes that collision negligible.
+	//
+	// An id present in the roster EXACTLY is never substituted, so it is never gated:
+	// Daintree ids are not always terminal-<uuid> (agent.launch takes an unrestricted
+	// requestedId that becomes the panel id verbatim), and gating on shape would make a
+	// legitimately-named live terminal unreachable through this wrapper. Same reasoning
+	// covers the fail-open paths above — they forward verbatim, so they substitute
+	// nothing and need no guard.
+	liveSet := make(map[string]struct{}, len(live))
+	for _, l := range live {
+		liveSet[strings.TrimSpace(l)] = struct{}{}
+	}
+	var vague []string
+	for _, id := range ids {
+		trimmed := strings.TrimSpace(id)
+		if _, exact := liveSet[trimmed]; exact {
+			continue
+		}
+		if !credibleTruncationRe.MatchString(trimmed) {
+			vague = append(vague, id)
+		}
+	}
+	if len(vague) > 0 {
+		fail := tools.Fail(codeTerminalNotFound, fmt.Sprintf(
+			"terminal id(s) %s match no live terminal exactly and are too short to expand unambiguously, so nothing was moved. Pass the EXACT, FULL id from terminal.list. Live terminals: %s.",
+			join(vague, ", "), join(live, ", ")),
+			tools.WithDetails(map[string]any{"tooShort": vague, "liveTerminals": live}))
+		return nil, &fail
 	}
 
 	r := terminalid.Resolve(ids, live)

@@ -523,9 +523,10 @@ func TestTerminalMoveToWorktreeRefusesVaguePrefixWithoutResolving(t *testing.T) 
 		if res.Ok || res.Error.Code != codeTerminalNotFound {
 			t.Fatalf("%q must be refused as too vague, got %+v", vague, res)
 		}
-		// Refused BEFORE the roster read: we do not even look for a match to substitute.
-		if len(mcp.calls) != 0 {
-			t.Errorf("%q must be refused without touching the MCP, called %v", vague, mcp.calls)
+		// The roster read is allowed (it is what proves the id is not an exact live id),
+		// but NOTHING may be moved.
+		if moves := mcp.callsTo("terminal.moveToWorktree"); len(moves) != 0 {
+			t.Errorf("%q must move nothing, moved %v", vague, moves)
 		}
 	}
 	// The standard truncation — terminal- plus the first 8 hex — still resolves.
@@ -538,6 +539,54 @@ func TestTerminalMoveToWorktreeRefusesVaguePrefixWithoutResolving(t *testing.T) 
 	}
 	if !res.Ok {
 		t.Fatalf("the standard 8-hex truncation must still resolve: %+v", res.Error)
+	}
+	// Prove it EXPANDED rather than merely forwarding the prefix verbatim (the fake
+	// succeeds either way).
+	if moves := mcp.callsTo("terminal.moveToWorktree"); len(moves) != 1 || moves[0]["terminalId"] != a {
+		t.Errorf("the 8-hex truncation must expand to the canonical id, got %v", moves)
+	}
+}
+
+// Daintree ids are NOT always terminal-<uuid>: agent.launch takes an unrestricted
+// requestedId that becomes the panel id verbatim, and terminal.list reports it. An id
+// that matches the roster EXACTLY is never substituted, so the too-vague guard must not
+// gate it on shape — otherwise a legitimately-named live terminal becomes unreachable
+// through this wrapper.
+func TestTerminalMoveToWorktreeAcceptsExactNonUUIDID(t *testing.T) {
+	mcp := &fakeMCP{connected: true, resultsByName: map[string]MCPCallResult{
+		"terminal.list": rosterResult("p1", canonical("aaaaaaaa")),
+	}}
+	res, err := moveTool(t, mcp, `{"terminalId":"p1","worktreeId":"/w/x"}`)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !res.Ok {
+		t.Fatalf("an EXACT live id must be accepted whatever its shape: %+v", res.Error)
+	}
+	if moves := mcp.callsTo("terminal.moveToWorktree"); len(moves) != 1 || moves[0]["terminalId"] != "p1" {
+		t.Errorf("the exact id must be forwarded unchanged, got %v", moves)
+	}
+}
+
+// An abandoned turn must not move anything even when the cohort is entirely canonical
+// and therefore skips the roster read — the path that has no MCP call to notice the
+// cancellation on.
+func TestTerminalMoveToWorktreeCancelledCanonicalCohortMovesNothing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	mcp := &fakeMCP{connected: true}
+	tool := newTerminalMoveToWorktreeTool(Deps{MCP: mcp})
+	decoded, err := tool.Decode(json.RawMessage(fmt.Sprintf(
+		`{"terminalIds":[%q,%q],"worktreeId":"/w/x"}`, canonical("aaaaaaaa"), canonical("bbbbbbbb"))))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	res := tool.Handle(ctx, decoded, &tools.ToolContext{})
+	if res.Ok || res.Error.Code != codeCancelled {
+		t.Fatalf("want %s, got %+v", codeCancelled, res)
+	}
+	if len(mcp.calls) != 0 {
+		t.Errorf("a cancelled turn must issue no calls at all, got %v", mcp.calls)
 	}
 }
 
@@ -578,8 +627,12 @@ func TestTerminalMoveToWorktreeCollapsesTwoSpellingsOfOneTerminal(t *testing.T) 
 	if !res.Ok {
 		t.Fatalf("move failed: %+v", res.Error)
 	}
-	if moves := mcp.callsTo("terminal.moveToWorktree"); len(moves) != 1 {
+	moves := mcp.callsTo("terminal.moveToWorktree")
+	if len(moves) != 1 {
 		t.Fatalf("two spellings of one terminal must produce ONE move, got %d (%v)", len(moves), moves)
+	}
+	if moves[0]["terminalId"] != a {
+		t.Errorf("the surviving move must carry the canonical id, got %v", moves[0]["terminalId"])
 	}
 }
 
@@ -621,7 +674,11 @@ func TestTerminalMoveToWorktreeBadDestinationFailsEveryIDFaithfully(t *testing.T
 	if moves := mcp.callsTo("terminal.moveToWorktree"); len(moves) != 2 {
 		t.Errorf("an ordinary refusal must not abort the batch, got %d moves", len(moves))
 	}
-	if moved, _ := failDetail(t, res, "moved").([]string); len(moved) != 0 {
+	moved, ok := failDetail(t, res, "moved").([]string)
+	if !ok {
+		t.Fatalf("details.moved must be present and []string, got %T", failDetail(t, res, "moved"))
+	}
+	if len(moved) != 0 {
 		t.Errorf("nothing moved; details.moved must be empty, got %v", moved)
 	}
 	if !strings.Contains(res.Error.Message, "none moved") {
@@ -704,6 +761,11 @@ func TestTerminalMoveToWorktreeInvalidArgsNeverReachConfirmation(t *testing.T) {
 		json.RawMessage(`{"terminalIds":[],"worktreeId":"/w/x"}`), tctx)
 	if res.Ok {
 		t.Fatalf("an empty cohort must be rejected: %+v", res)
+	}
+	// Pin the specific code so an unrelated earlier failure (a panic recovered into a
+	// generic Fail, say) cannot satisfy this test.
+	if res.Error.Code != "INVALID_ARGS" {
+		t.Errorf("want INVALID_ARGS from the decode gate, got %q (%s)", res.Error.Code, res.Error.Message)
 	}
 	if confirmations != 0 {
 		t.Errorf("invalid args must be rejected BEFORE the human is prompted, prompted %d time(s)", confirmations)
