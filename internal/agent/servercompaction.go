@@ -134,7 +134,7 @@ func (s *Session) applyServerCompaction(c *backend.StreamCompaction, sentLen int
 	// A store that cannot promise that (or a failed commit) declines the compaction
 	// outright rather than splicing memory it cannot back: the block is worth one turn's
 	// prompt savings and nothing is worth risking the transcript for.
-	if !s.persistServerCompactionLocked(block, tail) {
+	if !s.persistServerCompactionLocked(s.messages[:start], block, tail) {
 		return false, compactionRejectPersist
 	}
 
@@ -153,19 +153,31 @@ func (s *Session) applyServerCompaction(c *backend.StreamCompaction, sentLen int
 }
 
 // persistServerCompactionLocked writes the compaction boundary as ONE unit: the marker
-// that moves the rehydration boundary, the block, then the retained tail. Reports
-// whether the group is durably safe. Caller MUST hold s.mu (it reads/bumps s.seq).
+// that moves the rehydration boundary, then the WHOLE post-splice working history
+// behind it — the untouched prefix, the block, and the retained tail. Reports whether
+// the group is durably safe. Caller MUST hold s.mu (it reads/bumps s.seq).
 //
-// The rows the block replaced are left in place, behind the marker — an append-only log,
-// exactly as /compact leaves them. The tail is small (the span stops at the newest user
-// message, so what follows is this turn's own messages), which is what makes
-// re-persisting it cheap.
+// Re-emitting the prefix is not belt-and-braces, it is the correctness of the write.
+// RehydrateSession resumes from everything after the LAST marker, so a row left in
+// FRONT of this marker is invisible on the next boot — and the only rows that may be
+// left there are the ones the block replaced. The prefix is precisely what it did NOT
+// replace: the gate above requires start > lastBlock, so on the second and every later
+// compaction the prefix holds the EARLIER frozen block (and whatever followed it),
+// i.e. the entire first phase of the conversation. Writing only [marker, block, tail]
+// would keep that in memory and drop it on restart, and live history and durable
+// history would diverge for good. conversationRecord re-stamps the reserved name, so a
+// prior block comes back as a block rather than an ordinary user message.
+//
+// The rows the block replaced are what stays behind the marker — an append-only log,
+// exactly as /compact leaves them. What the group re-writes is bounded by the live
+// working history (itself bounded by compaction, and by the span having stopped at the
+// newest user message), which is what keeps this cheap.
 //
 // A session with NO store is memory-only by construction — every test, and any caller
 // that opted out of persistence — so there is no durable log to make inconsistent and
 // the splice proceeds. A store that cannot write the group atomically is a different
 // answer: it CAN be made inconsistent, so the compaction is declined instead.
-func (s *Session) persistServerCompactionLocked(block models.ChatMessage, tail []models.ChatMessage) (ok bool) {
+func (s *Session) persistServerCompactionLocked(prefix []models.ChatMessage, block models.ChatMessage, tail []models.ChatMessage) (ok bool) {
 	// A persistence failure must never break a live turn — the same contract every other
 	// write on this path honours.
 	defer func() {
@@ -180,8 +192,10 @@ func (s *Session) persistServerCompactionLocked(block models.ChatMessage, tail [
 	if !canGroup {
 		return false
 	}
-	msgs := make([]models.ChatMessage, 0, len(tail)+2)
-	msgs = append(msgs, models.TextMessage("system", serverCompactionMarker), block)
+	msgs := make([]models.ChatMessage, 0, len(prefix)+len(tail)+2)
+	msgs = append(msgs, models.TextMessage("system", serverCompactionMarker))
+	msgs = append(msgs, prefix...)
+	msgs = append(msgs, block)
 	msgs = append(msgs, tail...)
 
 	recs := make([]domain.ConversationMessageRecord, 0, len(msgs))

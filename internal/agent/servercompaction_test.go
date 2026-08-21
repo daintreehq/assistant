@@ -308,7 +308,7 @@ func TestApplyServerCompactionRefusesToReachOverAFrozenBlock(t *testing.T) {
 // A second block that opens strictly after the first composes cleanly — the indices
 // address the already-spliced array, so no coordinate mapping is ever needed.
 func TestApplyServerCompactionComposesAfterAnEarlierBlock(t *testing.T) {
-	s, _, _ := compactionTestSession(t, seedHistory())
+	s, store, _ := compactionTestSession(t, seedHistory())
 	if applied, _ := s.applyServerCompaction(validBlock("turn_1", 0, 2), 4, "turn_1"); !applied {
 		t.Fatal("first block refused")
 	}
@@ -325,6 +325,17 @@ func TestApplyServerCompactionComposesAfterAnEarlierBlock(t *testing.T) {
 	want := "BLOCK:Reconciled: u1/a1 established the worktree.|BLOCK:Reconciled again.|user:u3|assistant:a3"
 	if got != want {
 		t.Fatalf("history = %s\nwant       %s", got, want)
+	}
+
+	// Live history is only half the claim. The FIRST block sits in the second write's
+	// prefix, so a group that persisted only [marker, block, tail] would resume without
+	// it — memory and disk telling two different stories about the same conversation.
+	res, ok := RehydrateSession(store.msgs)
+	if !ok {
+		t.Fatal("rehydration reported no history")
+	}
+	if resumed := roles(res.RestoredMessages); resumed != got {
+		t.Fatalf("resumed = %s\nlive    = %s", resumed, got)
 	}
 }
 
@@ -461,6 +472,54 @@ func TestServerCompactionSurvivesAStoreRehydrateRoundTrip(t *testing.T) {
 		if m.Name != "" {
 			t.Errorf("an ordinary message carried a name: %+v", m)
 		}
+	}
+}
+
+// The same durable path in the shape the feature actually runs in: a span that opens
+// AFTER some untouched history, then a second compaction stacked on the first. Both
+// splices carry a non-empty prefix, and the second one's prefix contains the earlier
+// frozen block — which stands in for the whole first phase of the conversation.
+//
+// This is the steady state, not an edge case: the frozen-history gate REQUIRES every
+// span after the first to open past the last block, so every compaction but the first
+// has a prefix to lose. Pinning resumed == live is the assertion that matters; a
+// hand-written "want" would have to be kept in step with the splice rules to stay
+// meaningful, and the bug this guards is precisely the two diverging.
+func TestServerCompactionRoundTripKeepsThePrefixAndTheEarlierBlock(t *testing.T) {
+	s, store, _ := compactionTestSession(t, nil)
+	for _, m := range seedHistory() {
+		s.pushMessage(m) // pushMessage persists
+	}
+	s.pushMessage(models.TextMessage("user", "u3"))
+	s.pushMessage(models.TextMessage("assistant", "a3"))
+
+	// [u1,a1,u2,a2,u3,a3] — replace the SECOND turn only, so the splice keeps a prefix.
+	if applied, reason := s.applyServerCompaction(validBlock("turn_1", 2, 4), 6, "turn_1"); !applied {
+		t.Fatalf("first block refused as %q", reason)
+	}
+	// [u1,a1,BLOCK1,u3,a3] — one more complete turn makes [3,5) a legal second span.
+	s.pushMessage(models.TextMessage("user", "u4"))
+	s.pushMessage(models.TextMessage("assistant", "a4"))
+	second := validBlock("turn_2", 3, 5)
+	second.Block.Content = "Reconciled again."
+	if applied, reason := s.applyServerCompaction(second, 7, "turn_2"); !applied {
+		t.Fatalf("second block refused as %q", reason)
+	}
+
+	live := roles(s.Messages())
+	want := "user:u1|assistant:a1|BLOCK:Reconciled: u1/a1 established the worktree.|" +
+		"BLOCK:Reconciled again.|user:u4|assistant:a4"
+	if live != want {
+		t.Fatalf("live history = %s\nwant          %s", live, want)
+	}
+
+	// A fresh process, through the persisted rows alone.
+	res, ok := RehydrateSession(store.msgs)
+	if !ok {
+		t.Fatal("rehydration reported no history")
+	}
+	if resumed := roles(res.RestoredMessages); resumed != live {
+		t.Fatalf("durable history diverged from live history across a restart\nresumed = %s\nlive    = %s", resumed, live)
 	}
 }
 

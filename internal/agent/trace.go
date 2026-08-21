@@ -586,13 +586,22 @@ func (s *Session) traceServerCompaction(runID, turnID string, round int, c *back
 		return
 	}
 	s.safeTrace("backend.compaction", func() map[string]any {
+		// Dereference the span edges instead of logging the *int fields directly:
+		// debuglog renders only scalars inline, so a pointer falls through to the block
+		// formatter and a one-line event grows two indented JSON stanzas. A missing edge
+		// (the very reason a span is refused as out-of-bounds) logs as an explicit null,
+		// which is a different fact from the perfectly ordinary index 0.
+		var startIndex, endIndex any = debuglog.Null, debuglog.Null
+		if start, end, ok := c.Replaces.Bounds(); ok {
+			startIndex, endIndex = start, end
+		}
 		fields := map[string]any{
 			"runId":        runID,
 			"turnId":       turnID,
 			"round":        round,
 			"blockTurnId":  c.TurnID,
-			"startIndex":   c.Replaces.StartIndex,
-			"endIndex":     c.Replaces.EndIndex,
+			"startIndex":   startIndex,
+			"endIndex":     endIndex,
 			"sentMessages": sentLen,
 			"blockBytes":   len(c.Block.Content),
 			"applied":      applied,
