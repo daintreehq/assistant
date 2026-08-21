@@ -192,8 +192,6 @@ func resolveApprovalMode(requested mcpserver.ApprovalMode, defaultAutoApprove bo
 	return mode, mode == mcpserver.ApprovalAuto
 }
 
-// applyIfSet overwrites dst only when the session supplied a value, so an unset session
-// argument falls back to the process-level default rather than blanking it.
 // sessionOptions overlays one session's arguments onto the process-level options.
 //
 // Start from what this process was launched with (the .mcp.json env and any flags), then
@@ -223,16 +221,22 @@ func sessionOptions(base Options, p mcpserver.OpenParams) Options {
 	return o
 }
 
-// applyIfSet overlays one session argument, treating a WHITESPACE-ONLY value as omitted
-// and storing the trimmed form otherwise.
+// applyIfSet overwrites dst only when the session supplied a value, so an unset session
+// argument falls back to the process-level default rather than blanking it.
 //
-// Trimming is what makes "omitted inherits the launch default" actually true. config's
-// FirstString trims every value it resolves, so a raw " " stored here would count as SET
-// at this layer and as UNSET at that one — the launch flag would be discarded and the
-// environment (or a bare state root) would answer instead. For an id that scopes the
-// state directory, that silently opens the wrong project's database.
+// "Supplied" means non-blank, not merely non-empty. config's FirstString trims every
+// value it resolves, so a raw " " stored here would count as SET at this layer and as
+// UNSET at that one — the launch flag would be discarded and the environment (or a bare
+// state root) would answer instead. For an id that scopes the state directory, that
+// silently opens the wrong project's database.
+//
+// It stores the ORIGINAL value, not the trimmed one. Blankness is a question about
+// whether an argument was given; trimming is a change to what it SAYS, and several of
+// these fields are paths, where a trailing space is a legal part of a filename. Reading
+// "/keys/account" because the caller named "/keys/account " would bill a different
+// credential — the exact class of silent substitution these flags exist to prevent.
 func applyIfSet(dst *string, v string) {
-	if t := strings.TrimSpace(v); t != "" {
-		*dst = t
+	if strings.TrimSpace(v) != "" {
+		*dst = v
 	}
 }

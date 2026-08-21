@@ -212,6 +212,7 @@ func parseArgs(args []string) (parsedArgs, error) {
 	emptyValueFallback := map[string]string{
 		"prompt-file":               "there is no other prompt source",
 		"project-instructions-file": "omit the flag to use the project's own DAINTREE.md",
+		"project":                   "omit the flag to use the current directory",
 	}
 	for _, name := range []string{"backend-url", "api-key-file", "prompt-file", "state-dir", "log-dir",
 		"mcp-url", "mcp-token", "project", "project-id", "window-id", "project-instructions-file"} {

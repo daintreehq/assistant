@@ -168,18 +168,13 @@ func loadConfigFromOptions(opts Options) (config.AppConfig, error) {
 // deadline cannot cover a syscall that never returns). One key plus generous slack is
 // all a valid file can hold.
 func readAPIKeyFile(path string) (string, error) {
-	f, err := os.Open(path)
+	// Through the same guard the other file flags use. The bound was already documented
+	// as covering a FIFO, and it did not: os.Open blocks on one before any LimitReader
+	// applies. An over-length file is now rejected outright rather than truncated into a
+	// shape error, which is the more honest failure for a credential.
+	key, err := readBoundedFile(path, backend.MaxKeyLength+1024, "--api-key-file", false)
 	if err != nil {
-		return "", fmt.Errorf("--api-key-file: %w", err)
-	}
-	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, backend.MaxKeyLength+1024))
-	if err != nil {
-		return "", fmt.Errorf("--api-key-file %s: %w", path, err)
-	}
-	key := strings.TrimSpace(string(raw))
-	if key == "" {
-		return "", fmt.Errorf("--api-key-file %s: file is empty", path)
+		return "", err
 	}
 	// The SAME structural check config.LoadConfig applies to DAINTREE_API_KEY, for the
 	// same reason: an embedded newline, a smart quote or an over-length paste becomes a
@@ -198,9 +193,10 @@ func readAPIKeyFile(path string) (string, error) {
 
 // maxPromptFileBytes bounds --prompt-file. A prompt is prose, not a payload: a megabyte
 // is a very long runbook and still far short of anything a turn could carry. The bound
-// exists because a caller-supplied path need not be a regular file — /dev/zero or a
-// live FIFO would otherwise grow the read forever, which --timeout cannot preempt
-// (a deadline does not interrupt a syscall already in progress).
+// exists because stdin need not be a finite stream — /dev/zero or a live FIFO would
+// otherwise grow the read forever, which --timeout cannot preempt (a deadline does not
+// interrupt a syscall already in progress). A NAMED path is additionally required to be
+// a regular file; see readBoundedFile.
 const maxPromptFileBytes = 1 << 20 // 1 MiB
 
 // promptFileStdin is the literal token that means "read the prompt from stdin". Only the
@@ -238,7 +234,7 @@ func readPromptFile(path string, stdin io.Reader) (string, error) {
 	if path == promptFileStdin {
 		return readBoundedText(stdin, maxPromptFileBytes, "--prompt-file", "-")
 	}
-	return readBoundedFile(path, maxPromptFileBytes, "--prompt-file")
+	return readBoundedFile(path, maxPromptFileBytes, "--prompt-file", true)
 }
 
 // readBoundedFile opens a NAMED path and reads it under a byte bound.
@@ -248,19 +244,39 @@ func readPromptFile(path string, stdin io.Reader) (string, error) {
 // --timeout cannot preempt a syscall already in flight. Streaming input has a spelling
 // already — "-" — so a named pipe here is a mistake worth naming rather than a hang worth
 // waiting out. A directory becomes a clear message instead of an opaque read error.
-func readBoundedFile(path string, limit int64, flag string) (string, error) {
+func readBoundedFile(path string, limit int64, flag string, stdinHint bool) (string, error) {
+	advice := ""
+	if stdinHint {
+		advice = " (use '-' to stream from stdin)"
+	}
+	notRegular := func(p string) error {
+		return fmt.Errorf("%s %s: not a regular file%s", flag, p, advice)
+	}
+	// Checked BEFORE the open, because that is the check that prevents the hang: os.Open
+	// on a FIFO blocks waiting for a writer, and an error we never reach is no bound.
 	info, err := os.Stat(path)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", flag, err)
 	}
 	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("%s %s: not a regular file (use '-' to stream from stdin)", flag, path)
+		return "", notRegular(path)
 	}
 	f, err := os.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", flag, err)
 	}
 	defer f.Close()
+	// And again on the DESCRIPTOR, which is a different question: stat-then-open is two
+	// syscalls, so whatever we actually opened is not provably what we stat'd. This
+	// closes the half that matters — we never READ a non-regular file — while the other
+	// half (a swap to a FIFO landing between the two calls, which would still block in
+	// Open) stays open, and needs a non-blocking open to shut. The path comes from argv,
+	// so an attacker who can win that race already has the caller's own trust.
+	if fi, err := f.Stat(); err != nil {
+		return "", fmt.Errorf("%s %s: %w", flag, path, err)
+	} else if !fi.Mode().IsRegular() {
+		return "", notRegular(path)
+	}
 	return readBoundedText(f, limit, flag, path)
 }
 
@@ -277,7 +293,9 @@ func readBoundedFile(path string, limit int64, flag string) (string, error) {
 // DAINTREE.md would run the job against a DIFFERENT brief than the caller named and hide
 // the typo behind a successful-looking run.
 func readProjectInstructionsFile(path string) (string, error) {
-	return readBoundedFile(path, projectinstructions.MaxBytes, "--project-instructions-file")
+	// stdinHint false: this flag has no "-" spelling, so advising one would send the
+	// caller looking for a file literally named "-".
+	return readBoundedFile(path, projectinstructions.MaxBytes, "--project-instructions-file", false)
 }
 
 // applyAutoProjectInstructions fills o.ProjectInstructions from an auto-DISCOVERED

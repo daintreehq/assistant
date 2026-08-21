@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/daintreehq/assistant/internal/cli/render"
 	"github.com/daintreehq/assistant/internal/config"
@@ -290,5 +292,60 @@ func TestHostOverridesProjectInstructionsPrecedence(t *testing.T) {
 	// that wrote through would leak one boot's project into the next.
 	if base.ProjectPath != nil {
 		t.Error("hostOverrides mutated the shared base overrides")
+	}
+}
+
+// TestNamedPathMustBeRegular: a named path is required to be a regular file because
+// os.Open on a FIFO blocks waiting for a writer, BEFORE any byte bound applies and where
+// --timeout cannot reach. A FIFO is the case worth pinning — a test that only used a
+// directory would pass against a guard that never ran.
+func TestNamedPathMustBeRegular(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Skipf("mkfifo unavailable: %v", err)
+	}
+
+	// Each read runs on its own goroutine with a deadline: the whole point is that an
+	// UNGUARDED implementation would block here forever rather than fail, so the test
+	// has to be able to outlive it.
+	for _, tc := range []struct {
+		name, wantFlag string
+		read           func() (string, error)
+		wantStdinHint  bool
+	}{
+		{"--prompt-file", "--prompt-file",
+			func() (string, error) { return readPromptFile(fifo, strings.NewReader("")) }, true},
+		// No "-" spelling, so the message must NOT advise one: a caller who followed it
+		// would go looking for a file literally named "-".
+		{"--project-instructions-file", "--project-instructions-file",
+			func() (string, error) { return readProjectInstructionsFile(fifo) }, false},
+		{"--api-key-file", "--api-key-file",
+			func() (string, error) { return readAPIKeyFile(fifo) }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			type result struct {
+				err error
+			}
+			done := make(chan result, 1)
+			go func() {
+				_, err := tc.read()
+				done <- result{err}
+			}()
+			select {
+			case got := <-done:
+				if got.err == nil {
+					t.Fatal("a FIFO must be rejected, not read")
+				}
+				msg := got.err.Error()
+				if !strings.Contains(msg, tc.wantFlag) {
+					t.Errorf("error should name the flag, got: %v", got.err)
+				}
+				if hint := strings.Contains(msg, "'-'"); hint != tc.wantStdinHint {
+					t.Errorf("stdin advice = %v, want %v: %v", hint, tc.wantStdinHint, got.err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the read blocked on a FIFO — the regular-file guard did not run")
+			}
+		})
 	}
 }

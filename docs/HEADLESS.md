@@ -185,7 +185,9 @@ than a setting:
   (including the one the embedded host loads per boot); without the flag, discovery is
   unchanged. Unlike discovery, a named file that is missing, empty, or oversized is
   FATAL — falling back to the repo's own brief would run the job against a different one
-  than the caller named. It may be a symlink: discovery refuses one because the bound
+  than the caller named. Like `--api-key-file` and a named `--prompt-file`, it must be a
+  REGULAR file (it has no `-` spelling, so a pipe has nowhere to go). It may be a symlink
+  to one, though: discovery refuses a symlink because the bound
   project is untrusted, while argv carries the same trust as the environment it shadows.
   Two limits worth knowing: on `mcp --stdio` the file is validated when a session opens
   rather than at startup (there is no per-session override for it, so every open fails

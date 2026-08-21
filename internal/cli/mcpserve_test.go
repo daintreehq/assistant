@@ -103,8 +103,12 @@ func TestSessionProjectIdentityOverridesProcessDefaults(t *testing.T) {
 		// would answer instead — silently opening the wrong project's database.
 		{"whitespace is treated as omitted",
 			mcpserver.OpenParams{ProjectID: "   ", WindowID: "\t"}, "launch-project", "launch-window"},
-		{"a padded value is stored trimmed",
-			mcpserver.OpenParams{ProjectID: "  padded  "}, "padded", "launch-window"},
+		// Blankness decides whether an argument was GIVEN; it does not rewrite what one
+		// says. Several overlaid fields are paths, where a trailing space is a legal part
+		// of a filename — reading "/keys/account" because the caller named
+		// "/keys/account " would bill a different credential.
+		{"a padded value is preserved verbatim",
+			mcpserver.OpenParams{ProjectID: "  padded  "}, "  padded  ", "launch-window"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			session := sessionOptions(process, tc.params)

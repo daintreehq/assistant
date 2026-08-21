@@ -15,13 +15,6 @@ import (
 	"github.com/daintreehq/assistant/internal/tools"
 )
 
-// RunHost is the `host --stdio` entry: it builds the embedded-host App factory and
-// hands it to host.Run, which serves the stdio NDJSON protocol over os.Stdin/Stdout/
-// Stderr until teardown exits the process. The factory builds a real app.App per
-// booted session and adapts it onto the host.App seam.
-//
-// host.Run returns a nonzero code only when its stdin/factory precondition fails
-// (terminal stdin, nil factory); the normal path never returns (teardown os.Exits).
 // hostOverrides merges one boot descriptor onto the process-level overrides.
 //
 // The descriptor's cwd is the authoritative project path, and its DAINTREE.md content
@@ -42,6 +35,13 @@ func hostOverrides(base config.ConfigOverrides, params host.AppParams) config.Co
 	return o
 }
 
+// RunHost is the `host --stdio` entry: it builds the embedded-host App factory and
+// hands it to host.Run, which serves the stdio NDJSON protocol over os.Stdin/Stdout/
+// Stderr until teardown exits the process. The factory builds a real app.App per
+// booted session and adapts it onto the host.App seam.
+//
+// host.Run returns a nonzero code only when its stdin/factory precondition fails
+// (terminal stdin, nil factory); the normal path never returns (teardown os.Exits).
 func RunHost(ctx context.Context, opts Options) int {
 	// Resolved once, before serving: --api-key-file is read here, and an unreadable one
 	// must be fatal at the door rather than per boot request.
