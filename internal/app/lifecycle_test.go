@@ -421,7 +421,16 @@ func (c *spyContext) enteredWait() bool { return c.consults.Load() > 0 }
 func shutdownOnce(t *testing.T, a *App) func() {
 	t.Helper()
 	var once sync.Once
-	stop := func() { once.Do(func() { _ = a.Shutdown() }) }
+	stop := func() {
+		once.Do(func() {
+			// Reported, never discarded: a teardown that fails is exactly the regression
+			// these tests exist to catch, and swallowing it would hide a scheduler that
+			// could not be drained.
+			if err := a.Shutdown(); err != nil {
+				t.Errorf("Shutdown: %v", err)
+			}
+		})
+	}
 	t.Cleanup(stop)
 	return stop
 }

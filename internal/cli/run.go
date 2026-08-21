@@ -605,7 +605,10 @@ func RunOneShot(ctx context.Context, opts Options) int {
 			// run, so a deadline that expired during the turn reaches the barrier already
 			// dead and it returns without polling once. Name the bound, not an elapsed
 			// time we did not measure.
-			msg := fmt.Sprintf("--timeout (%s) expired with async work still running; it stays live for the next session", opts.Timeout)
+			// "unsettled" rather than "still running": an entry stays counted until its
+			// completion is PUBLISHED, so the work may well have finished and be waiting
+			// only on the event that carries the outcome.
+			msg := fmt.Sprintf("--timeout (%s) expired with async work unsettled; it stays live for the next session", opts.Timeout)
 			if !timedOut() {
 				msg = "stopped waiting for async work to settle; it stays live for the next session"
 			}

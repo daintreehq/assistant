@@ -432,17 +432,17 @@ func TestBinaryOneShotSchedulerActiveOnTheWire(t *testing.T) {
 		}
 		// The owner lease must be free the instant the process is gone. Taking it here
 		// is the only check that actually proves release rather than inferring it.
-		lockPath := ownerLockPath(t, dir)
-		if lockPath != "" {
-			l := ipc.NewFileLock(lockPath)
-			ok, err := l.TryAcquire()
-			if err != nil {
-				t.Errorf("probing the owner lease: %v", err)
-			} else if !ok {
-				t.Error("owner lease still held after the one-shot exited")
-			} else {
-				l.Release()
-			}
+		// A fresh handle, never the run's own: probing a HELD FileLock handle takes an
+		// "already mine" shortcut and would report free while releasing the holder's
+		// lease. NewFileLock starts with a nil fd, so TryAcquire makes a real flock call.
+		l := ipc.NewFileLock(ownerLockPath(t, dir))
+		ok, err := l.TryAcquire()
+		if err != nil {
+			t.Errorf("probing the owner lease: %v", err)
+		} else if !ok {
+			t.Error("owner lease still held after the one-shot exited")
+		} else {
+			l.Release()
 		}
 	})
 }
@@ -487,8 +487,10 @@ func TestBinaryRunSchedulerRequiresTimeout(t *testing.T) {
 }
 
 // ownerLockPath finds the owner lease under a state dir. The per-project subdir name is
-// derived internally, so the file is located rather than reconstructed; "" means the
-// run never created one, which is itself a pass for the caller.
+// derived internally, so the file is located rather than reconstructed. A MISSING file
+// is a failure, not a skip: every successful one-shot acquires owner.lock and the file
+// deliberately outlives its release, so absence means the walk looked in the wrong place
+// — and a probe that silently does not run proves nothing about release.
 func ownerLockPath(t *testing.T, stateDir string) string {
 	t.Helper()
 	var found string
@@ -503,6 +505,9 @@ func ownerLockPath(t *testing.T, stateDir string) string {
 	})
 	if err != nil {
 		t.Fatalf("walking the state dir: %v", err)
+	}
+	if found == "" {
+		t.Fatalf("no %s under %s; the run should have acquired the owner lease", ipc.OwnerLockName, stateDir)
 	}
 	return found
 }

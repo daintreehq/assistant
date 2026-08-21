@@ -439,15 +439,32 @@ func TestUsageDocumentsRunScheduler(t *testing.T) {
 // flag, so the alternative would be accepting an explicit request and doing nothing with
 // it — silence is the worse answer for a flag someone typed on purpose.
 func TestParseArgsRunSchedulerTimeoutRuleIsRouteIndependent(t *testing.T) {
-	for _, route := range []string{"daemon", "doctor", "host"} {
-		if _, err := parseArgs([]string{"--run-scheduler", route}); err == nil {
-			t.Errorf("parseArgs(--run-scheduler %s) = nil error, want the --timeout rejection", route)
+	routes := map[string]route{"doctor": routeDoctor, "daemon": routeDaemon, "host": routeHost}
+	for word := range routes {
+		_, err := parseArgs([]string{"--run-scheduler", word})
+		if err == nil {
+			t.Errorf("parseArgs(--run-scheduler %s) = nil error, want the --timeout rejection", word)
+			continue
+		}
+		// The SPECIFIC error, not merely any error: a route that failed for an unrelated
+		// reason would otherwise pass this test while proving nothing about the rule.
+		if !strings.Contains(err.Error(), "--timeout") {
+			t.Errorf("parseArgs(--run-scheduler %s) error = %q, want it to name --timeout", word, err)
 		}
 	}
-	// With a bound it parses; the route handlers simply never consult the flag.
-	for _, route := range []string{"doctor", "daemon"} {
-		if _, err := parseArgs([]string{"--run-scheduler", "--timeout", "1m", route}); err != nil {
-			t.Errorf("parseArgs(--run-scheduler --timeout 1m %s) errored: %v", route, err)
+	// With a bound it parses AND still reaches the right route — the flag must not
+	// disturb route selection, and the route words must not be read as prompts.
+	for word, want := range routes {
+		got, err := parseArgs([]string{"--run-scheduler", "--timeout", "1m", word})
+		if err != nil {
+			t.Errorf("parseArgs(--run-scheduler --timeout 1m %s) errored: %v", word, err)
+			continue
+		}
+		if got.Route != want {
+			t.Errorf("parseArgs(... %s).Route = %v, want %v", word, got.Route, want)
+		}
+		if got.Options.HasPrompt {
+			t.Errorf("parseArgs(... %s) took the route word as a prompt (%q)", word, got.Options.Prompt)
 		}
 	}
 }

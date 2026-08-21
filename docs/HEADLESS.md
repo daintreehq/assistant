@@ -170,9 +170,9 @@ argument boundary: a negative `--timeout`, or `--run-scheduler` without a positi
 `--timeout`, is rejected whatever follows it. Accepting a flag someone typed on purpose
 and then doing nothing with it is the worse answer. See
 [Background work in a one-shot is opt-in](#background-work-in-a-one-shot-is-opt-in).
-`--prompt-file` follows the same route rule: a command word is
-chosen before the prompt is, so `--prompt-file - mcp --stdio` serves MCP and never reads
-the stream carrying the protocol.
+`--prompt-file` follows the same route rule: a command word is chosen before the prompt
+is, so `--prompt-file - mcp --stdio` serves MCP and never reads the stream carrying the
+protocol.
 
 Two of these flags have no env counterpart because they carry a file's CONTENT rather
 than a setting:
@@ -385,10 +385,11 @@ with the answer still in `result.content`. A run that already **failed** keeps i
 `error` status and exit `1` — an expired wait never downgrades a real failure into a
 cancellation.
 
-The bound is cooperative, not a hard kill. Teardown joins any in-flight scheduler tick
-before closing the database, so a transport that ignores cancellation can push the exit
-slightly past the deadline. That is the deliberate trade: a bounded delay beats a data
-race against a closing store.
+The bound is cooperative, not a hard kill, and it has no second deadline behind it.
+Teardown joins any in-flight scheduler tick before closing the database, so a transport
+that ignored cancellation entirely could hold the exit open indefinitely. That is the
+deliberate trade — returning while a tick still held the store would be a data race — but
+do not read `--timeout` as a guaranteed upper bound on process lifetime.
 
 Four things are worth knowing before you reach for it:
 
@@ -399,10 +400,12 @@ Four things are worth knowing before you reach for it:
 - **Watcher and timer rows never hold the run open.** A watcher is long-lived and a
   timer can be scheduled arbitrarily far out, so neither has a "quiescent" state; if they
   gated the exit, `--timeout` would become the normal way a flagged run ends. Due work
-  fires during the turn and during the wait; the rows persist either way. One consequence
-  worth stating plainly: if a timer fires **during** the run and itself starts async
-  work, that async work is this run's — same session — so it does gate the exit like any
-  other. Supervising it is the point; abandoning it at exit would be worse.
+  fires during the turn and during the wait; the rows persist either way. If a timer fires
+  **during** the run and itself starts async work, that work carries this run's session
+  and is normally waited on like any other — but the barrier reads a count rather than
+  freezing registration, so work registered in the instant between the last read and
+  teardown is not waited on. It stays durably live for the next owner, which is the same
+  place every unfinished invocation ends up.
 - **Completions do not come back as tool results.** They land in the durable attention
   inbox, which the next session reads. The attention callback is deliberately nil for the
   same reason it is under `mcp --stdio`: a callback with nowhere to render would mark
