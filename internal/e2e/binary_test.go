@@ -333,3 +333,109 @@ func firstIndex(ss []string, s string) int {
 	}
 	return -1
 }
+
+// schedulerActiveOnWire reads runtime.scheduler_active from the Nth respond request.
+// The flag's whole invisible half is this wire value: the backend defaults it to true,
+// so an explicit false is what tells the model background work is unavailable.
+func schedulerActiveOnWire(t *testing.T, f *fakeBackend, n int) bool {
+	t.Helper()
+	body := f.request(n)
+	if body == nil {
+		t.Fatalf("no respond request at index %d", n)
+	}
+	rt, ok := body["runtime"].(map[string]any)
+	if !ok {
+		t.Fatalf("request %d has no runtime block: %v", n, body)
+	}
+	active, ok := rt["scheduler_active"].(bool)
+	if !ok {
+		t.Fatalf("runtime.scheduler_active missing or not a bool: %v", rt)
+	}
+	return active
+}
+
+// TestBinaryOneShotSchedulerActiveOnTheWire runs the real binary twice against the fake
+// backend — once plain, once with --run-scheduler — and asserts the runtime fact the
+// model actually reads. The default must keep reporting false (a one-shot that does not
+// tick must not claim it does), and the opt-in must report true on the FIRST round,
+// because that is the round where the model decides whether to start background work at
+// all. Both runs must exit 0 and leave no owner lease behind.
+func TestBinaryOneShotSchedulerActiveOnTheWire(t *testing.T) {
+	bin := buildBinary(t)
+
+	run := func(t *testing.T, extraArgs ...string) (*fakeBackend, string) {
+		t.Helper()
+		fake := newFakeBackend(t, sseRound{
+			contentTokens: []string{"All ", "clear."},
+			usage:         &fakeUsage{prompt: 40, completion: 3, total: 43},
+		})
+		dir := t.TempDir()
+		args := append(append([]string{}, extraArgs...), "--json", "anything running?")
+		cmd := exec.Command(bin, args...)
+		cmd.Env = append(cmd.Environ(),
+			"DAINTREE_BACKEND_URL="+fake.baseURL(),
+			"DAINTREE_ASSISTANT_STATE_DIR="+dir,
+			"DAINTREE_ASSISTANT_TIER=operator",
+			"DAINTREE_ASSISTANT_DEBUG_LOG=0",
+			"DAINTREE_MCP_URL=",
+			"DAINTREE_MCP_TOKEN=",
+		)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("run %v: %v (stderr: %s)", args, err, stderr.String())
+		}
+		if fake.callCount() == 0 {
+			t.Fatalf("backend served no respond requests (stderr: %s)", stderr.String())
+		}
+		return fake, dir
+	}
+
+	t.Run("default reports an inactive scheduler", func(t *testing.T) {
+		fake, _ := run(t)
+		if schedulerActiveOnWire(t, fake, 0) {
+			t.Error("runtime.scheduler_active = true without --run-scheduler, want false")
+		}
+	})
+
+	t.Run("--run-scheduler reports an active scheduler on the first round", func(t *testing.T) {
+		fake, dir := run(t, "--run-scheduler", "--timeout", "60s")
+		if !schedulerActiveOnWire(t, fake, 0) {
+			t.Error("runtime.scheduler_active = false with --run-scheduler, want true on the FIRST round")
+		}
+		// The lease must be free the moment the process is gone: a one-shot that takes
+		// the lease and starts ticking still has to leave nothing behind.
+		if entries, err := os.ReadDir(dir); err == nil {
+			for _, e := range entries {
+				if strings.Contains(e.Name(), "daemon") {
+					t.Errorf("one-shot left a daemon artifact behind: %s", e.Name())
+				}
+			}
+		}
+	})
+}
+
+// TestBinaryRunSchedulerRequiresTimeout: the bound is not optional, and the rejection
+// has to happen at the argument boundary — before a lease is taken or a turn is spent.
+func TestBinaryRunSchedulerRequiresTimeout(t *testing.T) {
+	bin := buildBinary(t)
+
+	cmd := exec.Command(bin, "--run-scheduler", "--json", "anything running?")
+	cmd.Env = append(cmd.Environ(),
+		"DAINTREE_ASSISTANT_STATE_DIR="+t.TempDir(),
+		"DAINTREE_ASSISTANT_DEBUG_LOG=0",
+		"DAINTREE_MCP_URL=",
+		"DAINTREE_MCP_TOKEN=",
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("--run-scheduler without --timeout exited 0 (stdout: %q)", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--timeout") {
+		t.Errorf("rejection does not name --timeout:\n%s", stderr.String())
+	}
+}

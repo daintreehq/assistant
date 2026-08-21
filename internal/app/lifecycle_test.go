@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/daintreehq/assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/mcp"
 	"github.com/daintreehq/assistant/internal/prompts"
 )
@@ -371,5 +373,110 @@ func TestRefreshStartupContextNotConnectedClears(t *testing.T) {
 	}
 	if got := a.activeWorktreeForFooter(); got != "" {
 		t.Fatalf("cleared worktree label = %q, want empty", got)
+	}
+}
+
+// asyncRec builds a live await.async record owned by sessionID. terminal.await.async
+// is the watch-only starter, so nothing here implies a side effect that already ran.
+func asyncRec(id, sessionID string) domain.AsyncInvocationRecord {
+	return domain.AsyncInvocationRecord{
+		ID: id, ToolName: "terminal.await.async", Title: "job " + id, GroupID: "run_" + id,
+		SessionID: sessionID, TerminalIdsJson: `["term-1"]`,
+		Status: domain.AsyncRunning, CreatedAt: 1_000, ExpiresAt: 1 << 40,
+	}
+}
+
+// TestWaitForSessionAsyncIsFreeWithoutWork: the common flagged run starts no async work
+// at all, and it must not pay a ticker interval to learn that. Also covers the
+// never-started-scheduler case, where the barrier has to be an outright no-op — that is
+// what keeps the DEFAULT one-shot path unchanged.
+func TestWaitForSessionAsyncIsFreeWithoutWork(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+
+	start := time.Now()
+	if err := a.WaitForSessionAsync(context.Background()); err != nil {
+		t.Fatalf("WaitForSessionAsync before StartScheduler = %v, want nil", err)
+	}
+	a.StartScheduler(context.Background(), nil)
+	if err := a.WaitForSessionAsync(context.Background()); err != nil {
+		t.Fatalf("WaitForSessionAsync with no work = %v, want nil", err)
+	}
+	if elapsed := time.Since(start); elapsed > asyncQuiesceInterval {
+		t.Errorf("no-work wait took %v, want a fast path shorter than one poll interval (%v)", elapsed, asyncQuiesceInterval)
+	}
+}
+
+// TestWaitForSessionAsyncIgnoresForeignSessionWork: Start adopts every live row in the
+// PROJECT, which is correct — whoever holds the lease supervises everything — but an
+// inherited backlog must never decide when a script exits.
+func TestWaitForSessionAsyncIgnoresForeignSessionWork(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+	a.StartScheduler(context.Background(), nil)
+
+	if err := a.asyncCoordinator.Register(asyncRec("asy_theirs", "ses_someone_else"), []string{"term-1"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := a.WaitForSessionAsync(ctx); err != nil {
+		t.Fatalf("WaitForSessionAsync with only foreign work = %v, want nil", err)
+	}
+	if elapsed := time.Since(start); elapsed > asyncQuiesceInterval {
+		t.Errorf("foreign-work wait took %v, want the fast path (%v)", elapsed, asyncQuiesceInterval)
+	}
+}
+
+// TestWaitForSessionAsyncBlocksOnOwnWorkUntilDeadline: the whole point of the barrier is
+// that the run does NOT exit while its own handles are live. When the bound expires with
+// work still running it reports the context error, and Shutdown must still complete
+// afterwards — a timeout that fires mid-poll cannot be allowed to strand teardown.
+func TestWaitForSessionAsyncBlocksOnOwnWorkUntilDeadline(t *testing.T) {
+	a := newOfflineApp(t)
+	a.StartScheduler(context.Background(), nil)
+
+	if err := a.asyncCoordinator.Register(asyncRec("asy_mine", a.SessionID), []string{"term-1"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	err := a.WaitForSessionAsync(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("WaitForSessionAsync = %v, want context.DeadlineExceeded", err)
+	}
+	// The work is still live: the barrier never cancels or abandons it, so the next
+	// owner can adopt it.
+	if n := a.asyncCoordinator.ActiveCountForSession(a.SessionID); n != 1 {
+		t.Errorf("live session work after the timeout = %d, want 1 (the wait must not mutate it)", n)
+	}
+	if err := a.Shutdown(); err != nil {
+		t.Fatalf("Shutdown after a mid-wait timeout: %v", err)
+	}
+}
+
+// TestWaitForSessionAsyncReturnsWhenOwnWorkClears: the barrier releases as soon as the
+// last of this session's invocations deregisters (which publishGroup does after the
+// completion event is published), not on the next scheduler tick.
+func TestWaitForSessionAsyncReturnsWhenOwnWorkClears(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+	a.StartScheduler(context.Background(), nil)
+
+	if err := a.asyncCoordinator.Register(asyncRec("asy_mine", a.SessionID), []string{"term-1"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		a.asyncCoordinator.Deregister("asy_mine")
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := a.WaitForSessionAsync(ctx); err != nil {
+		t.Fatalf("WaitForSessionAsync = %v, want nil once the work cleared", err)
 	}
 }

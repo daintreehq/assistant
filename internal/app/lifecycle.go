@@ -177,6 +177,71 @@ func (a *App) StartScheduler(ctx context.Context, onAttention func(events []doma
 	return a.scheduler
 }
 
+// asyncQuiesceInterval is how often WaitForSessionAsync re-reads the coordinator's
+// in-memory count. It is deliberately finer than the coordinator's own 1s tick: the
+// check is a map scan under a mutex, and the whole point of the barrier is to hand
+// the run back the instant the last completion is published rather than up to a
+// tick late.
+const asyncQuiesceInterval = 100 * time.Millisecond
+
+// WaitForSessionAsync blocks until every async invocation THIS session created has
+// settled and published, or until ctx is done. It is the barrier a `--run-scheduler`
+// one-shot puts between its turn and Shutdown, and it exists because Shutdown's very
+// first act is to cancel the coordinator — without a wait, a scheduler started for
+// the turn would be torn down before it polled once.
+//
+// It is NOT folded into Shutdown. "Stop safely" and "stay alive until useful work
+// finishes" are different operations: every other caller (cockpit, REPL, daemon,
+// mcp --stdio) outlives its async work by construction and must keep paying nothing
+// for a wait it does not need.
+//
+// The count is session-scoped on purpose. Coordinator.Start adopts every live row in
+// the PROJECT, which is correct — whoever holds the lease supervises everything — but
+// letting an inherited backlog decide when a script exits is not. Inherited work is
+// polled opportunistically while this process holds the lease and simply stays live
+// for the next owner if it outlasts the run.
+//
+// Watchers and timers are excluded by design. A watcher is long-lived and a timer can
+// be scheduled arbitrarily far out, so neither has a "quiescent" state; including
+// them would make --timeout the normal way a flagged run ends. They still tick during
+// the turn and during this wait, and their rows persist for the next owner.
+//
+// Returns nil once quiescent, or ctx.Err() if the bound expired first. It never
+// cancels, abandons, or otherwise mutates work that is still running — an unfinished
+// invocation stays durably live and is adopted by whoever takes the lease next.
+func (a *App) WaitForSessionAsync(ctx context.Context) error {
+	if a.asyncCoordinator == nil {
+		return nil
+	}
+	// Fast path first: the common flagged run starts no async work at all, and it must
+	// not pay for a ticker allocation to learn that.
+	if a.asyncCoordinator.ActiveCountForSession(a.SessionID) == 0 {
+		return nil
+	}
+	debuglog.BootTrace("oneshot.async.wait.started")
+	t := time.NewTicker(asyncQuiesceInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			// One last read before reporting a timeout: the final completion may have
+			// published in the same instant the deadline fired, and "timed out" for work
+			// that actually finished sends the reader hunting a stall that never was.
+			if a.asyncCoordinator.ActiveCountForSession(a.SessionID) == 0 {
+				debuglog.BootTrace("oneshot.async.wait.completed")
+				return nil
+			}
+			debuglog.BootTrace("oneshot.async.wait.cancelled")
+			return ctx.Err()
+		case <-t.C:
+			if a.asyncCoordinator.ActiveCountForSession(a.SessionID) == 0 {
+				debuglog.BootTrace("oneshot.async.wait.completed")
+				return nil
+			}
+		}
+	}
+}
+
 // ClearWatchers tears down ALL live watchers in this session — revokes their
 // grants, cancels them, and resolves their open attention events — for a completely
 // clean slate. Used by /clear, which is now the ONLY wholesale watcher teardown

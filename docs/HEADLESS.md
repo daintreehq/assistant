@@ -88,8 +88,9 @@ Things worth knowing before you drive it:
   A blocked run is reported as blocked: pending approvals ride the run's `poll` response
   and its `nextAction` says so, because "still running" would send you polling harder at
   something that will never move on its own.
-- Unlike a one-shot, an MCP session **does** run the scheduler, so watchers, timers and
-  async futures actually settle while it is open.
+- Unlike a one-shot's default, an MCP session **does** run the scheduler, so watchers,
+  timers and async futures actually settle while it is open. A one-shot can opt into the
+  same shape with `--run-scheduler`.
 
 ### Diagnosing a run
 
@@ -160,9 +161,14 @@ Every knob is a flag, and every flag shadows a trusted env var and wins over it.
 | `--window-id ID` | `DAINTREE_WINDOW_ID` | identity only; no effect on where state is stored |
 | `--project-instructions-file PATH` | — | the file's CONTENT becomes `DAINTREE.md`. Capped at 16 KiB |
 | `--timeout DURATION` | — | one-shot only; `0` means no limit |
+| `--run-scheduler` | — | one-shot only; run the scheduler and await this run's async work. Requires a positive `--timeout` |
 
-`--timeout` is silently ignored on every other route (interactive, `daemon`, `doctor`).
-Only `RunOneShot` consults it. `--prompt-file` follows the same rule: a command word is
+`--timeout` and `--run-scheduler` are silently ignored on every other route
+(interactive, `daemon`, `doctor`) — only `RunOneShot` consults them, and the interactive
+routes already run a scheduler of their own. `--run-scheduler` without a positive
+`--timeout` is rejected at the argument boundary; see
+[Background work in a one-shot is opt-in](#background-work-in-a-one-shot-is-opt-in).
+`--prompt-file` follows the same route rule: a command word is
 chosen before the prompt is, so `--prompt-file - mcp --stdio` serves MCP and never reads
 the stream carrying the protocol.
 
@@ -347,17 +353,53 @@ auto-compaction and the utility tasks are not counted at all. `promptTokens` is 
 *volume* — every round re-sends the conversation — while `contextTokens` is the last
 round's prompt size, which is the figure that actually drives compaction.
 
-### Background work does not run in a one-shot
+### Background work in a one-shot is opt-in
 
-A one-shot never starts the scheduler and never spawns a supervisor daemon. So if the
-turn kicks off asynchronous work — `terminal.run.async`, a watcher, a timer — the tool
-returns its `asy_…` handle, the row is written durably, and then **nothing polls it**.
-That work is adopted by the next process to take the project lease (a cockpit, or
-`daintree-assistant daemon`), not by the run that started it.
+**By default a one-shot does not run the scheduler.** It takes the project lease briefly
+and never spawns a supervisor daemon, so there is no poll loop for background work to
+register with: the async tools fail closed with `ASYNC_UNAVAILABLE` rather than handing
+back a handle nothing will ever settle, and the backend is told `scheduler_active: false`
+so the model plans around the absence instead of into it. A short scripted query pays
+nothing for machinery it will not use.
 
-For a harness this means a one-shot is the wrong shape for "spawn agents and wait". Use
-an in-turn wait (`terminal.awaitAll`) so the work completes inside the turn, give the
-run a `--timeout` generous enough to cover it, or drive a longer-lived session.
+Pass **`--run-scheduler`** to opt in. It starts the scheduler and the async coordinator
+for the life of the run — the same shape `mcp --stdio` already has — before the first
+backend round, so `scheduler_active` is `true` on the round where the model decides
+whether to start background work at all. After the turn, the run stays open until the
+async work **this run started** has settled and its completion has been published, then
+tears everything down and exits.
+
+```bash
+daintree-assistant --json --run-scheduler --timeout 15m \
+  "spawn agents on the three ready worktrees and report when they finish"
+```
+
+`--run-scheduler` **requires a positive `--timeout`**. Settling is not guaranteed — an
+invocation whose terminals stay unreadable does not advance toward expiry — so an
+unbounded flagged run could wait forever. If the bound expires with work still live, the
+run warns, exits `2` (cancelled) with the answer still in `result.content`, and leaves
+the work durably live for the next owner. Nothing is cancelled or abandoned.
+
+Four things are worth knowing before you reach for it:
+
+- **It waits for *this* run's async work only.** The coordinator adopts every live async
+  row in the project when it starts — whoever holds the lease supervises everything — but
+  an inherited backlog never decides how long your script runs. Adopted work is polled
+  opportunistically and stays live for the next owner if it outlasts the run.
+- **Watchers and timers tick, but never hold the run open.** A watcher is long-lived and
+  a timer can be scheduled arbitrarily far out, so neither has a "quiescent" state; if
+  they gated the exit, `--timeout` would become the normal way a flagged run ends. Due
+  work fires during the turn and during the wait; the rows persist either way.
+- **Completions do not come back as tool results.** They land in the durable attention
+  inbox, which the next session reads. The attention callback is deliberately nil for the
+  same reason it is under `mcp --stdio`: a callback with nowhere to render would mark
+  those events delivered and consume them before anyone saw them.
+- **It still spawns no daemon.** The scheduler is in-process and joined at exit; the
+  lease is released as the process ends. A flagged one-shot cannot litter the machine.
+
+Without the flag, a one-shot remains the wrong shape for "spawn agents and wait". Use an
+in-turn wait (`terminal.awaitAll`) so the work completes inside the turn, or drive a
+longer-lived session.
 
 ## Multi-turn
 

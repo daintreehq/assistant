@@ -340,8 +340,9 @@ func (c *Coordinator) Started() bool {
 
 // Register adopts a persisted invocation into the live poll set. The caller has
 // already inserted the row and performed the initial side effect. Fails when
-// the coordinator is not running (a one-shot/non-interactive session has no
-// foreground poll loop, so accepting the work would silently strand it). The
+// the coordinator is not running (a session with no foreground poll loop —
+// a plain one-shot, which starts one only under --run-scheduler — would
+// silently strand the work). The
 // started check and the map insert happen under ONE stateMu hold so a
 // concurrent Stop can never slip between them and strand a registered-but-
 // never-polled invocation (lock order: stateMu → mu).
@@ -545,6 +546,29 @@ func (c *Coordinator) ActiveCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.active)
+}
+
+// ActiveCountForSession reports how many of the polled invocations were created by
+// sessionID. It exists for the ONE caller that must not wait on the whole project:
+// a `--run-scheduler` one-shot, which holds the run open until its own async work
+// settles and then exits. Start adopts every live row in the project (deliberately —
+// whoever holds the lease supervises everything), so a plain ActiveCount would let an
+// unrelated backlog from a previous session decide how long a script runs. Identity,
+// not a baseline count: rows register and deregister concurrently, so a before/after
+// delta cannot tell "mine finished" from "someone else's did".
+func (c *Coordinator) ActiveCountForSession(sessionID string) int {
+	if sessionID == "" {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, t := range c.active {
+		if t.rec.SessionID == sessionID {
+			n++
+		}
+	}
+	return n
 }
 
 // Tick runs one pass. Safe to call directly in tests; the no-overlap guard

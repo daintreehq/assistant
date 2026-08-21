@@ -943,3 +943,75 @@ func TestCoordinatorAdoptOrphanedStartingRunAsync(t *testing.T) {
 		t.Fatalf("want one orphaned-startup attention item, got %+v", evs)
 	}
 }
+
+// TestActiveCountForSessionIsolatesForeignWork: the session-scoped count is what a
+// --run-scheduler one-shot holds its exit on, so it must see its OWN invocations and
+// nothing else. Start adopts every live row in the project (correctly — whoever holds
+// the lease supervises everything), and a plain ActiveCount would therefore let an
+// unrelated backlog from a previous session decide how long a script runs.
+func TestActiveCountForSessionIsolatesForeignWork(t *testing.T) {
+	h := newHarness([]StatusReadResult{
+		frame(true, map[string]TerminalStatus{"term-1": {AgentState: "working"}}),
+	})
+
+	mine := inv("asy_mine", "run_a", 1_000, 100_000) // SessionID "ses_test"
+	theirs := inv("asy_theirs", "run_b", 1_000, 100_000)
+	theirs.SessionID = "ses_other"
+	for _, rec := range []domain.AsyncInvocationRecord{mine, theirs} {
+		if err := h.c.Register(rec, []string{"term-1"}); err != nil {
+			t.Fatalf("Register %s: %v", rec.ID, err)
+		}
+	}
+
+	if got := h.c.ActiveCount(); got != 2 {
+		t.Fatalf("ActiveCount = %d, want 2 (the project-wide count must still see both)", got)
+	}
+	if got := h.c.ActiveCountForSession("ses_test"); got != 1 {
+		t.Errorf("ActiveCountForSession(ses_test) = %d, want 1", got)
+	}
+	if got := h.c.ActiveCountForSession("ses_other"); got != 1 {
+		t.Errorf("ActiveCountForSession(ses_other) = %d, want 1", got)
+	}
+	if got := h.c.ActiveCountForSession("ses_nobody"); got != 0 {
+		t.Errorf("ActiveCountForSession(ses_nobody) = %d, want 0", got)
+	}
+	// An empty session id must never match everything — that would turn the barrier
+	// into a project-wide drain the moment a caller forgot to set an id.
+	if got := h.c.ActiveCountForSession(""); got != 0 {
+		t.Errorf("ActiveCountForSession(\"\") = %d, want 0", got)
+	}
+}
+
+// TestActiveCountForSessionDropsToZeroOnlyAfterPublish: quiescence must mean "settled
+// AND published", not "the row went terminal". The coordinator deregisters an
+// invocation as the last step of publishGroup, so counting registrations is what keeps
+// a one-shot alive through the publish that wakes the next session.
+func TestActiveCountForSessionDropsToZeroOnlyAfterPublish(t *testing.T) {
+	h := newHarness([]StatusReadResult{
+		frame(true, map[string]TerminalStatus{"term-1": {AgentState: "working"}}),
+		frame(true, map[string]TerminalStatus{"term-1": {AgentState: "waiting"}}),
+	})
+	if err := h.c.Register(inv("asy_1", "run_a", 1_000, 100_000), []string{"term-1"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	ctx := context.Background()
+	h.c.Tick(ctx, 2_000) // working
+	if got := h.c.ActiveCountForSession("ses_test"); got != 1 {
+		t.Fatalf("count while working = %d, want 1", got)
+	}
+	h.c.Tick(ctx, 3_000) // settled into the coalescing window, not yet published
+	if len(h.queue.all()) != 0 {
+		t.Fatal("published before the grace elapsed")
+	}
+	if got := h.c.ActiveCountForSession("ses_test"); got != 1 {
+		t.Errorf("count while settling = %d, want 1 (the completion has not been published yet)", got)
+	}
+	h.c.Tick(ctx, 6_000) // grace passed → publish → deregister
+	if len(h.queue.all()) != 1 {
+		t.Fatalf("published %d events, want 1", len(h.queue.all()))
+	}
+	if got := h.c.ActiveCountForSession("ses_test"); got != 0 {
+		t.Errorf("count after publish = %d, want 0", got)
+	}
+}

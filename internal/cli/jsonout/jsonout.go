@@ -169,6 +169,28 @@ func (s *Sink) AssistantCancelled(content string) {
 	s.emit("assistant:cancelled", map[string]any{"content": content})
 }
 
+// CancelRun marks the RUN cancelled without touching the turn. It is for a bound
+// that expires AFTER the assistant already finished — a --run-scheduler one-shot
+// whose --timeout fires while it waits for async work to settle — where the answer
+// is real and must survive into the terminal `result` line.
+//
+// Deliberately not AssistantCancelled: that emits an `assistant:cancelled` event,
+// and a consumer that already saw `assistant:end` for this turn would then see two
+// terminal assistant events for one turn. This only moves the run-level status and
+// exit code, so the cancellation shows up exactly once, in `result`.
+//
+// It never downgrades a run that already failed: an error status carries a message
+// and a non-zero code that say more than "cancelled" does.
+func (s *Sink) CancelRun() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.status == domain.JSONStatusError {
+		return
+	}
+	s.status = domain.JSONStatusCancelled
+	s.exitCode = domain.OneShotExitCode.Cancelled
+}
+
 // Interjection emits a mid-turn user message as its own JSONL line (flushing buffered
 // prose first so it lands after the round it interrupted).
 func (s *Sink) Interjection(text string) {

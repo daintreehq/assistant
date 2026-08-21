@@ -86,6 +86,14 @@ type Options struct {
 	// SIGINT and reports cancelled rather than being killed mid-write.
 	Timeout time.Duration
 
+	// RunScheduler opts a one-shot into running the scheduler + async coordinator for
+	// the life of the run, matching what `mcp --stdio` and the cockpit already do. It
+	// is off by default because taking the lease and ticking is a bigger commitment
+	// than a scripted query should make by accident; the flag path requires a positive
+	// Timeout so an unsettleable job cannot hang a harness forever. Routing-only, like
+	// Timeout — never carried into config.
+	RunScheduler bool
+
 	// Cockpit is the runner seam (defaults to DefaultCockpitRunner when nil).
 	Cockpit CockpitRunner
 }
@@ -523,6 +531,25 @@ func RunOneShot(ctx context.Context, opts Options) int {
 	runErr := func() error {
 		st := a.ConnectMcp(ctx)
 		debuglog.BootTrace("oneshot.mcp.connect.done")
+		// The scheduler starts BEFORE the first backend round, and that ordering is the
+		// whole feature. PromptContext derives scheduler_active from whether it is
+		// running, so starting later would tell the model background work is unavailable
+		// on the very round where it decides whether to start any; and asyncPreflight
+		// rejects the async tools outright without a live coordinator, so a late start
+		// leaves them failing for the turn that needed them.
+		//
+		// Skipped when the bound already expired: Coordinator.Start adopts rows and flips
+		// its started flag synchronously, so on a dead context it would advertise a poll
+		// loop whose goroutine exits on its first select.
+		if opts.RunScheduler && ctx.Err() == nil {
+			// nil attention callback, for the same reason mcp --stdio passes nil: a non-nil
+			// one enables the scheduler's notifier, which marks attention-or-higher events
+			// delivered as it invokes them — so a callback with nowhere to render would
+			// consume exactly the async completions the durable inbox exists to hand to
+			// the next session.
+			a.StartScheduler(ctx, nil)
+			debuglog.BootTrace("oneshot.scheduler.started")
+		}
 		// The session header goes out AFTER the MCP connect and BEFORE the first round.
 		// After, because mcpConnected is the field that separates a real answer from one
 		// produced in degraded local mode, and a header that guessed would be worse than
@@ -557,6 +584,37 @@ func RunOneShot(ctx context.Context, opts Options) int {
 		reportError(runErr)
 	}
 
+	// waitCancelled is the console path's equivalent of Sink.CancelRun: the turn itself
+	// succeeded, only the async barrier ran out of time, and the exit code below has to
+	// say cancelled without a turn-level cancellation event to read it from.
+	waitCancelled := false
+	// Hold the run open until the async work THIS session started has settled and
+	// published. Without it Shutdown — whose first act is cancelling the coordinator —
+	// would tear down a scheduler that never polled, and the handles the turn just
+	// handed out would be abandoned by the process that created them.
+	//
+	// Runs even when the turn reported a failure: a tool that already accepted work and
+	// returned a handle deserves supervision regardless of how the round ended. Skipped
+	// entirely when unflagged, so the default path adds no call at all.
+	if opts.RunScheduler {
+		if werr := a.WaitForSessionAsync(ctx); werr != nil {
+			// The bound expired with work still live. Say so, and mark the RUN cancelled —
+			// but at the run level only, so an answer that did complete survives into the
+			// terminal line. The work itself stays durably live for the next owner.
+			msg := fmt.Sprintf("timed out after %s waiting for async work to settle; it stays live for the next session", opts.Timeout)
+			if !timedOut() {
+				msg = "stopped waiting for async work to settle; it stays live for the next session"
+			}
+			if sink != nil {
+				sink.Warn(msg)
+				sink.CancelRun()
+			} else {
+				stderrR.Warn(msg)
+				waitCancelled = true
+			}
+		}
+	}
+
 	// Shutdown BEFORE the terminal result line; route any shutdown error off stdout.
 	if serr := a.Shutdown(); serr != nil {
 		if sink != nil {
@@ -577,7 +635,7 @@ func RunOneShot(ctx context.Context, opts Options) int {
 	if runErr != nil || cs.Failed() {
 		return domain.OneShotExitCode.Error
 	}
-	if cs.Cancelled() {
+	if cs.Cancelled() || waitCancelled {
 		return domain.OneShotExitCode.Cancelled
 	}
 	return domain.OneShotExitCode.Success
