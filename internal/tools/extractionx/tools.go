@@ -217,7 +217,7 @@ type extractArgs struct {
 	baseArgs
 }
 
-// sharedBaseProps are the JSON-schema properties common to every extract tool. The
+// sharedBaseProps renders the JSON-schema properties common to every extract tool. The
 // output-shape fields (format/jsonSchema) are NOT here — output shape is fixed per
 // tool (terminal.extract = text, terminal.extract.json = structured).
 //
@@ -230,7 +230,34 @@ type extractArgs struct {
 // ({} stays valid: zero properties, the coerced settled default); modelJudge is
 // deliberately ABSENT from its properties because extraction rejects it
 // (rejectModelJudge) — the schema should make it ungenerable, not just documented.
-var sharedBaseProps = `
+//
+// leafDocs controls only the per-LEAF description prose of `wait`, never structure —
+// the same lever internal/tools/watcher uses across stopWhen/alertWhen, and for the
+// same reason. This block is rendered TWICE (terminal.extract + terminal.extract.json)
+// and the inventory ships on every model round, so documenting each leaf twice was
+// ~1.2 KB of pure duplication per turn. terminal.extract projects FIRST (deps.go
+// registration order, which is the projection order) and carries the full prose; the
+// .json variant points at it.
+//
+// What stays in BOTH copies, terse or not:
+//   - every structural keyword (type/enum/minLength/minimum/minItems/minProperties/
+//     maxProperties/additionalProperties/items) — pinned leaf by leaf by
+//     TestExtractWaitCarriesTheFullUnion;
+//   - the `wait` CONTAINER description, which carries the stateIs:'waiting' trap;
+//   - the COMBINED-tail behaviour on contains/regex, because .json is the variant
+//     reached FOR multi-terminal work and is where straddling a boundary bites;
+//   - the no-modelJudge constraint on the combinators, and the "not is a property,
+//     not the JSON-Schema keyword" trap.
+//
+// Those are the hard-won parts. Terseness may only take restatement.
+func sharedBaseProps(leafDocs bool) string {
+	doc := func(verbose, terse string) string {
+		if leafDocs {
+			return verbose
+		}
+		return terse
+	}
+	return `
     "terminalIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "maxItems": 16, "uniqueItems": true, "description": "Daintree terminal id(s) to read and extract from — full terminal-<uuid> ids exactly as listed (a unique prefix resolves as a fallback, but never invent or abbreviate ids)." },
     "wait": {
       "type": "object",
@@ -238,26 +265,27 @@ var sharedBaseProps = `
       "additionalProperties": false,
       "description": "Poll until this holds before extracting; omit to read once. EXACTLY ONE key below, or {} for a genuine FINISH — prefer {} over stateIs:'waiting', which a pre-start prompt also matches. {} is single-terminal; for a cohort use terminal.awaitAll. No modelJudge here.",
       "properties": {
-        "stateIs": { "type": "string", "enum": ["idle", "working", "waiting", "directing", "completed", "exited"], "description": "Fires when the agent state equals this value exactly. Do NOT use stateIs:'waiting' to mean finished — pass {} instead (it confirms a real finish)." },
-        "runtimeStatusIs": { "type": "string", "enum": ["running", "exited"], "description": "Fires on the coarse terminal runtime status." },
-        "contains": { "type": "string", "minLength": 1, "description": "Fires when the terminal tail contains this literal substring (non-empty). Matches the COMBINED tail across multiple terminalIds." },
-        "regex": { "type": "string", "minLength": 1, "description": "Fires when the tail matches this Go/RE2 regular expression (must compile). Matches the COMBINED tail across multiple terminalIds, so it can straddle a terminal boundary." },
-        "noOutputForMs": { "type": "integer", "minimum": 1, "description": "Fires once no NEW output has appeared for this many ms." },
-        "all": { "type": "array", "minItems": 1, "items": { "type": "object", "minProperties": 1, "maxProperties": 1 }, "description": "AND — every nested condition (each the same one-key WatchCondition shape; modelJudge is not supported anywhere in the tree) must hold." },
-        "any": { "type": "array", "minItems": 1, "items": { "type": "object", "minProperties": 1, "maxProperties": 1 }, "description": "OR — at least one nested condition (same one-key shape; no modelJudge anywhere) holds." },
-        "not": { "type": "object", "minProperties": 1, "maxProperties": 1, "description": "Negates ONE nested condition (same one-key shape; no modelJudge anywhere). This is a property named not, NOT the JSON-Schema keyword." }
+        "stateIs": { "type": "string", "enum": ["idle", "working", "waiting", "directing", "completed", "exited"], "description": "` + doc("Fires when the agent state equals this value exactly. Do NOT use stateIs:'waiting' to mean finished — pass {} instead (it confirms a real finish).", "Agent state equals this value exactly.") + `" },
+        "runtimeStatusIs": { "type": "string", "enum": ["running", "exited"], "description": "` + doc("Fires on the coarse terminal runtime status.", "Coarse terminal runtime status.") + `" },
+        "contains": { "type": "string", "minLength": 1, "description": "` + doc("Fires when the terminal tail contains this literal substring (non-empty). Matches the COMBINED tail across multiple terminalIds.", "Tail contains this literal substring. Matches the COMBINED tail across terminalIds.") + `" },
+        "regex": { "type": "string", "minLength": 1, "description": "` + doc("Fires when the tail matches this Go/RE2 regular expression (must compile). Matches the COMBINED tail across multiple terminalIds, so it can straddle a terminal boundary.", "Tail matches this Go/RE2 regex (must compile). Matches the COMBINED tail, so it can straddle a terminal boundary.") + `" },
+        "noOutputForMs": { "type": "integer", "minimum": 1, "description": "` + doc("Fires once no NEW output has appeared for this many ms.", "No new output for this many ms.") + `" },
+        "all": { "type": "array", "minItems": 1, "items": { "type": "object", "minProperties": 1, "maxProperties": 1 }, "description": "` + doc("AND — every nested condition (each the same one-key WatchCondition shape; modelJudge is not supported anywhere in the tree) must hold.", "AND over nested one-key conditions; no modelJudge anywhere.") + `" },
+        "any": { "type": "array", "minItems": 1, "items": { "type": "object", "minProperties": 1, "maxProperties": 1 }, "description": "` + doc("OR — at least one nested condition (same one-key shape; no modelJudge anywhere) holds.", "OR over nested one-key conditions; no modelJudge anywhere.") + `" },
+        "not": { "type": "object", "minProperties": 1, "maxProperties": 1, "description": "` + doc("Negates ONE nested condition (same one-key shape; no modelJudge anywhere). This is a property named not, NOT the JSON-Schema keyword.", "Negates ONE nested one-key condition; no modelJudge anywhere. A property named not, NOT the JSON-Schema keyword.") + `" }
       }
     },
     "pollIntervalMs": { "type": "integer", "minimum": 0, "maximum": 60000, "default": 2000, "description": "Delay between polls in wait mode, in ms." },
     "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 120, "default": 30, "description": "Hard cap on poll attempts in wait mode." },
     "tailBytes": { "type": "integer", "minimum": 1, "maximum": 100000, "default": 12000, "description": "Max characters of each terminal's tail fed to the model." },
     "maxTokens": { "type": "integer", "minimum": 1, "maximum": 2000, "default": 1024, "description": "Max tokens the extraction model may produce. For a verbatim/full-reproduction instruction prefer terminal.read (raw scrollback, no model, no cap)." }`
+}
 
 var extractSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "instruction": { "type": "string", "description": "What to extract, as plain TEXT (a number, a name, a yes/no, an agent's answer). Omit to run a wait gate only. Over several terminalIds this MERGES them into ONE answer — for named fields, or one answer per terminal, use terminal.extract.json." },` + sharedBaseProps + `
+    "instruction": { "type": "string", "description": "What to extract, as plain TEXT (a number, a name, a yes/no, an agent's answer). Omit to run a wait gate only. Over several terminalIds this MERGES them into ONE answer — for named fields, or one answer per terminal, use terminal.extract.json." },` + sharedBaseProps(true) + `
   },
   "required": ["terminalIds"]
 }`)
@@ -392,7 +420,7 @@ var extractJSONSchema = json.RawMessage(`{
   "additionalProperties": false,
   "properties": {
     "instruction": { "type": "string", "description": "What to extract as STRUCTURED JSON (e.g. each player's vote and reasoning)." },
-    "jsonSchema": { "type": "string", "description": "Required. A REAL JSON Schema (the kind you put under a tool's \"parameters\"), NOT an example value. Accepted keywords ONLY: type, properties, required, items, enum, const, additionalProperties, anyOf, oneOf, allOf, minimum, maximum, exclusiveMinimum, exclusiveMaximum, minLength, maxLength, minItems, maxItems, uniqueItems. Any other key is REJECTED — no description, title, default, format, examples, $ref or $schema anywhere. Put explanation in instruction. For one entry per terminal, make the value an array of objects each carrying its own terminalId." },` + sharedBaseProps + `
+    "jsonSchema": { "type": "string", "description": "Required. A REAL JSON Schema (the kind you put under a tool's \"parameters\"), NOT an example value. Accepted keywords ONLY: type, properties, required, items, enum, const, additionalProperties, anyOf, oneOf, allOf, minimum, maximum, exclusiveMinimum, exclusiveMaximum, minLength, maxLength, minItems, maxItems, uniqueItems. Any other key is REJECTED — no description, title, default, format, examples, $ref or $schema anywhere. Put explanation in instruction. For one entry per terminal, make the value an array of objects each carrying its own terminalId." },` + sharedBaseProps(false) + `
   },
   "required": ["terminalIds", "instruction", "jsonSchema"]
 }`)
