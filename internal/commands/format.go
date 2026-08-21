@@ -41,6 +41,26 @@ func FormatRunTimeline(events []domain.RunEventRecord, auditRows []domain.AuditR
 	for _, a := range auditRows {
 		auditByID[a.ID] = a
 	}
+	// A run recorded by a build that emits skill:decision rows gets its skill story from
+	// those rows ALONE. The eager skill:loaded row is a per-attempt DELTA cue: it names
+	// only what newly loaded, never what was retained or auto-paired in, and on a retried
+	// round it can name a skill the committed round never kept. Showing both would put a
+	// non-authoritative line above the authoritative one; showing only the eager row (the
+	// pre-#354 behaviour) is what this replaces. Older runs have no decision rows, so they
+	// keep rendering skill:loaded — dropping it there would blank their skill story.
+	haveDecisions := false
+	for _, ev := range events {
+		if ev.Type == "skill:decision" {
+			haveDecisions = true
+			break
+		}
+	}
+	// The active set last SHOWN, so an unchanged round adds nothing. A turn is many
+	// rounds and the set usually holds across all of them; a line per round would bury
+	// the tool calls this replay exists to show.
+	var shownActive []string
+	activeShown := false
+
 	var lines []string
 	for _, ev := range events {
 		payload := parseEventPayload(ev.Payload)
@@ -112,21 +132,34 @@ func FormatRunTimeline(events []domain.RunEventRecord, auditRows []domain.AuditR
 		case "error":
 			lines = append(lines, "⚠ error: "+str(payload["message"]))
 		case "skill:loaded":
-			// A server-side skill load: surface the runbook name(s) so the replay shows
-			// when a skill entered the prompt (not a bare "· skill:loaded").
+			// Superseded by the committed decision whenever this run recorded one; see
+			// haveDecisions above. Otherwise (a pre-#354 run) it is the only skill signal
+			// there is, so surface the runbook name(s) rather than a bare "· skill:loaded".
+			if haveDecisions {
+				continue
+			}
 			if titles := strList(payload["titles"]); len(titles) > 0 {
 				lines = append(lines, "✦ skill loaded: "+strings.Join(titles, ", "))
 			}
 		case "skill:decision":
-			// Persisted every committed round, rendered almost never. A clean decision
-			// only repeats what the ✦ skill loaded row above already said, and a line per
-			// round would bury the tool calls this replay exists to show. The one case
-			// worth a human's attention is a selector that FAILED OPEN: the round kept
-			// the prior active set without deciding on it, so the run may have used
-			// exactly the right runbook for entirely the wrong reason.
-			if line := degradedSkillLine(payload); line != "" {
-				lines = append(lines, line)
+			// Persisted every committed round; rendered when it says something new. Two
+			// cases qualify. A CHANGED active set is the run's actual skill story —
+			// including the retained and auto-paired skills the delta cue never named. A
+			// DEGRADED selector always is: it failed open and kept the prior set without
+			// deciding on it, so the round may carry exactly the right runbook for
+			// entirely the wrong reason, and `active` alone looks perfectly healthy.
+			active := skillRefTitles(payload["active"])
+			degraded := selectorDegraded(payload)
+			changed := !activeShown || !equalStringSlices(active, shownActive)
+			if !degraded && !(changed && len(active) > 0) {
+				continue
 			}
+			shownActive, activeShown = active, true
+			if degraded {
+				lines = append(lines, degradedSkillLine(active, payload))
+				continue
+			}
+			lines = append(lines, "✦ skills active: "+strings.Join(active, ", "))
 		case "info":
 			lines = append(lines, "· "+str(payload["message"]))
 		default:
@@ -327,26 +360,45 @@ func indent(s string, pad int) string {
 	return strings.Join(lines, "\n")
 }
 
-// degradedSkillLine renders a skill:decision row ONLY when its selector degraded,
-// returning "" otherwise so a clean per-round decision leaves no trace in the replay.
-// The active set is named because "which runbook did it fall open into" is the whole
-// question a reader has at that point.
-func degradedSkillLine(payload map[string]any) string {
+// selectorDegraded reads the fail-open flag out of a DB-replayed payload. Every step is
+// guarded: these rows are decoded from arbitrary stored JSON, not built in-process.
+func selectorDegraded(payload map[string]any) bool {
 	sel, ok := payload["selector"].(map[string]any)
 	if !ok {
-		return ""
+		return false
 	}
-	if degraded, _ := sel["degraded"].(bool); !degraded {
-		return ""
-	}
+	degraded, _ := sel["degraded"].(bool)
+	return degraded
+}
+
+// degradedSkillLine renders the fail-open warning. The active set is named because
+// "which runbook did it fall open INTO" is the reader's whole next question, and the
+// selector's reason because that is the diagnostic payload.
+func degradedSkillLine(active []string, payload map[string]any) string {
 	line := "⚠ skill selector degraded (reused the prior set)"
-	if titles := skillRefTitles(payload["active"]); len(titles) > 0 {
-		line += ": " + strings.Join(titles, ", ")
+	if len(active) > 0 {
+		line += ": " + strings.Join(active, ", ")
 	}
-	if reason := strings.TrimSpace(str(sel["reason"])); reason != "" {
-		line += " — " + reason
+	if sel, ok := payload["selector"].(map[string]any); ok {
+		if reason := strings.TrimSpace(str(sel["reason"])); reason != "" {
+			line += " — " + reason
+		}
 	}
 	return line
+}
+
+// equalStringSlices reports whether two rendered label lists are identical, order
+// included — the backend's ranking is part of what changed.
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // skillRefTitles coerces a decoded array of {id,title} skill objects to display labels,

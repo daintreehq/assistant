@@ -144,18 +144,19 @@ func TestSkillDecisionFromCopiesRefsVerbatim(t *testing.T) {
 		},
 	})
 
-	if len(got.Active) != 3 {
-		t.Fatalf("active = %#v, want all 3 refs preserved including the malformed one", got.Active)
+	// Assert the WHOLE projection, field by field. A subset check here would pass an
+	// implementation that dropped every title, or returned an empty NewlyLoaded.
+	wantActive := []SkillRef{
+		{ID: "b", Title: "Beta"}, // order preserved: the backend's ranking is information
+		{ID: "a"},                // title NOT back-filled from the id
+		{},                       // malformed ref NOT dropped
 	}
-	// Order preserved: the backend's ranking is information.
-	if got.Active[0].ID != "b" || got.Active[1].ID != "a" {
-		t.Fatalf("active order changed: %#v", got.Active)
+	if !equalSkillRefs(got.Active, wantActive) {
+		t.Fatalf("active = %#v, want %#v", got.Active, wantActive)
 	}
-	if got.Active[1].Title != "" {
-		t.Fatalf("active[1].Title = %q; the id must not be laundered into the title", got.Active[1].Title)
-	}
-	if got.Active[2] != (SkillRef{}) {
-		t.Fatalf("active[2] = %#v, want the malformed ref preserved as-is", got.Active[2])
+	wantNewly := []SkillRef{{ID: "a"}}
+	if !equalSkillRefs(got.NewlyLoaded, wantNewly) {
+		t.Fatalf("newlyLoaded = %#v, want %#v", got.NewlyLoaded, wantNewly)
 	}
 
 	if got.Selector.Confidence == nil || *got.Selector.Confidence != 0.42 {
@@ -163,6 +164,112 @@ func TestSkillDecisionFromCopiesRefsVerbatim(t *testing.T) {
 	}
 	if got.Selector.TaskType != "review" || got.Selector.Reason != "because" || !got.Selector.Ran {
 		t.Fatalf("selector = %#v", got.Selector)
+	}
+	if got.Selector.Degraded {
+		t.Fatalf("selector.Degraded invented: %#v", got.Selector)
+	}
+}
+
+func equalSkillRefs(a, b []SkillRef) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Duplicate ids and characters that need JSON escaping are carried through untouched —
+// the projection must not dedupe, reorder, or sanitize what the backend said.
+func TestSkillDecisionFromPreservesDuplicatesAndEscapableText(t *testing.T) {
+	got := skillDecisionFrom(backend.SkillsBlock{
+		Active: []backend.SkillRef{
+			{ID: "dup", Title: "First"},
+			{ID: "dup", Title: "Second"},
+			{ID: `quote"back\slash`, Title: "line\nbreak — ünïcode"},
+		},
+	})
+	if len(got.Active) != 3 {
+		t.Fatalf("duplicate ids were collapsed: %#v", got.Active)
+	}
+	if got.Active[0].Title != "First" || got.Active[1].Title != "Second" {
+		t.Fatalf("duplicate ids lost their distinct titles: %#v", got.Active)
+	}
+	if got.Active[2].ID != `quote"back\slash` || got.Active[2].Title != "line\nbreak — ünïcode" {
+		t.Fatalf("escapable text was altered: %#v", got.Active[2])
+	}
+}
+
+// divergentSkillBackend fires the EAGER cue with one skill, then commits meta describing
+// a DIFFERENT active set — the retry shape, where attempt 1 loaded something the
+// committed attempt did not keep. Session must wire the decision to the committed meta,
+// not to the eager cue.
+type divergentSkillBackend struct{}
+
+func (divergentSkillBackend) RespondStream(_ context.Context, _ backend.RespondRequest, cb backend.StreamCallbacks) (backend.RespondResult, error) {
+	// What attempt 1 eagerly reported, before it failed and was retried.
+	eager := []backend.SkillRef{{ID: "abandoned", Title: "Abandoned by the retry"}}
+	if cb.OnSkillLoaded != nil {
+		cb.OnSkillLoaded(eager)
+	}
+	// What the attempt that actually committed selected.
+	meta := backend.StreamMeta{
+		State: "dst1.committed",
+		Skills: backend.SkillsBlock{
+			Active:      []backend.SkillRef{{ID: "committed", Title: "Committed runbook"}},
+			NewlyLoaded: nil,
+			Selector:    backend.SelectorMeta{Ran: true},
+		},
+	}
+	if cb.OnMeta != nil {
+		cb.OnMeta(meta)
+	}
+	if cb.OnContent != nil {
+		cb.OnContent("answer")
+	}
+	return backend.RespondResult{
+		Meta:    meta,
+		Message: backend.RespondMessage{Role: "assistant", Content: "answer"},
+	}, nil
+}
+
+func (divergentSkillBackend) RunTask(context.Context, backend.TaskRequest) (backend.TaskResult, error) {
+	return backend.TaskResult{}, nil
+}
+
+// The authoritative-source guarantee. Wiring the decision to the eager refs would be an
+// easy and invisible mistake — both callbacks carry []backend.SkillRef — and it would
+// silently make the event report a selection the round never used.
+func TestSkillDecisionSourcedFromCommittedMetaNotEagerCue(t *testing.T) {
+	sink := &decisionSink{}
+	r := &fakeRouter{results: []models.ChatResult{{Content: "unused"}}}
+	deps := baseDeps(r, &fakeTools{})
+	deps.Backend = divergentSkillBackend{}
+	deps.Events = sink
+	s := NewSession(deps)
+
+	if _, err := s.Send(context.Background(), "go", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if sink.loads != 1 {
+		t.Fatalf("eager SkillLoaded fired %d time(s), want 1 — the fixture is not "+
+			"exercising the divergence", sink.loads)
+	}
+	if len(sink.decisions) != 1 {
+		t.Fatalf("SkillDecision fired %d time(s), want exactly 1", len(sink.decisions))
+	}
+	got := sink.decisions[0]
+	if len(got.Active) != 1 || got.Active[0].ID != "committed" {
+		t.Fatalf("active = %#v, want the COMMITTED set; the decision is wired to the "+
+			"eager cue rather than to the committed meta", got.Active)
+	}
+	for _, ref := range got.Active {
+		if ref.ID == "abandoned" {
+			t.Fatal("the abandoned attempt's skill leaked into the committed decision")
+		}
 	}
 }
 

@@ -109,6 +109,59 @@ func TestPump_SkillLoadedDoesNotDisturbStreamingProse(t *testing.T) {
 	}
 }
 
+// Inertness in the strict sense: a decision arriving BETWEEN two tokens must not flush
+// the coalescer. Buffering A, emitting the decision, then buffering B has to yield ONE
+// token event carrying A+B — an implementation that called emit() would split it in two
+// and move the flush boundary for something that draws nothing.
+func TestPump_SkillDecisionDoesNotFlushTheTokenCoalescer(t *testing.T) {
+	p := newEventPump()
+	p.AssistantToken("first half ")
+	p.SkillDecision(agent.SkillDecisionEvent{
+		Active:   []agent.SkillRef{{ID: "supervise", Title: "Supervise a fleet of agents"}},
+		Selector: agent.SkillSelectorOutcome{Ran: true, Degraded: true},
+	})
+	p.AssistantToken("second half")
+
+	var chunks []string
+	for _, ev := range drainToSentinel(t, p) {
+		if ev.kind != pumpTokens {
+			t.Fatalf("a skill decision put a %v event into a streaming turn; it must be inert", ev.kind)
+		}
+		if strings.Contains(ev.text, "Supervise a fleet") {
+			t.Fatalf("a skill title reached the reducer as prose: %q", ev.text)
+		}
+		chunks = append(chunks, ev.text)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("tokens arrived in %d chunk(s) (%q); a decision between them flushed the "+
+			"coalescer", len(chunks), chunks)
+	}
+	if chunks[0] != "first half second half" {
+		t.Fatalf("coalesced text = %q, want the two halves joined", chunks[0])
+	}
+}
+
+// The same strict property for the eager cue, which previously only pinned "no non-token
+// event" with the token placed BEFORE the skill event — a flush at the skill event would
+// have passed that.
+func TestPump_SkillLoadedDoesNotFlushTheTokenCoalescer(t *testing.T) {
+	p := newEventPump()
+	p.AssistantToken("first half ")
+	p.SkillLoaded([]string{"Supervise a fleet of agents"})
+	p.AssistantToken("second half")
+
+	var chunks []string
+	for _, ev := range drainToSentinel(t, p) {
+		if ev.kind != pumpTokens {
+			t.Fatalf("a skill load put a %v event into a streaming turn", ev.kind)
+		}
+		chunks = append(chunks, ev.text)
+	}
+	if len(chunks) != 1 || chunks[0] != "first half second half" {
+		t.Fatalf("tokens = %q; a skill load flushed the coalescer", chunks)
+	}
+}
+
 // A skill load reaching the sink mid-turn leaves the rendered turn byte-identical: no
 // card, and no prose seal (which would split one paragraph into two steps and change
 // spacing even if the card itself drew nothing).

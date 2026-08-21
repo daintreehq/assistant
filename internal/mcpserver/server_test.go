@@ -717,10 +717,22 @@ func TestRunEventsReachTheCaller(t *testing.T) {
 	if !decision.SkillsDegraded {
 		t.Error("skillsDegraded lost; a fail-open round would read as a clean one")
 	}
-	// The marker is omitted everywhere else, so it can never be read off an unrelated event.
+	// The marker must be OMITTED from unrelated events, not merely false — a decoded
+	// bool cannot tell those apart, so assert on the raw JSON keys.
 	for _, e := range run.Events {
-		if e.Type != "skill:decision" && e.SkillsDegraded {
-			t.Errorf("skillsDegraded set on a %q event", e.Type)
+		if e.Type == "skill:decision" {
+			continue
+		}
+		raw, err := json.Marshal(e)
+		if err != nil {
+			t.Fatalf("marshal %q event: %v", e.Type, err)
+		}
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &keys); err != nil {
+			t.Fatalf("decode %q event: %v", e.Type, err)
+		}
+		if _, present := keys["skillsDegraded"]; present {
+			t.Errorf("skillsDegraded present on a %q event: %s", e.Type, raw)
 		}
 	}
 

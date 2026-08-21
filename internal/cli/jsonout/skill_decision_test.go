@@ -2,7 +2,8 @@ package jsonout
 
 import (
 	"bytes"
-	"encoding/json"
+	"math"
+	"sort"
 	"testing"
 
 	"github.com/daintreehq/assistant/internal/agent"
@@ -133,7 +134,7 @@ func TestSkillDecisionEmptySetsAreArraysAndConfidenceIsNull(t *testing.T) {
 	s.SkillDecision(agent.SkillDecisionEvent{
 		Active:      []agent.SkillRef{},
 		NewlyLoaded: []agent.SkillRef{},
-		Selector:    agent.SkillSelectorOutcome{Ran: false, Reason: "selector unavailable"},
+		Selector:    agent.SkillSelectorOutcome{}, // zero value: every field must still appear
 	})
 
 	raw := buf.String()
@@ -145,20 +146,58 @@ func TestSkillDecisionEmptySetsAreArraysAndConfidenceIsNull(t *testing.T) {
 	}
 
 	line := decodeOne(t, bytes.NewBufferString(raw))
-	sel, _ := line["selector"].(map[string]any)
+
+	// The FULL key set, so an added omitempty (or a new stray field) fails here rather
+	// than silently changing the contract a consumer parses.
+	wantTop := map[string]bool{"type": true, "ts": true, "seq": true,
+		"active": true, "newlyLoaded": true, "selector": true}
+	assertExactKeys(t, "line", line, wantTop)
+
+	sel, ok := line["selector"].(map[string]any)
+	if !ok {
+		t.Fatalf("selector = %#v, want an object", line["selector"])
+	}
+	assertExactKeys(t, "selector", sel, map[string]bool{
+		"ran": true, "degraded": true, "taskType": true, "confidence": true, "reason": true})
+
 	// Present-and-null, not absent: an absent key reads as "this CLI version does not
 	// report confidence", which is a different fact.
-	c, present := sel["confidence"]
-	if !present {
-		t.Fatal("selector.confidence must be present as null, not omitted")
-	}
-	if c != nil {
+	if c := sel["confidence"]; c != nil {
 		t.Fatalf("selector.confidence = %#v, want null", c)
 	}
-	// Same for the string fields: "" rather than absent.
-	if _, present := sel["taskType"]; !present {
-		t.Fatal("selector.taskType must be present as \"\", not omitted")
+	// Same for the string fields: "" rather than absent. The selector here is the ZERO
+	// value, so an omitempty on either would drop the key entirely.
+	if sel["taskType"] != "" {
+		t.Fatalf("selector.taskType = %#v, want \"\"", sel["taskType"])
 	}
+	if sel["reason"] != "" {
+		t.Fatalf("selector.reason = %#v, want \"\"", sel["reason"])
+	}
+}
+
+// assertExactKeys pins a JSON object's key set exactly — neither a missing key nor an
+// unexpected extra one may pass.
+func assertExactKeys(t *testing.T, what string, got map[string]any, want map[string]bool) {
+	t.Helper()
+	for k := range want {
+		if _, present := got[k]; !present {
+			t.Errorf("%s is missing key %q (keys: %v)", what, k, keysOf(got))
+		}
+	}
+	for k := range got {
+		if !want[k] {
+			t.Errorf("%s carries unexpected key %q", what, k)
+		}
+	}
+}
+
+func keysOf(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // The degraded case is the one this event exists for. A selector that fails open reuses
@@ -237,28 +276,70 @@ func TestSkillDecisionFlushesBufferedProseFirst(t *testing.T) {
 	}
 }
 
-// The line must survive a strict round trip back into the event type, so the documented
-// shape and the type that produces it cannot drift apart silently.
-func TestSkillDecisionRoundTrips(t *testing.T) {
+// Every field of a fully-populated event reaches the wire under its documented key.
+// Deliberately NOT a round trip through the same tagged struct: that would pass even if
+// every tag were renamed in a coordinated way, since the same tags would decode it back.
+func TestSkillDecisionEmitsEveryFieldByDocumentedKey(t *testing.T) {
 	var buf bytes.Buffer
 	s := New(&buf, fixedClock)
-	want := agent.SkillDecisionEvent{
+	s.SkillDecision(agent.SkillDecisionEvent{
 		Active:      []agent.SkillRef{{ID: "a", Title: "Alpha"}},
-		NewlyLoaded: []agent.SkillRef{{ID: "a", Title: "Alpha"}},
+		NewlyLoaded: []agent.SkillRef{{ID: "n", Title: "Newly"}},
 		Selector: agent.SkillSelectorOutcome{
-			Ran: true, TaskType: "review", Confidence: confidence(0.5), Reason: "why",
+			Ran: true, Degraded: true, TaskType: "review",
+			Confidence: confidence(0.5), Reason: "why",
 		},
-	}
-	s.SkillDecision(want)
+	})
 
-	var got agent.SkillDecisionEvent
-	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
-		t.Fatalf("line does not decode back into SkillDecisionEvent: %v", err)
+	line := decodeOne(t, &buf)
+	active, _ := line["active"].([]any)
+	newly, _ := line["newlyLoaded"].([]any)
+	if len(active) != 1 || len(newly) != 1 {
+		t.Fatalf("active/newlyLoaded = %#v / %#v", line["active"], line["newlyLoaded"])
 	}
-	if len(got.Active) != 1 || got.Active[0] != want.Active[0] {
-		t.Fatalf("active round trip = %#v", got.Active)
+	a, _ := active[0].(map[string]any)
+	n, _ := newly[0].(map[string]any)
+	if a["id"] != "a" || a["title"] != "Alpha" {
+		t.Fatalf("active[0] = %#v", a)
 	}
-	if got.Selector.TaskType != "review" || got.Selector.Confidence == nil || *got.Selector.Confidence != 0.5 {
-		t.Fatalf("selector round trip = %#v", got.Selector)
+	// Distinct fixtures per slice, so a projection that emitted the same list twice fails.
+	if n["id"] != "n" || n["title"] != "Newly" {
+		t.Fatalf("newlyLoaded[0] = %#v", n)
+	}
+	sel, _ := line["selector"].(map[string]any)
+	if sel["ran"] != true || sel["degraded"] != true || sel["taskType"] != "review" ||
+		sel["reason"] != "why" {
+		t.Fatalf("selector = %#v", sel)
+	}
+	if c, _ := sel["confidence"].(float64); c != 0.5 {
+		t.Fatalf("selector.confidence = %#v", sel["confidence"])
+	}
+}
+
+// emitStruct marshals before framing, so a value JSON cannot represent takes a different
+// failure path than emit's. NaN is reachable: confidence comes off the wire as a float.
+// The line must stay valid JSON and keep its seq, so a consumer's parser does not choke
+// and the monotonic-seq contract survives.
+func TestSkillDecisionUnserializableDegradesWithoutBreakingTheStream(t *testing.T) {
+	var buf bytes.Buffer
+	s := New(&buf, fixedClock)
+	s.SkillDecision(agent.SkillDecisionEvent{
+		Selector: agent.SkillSelectorOutcome{Confidence: confidence(math.NaN())},
+	})
+	s.Info("still streaming")
+
+	lines := decodeLines(t, &buf)
+	if len(lines) != 2 {
+		t.Fatalf("expected the degraded line then info, got %d: %v", len(lines), lines)
+	}
+	if lines[0]["type"] != "skill:decision" {
+		t.Fatalf("type = %v, want the event type preserved", lines[0]["type"])
+	}
+	if lines[0]["serializationError"] != true {
+		t.Fatalf("line = %v, want serializationError:true", lines[0])
+	}
+	// No seq gap: a hole would break the monotonic-seq contract the stream promises.
+	if lines[0]["seq"].(float64) != 0 || lines[1]["seq"].(float64) != 1 {
+		t.Fatalf("seq = %v, %v; want 0, 1", lines[0]["seq"], lines[1]["seq"])
 	}
 }

@@ -72,10 +72,23 @@ func TestBinaryJSONOneShot(t *testing.T) {
 			toolName:      "memory__list",
 			toolArgs:      `{"limit":3}`,
 			usage:         &fakeUsage{prompt: 50, completion: 6, total: 56, cached: 0},
+			// Round 1 loads one skill but reports TWO active: the second is retained /
+			// auto-paired, which is precisely what the delta-only skill:loaded cue can
+			// never report and what skill:decision exists to expose.
+			skills: skillsBlock(false,
+				[]string{"multi_agent", "Multi-agent orchestration",
+					"foundation", "Daintree orchestration foundation"},
+				[]string{"multi_agent", "Multi-agent orchestration"}),
 		},
 		sseRound{
 			contentTokens: []string{"Nothing ", "stored."},
 			usage:         &fakeUsage{prompt: 70, completion: 4, total: 74, cached: 20},
+			// Round 2 loads nothing and DEGRADES: the eager cue is silent for this round
+			// entirely, so only the decision reports that the set was kept by fail-open.
+			skills: skillsBlock(true,
+				[]string{"multi_agent", "Multi-agent orchestration",
+					"foundation", "Daintree orchestration foundation"},
+				nil),
 		},
 	)
 
@@ -131,6 +144,62 @@ func TestBinaryJSONOneShot(t *testing.T) {
 	}
 	if len(lines) == 0 {
 		t.Fatalf("no JSONL lines on stdout; stderr:\n%s", stderr.String())
+	}
+
+	// --- the skill decision reaches the real --json stream, once per round ---
+	//
+	// This is the ONLY assertion that covers the whole production path at once: SSE
+	// decode → the committed OnMeta callback → the session's projection → MultiSink →
+	// app.eventProxy → the jsonout sink. Every other test for this feature exercises one
+	// of those links in isolation, so any of them could become a no-op undetected.
+	var decisions []map[string]any
+	starts := 0
+	for _, l := range lines {
+		switch l.Type {
+		case "assistant:start":
+			starts++
+		case "skill:decision":
+			decisions = append(decisions, l.raw)
+		}
+	}
+	if starts != 2 {
+		t.Fatalf("assistant:start count = %d, want 2 rounds: %v", starts, typesOf(lines))
+	}
+	if len(decisions) != starts {
+		t.Fatalf("skill:decision count = %d, want one per round (%d): %v",
+			len(decisions), starts, typesOf(lines))
+	}
+
+	// Round 1: ids AND titles, and the whole active set — including the retained skill
+	// that never appeared in newly_loaded.
+	active, _ := decisions[0]["active"].([]any)
+	if len(active) != 2 {
+		t.Fatalf("round 1 active = %#v, want both the loaded and the retained skill", decisions[0]["active"])
+	}
+	first, _ := active[0].(map[string]any)
+	if first["id"] != "multi_agent" || first["title"] != "Multi-agent orchestration" {
+		t.Errorf("round 1 active[0] = %#v, want id+title carried through the wire", first)
+	}
+	if newly, _ := decisions[0]["newlyLoaded"].([]any); len(newly) != 1 {
+		t.Errorf("round 1 newlyLoaded = %#v, want just the delta", decisions[0]["newlyLoaded"])
+	}
+	// The backend sends snake_case; the stream is camelCase. A regression that passed the
+	// wire block through verbatim would show up right here.
+	if _, present := decisions[0]["newly_loaded"]; present {
+		t.Error("round 1 line carries the backend's snake_case newly_loaded key")
+	}
+
+	// Round 2: nothing newly loaded, and the fail-open flag — the round the eager
+	// skill:loaded cue is completely silent for.
+	sel2, _ := decisions[1]["selector"].(map[string]any)
+	if sel2["degraded"] != true {
+		t.Errorf("round 2 selector = %#v, want degraded:true", decisions[1]["selector"])
+	}
+	if newly, _ := decisions[1]["newlyLoaded"].([]any); len(newly) != 0 {
+		t.Errorf("round 2 newlyLoaded = %#v, want empty", decisions[1]["newlyLoaded"])
+	}
+	if act2, _ := decisions[1]["active"].([]any); len(act2) != 2 {
+		t.Errorf("round 2 active = %#v, want the set it fell open into", decisions[1]["active"])
 	}
 
 	// --- monotonic seq from 0 ---
