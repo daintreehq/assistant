@@ -253,7 +253,7 @@ type SessionDeps struct {
 	// independent of Daintree. It is expected to be bounded and best-effort.
 	EnsureStartupContext func(ctx context.Context)
 	// CurrentWorktreeFetcher returns Daintree's live current worktree. Like
-	// OpenTerminalsFetcher, it is invoked on a DETACHED goroutine (refreshWorktreeAsync),
+	// OpenTerminalsFetcher, it is invoked on a DETACHED goroutine (maybeRefreshWorktreeAsync),
 	// never inline on a model round: each round serves the cross-turn cached snapshot and
 	// kicks a refresh only when the cache is older than worktreeSnapshotTTL, so a worktree
 	// switch is reflected within ~one TTL without an unhealthy MCP ever blocking model

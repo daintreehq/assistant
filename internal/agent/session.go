@@ -2175,36 +2175,38 @@ func (s *Session) currentWorktreeContext(ctx context.Context) *prompts.WorktreeC
 	return s.worktreeSnap
 }
 
-// maybeRefreshWorktreeAsync kicks a detached current-worktree refresh when the cache
-// is stale (older than worktreeSnapshotTTL) or was never filled. TTL-gated at the
-// call site so the per-round consult and the turn/splash warm calls share one policy:
-// a turn starting seconds after the last fetch re-reads nothing.
-func (s *Session) maybeRefreshWorktreeAsync() {
-	if s.deps.CurrentWorktreeFetcher == nil {
-		return
-	}
-	s.worktreeMu.Lock()
-	stale := s.worktreeFetchedAt.IsZero() || time.Since(s.worktreeFetchedAt) > worktreeSnapshotTTL
-	s.worktreeMu.Unlock()
-	if stale {
-		s.refreshWorktreeAsync()
-	}
-}
-
-// refreshWorktreeAsync starts a detached, best-effort refresh of the cached
-// current-worktree snapshot unless one is already in flight — the exact
+// maybeRefreshWorktreeAsync starts a detached, best-effort refresh of the cached
+// current-worktree snapshot when that cache is stale (older than worktreeSnapshotTTL)
+// or was never filled, and only when no refresh is already in flight — the exact
 // refreshRosterAsync shape: single-flight dedupe, wg.Add gated under s.mu with the
 // draining flag (so Shutdown's drain never races the Add), and parented off bgCtx
 // WITHOUT a deadline (the fetcher self-bounds via its own cancel timer; a ctx
 // deadline would make mcp.Client tear down the shared transport). The result —
 // nil for a failed read included — replaces the cache the moment it lands, so the
-// next round's runtime block picks it up without ever blocking a turn.
-func (s *Session) refreshWorktreeAsync() {
+// next round's runtime block picks it up without ever blocking a turn. The TTL gate
+// lives here rather than at the call sites so the per-round consult and the
+// turn/splash warm calls share one policy: a turn starting seconds after the last
+// fetch re-reads nothing.
+//
+// The staleness test and the in-flight claim MUST hold worktreeMu across BOTH, and
+// that is the whole reason they sit in one function. Reading staleness under an
+// earlier, separate hold left a window: an in-flight fetch could land in the gap —
+// re-dating worktreeFetchedAt and clearing worktreeRefreshing — so the caller that
+// had just read "stale" then won the claim and kicked a SECOND fetch for the same
+// turn, the per-round re-read this cache exists to prevent. It surfaced as a rare
+// -race failure of TestCurrentWorktreeCachedSnapshotServesEveryBackendRound (turn
+// start kicks the fetch, round 0 consults the still-cold cache, the fetch lands
+// between that consult's two locks).
+func (s *Session) maybeRefreshWorktreeAsync() {
 	if s.deps.CurrentWorktreeFetcher == nil {
 		return
 	}
 	s.worktreeMu.Lock()
 	if s.worktreeRefreshing {
+		s.worktreeMu.Unlock()
+		return
+	}
+	if !s.worktreeFetchedAt.IsZero() && time.Since(s.worktreeFetchedAt) <= worktreeSnapshotTTL {
 		s.worktreeMu.Unlock()
 		return
 	}
