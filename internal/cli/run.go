@@ -325,9 +325,10 @@ func RunOneShot(ctx context.Context, opts Options) int {
 
 	// A debug-log path is diagnostic metadata, never answer content. Keep it on
 	// stderr for every one-shot mode so stdout remains empty on a failed human run.
-	if path := debuglog.StartDebugLog(debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir},
-		map[string]any{"sessionId": a.SessionID, "project": a.Config.ProjectPath}); path != "" {
-		stderrR.Line(stderrR.Gray("logging to " + path))
+	logPath := debuglog.StartDebugLog(debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir},
+		map[string]any{"sessionId": a.SessionID, "project": a.Config.ProjectPath})
+	if logPath != "" {
+		stderrR.Line(stderrR.Gray("logging to " + logPath))
 	}
 
 	// No model-key preflight: the CLI no longer holds model credentials (the backend
@@ -349,7 +350,10 @@ func RunOneShot(ctx context.Context, opts Options) int {
 	// AssistantCancelled does NOT — so routing this through Error made a cancelled run
 	// report its failure as "AUTO-APPROVE is ON". An event-driven consumer watching for
 	// `error` lines would also abort a perfectly healthy run.
-	if a.Config.AutoApprove {
+	warnAutoApprove := func() {
+		if !a.Config.AutoApprove {
+			return
+		}
 		// Name the source that actually turned it on. Telling someone to unset an env var
 		// they never set — because they passed --auto-approve — is a dead end.
 		source := "DAINTREE_ASSISTANT_AUTO_APPROVE=1 is set"
@@ -394,8 +398,34 @@ func RunOneShot(ctx context.Context, opts Options) int {
 
 	debuglog.BootTrace("oneshot.app.created")
 	runErr := func() error {
-		a.ConnectMcp(ctx)
+		st := a.ConnectMcp(ctx)
 		debuglog.BootTrace("oneshot.mcp.connect.done")
+		// The session header goes out AFTER the MCP connect and BEFORE the first round.
+		// After, because mcpConnected is the field that separates a real answer from one
+		// produced in degraded local mode, and a header that guessed would be worse than
+		// none. Before, because its whole job is to let a consumer reach the trace for a
+		// run that is about to fail.
+		if sink != nil {
+			sink.Session(jsonout.SessionInfo{
+				SessionID: a.SessionID,
+				Project:   a.Config.ProjectPath,
+				Tier:      string(a.Tier()),
+				// SanitizeURL, not the raw config value: DAINTREE_BACKEND_URL and
+				// --backend-url are never normalized, so an endpoint carrying userinfo
+				// or a query token would otherwise be published verbatim on stdout and
+				// straight into a CI log. It fails closed (an unparseable endpoint
+				// becomes ""), which is the right trade for a diagnostic field.
+				BackendURL:   mcp.SanitizeURL(a.Config.BackendURL),
+				LogPath:      logPath,
+				Version:      buildVersion,
+				AutoApprove:  a.Config.AutoApprove,
+				MCPConnected: st.Connected,
+				MCPTransport: st.Transport,
+			})
+		}
+		// After the header, so a JSONL consumer can rely on `session` being the FIRST
+		// line whenever one is emitted at all.
+		warnAutoApprove()
 		_, err := a.Session.Send(ctx, opts.Prompt, agent.SendOptions{})
 		debuglog.BootTrace("oneshot.send.done")
 		return err

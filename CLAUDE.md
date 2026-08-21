@@ -511,6 +511,8 @@ guarantee, sub-agent skill selection, and the cockpit rows**),
 work + the local run-tracking tools), `docs/WORKFLOW_INTELLIGENCE.md` (the flag-gated
 workflow execution-graph layer: graph model, tools, observer, async linking, and the
 backend contract it expects),
+`docs/HEADLESS.md` (**driving the CLI from a script or another agent — the flags, the
+`--json` event schema, exit codes, isolation**),
 `README.md` (full overview), `docs/BUBBLE_TEA.md` (cockpit architecture),
 `docs/ARCHITECTURE.md`, `docs/DAINTREE_MCP.md` (Daintree's MCP protocol),
 `docs/DAINTREE_HOST.md` (how Daintree launches / displays / hides / restarts this CLI),

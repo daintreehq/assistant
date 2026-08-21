@@ -120,6 +120,69 @@ type JsonResultEnvelope struct {
 	Error         *struct {
 		Message string `json:"message"`
 	} `json:"error"`
+	Stats JsonRunStats `json:"stats"`
+}
+
+// JsonRunStats is the accounting block on the terminal `result` line — how much work
+// the run did, so a consumer need not re-derive it by counting stream lines it may not
+// have kept. The single declaration of these keys; the sink marshals this struct.
+//
+// Read the token counts as a LOWER BOUND on spend, not a bill. They are summed from the
+// per-round usage the backend reports on a SUCCESSFUL response, so an attempt that was
+// billed and then failed into a retry contributes nothing, and the separate model calls
+// behind auto-compaction and the utility tasks are not counted at all.
+type JsonRunStats struct {
+	DurationMs int `json:"durationMs"`
+	// Rounds counts rounds STARTED (one per assistant:start), not tool calls and not
+	// completed backend requests: a run cancelled before its first request still
+	// reports 1.
+	Rounds     int `json:"rounds"`
+	ToolCalls  int `json:"toolCalls"`
+	ToolErrors int `json:"toolErrors"`
+	// PromptTokens sums each round's prompt — every round re-sends the conversation, so
+	// this is input-token VOLUME (what a provider charges for), not the size of the
+	// context. ContextTokens is the latter: the last round's prompt size, which is the
+	// figure that drives compaction.
+	PromptTokens     int `json:"promptTokens"`
+	CompletionTokens int `json:"completionTokens"`
+	TotalTokens      int `json:"totalTokens"`
+	ContextTokens    int `json:"contextTokens"`
+}
+
+// JsonSessionPayload is the body of the one-time `session` header line: the facts a
+// consumer needs to FIND the run it just started. It is the SINGLE declaration of those
+// keys — the sink marshals this struct rather than hand-rolling a map, so the wire
+// shape cannot drift from the contract silently.
+//
+// It names the endpoint and never the key. BackendURL arrives already stripped of
+// userinfo and query (mcp.SanitizeURL); Project and LogPath are filesystem paths and
+// are NOT sanitized, so the honest guarantee is "no field here is a credential", not
+// "no field here can embarrass you".
+type JsonSessionPayload struct {
+	SessionID  string `json:"sessionId"`
+	Project    string `json:"project"`
+	Tier       string `json:"tier"`
+	BackendURL string `json:"backendUrl"`
+	// LogPath is "" when debug logging is off — reported as empty rather than omitted,
+	// so a consumer can tell "logging disabled" from "field absent in this version".
+	LogPath string `json:"logPath"`
+	Version string `json:"version"`
+	// AutoApprove restates the warning line as a machine-readable fact.
+	AutoApprove bool `json:"autoApprove"`
+	// MCPConnected is the status at the moment the run STARTED, sampled once right
+	// after connect. It separates a real answer from one produced in degraded local
+	// mode, which is invisible in the content — but MCP can still degrade later in the
+	// run, so it is a starting condition, not a whole-run guarantee.
+	MCPConnected bool   `json:"mcpConnected"`
+	MCPTransport string `json:"mcpTransport"`
+}
+
+// JsonSessionEnvelope is the full `session` line: the standard framing plus the payload.
+type JsonSessionEnvelope struct {
+	Type string `json:"type"` // literal "session"
+	Ts   int64  `json:"ts"`
+	Seq  int    `json:"seq"`
+	JsonSessionPayload
 }
 
 // classEpistemicKind maps a classification to its provenance when no model was

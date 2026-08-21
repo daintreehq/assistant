@@ -235,7 +235,13 @@ const (
 	JsonlError              JsonlEventType = "error"
 	JsonlInfo               JsonlEventType = "info"
 	JsonlSkillLoaded        JsonlEventType = "skill:loaded" // server-side runbook load; payload {titles:[]}
-	JsonlResult             JsonlEventType = "result"
+	JsonlWarning            JsonlEventType = "warning"      // non-fatal; does NOT change the terminal status
+	JsonlInterjection       JsonlEventType = "user:interjection"
+	// JsonlSession is the one-time header line: sessionId, project, tier, backend
+	// endpoint, debug-log path, MCP connectivity. Emitted before the first round so a
+	// consumer can reach the trace for a run that then fails.
+	JsonlSession JsonlEventType = "session"
+	JsonlResult  JsonlEventType = "result"
 )
 
 // RecommendedActionVerb is the WatcherVerdict.recommendedAction inline enum.
