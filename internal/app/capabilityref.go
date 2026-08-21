@@ -311,10 +311,11 @@ func RenderCompatibilityManifest() string {
 
 	b.WriteString("\n## Endpoints\n\n")
 	b.WriteString("| Endpoint | URL |\n|---|---|\n")
-	fmt.Fprintf(&b, "| Official (default) | `%s` |\n", backend.DefaultBaseURL)
+	fmt.Fprintf(&b, "| Deployed (default) | `%s` |\n", backend.DefaultBaseURL)
 	fmt.Fprintf(&b, "| Local development | `%s` |\n", backend.LocalBaseURL)
-	b.WriteString("\nA **remote** endpoint that does not serve `/v1/daintree/auth/verify` fails sign-in;\n")
-	b.WriteString("only a loopback endpoint is forgiven. See `docs/BACKEND.md`.\n")
+	b.WriteString("\nSelected with `DAINTREE_BACKEND_URL`; there is no sign-in and no key to supply.\n")
+	b.WriteString("A **remote** endpoint that does not serve `/v1/daintree/auth/verify` is a `doctor`\n")
+	b.WriteString("failure; only a loopback endpoint is forgiven. See `docs/BACKEND.md`.\n")
 
 	b.WriteString("\n## Platform support\n\n")
 	b.WriteString("| Platform | Cockpit / one-shot | Persistent supervision |\n|---|---|---|\n")

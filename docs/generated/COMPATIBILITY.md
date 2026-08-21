@@ -44,11 +44,12 @@ count-only check could not see).
 
 | Endpoint | URL |
 |---|---|
-| Official (default) | `https://assistant.daintree.org` |
+| Deployed (default) | `https://assistant.daintree.org` |
 | Local development | `http://127.0.0.1:8473` |
 
-A **remote** endpoint that does not serve `/v1/daintree/auth/verify` fails sign-in;
-only a loopback endpoint is forgiven. See `docs/BACKEND.md`.
+Selected with `DAINTREE_BACKEND_URL`; there is no sign-in and no key to supply.
+A **remote** endpoint that does not serve `/v1/daintree/auth/verify` is a `doctor`
+failure; only a loopback endpoint is forgiven. See `docs/BACKEND.md`.
 
 ## Platform support
 

@@ -29,7 +29,7 @@ func costText(a *app.App) string { return renderCostPanel(a.CostLedger.Snapshot(
 // which are the substance of this file — are testable without booting an App.
 func renderCostPanel(s costledger.Snapshot) string {
 	var b strings.Builder
-	b.WriteString("Spend on your own OpenRouter key, this session.\n\n")
+	b.WriteString("Upstream spend for this session.\n\n")
 
 	if s.Calls == 0 {
 		b.WriteString("Nothing billed yet — no turns and no utility tasks have run.\n\n")

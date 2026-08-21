@@ -1863,7 +1863,7 @@ func upstreamFailureAdvice(be *backend.Error) string {
 	case backend.CodeProviderKeyForbidden:
 		// Deliberately does NOT suggest /login. The key is recognised and funded; a
 		// fresh sign-in with the same key changes nothing.
-		return "Model unavailable: your OpenRouter key isn't permitted to use this model. Check its model permissions, spend limit and guardrails — signing in again won't help."
+		return "Model unavailable: the credential funding this turn isn't permitted to use this model. Its model permissions, spend limit or guardrails are blocking it."
 	case backend.CodeUpstreamNoCompliantProvider:
 		return "Model unavailable: no OpenRouter endpoint matched your routing policy. Run /routing to see it — a stricter privacy mode or a narrow endpoint list can empty the pool, and it is never relaxed automatically to find a route."
 	case backend.CodeUpstreamUnavailable:

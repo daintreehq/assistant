@@ -102,9 +102,8 @@ type CreateOptions struct {
 type ToolBuilder func(a *App) ([]*tools.Tool, error)
 
 // App is the composition root. Fields are effectively read-only after Create
-// except Config.Tier (mutated by /permissions), Config.BackendURL/APIKey (mutated by
-// SignIn for /login) — both under cfgMu — Hooks (merged by SetHooks), and scheduler
-// (set lazily by StartScheduler).
+// except Config.Tier (mutated by /permissions, under cfgMu), Hooks (merged by
+// SetHooks), and scheduler (set lazily by StartScheduler).
 type App struct {
 	Config config.AppConfig
 	Store  *storage.Store
@@ -115,27 +114,19 @@ type App struct {
 	// interface so tests can inject a fake (CreateOptions.BackendOverride).
 	//
 	// It is ALWAYS the *backend.Swappable below. Consumers capture this value and keep
-	// it for the App's lifetime; `/login` re-authenticates by swapping what it delegates
-	// to, so nothing downstream has to be re-wired or can go on holding a dead endpoint.
+	// it for the App's lifetime; replacing the live client is a delegate swap, so nothing
+	// downstream has to be re-wired or can go on holding a dead endpoint.
 	Backend  backend.Backend
 	Registry *tools.Registry
 
 	// CostLedger accumulates what this process has spent on the caller's own upstream
 	// key — turns and utility tasks alike. It is wired into the backend client's OnCost
-	// hook and deliberately OUTLIVES that client, so a `/login` endpoint swap does not
-	// silently reset the session's bill to zero. Surfaced by `/cost` and `/doctor`.
+	// hook and deliberately OUTLIVES that client, so anything that rebuilds the client
+	// mid-session cannot reset the bill to zero. Surfaced by `/cost` and `/doctor`.
 	CostLedger *costledger.Ledger
 
 	SessionID string
 	Session   *agent.Session
-
-	// backendSwap is the same object as Backend, typed so SignIn can swap the delegate.
-	backendSwap *backend.Swappable
-	// lastSignInWarning carries a caveat from the last successful SignIn (e.g. a
-	// backend too old to check the key upstream), so the UI can report a partial
-	// verification honestly instead of implying a full one. Guarded by cfgMu, with
-	// the sign-in fields it describes.
-	lastSignInWarning string
 
 	runRef    *agent.RunIDRef
 	scheduler *daemon.Scheduler
@@ -198,11 +189,11 @@ type App struct {
 	hooksMu sync.RWMutex
 	hooks   AppHooks
 
-	// cfgMu guards Config — the fields mutated at runtime: Tier (/permissions) and the
-	// sign-in pair BackendURL/APIKey (/login, via SignIn). buildContext copies the WHOLE
-	// Config and PromptContext reads it on agent/tool goroutines, so every runtime write
-	// must be serialized against them or the race detector flags a torn read. Any future
-	// runtime-mutable field belongs under this lock too.
+	// cfgMu guards Config — today only Tier (/permissions) is mutated at runtime.
+	// buildContext copies the WHOLE Config and PromptContext reads it on agent/tool
+	// goroutines, so every runtime write must be serialized against them or the race
+	// detector flags a torn read. Any future runtime-mutable field belongs under this
+	// lock too.
 	cfgMu sync.RWMutex
 
 	// InitialTier is the boot-time tier resolved from env/overrides/DEFAULTS, captured
@@ -244,7 +235,7 @@ type App struct {
 	// because it is fetched once at boot and then read per turn. nil until a handshake
 	// succeeds, and a capability read fails CLOSED (see backendAcceptsDisplayContext).
 	//
-	// It is PINNED TO THE ENDPOINT that answered, because `/login` can swap the delegate
+	// It is PINNED TO THE ENDPOINT that answered, because the delegate can be swapped
 	// underneath a fetch that is still in flight: a slow boot handshake completing after
 	// a swap would otherwise publish the OLD deployment's answer as if it described the
 	// new one, and a gate opened on that lie sends a field the new backend rejects —
@@ -309,7 +300,7 @@ func (a *App) DisplaySize() *prompts.DisplayContext { return a.display.Load() }
 
 // backendCapsSnapshot is one capability descriptor together with the endpoint that
 // answered it. The pairing is the point: a descriptor alone cannot say WHICH backend
-// it describes, and this session's backend can be replaced mid-flight by `/login`.
+// it describes, and this session's backend client can be replaced mid-flight.
 type backendCapsSnapshot struct {
 	baseURL string
 	caps    backend.Capabilities
@@ -321,9 +312,9 @@ type backendCapsSnapshot struct {
 // answer alone and returns the error, since "we could not ask" is not evidence that
 // anything changed.
 //
-// The endpoint is read BEFORE the call and stored with the answer, so a descriptor
-// that arrives after a `/login` swap is filed under the endpoint it actually came
-// from and the readers below discard it.
+// The endpoint is read BEFORE the call and stored with the answer, so a descriptor that
+// arrives after an endpoint change is filed under the endpoint it actually came from and
+// the readers below discard it.
 func (a *App) BackendCapabilities(ctx context.Context) (backend.Capabilities, error) {
 	if a.Backend == nil {
 		return backend.Capabilities{}, errors.New("no backend client")
@@ -361,8 +352,7 @@ func (a *App) Tier() domain.Tier {
 // caller building a per-turn ToolContext can't observe a torn Tier write.
 // SnapshotConfig returns a consistent copy of the resolved config. EVERY whole-Config
 // read outside this package must come through here: Config is an exported struct whose
-// Tier and sign-in fields are mutated at runtime, so a direct `a.Config` copy races
-// SetTier / SignIn.
+// Tier is mutated at runtime, so a direct `a.Config` copy races SetTier.
 func (a *App) SnapshotConfig() config.AppConfig { return a.snapshotConfig() }
 
 func (a *App) snapshotConfig() config.AppConfig {
@@ -380,13 +370,15 @@ func Create(opts CreateOptions) (*App, error) {
 	}
 
 	// Register this process's real credentials for redaction, FIRST — before anything can
-	// log. Shape matching alone is not enough for these two: the API key becomes a
-	// subscription key later and the Daintree MCP token has no fixed format, so either
-	// could match none of the patterns while being the single most expensive value in the
-	// process to leak (one funds model calls, the other authorises system-tier Daintree
-	// actions for its validity window). Registration is additive, so a later `/login`
-	// swap or MCP reconnect adds the new value without un-protecting the old one — which
-	// is correct, since a log written before the swap still contains it.
+	// log. Shape matching alone is not enough for either: an account credential need
+	// match no known pattern, and the Daintree MCP token has no fixed format, while both
+	// are among the most expensive values in the process to leak (one funds model calls,
+	// the other authorises system-tier Daintree actions for its validity window).
+	// cfg.APIKey is normally EMPTY — RegisterSecret ignores that — and registering it
+	// unconditionally means the rare install that exports DAINTREE_API_KEY is protected
+	// without a second code path. Registration is additive, so an MCP reconnect adds the
+	// new value without un-protecting the old one, which is correct: a log written
+	// before the refresh still contains it.
 	redact.RegisterSecret(cfg.APIKey)
 	redact.RegisterSecret(cfg.McpToken)
 
@@ -500,26 +492,27 @@ func Create(opts CreateOptions) (*App, error) {
 	// tasks. The CLI no longer talks to DeepSeek directly — the backend owns the model
 	// credentials, prompt assembly, and skill selection.
 	//
-	// Endpoint AND credentials come from the resolved config (internal/config), which
-	// merges the stored sign-in with the trusted env overrides — app.Create never reads
-	// the environment for them itself, so every entry point (cockpit, one-shot, host,
-	// supervisor daemon) authenticates identically. cfg.APIKey is empty exactly when
-	// the user is signed out; the client still constructs, so `doctor` can reach the
-	// unauthenticated probes and say so, while any real call 401s with a clear code.
+	// The endpoint comes from the resolved config (internal/config) — app.Create never
+	// reads the environment itself, so every entry point (cockpit, one-shot, host,
+	// supervisor daemon) is configured identically. There is no credential to resolve
+	// on the normal path: the backend holds its own upstream key and serves a request
+	// with no Authorization header. cfg.APIKey is set only when DAINTREE_API_KEY named
+	// one, and then it overrides the backend's own for this session's calls.
 	//
 	// The client is wrapped in a backend.Swappable and that wrapper — never the raw
-	// client — is what every consumer captures. `/login` re-authenticates in place by
-	// swapping the delegate, so Session, the watcher engine, the async coordinator and
-	// the workflow layer all follow without any of them holding a stale endpoint. Test
-	// overrides are wrapped too, so the swap path is identical everywhere.
+	// client — is what every consumer captures, so Session, the watcher engine, the
+	// async coordinator and the workflow layer can never end up holding a stale
+	// endpoint. Nothing swaps today; the wrapper is kept because account sign-in is
+	// being built next and re-authenticating in place is a delegate swap through this
+	// seam rather than a re-wiring of every consumer. Test overrides are wrapped too,
+	// so there is one code path.
 	// Built before the client, which captures its Record method as the OnCost hook.
 	a.CostLedger = costledger.New()
 	if opts.BackendOverride != nil {
-		a.backendSwap = backend.NewSwappable(opts.BackendOverride)
+		a.Backend = backend.NewSwappable(opts.BackendOverride)
 	} else {
-		a.backendSwap = backend.NewSwappable(backend.NewClient(backendClientConfig(cfg, a.CostLedger)))
+		a.Backend = backend.NewSwappable(backend.NewClient(backendClientConfig(cfg, a.CostLedger)))
 	}
-	a.Backend = a.backendSwap
 	// The async coordinator is built BEFORE the tool registry (the asyncx family
 	// captures it) and started later, alongside the scheduler (StartScheduler).
 	// Its Notify hook pushes a fresh completion to the scheduler's delivery path

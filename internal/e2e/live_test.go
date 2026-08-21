@@ -67,17 +67,15 @@ func TestLiveBackendOneShot(t *testing.T) {
 	if !backendReachable(liveBackendURL) {
 		t.Skipf("live backend e2e requires a Daintree backend reachable at %s; none responded to /health", liveBackendURL)
 	}
-	// Guard 3: a funding key. The backend holds no upstream credential — the bearer
-	// token IS the key that pays for the turn — and this test deliberately isolates
-	// itself from the developer's real sign-in via DAINTREE_ASSISTANT_STATE_DIR, so the
-	// key has to come from the environment. Skip rather than fail: an unset key means
-	// "not opted in", not "broken".
+	// There is deliberately no third guard on a funding key. The backend holds its own
+	// upstream credential now, so a reachable one should be able to fund this turn
+	// unaided; requiring DAINTREE_API_KEY would skip the test on exactly the setup it is
+	// meant to exercise. A local backend running WITHOUT a credential fails here rather
+	// than skipping, which is the correct report — it cannot serve a turn, and that is
+	// worth knowing.
 	liveKey := strings.TrimSpace(os.Getenv("DAINTREE_API_KEY"))
-	if liveKey == "" {
-		t.Skip("live backend e2e requires DAINTREE_API_KEY (the caller key that funds the turn)")
-	}
 
-	// Guard 4 lives inside buildBinary(t): it t.Skip()s under -race.
+	// Guard 3 lives inside buildBinary(t): it t.Skip()s under -race.
 	bin := buildBinary(t)
 
 	// Generous deadline so a hung socket fails CLEANLY (the process is killed and we
@@ -94,9 +92,9 @@ func TestLiveBackendOneShot(t *testing.T) {
 	// DAINTREE_BACKEND_URL is now set EXPLICITLY to the local backend: the default is
 	// the deployed endpoint, and this test must never be the thing that quietly calls
 	// production. DAINTREE_ASSISTANT_OFFLINE stays unset (offline would short-circuit
-	// the call). The real OpenRouter key is inherited from the environment when present
-	// — the local backend holds no upstream credential of its own, so a turn only
-	// completes if the caller supplies a funding key.
+	// the call). DAINTREE_API_KEY is inherited from the environment when present: the
+	// backend normally funds the turn from its own credential, but a local backend
+	// running without one still completes if the caller supplies a funding key.
 	cmd.Env = append(os.Environ(),
 		"DAINTREE_BACKEND_URL="+liveBackendURL,
 		"DAINTREE_API_KEY="+liveKey,

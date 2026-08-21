@@ -8,12 +8,17 @@ import (
 // Swappable is a Backend whose underlying client can be replaced at runtime, safely,
 // while other goroutines are mid-call.
 //
-// It exists for one reason: `/login` re-authenticates WITHOUT a restart. The backend
+// It exists for one reason: the live client must be replaceable WITHOUT a restart. That
 // client is captured in a lot of long-lived places — agent.Session's deps, the watcher
 // engine, the async coordinator, the workflow layer — and several of those run on their
 // own goroutines (the 3s scheduler tick, the 1s coordinator tick, autonomous wake
 // turns). Reassigning a plain `App.Backend` field under all that is a data race, and
 // threading a guarded accessor through four subsystems would touch every call site.
+//
+// NOTHING SWAPS TODAY: the sign-in that used to re-authenticate in place is gone, since
+// the backend now holds its own upstream credential. The wrapper is kept deliberately —
+// account sign-in is being built next, and landing it here is a delegate swap rather than
+// a re-wiring of every consumer above.
 //
 // Instead the app hands out ONE Swappable at construction and never replaces the
 // reference. Every consumer keeps the pointer it already has; a swap changes only what

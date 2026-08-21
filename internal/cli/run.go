@@ -15,7 +15,6 @@ import (
 	"github.com/daintreehq/assistant/internal/cli/jsonout"
 	"github.com/daintreehq/assistant/internal/cli/render"
 	"github.com/daintreehq/assistant/internal/config"
-	"github.com/daintreehq/assistant/internal/credentials"
 	"github.com/daintreehq/assistant/internal/debuglog"
 	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/mcp"
@@ -101,37 +100,6 @@ func buildOverrides(opts Options, r *render.Renderer) config.ConfigOverrides {
 	return o
 }
 
-// ensureSignedIn gates startup on a usable sign-in. The backend authenticates in
-// every environment — there is no unauthenticated mode to degrade into — so a launch
-// without a key would otherwise boot a full cockpit that 401s on the first message.
-//
-// allowPrompt is false wherever prompting would corrupt the output contract or hang:
-// one-shot runs (stdout is the answer, stdin may be a pipe), --json, the stdio host,
-// and the supervisor daemon. Those get the actionable error instead.
-//
-// It re-resolves the config rather than taking one from the caller because the gate
-// runs BEFORE app.Create — which is the point: the key has to exist before the
-// backend client is built. The resolve is cheap and app.Create redoes it against the
-// file RunLogin just wrote.
-func ensureSignedIn(ctx context.Context, overrides config.ConfigOverrides, allowPrompt bool) error {
-	cfg, err := config.LoadConfig(overrides)
-	if err != nil {
-		return err
-	}
-	if strings.TrimSpace(cfg.APIKey) != "" {
-		return nil
-	}
-	if !allowPrompt {
-		// Names what DAINTREE_API_KEY actually IS. A user who takes the env-var route
-		// never sees the login flow's disclosure, and "set DAINTREE_API_KEY" on its own
-		// reads like a service token rather than a credential OpenRouter bills.
-		return fmt.Errorf("not signed in — run `daintree-assistant login` to connect to %s (or set DAINTREE_API_KEY to your own OpenRouter key; %s)",
-			cfg.BackendURL, backend.KeyPurposeNotice)
-	}
-	_, err = RunLogin(ctx, cfg, StdLoginIO())
-	return err
-}
-
 // Run routes per the top-level dispatch:
 //
 //	prompt        → RunOneShot
@@ -168,15 +136,6 @@ func RunOneShot(ctx context.Context, opts Options) int {
 
 	overrides := buildOverrides(opts, stderrR)
 	debuglog.BootTrace("oneshot.overrides.loaded")
-	// Never prompt here: stdout is the answer channel (or the JSONL stream) and stdin
-	// is routinely a pipe. Fail with the instruction instead.
-	if err := ensureSignedIn(ctx, overrides, false); err != nil {
-		reportError(err)
-		if sink != nil {
-			return sink.Finish()
-		}
-		return domain.OneShotExitCode.Error
-	}
 	// One-shot takes the owner lease briefly (never spawning a daemon — a script
 	// probe must not litter the machine with supervisors). A held lease means a
 	// live assistant owns the project: fail loudly instead of double-opening.
@@ -308,13 +267,6 @@ func runInteractive(ctx context.Context, opts Options, ttyOK bool) int {
 	r := render.Stdout()
 	overrides := buildOverrides(opts, r)
 	debuglog.BootTrace("boot.overrides.loaded")
-	// Sign-in gate BEFORE the ownership lease: a login that ends in Ctrl-C should
-	// leave no lease behind, and it must not race the daemon handover.
-	if err := ensureSignedIn(ctx, overrides, ttyOK); err != nil {
-		r.Error(err.Error())
-		return domain.OneShotExitCode.Error
-	}
-	debuglog.BootTrace("boot.signin.ok")
 	// Interactive launch: ensure the project's supervisor daemon exists, attach
 	// (it yields ownership + receives our fresh MCP credentials), and take the
 	// owner lease. Closing this assistant later hands supervision straight back
@@ -479,7 +431,6 @@ func buildDoctorReport(ctx context.Context, opts Options) (*DoctorReport, error)
 	defer a.Shutdown()
 
 	report.Add(CheckStateDir(a.Config.StateDir))
-	report.Add(CheckCredentialsFile(a.Config.CredentialsPath))
 	report.Add(DoctorCheck{
 		ID: "state.schema", Label: "state schema", Status: StatusOK,
 		Detail: fmt.Sprintf("version %d at %s", storage.SchemaVersion(), a.Config.DBPath),
@@ -516,22 +467,20 @@ func buildDoctorReport(ctx context.Context, opts Options) (*DoctorReport, error)
 	return report, nil
 }
 
-// backendDoctorChecks diagnoses the sign-in and the backend hop.
+// backendDoctorChecks diagnoses the backend hop.
 func backendDoctorChecks(ctx context.Context, a *app.App) []DoctorCheck {
 	var out []DoctorCheck
 
-	// Sign-in first: signed out, every authenticated check below fails for one reason,
-	// and a wall of 401s reads as a broken backend instead of a missing login.
-	if a.Config.APIKey == "" {
+	// There is deliberately no "signed in" row. The backend holds its own upstream
+	// credential and serves a request that carries no Authorization header, so a CLI
+	// with no key is a healthy CLI — a red row there would fire on every install.
+	// A key is reported only when one is actually being sent, since it then changes
+	// which account funds the turn. The value is never printed; naming the source is
+	// what makes an inherited or stale value actionable.
+	if a.Config.APIKey != "" {
 		out = append(out, DoctorCheck{
-			ID: "auth.signedIn", Label: "signed in", Status: StatusFail,
-			Detail: "no API key stored",
-			Hint:   "Run `daintree-assistant login`.",
-		})
-	} else {
-		out = append(out, DoctorCheck{
-			ID: "auth.signedIn", Label: "signed in", Status: StatusOK,
-			Detail: credentials.Redact(a.Config.APIKey),
+			ID: "auth.bearer", Label: "bearer token", Status: StatusOK,
+			Detail: "sent from DAINTREE_API_KEY — this key funds the turn, not the backend's",
 		})
 	}
 
@@ -558,34 +507,50 @@ func backendDoctorChecks(ctx context.Context, a *app.App) []DoctorCheck {
 		Detail: base, Data: map[string]any{"url": base},
 	})
 
-	if a.Config.APIKey != "" {
-		out = append(out, verifyKeyDoctorCheck(ctx, a, base))
-	}
+	out = append(out, verifyCredentialDoctorCheck(ctx, a, base))
 	out = append(out, taskManifestDoctorCheck(ctx, a))
 	return out
 }
 
-// verifyKeyDoctorCheck asks whether the key actually WORKS — which nothing else here can
-// tell you, since our own auth is structural and every other row stays green with a
-// bogus key.
-func verifyKeyDoctorCheck(ctx context.Context, a *app.App, base string) DoctorCheck {
-	c := DoctorCheck{ID: "auth.keyValid", Label: "key valid"}
+// verifyCredentialDoctorCheck asks whether the backend can actually spend a credential —
+// which nothing else here can tell you, since /health and /readyz answer for the process
+// and every other row stays green while the upstream account is dead.
+//
+// It reports on whichever key THIS request would spend: ours if DAINTREE_API_KEY named
+// one, the backend's own otherwise, which is every normal install. That makes it a
+// backend-health row far more often than a "your key" row, and the wording below has to
+// hold for both readings.
+func verifyCredentialDoctorCheck(ctx context.Context, a *app.App, base string) DoctorCheck {
+	c := DoctorCheck{ID: "auth.credentialUsable", Label: "upstream credential"}
 	vctx, vcancel := context.WithTimeout(ctx, 3*time.Second)
 	ver, verr := a.Backend.VerifyKey(vctx)
 	vcancel()
 
 	switch {
 	case errors.Is(verr, backend.ErrVerifyUnsupported):
-		// Must agree with backend.CheckSignIn, or doctor would bless an endpoint `login`
-		// refuses: a gating failure for any remote host, a benign gap on loopback.
+		// A remote endpoint that cannot answer this is out of date or intercepted; a
+		// loopback one is routinely a work-in-progress backend, so the gap is benign.
 		if !backend.AllowsUnverifiedSignIn(base) {
 			c.Status = StatusFail
 			c.Detail = "this backend does not serve /v1/daintree/auth/verify"
-			c.Hint = "Your key is fine — the endpoint is out of date or a proxy is intercepting it. Retry off any proxy, or use a Local backend."
+			c.Hint = "The endpoint is out of date or a proxy is intercepting it. Retry off any proxy, or use a local backend."
 			return c
 		}
 		c.Status = StatusUnknown
 		c.Detail = "this local backend can't check"
+		return c
+	case isBackendAuthError(verr):
+		// A 401 at OUR door is a definite answer, not a failed check: this deployment
+		// will not serve this CLI, so every turn fails. Reporting it as `unknown` would
+		// leave doctor concluding "no blocking problems" for an install that cannot run
+		// at all — and the whole point of this row is to say so before a turn does.
+		c.Status = StatusFail
+		c.Detail = "this backend rejected the request outright — " + verr.Error()
+		if a.Config.APIKey != "" {
+			c.Hint = "DAINTREE_API_KEY is set and this backend refused it. Unset it, or correct it."
+		} else {
+			c.Hint = "This CLI sends no API key. The endpoint still requires one, so it is older than this build — point DAINTREE_BACKEND_URL at a current backend."
+		}
 		return c
 	case verr != nil:
 		c.Status = StatusUnknown
@@ -593,24 +558,61 @@ func verifyKeyDoctorCheck(ctx context.Context, a *app.App, base string) DoctorCh
 		return c
 	case !ver.Valid:
 		c.Status = StatusFail
-		c.Detail = "the provider rejected this key: " + ver.Detail
-		c.Hint = "Run `daintree-assistant login` with an active, funded key."
+		c.Detail = "the provider rejected this credential: " + ver.Detail
+		c.Hint = credentialFixHint(a.Config.APIKey)
 		return c
-	case ver.LimitRemaining != nil && *ver.LimitRemaining <= 0:
-		// Recognised but empty fails every turn just as surely as a wrong key — but the
-		// fix is topping up, not re-pasting, so it is its own state.
+	case !ver.IsUsable():
+		// Recognised but empty fails every turn just as surely as a wrong credential —
+		// but the fix is topping up, not replacing it, so it is its own state.
+		// IsUsable, not a bare LimitRemaining test: it honours the backend's own
+		// `usable` verdict and treats "not reported" as fine, which is what an
+		// unlimited or pay-as-you-go account looks like.
 		c.Status = StatusFail
-		c.Detail = "the key is valid but has NO CREDIT remaining"
+		c.Detail = "the credential is valid but has NO CREDIT remaining"
 		c.Hint = "Top up the account — every turn will fail until you do."
 		c.Data = map[string]any{"limitRemaining": *ver.LimitRemaining}
 		return c
 	}
 	c.Status = StatusOK
-	c.Detail = "yes" + keyLabelSuffix(ver, a.APIKey())
+	c.Detail = "usable" + credentialOwnerSuffix(a.Config.APIKey)
+	if ver.Label != "" {
+		// The provider's own safe label, when it offers one. Cerebras does not — its
+		// probe answers with a model listing — so this is normally absent rather than
+		// empty-looking, and the row must read correctly without it.
+		c.Detail += " · " + ver.Label
+	}
 	if ver.LimitRemaining != nil {
 		c.Data = map[string]any{"limitRemaining": *ver.LimitRemaining}
 	}
 	return c
+}
+
+// isBackendAuthError reports a 401/403 raised at the BACKEND's own door (not the
+// provider's). Distinct from every other transport failure because it is a verdict
+// rather than a gap: the request was understood and refused.
+func isBackendAuthError(err error) bool {
+	var berr *backend.Error
+	return errors.As(err, &berr) && berr.IsAuth()
+}
+
+// credentialOwnerSuffix names WHOSE credential the row just reported on. Without it the
+// same word means two very different things — "the backend's account is funded" versus
+// "the key you exported is funded" — and the reader cannot tell which from the endpoint.
+func credentialOwnerSuffix(callerKey string) string {
+	if callerKey != "" {
+		return " (yours, from DAINTREE_API_KEY)"
+	}
+	return " (the backend's own)"
+}
+
+// credentialFixHint routes a rejection to whoever can actually fix it. A caller-supplied
+// key is the user's to correct; the backend's own is not, and telling them to re-paste
+// something they never pasted sends them looking for a setting that does not exist.
+func credentialFixHint(callerKey string) string {
+	if callerKey != "" {
+		return "DAINTREE_API_KEY names a credential the provider will not accept — unset it to fall back to the backend's own."
+	}
+	return "The backend's own upstream credential is rejected — this is a backend-side problem, not yours."
 }
 
 // taskManifestDoctorCheck compares the task ids this CLI sends against what the backend

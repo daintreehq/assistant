@@ -81,12 +81,6 @@ func (m Model) onKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.onQuestionKey(k)
 	}
 
-	// Sign-in sheet owns every key while up — including plain text, which is being
-	// typed into its URL/key fields, not the composer.
-	if m.pendingSignIn != nil {
-		return m.onSignInKey(k)
-	}
-
 	// Ctrl+O toggles the operations deck (clearing any active panel filter).
 	if isCtrl(k, 'o') {
 		if m.view == viewOperations {
@@ -248,13 +242,6 @@ func (m Model) onSubmit(text string) (tea.Model, tea.Cmd) {
 		// package, which only sees *app.App and couldn't read or mutate this map.
 		if title, body, ok := m.handleApprovalsCommand(text); ok {
 			return m.onCommandComplete(CommandCompleteMsg{Title: title, Text: body})
-		}
-		// /login opens the sign-in sheet. Intercepted here for the same reason as
-		// /approvals: it needs the cockpit Model (the sheet is UI state), which the
-		// commands package — which only sees *app.App — cannot touch.
-		if fields := strings.Fields(strings.TrimPrefix(text, "/")); len(fields) > 0 &&
-			strings.EqualFold(fields[0], "login") {
-			return m.openSignIn()
 		}
 		// Slash command: run off the loop (some hit the model). Keep single-flight
 		// independent — a command isn't a model turn. Track it so the composer shows a

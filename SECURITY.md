@@ -14,11 +14,11 @@ to attach. **Do not attach a debug log**; it contains your whole conversation.
 
 **Rotate it first, then tell us.** In order:
 
-1. **OpenRouter key** — revoke it at OpenRouter and issue a new one, then
-   `daintree-assistant login`. The key spends money; a minute of rotation beats any amount
-   of analysis.
-2. **Daintree MCP token** — close and reopen the Daintree window. Daintree rotates the
+1. **Daintree MCP token** — close and reopen the Daintree window. Daintree rotates the
    per-session bearer on every re-provision, so a fresh session invalidates the old one.
+2. **`DAINTREE_API_KEY`, if you set one** — the CLI does not ask for or store an upstream
+   key, so most installs have none. If you exported one, revoke it at the provider and
+   unset the variable.
 3. **Anything else** (a PAT in a terminal, an env var an agent printed) — rotate at the
    source. The assistant only ever handled a copy.
 
@@ -40,17 +40,18 @@ class implies, is a security bug even when nothing leaked. Include:
 
 ## The model this project is defending
 
-The bearer token the CLI sends **is** the caller's own spendable API key, and the Daintree
-MCP token authorises **system-tier** actions for its validity window. Both are treated as
-material that must never reach a durable or shareable surface.
+The CLI normally holds **no upstream credential at all** — the backend supplies its own,
+and a request carries no `Authorization` header. What it does hold is the Daintree MCP
+token, which authorises **system-tier** actions for its validity window, plus an optional
+`DAINTREE_API_KEY` bearer on the rare install that sets one. Both are treated as material
+that must never reach a durable or shareable surface.
 
 Enforced properties, each with tests:
 
 - **No tool edits project files.** Any tool whose name looks file-mutating is rejected at
   startup, before boot completes. Changes go through a *visible* agent terminal.
-- **Credentials never come from a project `.env`.** A bound repository cannot redirect the
-  endpoint or supply a key — that would let a repo steal a spendable credential.
-- **Remote endpoints require HTTPS**, and a URL carrying userinfo is refused.
+- **Credentials and the endpoint never come from a project `.env`.** A bound repository
+  cannot redirect where a turn is sent, nor supply a bearer on your behalf.
 - **Tool activity is scrubbed of known credential shapes** — tool call arguments and
   results, at the event source, which covers the debug log, audit rows, run events, the
   console and JSONL sinks, and the cockpit's activity rows. The debug log additionally

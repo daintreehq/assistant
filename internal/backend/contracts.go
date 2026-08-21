@@ -20,8 +20,6 @@ package backend
 import (
 	"encoding/json"
 	"math"
-
-	"github.com/daintreehq/assistant/internal/credentials"
 )
 
 // ProtocolVersion is the Daintree wire protocol the CLI speaks. The backend
@@ -40,14 +38,14 @@ const ProtocolVersion = 2
 const DefaultBaseURL = "https://assistant.daintree.org"
 
 // LocalBaseURL is the local development backend (`python -m daintree_assistant_server`
-// from ../assistant-backend). Offered as an explicit choice at login, and still the
-// value DAINTREE_BACKEND_URL is usually pointed at for e2e tests and benchmarks.
-// It needs a key too — "local" changes where requests go, not whether they authenticate.
+// from ../assistant-backend). It is what DAINTREE_BACKEND_URL is usually pointed at for
+// the dev loop, e2e tests and benchmarks. There is no endpoint menu any more — the
+// trusted env var is the whole mechanism — so this is the value a developer exports.
 const LocalBaseURL = "http://127.0.0.1:8473"
 
-// AllowsUnverifiedSignIn reports whether an endpoint may be signed in to WITHOUT
-// proving the key works upstream — i.e. whether a missing /v1/daintree/auth/verify
-// route downgrades to a warning instead of failing sign-in outright (see CheckSignIn).
+// AllowsUnverifiedSignIn reports whether an endpoint is excused from proving it can
+// spend a credential — i.e. whether a missing /v1/daintree/auth/verify route is a
+// diagnostic FAILURE or a benign gap (see the doctor check in internal/cli).
 //
 // Only a LOOPBACK endpoint qualifies. The reasoning is about which way the test fails
 // when it is wrong:
@@ -55,8 +53,7 @@ const LocalBaseURL = "http://127.0.0.1:8473"
 //   - The obvious formulation, "is this the official endpoint?", fails OPEN. Its alias
 //     surface is unbounded — `:443`, an empty port, a trailing DNS root dot, an IDNA
 //     spelling, userinfo — and every spelling the check does not anticipate silently
-//     takes the LENIENT path and persists an unverified, spendable key against a remote
-//     host. Getting that check wrong is a security bug.
+//     takes the LENIENT path and blesses a remote host that cannot answer for itself.
 //   - "Is this loopback?" fails CLOSED. There is no `evil.com` spelling that parses to
 //     127.0.0.1, an unparseable URL is treated as remote, and the worst outcome of a
 //     miss is that a developer's own backend has to serve one more route.
@@ -65,45 +62,7 @@ const LocalBaseURL = "http://127.0.0.1:8473"
 // contract, and the lenient path exists only for the `python -m daintree_assistant_server`
 // development loop, where there is no network to intercept and no third party to trust.
 func AllowsUnverifiedSignIn(baseURL string) bool {
-	return credentials.IsLoopbackURL(baseURL)
-}
-
-// EndpointChoice is one selectable endpoint in a sign-in menu.
-type EndpointChoice struct {
-	Label string
-	// URL is empty for "Custom", which prompts for one instead.
-	URL  string
-	Note string
-}
-
-// KeyPurposeNotice is what a user is told, at the moment they are asked for a key, about
-// WHAT the key is and WHO it bills.
-//
-// It is here rather than duplicated in each prompt because both sign-in surfaces have to
-// say the same thing, and this particular sentence is one a tester acts on: they are
-// about to paste a credential that spends their own money, and nothing else in the flow
-// tells them so. Someone who thinks they are entering a Daintree account password will
-// paste the wrong thing, and — worse — will not know to watch their balance.
-//
-// The billing clause leads because it is the half a reader acts on. The backend holds no
-// provider credential of its own; the key travels with every request and funds every
-// model call the session makes, including the ones background supervision fires while
-// nobody is watching — which is the spend a tester would otherwise never think to
-// expect.
-//
-// Kept SHORT on purpose. The cockpit sheet wraps it into a bounded number of rows and
-// ELLIPSIZES past them, and a disclosure cut off mid-sentence at 40 columns is worse
-// than a terser one that always lands whole. Each surface adds its own framing around
-// this sentence; the sentence itself stays the shared, load-bearing part.
-const KeyPurposeNotice = "OpenRouter bills this key for every model call, including background supervision."
-
-// EndpointChoices is the offered endpoint menu, shared by the startup login flow
-// (internal/cli) and the cockpit's `/login` sheet (internal/ui) so the two surfaces
-// cannot drift into offering different endpoints.
-var EndpointChoices = []EndpointChoice{
-	{Label: "Official", URL: DefaultBaseURL, Note: "the deployed Daintree backend"},
-	{Label: "Custom", URL: "", Note: "enter your own URL"},
-	{Label: "Local", URL: LocalBaseURL, Note: "a backend you are running yourself"},
+	return IsLoopbackURL(baseURL)
 }
 
 // --------------------------------------------------------------------------

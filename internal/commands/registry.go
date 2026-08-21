@@ -36,8 +36,6 @@ var COMMAND_REGISTRY = []CommandMeta{
 	{Name: "models", Syntax: "/models", Palette: "backend-owned model routing", Help: "show backend-owned model routing"},
 	{Name: "cost", Syntax: "/cost", Palette: "what this session has spent", Help: "session spend on your own upstream key"},
 	{Name: "routing", Syntax: "/routing", Palette: "which endpoints serve you", Help: "endpoint routing: privacy filter and ranking"},
-	{Name: "auth", Syntax: "/auth", Palette: "endpoint and sign-in", Help: "show the active endpoint and API key (redacted)"},
-	{Name: "login", Syntax: "/login", Palette: "sign in · switch endpoint", Help: "sign in again: official, custom, or local backend"},
 	{Name: "permissions", Syntax: "/permissions [tier]", Palette: "supervisor | operator | system", Help: "show or set tier (supervisor|operator|system)"},
 	{Name: "approvals", Syntax: "/approvals [clear]", Palette: "cockpit tool approvals", Help: "cockpit session approvals; clear resets them"},
 	{Name: "memory", Syntax: "/memory [sub]", Palette: "list · pin · unpin · forget", Help: "list | pin <id> | unpin <id> | forget <id>"},

@@ -305,9 +305,8 @@ read tool that touches the filesystem should use both.
 
 ## Size budgets (enforced)
 
-The inventory is sent on **every** model round and the tester pays for it on their own
-OpenRouter key — measured at ~61% of a representative request, more than double the
-permanent system prompt. `internal/app/toolbudget_test.go` bounds it:
+The inventory is sent on **every** model round — measured at ~61% of a representative
+request, more than double the permanent system prompt, and paid for on every single one. `internal/app/toolbudget_test.go` bounds it:
 
 | budget | limit |
 |---|---|

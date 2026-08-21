@@ -2,8 +2,8 @@
 
 > ❗ **Internal testing only, for now.** Pre-release software under active development.
 > Anyone is welcome to use it, but expect **breaking changes** — to the backend wire
-> protocol, the on-disk schema, and the sign-in flow. An update may mean re-running
-> install and losing local state.
+> protocol, the on-disk schema, and how authentication works. An update may mean
+> re-running install and losing local state.
 
 A single native Go binary: a local command-line **orchestration assistant for
 [Daintree](https://github.com/daintreehq/daintree)**. It plans Daintree operations, spawns
@@ -13,9 +13,9 @@ and keeps your main conversation clean.
 **It is not a code editor and never edits your files.** When a change is needed it spawns
 a *visible* agent in a worktree and supervises it.
 
-Every model call takes one path — CLI → Daintree Assistant backend → OpenRouter → the
-selected model. The CLI holds no provider credential of its own: it forwards your key, and
-the backend owns the system prompt, skill selection, and model choice. See
+Every model call takes one path — CLI → Daintree Assistant backend → the upstream
+provider → the selected model. The CLI holds no credential at all: the backend supplies
+the upstream key and owns the system prompt, skill selection, and model choice. See
 [`docs/BACKEND.md`](docs/BACKEND.md).
 
 ## Supported platforms
@@ -43,23 +43,21 @@ go version                           # want go1.21 or newer
 
 No Homebrew or snap? Take the official package from <https://go.dev/dl/>.
 
-**2. Install, sign in, verify.**
+**2. Install and verify.**
 
 ```bash
 go install github.com/daintreehq/assistant/cmd/daintree-assistant@latest
-daintree-assistant login      # choose "Official", paste your API key
 daintree-assistant doctor     # read it top to bottom; you want no FAIL lines
 ```
 
-Two things that trip people up:
+**There is no sign-in and no API key to paste.** The backend holds the upstream
+credential and Daintree pays for the model calls, so the binary works as soon as it is on
+your `PATH`. Account sign-in is being built; when it arrives, this section grows a step.
 
-- `go install` writes to `$(go env GOPATH)/bin` (usually `~/go/bin`), **which is not on
-  `PATH` by default on macOS** — so the install succeeds and the command is then not
-  found. Fix it with
-  `echo 'export PATH="$(go env GOPATH)/bin:$PATH"' >> ~/.zshrc && exec zsh`.
-- During the tester phase your API key is **your own OpenRouter key**, and it funds every
-  model call your turns make — including background watcher and supervision work that runs
-  while you are not looking. Use a dedicated low-limit key, not your main one.
+One thing that trips people up: `go install` writes to `$(go env GOPATH)/bin` (usually
+`~/go/bin`), **which is not on `PATH` by default on macOS** — so the install succeeds and
+the command is then not found. Fix it with
+`echo 'export PATH="$(go env GOPATH)/bin:$PATH"' >> ~/.zshrc && exec zsh`.
 
 ## Updating
 
@@ -95,9 +93,10 @@ alternate screen, never with the mouse captured — so the host terminal keeps n
 scrolling, selection, and copy-paste. `^O` opens the operations deck, `^X` toggles raw
 tool detail, `/help` lists the rest.
 
-**`doctor` is the gate.** It diagnoses the install, the sign-in (including "no credit
-left" as its own verdict), the backend, and both MCP connections, and exits non-zero only
-on a real failure. Start there when anything is wrong.
+**`doctor` is the gate.** It diagnoses the install, the backend (including whether its
+upstream credential can actually fund a turn — "no credit left" is its own verdict), and
+both MCP connections, and exits non-zero only on a real failure. Start there when
+anything is wrong.
 
 ## Inside Daintree
 

@@ -55,42 +55,6 @@ type pendingQuestion struct {
 	shownAt  int64
 }
 
-// signInStage is where the `/login` sheet currently is. The sheet is a small linear
-// wizard rather than one form because the key prompt must be able to say WHICH endpoint
-// it is about to send the key to — the whole point of picking one first.
-type signInStage int
-
-const (
-	signInStageEndpoint  signInStage = iota // choosing from backend.EndpointChoices
-	signInStageCustomURL                    // typing a URL (only reachable from "Custom")
-	signInStageKey                          // typing the key, masked
-	signInStageVerifying                    // probing the endpoint; input is locked
-)
-
-// pendingSignIn is the in-flight `/login` sheet. Like the approval and question sheets
-// it REPLACES the composer while up, so there is never a second focused input.
-//
-// It holds no reply channel: unlike those sheets it is user-initiated, so nothing is
-// blocked waiting on it and Esc simply abandons it.
-type pendingSignIn struct {
-	stage    signInStage
-	selected int    // highlighted endpoint choice
-	urlInput string // custom-URL entry
-	keyInput string // key entry — rendered as bullets, never echoed
-	// baseURL is the endpoint chosen in stage one, shown on the key prompt so the user
-	// can see where the key is about to be sent.
-	baseURL string
-	// current is the sign-in in force when the sheet opened, so the sheet can offer
-	// "keep the existing key" and show what is being replaced.
-	current app.SignInStatus
-	// currentKeySet marks that a key already exists, making an empty key entry mean
-	// "keep it" instead of an error.
-	currentKeySet bool
-	// errMsg is the last failure, shown inline so the user can correct without
-	// losing the sheet.
-	errMsg string
-}
-
 // Model is the root cockpit model.
 type Model struct {
 	ctx        context.Context
@@ -121,7 +85,6 @@ type Model struct {
 	composer        composer.Model
 	pending         *pendingConfirm
 	pendingQuestion *pendingQuestion
-	pendingSignIn   *pendingSignIn
 
 	// approvedTools is the session "don't ask again for this tool" allow-list (set by the
 	// approval sheet's A / F actions, consulted in onApprovalRequested). The value is a
@@ -350,7 +313,7 @@ func paletteCommands() []composer.Command {
 // composer stays editable while a turn runs (a question/approval sheet is the exception:
 // it takes the keys until the user decides).
 func (m *Model) composerFocus() bool {
-	return m.view == viewHome && m.pending == nil && m.pendingQuestion == nil && m.pendingSignIn == nil
+	return m.view == viewHome && m.pending == nil && m.pendingQuestion == nil
 }
 
 // gutter / chrome / content width helpers measured from the current geometry.

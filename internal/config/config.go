@@ -32,7 +32,6 @@ import (
 	"strings"
 
 	"github.com/daintreehq/assistant/internal/backend"
-	"github.com/daintreehq/assistant/internal/credentials"
 	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/joho/godotenv"
 )
@@ -70,17 +69,22 @@ type AppConfig struct {
 	ProjectID string
 	WindowID  string
 
-	// BackendURL is the resolved Daintree backend endpoint, and APIKey the caller's
-	// key sent as its bearer token. Both come from the sign-in stored at
-	// CredentialsPath unless a trusted env var / CLI override overrides them. APIKey
-	// is empty exactly when the user is signed out — the state every entry point must
-	// handle, since the backend has no unauthenticated mode.
+	// BackendURL is the resolved Daintree backend endpoint: the deployed default
+	// unless a trusted env var / CLI override names another one.
 	BackendURL string
-	APIKey     string
-	// CredentialsPath is where the sign-in is read from and written to. PER-USER (the
-	// state ROOT, shared across projects) unless the state dir was explicitly
-	// overridden, in which case it follows the override so tests stay isolated.
-	CredentialsPath string
+	// APIKey is an OPTIONAL caller-supplied bearer token, and is empty on virtually
+	// every install. The backend holds its own upstream credential and serves a
+	// request that carries no Authorization header at all, so the CLI neither asks
+	// for a key nor stores one — there is no sign-in to be signed out of.
+	//
+	// The field survives because the backend still PREFERS a caller-supplied key
+	// over its own when one arrives, and Daintree's account login is being built
+	// into exactly that seam. Keeping it live (and keeping the header, the shape
+	// check and ScrubKey with it) makes per-account credentials a value flowing
+	// through existing plumbing rather than new plumbing. Trusted env only: it is
+	// spendable, so a bound project's .env must be able neither to supply nor to
+	// read it.
+	APIKey string
 
 	Tier        domain.Tier
 	AutoApprove bool
@@ -313,44 +317,33 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 	}
 	cfg.DBPath = filepath.Join(cfg.StateDir, "state.db")
 
-	// --- sign-in (endpoint + API key) ---
-	// The sign-in is PER-USER: one login serves every project, so it lives at the state
-	// ROOT rather than the per-project subdir. An EXPLICIT state-dir override is the
-	// exception — tests, benchmarks, and `make db-reset` all point the state dir
-	// somewhere disposable, and they must not read (or clobber) the real sign-in.
-	credentialsDir := stateRoot
-	if explicitStateDir != "" {
-		credentialsDir = cfg.StateDir
-	}
-	cfg.CredentialsPath = credentials.Path(credentialsDir)
-	// A malformed credentials file resolves to SIGNED OUT, not a fatal error. Erroring
-	// here would brick the two commands that exist to fix it: `login` and `logout` both
-	// resolve config before they run, so a truncated or hand-edited file would refuse
-	// every recovery path and leave "delete this file yourself" as the only way out.
-	// Signed-out sends the user straight to the login prompt, whose atomic save
-	// overwrites the bad file. `credentials.Load` still reports the error so the login
-	// flow can print it as a warning.
-	stored, _, _ := credentials.Load(cfg.CredentialsPath)
-	// Both are trustedGet, never merged: the API key is a spendable secret (it funds
-	// the upstream model calls), so a bound project's .env must be able neither to read
-	// it nor — via the URL — to redirect where it is sent. DAINTREE_BACKEND_URL stays
-	// the dev/test escape hatch (local backend, fake backend in e2e); the stored
-	// sign-in supplies the endpoint otherwise, falling back to the deployed default.
+	// --- backend endpoint + optional bearer ---
+	// Both are trustedGet, never merged. A bound project's .env must be able neither
+	// to redirect where a turn is sent (the URL) nor to supply a spendable credential
+	// on the user's behalf (the key). DAINTREE_BACKEND_URL is the dev/test escape
+	// hatch — a local backend, the fake backend in e2e — and the deployed default
+	// serves everyone else. There is nothing stored to read: the endpoint falls
+	// straight back to DefaultBaseURL and the key stays empty unless the trusted env
+	// names one, which is the normal case.
 	cfg.BackendURL = FirstString(
 		deref(overrides.BackendURL),
 		e.trustedGet("DAINTREE_BACKEND_URL"),
-		stored.BaseURL,
 		backend.DefaultBaseURL,
 	)
-	// The stored key is used whatever the endpoint resolves to, deliberately: it is the
-	// caller's own provider credential, equally valid against the deployed backend and
-	// a local one. Binding it to the stored URL would break the main dev loop — sign in
-	// once, then point DAINTREE_BACKEND_URL at localhost to test a backend change.
 	cfg.APIKey = FirstString(
 		deref(overrides.APIKey),
 		e.trustedGet("DAINTREE_API_KEY"),
-		stored.APIKey,
 	)
+	// Shape-check it HERE, where the value is resolved, because this is the only place
+	// a human error is still legible. Nobody is prompted for this key any more, so a
+	// bad one arrives via the environment — shell-mangled, smart-quoted, wrapped — and
+	// would otherwise die inside net/http as "invalid header field value" on every
+	// single turn, naming neither the variable nor the cause.
+	if cfg.APIKey != "" {
+		if err := backend.ValidateKeyShape(cfg.APIKey); err != nil {
+			return AppConfig{}, fmt.Errorf("DAINTREE_API_KEY: %w", err)
+		}
+	}
 
 	// logDir (trusted/override → ~/.daintree/logs); always absolute. GLOBAL.
 	logDir := FirstString(deref(overrides.LogDir), e.trustedGet("DAINTREE_ASSISTANT_LOG_DIR"))
@@ -437,7 +430,7 @@ func DescribeConfig(cfg AppConfig) map[string]string {
 		"dbPath":               cfg.DBPath,
 		"logDir":               cfg.LogDir,
 		"backendUrl":           cfg.BackendURL,
-		"apiKey":               credentials.Redact(cfg.APIKey),
+		"apiKey":               redactSecret(cfg.APIKey),
 		"mcpToken":             redactSecret(cfg.McpToken),
 		"projectId":            cfg.ProjectID,
 		"windowId":             placeholderUnset(cfg.WindowID),

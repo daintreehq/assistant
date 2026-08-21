@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -376,43 +375,6 @@ func CheckStateDir(stateDir string) DoctorCheck {
 	}
 	c.Status = StatusOK
 	c.Detail = fmt.Sprintf("%s (%04o)", stateDir, perm)
-	return c
-}
-
-// CheckCredentialsFile reports the stored sign-in's file permissions.
-//
-// Separate from "are you signed in": the key can be perfectly valid and world-readable at
-// the same time, and only one of those is visible from a turn. Reported as a WARNING with
-// the exact chmod rather than repaired silently — a file this process did not create,
-// with permissions it did not choose, is not its to quietly change.
-func CheckCredentialsFile(path string) DoctorCheck {
-	c := DoctorCheck{ID: "credentials.perms", Label: "sign-in file", Data: map[string]any{"path": path}}
-
-	info, err := os.Stat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		c.Status = StatusSkip
-		c.Detail = "no stored sign-in"
-		return c
-	}
-	if err != nil {
-		c.Status = StatusUnknown
-		c.Detail = err.Error()
-		return c
-	}
-	perm := info.Mode().Perm()
-	c.Data["mode"] = fmt.Sprintf("%04o", perm)
-	if perm&0o077 != 0 {
-		// FAIL, not warn. This is not a hygiene note: any other account on the machine can
-		// read a credential that spends the user's money, and the file is 0600 by
-		// construction when this CLI writes it — so a wider mode means something else set
-		// it, and the user needs to know now rather than at the bottom of a warning list.
-		c.Status = StatusFail
-		c.Detail = fmt.Sprintf("mode %04o — other users on this machine can read your API key", perm)
-		c.Hint = "Run: chmod 600 " + path
-		return c
-	}
-	c.Status = StatusOK
-	c.Detail = fmt.Sprintf("%04o (owner only)", perm)
 	return c
 }
 

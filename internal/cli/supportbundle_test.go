@@ -26,7 +26,6 @@ func bundleFixture(t *testing.T) (config.AppConfig, string, string) {
 	return config.AppConfig{
 		StateDir:            dir,
 		DBPath:              filepath.Join(dir, "state.db"),
-		CredentialsPath:     filepath.Join(dir, "credentials.json"),
 		LogDir:              filepath.Join(dir, "logs"),
 		ProjectPath:         dir,
 		APIKey:              apiKey,

@@ -117,38 +117,6 @@ func TestCheckStateDirProvesWritabilityByWriting(t *testing.T) {
 	}
 }
 
-func TestCheckCredentialsFileFlagsBroadPermissions(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "credentials.json")
-	if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	c := CheckCredentialsFile(path)
-	// FAIL, not warn. Any other account on the machine can read a credential that spends
-	// the user's money — and this CLI writes the file 0600, so a wider mode means
-	// something else set it. That belongs at the top of the output, not in a warning list
-	// people skim past.
-	if c.Status != StatusFail {
-		t.Errorf("a 0644 credentials file must FAIL, got %s", c.Status)
-	}
-	if !strings.Contains(c.Hint, "chmod 600") {
-		t.Errorf("the hint should give the exact command: %q", c.Hint)
-	}
-
-	if err := os.Chmod(path, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if c := CheckCredentialsFile(path); c.Status != StatusOK {
-		t.Errorf("a 0600 credentials file should pass, got %s", c.Status)
-	}
-
-	// No sign-in stored is a SKIP, not a problem: signed-out is a valid state, and the
-	// "signed in" check is the one that reports it.
-	if c := CheckCredentialsFile(filepath.Join(dir, "absent.json")); c.Status != StatusSkip {
-		t.Errorf("a missing credentials file should skip, got %s", c.Status)
-	}
-}
-
 // AUTO_APPROVE is invisible from every other surface and changes what the assistant may
 // do without asking. A diagnostic that omits it is missing the most important fact.
 func TestCheckAutoApproveIsConspicuousWhenOn(t *testing.T) {
@@ -169,7 +137,7 @@ func TestCheckAutoApproveIsConspicuousWhenOn(t *testing.T) {
 // can branch on without walking the list.
 func TestDoctorReportJSONShape(t *testing.T) {
 	r := &DoctorReport{Version: "1.2.3", Platform: "darwin/arm64"}
-	r.Add(DoctorCheck{ID: "auth.signedIn", Label: "signed in", Status: StatusOK})
+	r.Add(DoctorCheck{ID: "auth.credentialUsable", Label: "upstream credential", Status: StatusOK})
 	r.Add(DoctorCheck{ID: "backend.reachable", Label: "backend", Status: StatusFail, Hint: "check the network"})
 	r.Finalize()
 
@@ -193,7 +161,7 @@ func TestDoctorReportJSONShape(t *testing.T) {
 		t.Fatalf("want 2 checks, got %d", len(checks))
 	}
 	first, _ := checks[0].(map[string]any)
-	if first["id"] != "auth.signedIn" {
+	if first["id"] != "auth.credentialUsable" {
 		t.Errorf("check ids must be stable and present: %v", first)
 	}
 }

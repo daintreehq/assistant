@@ -48,8 +48,8 @@ func TestPromptContextWithholdsDisplayFromUnawareBackend(t *testing.T) {
 	}
 }
 
-// THE race the endpoint pin exists for: a capability fetch that completes AFTER a
-// `/login` swap describes the OLD deployment. Believed, it would open the gate against
+// THE race the endpoint pin exists for: a capability fetch that completes AFTER the
+// client was replaced describes the OLD deployment. Believed, it would open the gate against
 // a backend that rejects the field and 422 every remaining turn of the session — a
 // permanent break, not a blip. A descriptor from another endpoint is not evidence about
 // this one, so the gate stays closed.
@@ -165,10 +165,17 @@ func TestBackendCapabilitiesLeavesTheCacheAloneOnFailure(t *testing.T) {
 	a.backendCaps.Store(capableSnapshot(a.Backend.BaseURL()))
 	a.SetDisplaySize(120, 97)
 
-	swap := a.backendSwap.Swap(&fakeBackend{caps: func() (backend.Capabilities, error) {
+	// App.Backend is ALWAYS a *backend.Swappable — that is the invariant that lets a
+	// consumer capture it once and still follow a later client rebuild. Asserting it
+	// here is how this test reaches the delegate, and pins the invariant besides.
+	sw, ok := a.Backend.(*backend.Swappable)
+	if !ok {
+		t.Fatalf("App.Backend must be a *backend.Swappable, got %T", a.Backend)
+	}
+	swap := sw.Swap(&fakeBackend{caps: func() (backend.Capabilities, error) {
 		return backend.Capabilities{}, errors.New("backend unreachable")
 	}})
-	defer a.backendSwap.Swap(swap)
+	defer sw.Swap(swap)
 
 	if _, err := a.BackendCapabilities(context.Background()); err == nil {
 		t.Fatal("want the fetch error surfaced to the caller")

@@ -59,16 +59,18 @@ either.
 
 ## What it costs you
 
-**Your OpenRouter key funds every model call.** Turns you type, and also:
+**Nothing.** There is no key to supply and no account to fund: the backend holds the
+upstream credential and Daintree pays for every model call — turns you type, and also:
 
 - watcher checks (a small model classifying terminal output, on a cadence)
 - async supervision waking the assistant when work completes
 - utility tasks: summarize, extract, classify, memory distillation, compaction
 
-Use a **dedicated, low-limit key**, not your main one. `doctor` reports the remaining
-limit when the provider exposes it, and treats "valid but no credit" as a FAILURE — that
-state fails every turn, so it should not read as healthy. (Sign-in itself warns rather
-than refusing, so you can still configure the CLI while topping up.)
+That list is worth reading anyway, because it is where the assistant spends time as well
+as money, and it explains activity you did not ask for. `doctor`'s `upstream credential`
+row reports whether the backend's own account can actually fund a turn, and treats "valid
+but no credit" as a FAILURE — that state fails every turn, so it should not read as
+healthy. If you see it, it is ours to fix, not yours.
 
 ---
 
@@ -87,8 +89,8 @@ work; it publishes a blocked item and resumes on the next launch. Nobody should 
 clean baseline rather than a migration chain. On an **interactive** launch your existing
 database is moved aside to a timestamped backup and recreated, and the path is printed. A
 non-TTY launch (one-shot, `--json`, host, daemon) fails loudly instead, so a script never
-destroys state silently. Your sign-in survives either way; conversation history and
-memories for that project do not.
+destroys state silently. Conversation history and memories for that project do not
+survive.
 
 **Workflow Intelligence is off.** The execution-graph layer
 (`DAINTREE_WORKFLOW_INTELLIGENCE=1`) is not part of this beta. It needs a matching backend
@@ -121,7 +123,7 @@ where it was already on, and its values are redacted and size-capped.)
 
 ## Reference
 
-- [`FIRST_RUN.md`](FIRST_RUN.md) — install, sign in, first useful result
+- [`FIRST_RUN.md`](FIRST_RUN.md) — install, verify, first useful result
 - [`PRIVACY_AND_DATA.md`](PRIVACY_AND_DATA.md) — what leaves your machine, what is stored, how to delete it
 - [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — a doctor-driven decision tree
 - [`SUPPORT_BUNDLE.md`](SUPPORT_BUNDLE.md) — what a bundle contains and what it deliberately omits

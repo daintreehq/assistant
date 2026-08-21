@@ -123,9 +123,9 @@ func TestPromptContextRejectsUnstrippableEndpoint(t *testing.T) {
 }
 
 // The assistant backend URL is model-visible through context.snapshot, and a custom
-// endpoint (trusted env / stored sign-in) can carry userinfo — it never passes through
-// credentials.NormalizeBaseURL when it arrives as an override. It must be sanitized on
-// the way to the model exactly like an MCP endpoint.
+// endpoint can carry userinfo — DAINTREE_BACKEND_URL is taken as given, with no
+// normalisation step to strip it. It must be sanitized on the way to the model exactly
+// like an MCP endpoint.
 func TestSnapshotToolSanitizesBackendURL(t *testing.T) {
 	t.Setenv("DAINTREE_BACKEND_URL", "https://user:supersecret@backend.example")
 	t.Setenv("DAINTREE_API_KEY", "sk-test-key")

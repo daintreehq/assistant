@@ -102,14 +102,6 @@ func HandleUICommandWithProgress(ctx context.Context, line string, a *app.App, p
 		return UICommandResult{Handled: true, Title: "Cost", Text: costText(a)}
 	case "routing":
 		return UICommandResult{Handled: true, Title: "Routing", Text: routingText(ctx, a)}
-	case "auth":
-		return UICommandResult{Handled: true, Title: "Auth", Text: authText(a)}
-	case "login":
-		// The cockpit intercepts /login before this handler and opens the sign-in sheet
-		// (see ui.onSubmit), exactly as it does for /approvals. Reaching here means a
-		// surface with no sheet — the classic REPL — where the subcommand is the answer.
-		return UICommandResult{Handled: true, Title: "Login", Text: authText(a) +
-			"\n\nThis REPL has no sign-in sheet — run `daintree-assistant login` to change it."}
 	case "permissions":
 		return UICommandResult{Handled: true, Title: "Permissions", Text: permissionsText(a, arg)}
 	case "approvals":
@@ -600,32 +592,6 @@ func modelsText(a *app.App) string {
 	return "Model routing is owned by the Daintree backend.\n" +
 		padRight("backend", 8) + ": " + a.Backend.BaseURL() + "\n" +
 		padRight("model", 8) + ": daintree-assistant"
-}
-
-// authText is the read-only sign-in panel (`/auth`). Changing the sign-in is `/login`
-// in the cockpit, or `daintree-assistant login` anywhere.
-func authText(a *app.App) string {
-	st := a.SignInStatus()
-	var b strings.Builder
-	b.WriteString(padRight("endpoint", 10) + ": " + st.Endpoint + "\n")
-	if st.SignedIn {
-		b.WriteString(padRight("signed in", 10) + ": " + st.KeyRedacted + "\n")
-	} else {
-		b.WriteString(padRight("signed in", 10) + ": NO\n")
-	}
-	b.WriteString(padRight("stored at", 10) + ": " + st.StoredPath + "\n")
-	// An env override silently beats the stored sign-in, so a user who has one exported
-	// would otherwise read this panel, run /login, and be baffled that nothing changed.
-	if st.EnvOverride != "" {
-		b.WriteString(padRight("override", 10) + ": " + st.EnvOverride + " is set and wins over the stored sign-in\n")
-	}
-	b.WriteString("\nThe key is your own upstream credential — it funds this session's model calls.\n")
-	if st.SignedIn {
-		b.WriteString("Run /login to switch endpoint or key (applies from the next turn).")
-	} else {
-		b.WriteString("Run /login to sign in.")
-	}
-	return b.String()
 }
 
 func permissionsText(a *app.App, arg string) string {

@@ -7,13 +7,10 @@ import (
 	"testing"
 
 	"github.com/daintreehq/assistant/internal/config"
-	"github.com/daintreehq/assistant/internal/credentials"
 	"github.com/daintreehq/assistant/internal/ipc"
 )
 
-// resetFixture builds a populated state dir and the config that describes it, with the
-// credentials file at the per-user ROOT (one level up) — the real layout, and the one the
-// old `rm -rf` got wrong by deleting a sign-in that does not belong to the project.
+// resetFixture builds a populated state dir and the config that describes it.
 func resetFixture(t *testing.T) (config.AppConfig, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -33,13 +30,10 @@ func resetFixture(t *testing.T) (config.AppConfig, string) {
 	write(filepath.Join(stateDir, ipc.OwnerLockName))
 	write(filepath.Join(stateDir, ipc.DaemonLockName))
 	write(filepath.Join(stateDir, "artifacts", "art_1.json"))
-	credPath := credentials.Path(root)
-	write(credPath)
 
 	return config.AppConfig{
-		StateDir:        stateDir,
-		DBPath:          dbPath,
-		CredentialsPath: credPath,
+		StateDir: stateDir,
+		DBPath:   dbPath,
 	}, root
 }
 
@@ -60,40 +54,6 @@ func contains(hay []string, needle string) bool {
 	return false
 }
 
-// The defining property of the project-state scope: the sign-in SURVIVES.
-//
-// This is the bug the shell version had. "Reset my project" silently destroyed a
-// spendable API key the user may not have stored anywhere else, and gave no hint that it
-// had happened — they discovered it at the next launch, as a login prompt.
-func TestResetProjectStateNeverTouchesCredentials(t *testing.T) {
-	cfg, _ := resetFixture(t)
-
-	targets, err := resetTargets(cfg, ScopeProjectState)
-	if err != nil {
-		t.Fatalf("resetTargets: %v", err)
-	}
-	got := paths(targets)
-	if contains(got, cfg.CredentialsPath) {
-		t.Fatalf("project-state must never remove the sign-in, but targets included it: %v", got)
-	}
-	// It must still remove the things it promises.
-	for _, want := range []string{
-		cfg.DBPath,
-		cfg.DBPath + "-wal", // a stray WAL beside a deleted DB is how a "clean" dir opens dirty
-		cfg.DBPath + "-shm",
-		filepath.Join(cfg.StateDir, "artifacts"),
-	} {
-		if !contains(got, want) {
-			t.Errorf("project-state should remove %s, targets: %v", want, got)
-		}
-	}
-}
-
-// The lease files must SURVIVE — deleting owner.lock while holding an flock on it is the
-// inode-vs-path hazard this whole command exists to prevent. The lock lives on the open
-// descriptor, so unlinking the path lets a second process create a NEW owner.lock,
-// acquire it trivially, and start writing the same database while we still believe we own
-// it. They hold no state either: a lease file is a pid stamp, recreated on demand.
 func TestResetNeverRemovesTheLeaseFilesItHolds(t *testing.T) {
 	cfg, _ := resetFixture(t)
 
@@ -128,61 +88,6 @@ func TestResetProjectStateSweepsUnknownFiles(t *testing.T) {
 	}
 }
 
-// With an explicit DAINTREE_ASSISTANT_STATE_DIR the sign-in lives INSIDE the state dir,
-// so a directory sweep would take it — the same bug as the shell version, reached by a
-// different route.
-func TestResetProjectStateKeepsCredentialsStoredInsideTheStateDir(t *testing.T) {
-	dir := t.TempDir()
-	stateDir := filepath.Join(dir, "isolated")
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	cfg := config.AppConfig{
-		StateDir:        stateDir,
-		DBPath:          filepath.Join(stateDir, "state.db"),
-		CredentialsPath: credentials.Path(stateDir), // the override layout
-	}
-	for _, f := range []string{"state.db", "credentials.json"} {
-		if err := os.WriteFile(filepath.Join(stateDir, f), []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	targets, err := resetTargets(cfg, ScopeProjectState)
-	if err != nil {
-		t.Fatalf("resetTargets: %v", err)
-	}
-	got := paths(targets)
-	if contains(got, cfg.CredentialsPath) {
-		t.Fatalf("project-state removed the sign-in from an overridden state dir: %v", got)
-	}
-	if !contains(got, cfg.DBPath) {
-		t.Errorf("project-state should still remove the database: %v", got)
-	}
-}
-
-func TestResetCredentialsScopeRemovesOnlyTheSignIn(t *testing.T) {
-	cfg, _ := resetFixture(t)
-
-	targets, err := resetTargets(cfg, ScopeCredentials)
-	if err != nil {
-		t.Fatalf("resetTargets: %v", err)
-	}
-	if len(targets) != 1 || targets[0].Path != cfg.CredentialsPath {
-		t.Fatalf("credentials scope must target exactly the sign-in, got %v", paths(targets))
-	}
-	if _, err := os.Stat(cfg.DBPath); err != nil {
-		t.Error("the database must still exist — resolving targets must not delete anything")
-	}
-}
-
-// all-data takes the state dir's CONTENTS and the sign-in, even though the sign-in lives
-// one level up at the per-user root.
-//
-// The contents, never the DIRECTORY: RemoveAll on the state dir would unlink owner.lock
-// while this process holds an flock on it, letting a concurrent launch recreate the
-// directory and a fresh lock and acquire it — two owners on one database, which is the
-// hazard the whole command exists to remove.
 func TestResetAllDataRemovesContentsButNeverTheHeldLease(t *testing.T) {
 	cfg, _ := resetFixture(t)
 
@@ -202,57 +107,8 @@ func TestResetAllDataRemovesContentsButNeverTheHeldLease(t *testing.T) {
 	if !contains(got, cfg.DBPath) {
 		t.Errorf("all-data must remove the database, got %v", got)
 	}
-	if !contains(got, cfg.CredentialsPath) {
-		t.Errorf("all-data must remove the sign-in, got %v", got)
-	}
 }
 
-// With an explicit state-dir override the credentials live INSIDE the state dir, so
-// listing them separately would name the same file twice and try to remove it twice.
-func TestResetAllDataDoesNotDoubleCountCredentialsInsideTheStateDir(t *testing.T) {
-	dir := t.TempDir()
-	cfg := config.AppConfig{
-		StateDir:        dir,
-		DBPath:          filepath.Join(dir, "state.db"),
-		CredentialsPath: credentials.Path(dir),
-	}
-	if err := os.WriteFile(cfg.CredentialsPath, []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	targets, err := resetTargets(cfg, ScopeAllData)
-	if err != nil {
-		t.Fatalf("resetTargets: %v", err)
-	}
-	if len(targets) != 1 || targets[0].Path != cfg.CredentialsPath {
-		t.Fatalf("want the sign-in named exactly once, got %v", paths(targets))
-	}
-}
-
-// A "remove my key" scope that quietly writes a plaintext copy of that key into a new
-// directory has not removed it — and the user has no idea the copy exists.
-func TestBackupNeverCopiesTheSignIn(t *testing.T) {
-	cfg, _ := resetFixture(t)
-
-	targets, err := resetTargets(cfg, ScopeAllData)
-	if err != nil {
-		t.Fatalf("resetTargets: %v", err)
-	}
-	dest, err := backupTargets(cfg, targets)
-	if err != nil {
-		t.Fatalf("backupTargets: %v", err)
-	}
-	if dest == "" {
-		t.Fatal("expected a backup directory")
-	}
-	if _, err := os.Stat(filepath.Join(dest, filepath.Base(cfg.CredentialsPath))); err == nil {
-		t.Error("the sign-in was copied into the backup — the key survives a reset that promised to remove it")
-	}
-}
-
-// A misresolved state dir must never become an unbounded delete. This is the guard the
-// shell version approximated with an empty-string check — which would not have caught
-// "/" or a relative path resolving to the user's home.
 func TestResetRefusesAnUnsafeStateDirectory(t *testing.T) {
 	unsafe := []string{
 		"", "   ", "/", ".", string(filepath.Separator),
@@ -369,9 +225,8 @@ func TestResetTargetsSkipMissingPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := config.AppConfig{
-		StateDir:        stateDir,
-		DBPath:          filepath.Join(stateDir, "state.db"), // never created
-		CredentialsPath: credentials.Path(dir),               // never created
+		StateDir: stateDir,
+		DBPath:   filepath.Join(stateDir, "state.db"), // never created
 	}
 	targets, err := resetTargets(cfg, ScopeProjectState)
 	if err != nil {
@@ -383,12 +238,12 @@ func TestResetTargetsSkipMissingPaths(t *testing.T) {
 }
 
 func TestParseResetScope(t *testing.T) {
-	for _, want := range []ResetScope{ScopeProjectState, ScopeCredentials, ScopeAllData} {
+	for _, want := range []ResetScope{ScopeProjectState, ScopeAllData} {
 		if got, ok := ParseResetScope(string(want)); !ok || got != want {
 			t.Errorf("ParseResetScope(%q) = %q, %v", want, got, ok)
 		}
 	}
-	for _, bad := range []string{"", "all", "everything", "project", "PROJECT-STATE", "rm -rf"} {
+	for _, bad := range []string{"", "all", "everything", "project", "credentials", "PROJECT-STATE", "rm -rf"} {
 		if _, ok := ParseResetScope(bad); ok {
 			t.Errorf("ParseResetScope(%q) should not match a scope", bad)
 		}
@@ -463,15 +318,14 @@ func TestBackupDoesNotRecurseIntoAPreviousBackup(t *testing.T) {
 	}
 }
 
-// Every scope must say plainly what SURVIVES. "Will my key be gone?" is the question the
-// user actually has, and a destructive prompt that does not answer it is a leap, not a
-// decision.
-func TestResetSurvivorNotesAnswerTheCredentialQuestion(t *testing.T) {
+// Every scope must say plainly what SURVIVES. A destructive prompt that does not answer
+// that is a leap, not a decision.
+func TestResetSurvivorNotesSayWhatSurvives(t *testing.T) {
 	cfg, _ := resetFixture(t)
 
 	project := strings.Join(resetSurvivorNotes(cfg, ScopeProjectState), " ")
-	if !strings.Contains(project, "sign-in is KEPT") {
-		t.Errorf("project-state must say the sign-in survives: %s", project)
+	if !strings.Contains(project, "Other projects") {
+		t.Errorf("project-state must say other projects survive: %s", project)
 	}
 	all := strings.Join(resetSurvivorNotes(cfg, ScopeAllData), " ")
 	// It must be precise about its REACH. The command can only take the lease for THIS
@@ -480,12 +334,8 @@ func TestResetSurvivorNotesAnswerTheCredentialQuestion(t *testing.T) {
 	if !strings.Contains(all, "Only THIS project") {
 		t.Errorf("all-data must say it reaches only this project: %s", all)
 	}
-	creds := strings.Join(resetSurvivorNotes(cfg, ScopeCredentials), " ")
-	if !strings.Contains(creds, "KEPT") || !strings.Contains(creds, "login") {
-		t.Errorf("credentials scope must say state survives and login is needed: %s", creds)
-	}
 	// Every scope reassures about the one thing that is never at risk.
-	for _, scope := range []ResetScope{ScopeProjectState, ScopeCredentials, ScopeAllData} {
+	for _, scope := range []ResetScope{ScopeProjectState, ScopeAllData} {
 		if !strings.Contains(strings.Join(resetSurvivorNotes(cfg, scope), " "), "code") {
 			t.Errorf("%s must state that the user's code is untouched", scope)
 		}

@@ -91,8 +91,8 @@ first-token timing + aggregate stats.
 skill it loaded — the surface that says "fix the selector, not the tool"); `done` = what
 it **produced**.
 
-`done`'s `cost` block (`{total, main, selector, complete}`, in USD, on the caller's own
-OpenRouter key) is present only when the backend reported one — its **absence means
+`done`'s `cost` block (`{total, main, selector, complete}`, in USD, on whichever upstream
+credential funded the turn) is present only when the backend reported one — its **absence means
 unknown, never free**, and it is never zero-filled. It is logged per round rather than
 only as a session total because "why was that turn expensive?" is a question you answer
 by reading a log, and because `selector` is the share prompt work can actually move.

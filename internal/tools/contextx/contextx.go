@@ -62,9 +62,9 @@ type Deps struct {
 	MCP    MCPClient
 	Router Router
 	Queue  Queue
-	// BackendURL reports the assistant backend this process is signed in to (the
-	// deployed endpoint, a local dev server, …). A func, not a string, because /login
-	// hot-swaps the client mid-session (backend.Swappable) — a captured string would go
+	// BackendURL reports the assistant backend this process is talking to (the deployed
+	// endpoint, a local dev server, …). A func, not a string, because the live client
+	// sits behind a backend.Swappable and can be replaced — a captured string would go
 	// stale. Optional: nil (or a blank return) just omits the line.
 	BackendURL func() string
 }

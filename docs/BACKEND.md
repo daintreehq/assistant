@@ -14,53 +14,67 @@ User → Daintree CLI ──(structured startup + visible conversation + runtime
         │  streams assistant text, persists backend state                              model routing
         ◄──(named-event SSE: meta / delta / done / error)────────────────────────────┘
                                                                                              │
-                                                                            (caller's key, request-scoped)
+                                                                        (the BACKEND's own credential)
                                                                                              ▼
-                                                                                         OpenRouter
+                                                                                   the upstream provider
                                                                                              │
                                                                                              ▼
                                                                                    the selected model
 ```
 
-**OpenRouter is the only upstream transport.** The backend reaches every model — the main
+**The backend owns the upstream credential.** It reaches every model — the main
 orchestration model and every utility model behind summarize / extract / classify /
-checkpoint / workflow tasks — through OpenRouter, using the caller's own key on a
-per-request basis. Model *identities* in this repo (DeepSeek V4 Flash, GPT-5.6 Sol) are
-OpenRouter route ids, not direct provider integrations, and where a comment names
-model-specific protocol behaviour it means "that model's behaviour when reached through
-OpenRouter." The CLI carries no provider key, no provider client, and no pricing table;
-reintroducing one would let a handler bypass the backend that owns prompts, skills, and
-credentials.
+checkpoint / workflow tasks — with a key the SERVER holds, and Daintree pays. Model
+*identities* named in this repo are the backend's upstream route ids, not direct provider
+integrations, and where a comment names model-specific protocol behaviour it means "that
+model's behaviour when reached through the backend's upstream." The CLI carries no
+provider key, no provider client, and no pricing table; reintroducing one would let a
+handler bypass the backend that owns prompts, skills, and credentials.
 
-## Endpoint and sign-in
+## Endpoint and credentials
 
 Two constants: `backend.DefaultBaseURL` = `https://assistant.daintree.org` (the deployed
 backend, and the default for a fresh install) and `backend.LocalBaseURL` =
 `http://127.0.0.1:8473` (a backend you run yourself).
 
-**Every request authenticates, in every environment.** There is no unauthenticated mode
-to fall back to — not even locally. The `Authorization: Bearer <key>` token is the
-*caller's own* API key, and it doubles as the upstream credential funding that turn's
-model calls: the server holds no provider credential of its own. For early testers the
-key is literally their OpenRouter key (`sk-or-v1-…`); later it becomes a subscription key
-the backend maps server-side, with no wire change. Only `/healthz`, `/readyz` and
-`/version` are open.
+**There is no sign-in.** The backend holds its own upstream credential and funds every
+turn from it, so a request needs to carry no key in order to have one to spend, and
+`auth.authenticate` returns an anonymous principal for a request with no `Authorization`
+header. That is what the CLI sends. It never prompts for a key, never writes one to disk,
+and never gates startup on one.
 
-The backend validates the key **structurally only** (printable non-space ASCII, bounded
-length). That gives two deliberately distinct failures:
+This is a **stage, not a destination**: Daintree account authentication is being built,
+and it lands in the seams below rather than in a rebuilt key flow. Do not reintroduce
+`login`, `logout`, `/auth`, `/login`, a credentials file, or a startup sign-in gate.
+
+Three things stay live because that next step needs them:
+
+| seam | state today | why it is kept |
+|---|---|---|
+| `DAINTREE_API_KEY` → `cfg.APIKey` → `Authorization: Bearer` | unset on a normal install | a caller-supplied bearer still WINS: the backend prefers it over its own credential for that request. Keeping the header, the shape check and `ScrubKey` alive makes a per-account credential a *value* flowing through existing plumbing |
+| `App.Backend` is a `backend.Swappable` | nothing swaps | every consumer holds the wrapper, so in-place re-authentication is a delegate swap rather than a re-wiring of Session, watchers, asyncwork and the workflow layer |
+| `POST /v1/daintree/auth/verify` | `doctor` is the only caller | it now answers for whichever key the request WOULD spend — the backend's own, normally — so it is the one probe that says "this deployment can actually run a turn" |
+
+A **malformed** bearer is still a `401 invalid_api_key`, and that asymmetry is deliberate:
+absence is a valid choice, but a header that is present and unusable is a mistake, and
+silently ignoring it would show a caller a successful authentication while every turn ran
+on the backend's account. The CLI shape-checks `DAINTREE_API_KEY` in `config.LoadConfig`
+for the same reason, one layer earlier — nobody is prompted any more, so a mangled value
+arrives from the environment and would otherwise die inside `net/http` as "invalid header
+field value" on every turn, naming neither the variable nor the cause.
+
+The two 401s remain distinct by **code**, never by status:
 
 | condition | response | CLI predicate | meaning |
 |---|---|---|---|
-| missing / malformed bearer | `401 invalid_api_key` | `Error.IsAuth()` | fix your header — sign in again |
-| well-formed key the provider rejects | `401 provider_invalid_api_key` | `Error.IsUpstreamAuth()` | fix your account — bad or revoked key |
+| malformed bearer (when one is sent at all) | `401 invalid_api_key` | `Error.IsAuth()` | fix your header |
+| well-formed key the provider rejects | `401 provider_invalid_api_key` | `Error.IsUpstreamAuth()` | fix the account behind the key |
 
-Note the two 401s. They mean opposite things and are separated by **code**, never by
-status: `IsAuth()` deliberately excludes the provider codes, because telling someone
-whose key the provider revoked to "check you pasted it in full" sends them round a
-re-entry loop that cannot work. See the upstream taxonomy below.
+`IsAuth()` deliberately excludes the provider codes: telling someone whose credential the
+provider revoked to "check you pasted it in full" sends them round a re-entry loop that
+cannot work. See the upstream taxonomy below.
 
-Because validation is structural, `/v1/daintree/capabilities` answers **200 for any
-well-formed string**. That is why sign-in also calls:
+### Verifying that a turn can actually be funded
 
 ```
 POST /v1/daintree/auth/verify
@@ -68,36 +82,34 @@ POST /v1/daintree/auth/verify
       "label": "...", "limit_remaining": 1.23}
 ```
 
-It asks the provider directly (its key-introspection call — no tokens spent) and is the
-only check that can catch a key that is well-formed but wrong, revoked, or unfunded.
-`valid:false` comes back as **200**, not 401: "this key is invalid" is a successful
-answer to the question, and a 401 would tell the client to retry the same header. A
-provider we cannot reach propagates as 502 `upstream_error`, because then we do not
-know — and "could not check" must never be reported as "invalid".
+It asks the provider directly (a model listing — no tokens spent) about whichever key
+this request would spend. `valid:false` comes back as **200**, not 401: "this key is
+invalid" is a successful answer to the question, and a 401 would tell the client to retry
+the same header. A provider we cannot reach propagates as 502 `upstream_error`, because
+then we do not know — and "could not check" must never be reported as "invalid".
 
 `valid` and `usable` answer different questions — "does the provider recognise this
 credential" versus "can the account behind it fund a turn" — and `reason` (`ok` /
 `provider_rejected` / `credits_exhausted`) is the stable outcome to branch on. A
 recognised key with a spent balance is `valid: true, usable: false`; a client reading
-only `valid` shows a successful sign-in and then fails on the first real request.
+only `valid` reports health and then fails on the first real request.
 `KeyVerification.Usable` is a `*bool` so a backend that predates the field decodes as
 "not reported" rather than as `false`, with `IsUsable()` falling back to
-`limit_remaining`.
+`limit_remaining`. Cerebras reports neither a label nor a budget — its probe answers with
+a model listing — so both are normally absent, and the doctor row is written to read
+correctly without them.
 
-`backend.CheckSignIn` is the shared client-side helper both entry points run, so the
-startup flow and `/login` cannot diverge on what "verified" means. It gates hard on
-capabilities and on an explicit `valid:false`, and downgrades to a **warning** when the
-provider was unreachable or the key is recognised but out of credit. Cancellation and
-timeout are the exception: they are hard failures, since neither is evidence about the
-key nor consent to persist an unverified one.
+`doctor`'s `upstream credential` row is the whole consumer. It reports on the backend's
+own key on a normal install and on yours when `DAINTREE_API_KEY` is set, which is why it
+names the owner in its detail and routes a rejection to whoever can actually fix it.
 
-**A backend that does not serve the route at all is a compatibility failure**, scoped by
+**A backend that does not serve the route at all** is scoped by
 `backend.AllowsUnverifiedSignIn`:
 
 | endpoint | `/v1/daintree/auth/verify` absent (404 / 405 / 501) | rationale |
 |---|---|---|
-| any **remote** host — Official, staging, custom | **hard failure** — `ErrBackendIncompatible` | the deployed backend has served the route since 2026-08, so its absence means an obsolete deployment or an intercepting proxy. Warning through would persist an unverified *spendable* key — the exact thing verification exists to prevent |
-| **loopback** (`127.0.0.0/8`, `::1`, `localhost`) | warning, sign-in proceeds | the `python -m daintree_assistant_server` development loop; there is no network to intercept and no third party to trust |
+| any **remote** host | **doctor failure** | the deployed backend has served the route since 2026-08, so its absence means an obsolete deployment or an intercepting proxy |
+| **loopback** (`127.0.0.0/8`, `::1`, `localhost`) | reported as unknown, not a failure | the `python -m daintree_assistant_server` development loop, which is routinely mid-change |
 
 The predicate is deliberately **"is this local?"**, never "is this the official
 endpoint?". The latter fails **open**: its alias surface is unbounded — `:443`, an empty
@@ -108,25 +120,21 @@ unparseable URL is treated as remote. Both are pinned by `TestAllowsUnverifiedSi
 
 404, 405, and 501 all map to `ErrVerifyUnsupported`: the client issues the contractually
 correct `POST`, so any of the three is evidence the route is absent or intercepted.
-Transport failures and other 5xx do **not** — those mean "could not check", which stays a
-warning and must never be reported as a verdict about the key.
-
-`ErrBackendIncompatible` is deliberately distinct from `ErrKeyRejected` because the fixes
-are opposite: re-pasting the key cannot help, so both sign-in surfaces say "your key is
-fine — retry off any proxy, or point at a Local backend meanwhile" rather than sending a
-tester hunting for a credential problem they do not have.
+Transport failures and other 5xx do **not** — those mean "could not check", which stays
+`unknown` and must never be reported as a verdict about the credential.
 
 ### Key hygiene: the client scrubs on the way out
 
-The bearer token is the caller's spendable credential, and an upstream we do not control
-can echo the `Authorization` header back at us. Every path where that could happen is
-scrubbed **inside the client**, not at the display sites — there are many sinks (turn
-error rendering, doctor rows, login messages, the retry hook, the debug-log writer) and
-exactly one place they all get their values from:
+On the normal path there is no caller key for anyone to echo, so this costs nothing. When
+`DAINTREE_API_KEY` IS set the bearer is a spendable credential and an upstream we do not
+control can echo the `Authorization` header back at us. Every path where that could happen
+is scrubbed **inside the client**, not at the display sites — there are many sinks (turn
+error rendering, doctor rows, the retry hook, the debug-log writer) and exactly one place
+they all get their values from:
 
 | path | where | why it needs its own scrub |
 |---|---|---|
-| `verify` **200** body (`detail`, `label`) | `VerifyKey` | the *success* path — no error wrapper covers it, and it feeds the login confirmation, `/auth`, and the cockpit sheet |
+| `verify` **200** body (`detail`, `label`) | `VerifyKey` | the *success* path — no error wrapper covers it, and it feeds the `doctor` credential row |
 | any JSON endpoint's error body | `readErrorResponse` → `scrubBackendError` | scrubbing here also cleans the error handed to the retry-observability hook |
 | marshal / decode errors | `doJSON` → `scrubError` | a decoder's message can echo the payload |
 | terminal SSE `error` event | `respondStreamOnce` → `scrubError` | `parseRespondStream` is a free function with no access to the key |
@@ -142,70 +150,40 @@ The default transports use `proxyExceptLoopback`, not `http.ProxyFromEnvironment
 stock bypass fires only for the exact lowercase host `localhost` and parseable loopback
 IP literals, while `AllowsUnverifiedSignIn` also accepts `LOCALHOST`, `localhost.`,
 `dev.localhost`, and `127.0.0.1.` — all of which genuinely address this machine. Left
-unaligned, those four spellings would be classified onto the *lenient* sign-in path while
-being *routed* through `HTTP_PROXY`: over plain http the proxy would receive the spendable
-token in clear text, and a proxy answering capabilities-then-404 could push the request
-back onto the lenient path and persist an unverified key. Deriving both from the same
-predicate makes them agree by construction, so widening the loopback definition later
-cannot silently reopen the gap. Pinned by
-`TestProxyIsBypassedForEverySpellingClassifiedAsLocal`.
+unaligned, those four spellings would be treated as trusted-local by one predicate while
+being *routed* through `HTTP_PROXY` by the other: over plain http the proxy would see
+whatever bearer the request carries in clear text, and would sit in the middle of a turn
+it was never meant to see. Deriving both from the same predicate makes them agree by
+construction, so widening the loopback definition later cannot silently reopen the gap.
+Pinned by `TestProxyIsBypassedForEverySpellingClassifiedAsLocal`.
 
-**The CLI never probes the provider itself.** It holds no provider client by design, and
-the caller key becomes a subscription key later — at which point only the backend can
-resolve it. Adding an OpenRouter call here would break both properties.
-
-### Signing in
-
-```bash
-daintree-assistant login    # choose official / custom / local, paste the key
-daintree-assistant logout   # forget it
-daintree-assistant doctor   # `signed in` + `key valid` rows
-```
-
-Inside the cockpit, `/auth` shows the active sign-in (read-only) and `/login` opens a
-sheet that re-authenticates **in place** — endpoint picker, masked key entry, verify,
-then a hot swap of the live backend client via `App.SignIn`. No restart: every consumer
-holds a `backend.Swappable` (never a raw client), so `agent.Session`, the watcher engine,
-the async coordinator, and the workflow layer all follow the swap. A turn already
-streaming finishes on the old client — an endpoint cannot change mid-stream without
-corrupting the transcript — so the change applies from the next message. `/login` is
-REFUSED while a turn is running: a turn is multi-round (Session re-calls `RespondStream`
-after every tool round), and swapping between rounds would send the next round to a
-different endpoint carrying a `state` token the previous one signed.
-
-A custom endpoint may only use `http://` for **loopback** hosts — every request carries
-the key as a bearer token, so plain HTTP to a remote host would put a spendable secret on
-the wire. Embedded userinfo (`https://user:pass@host`) is rejected for the same reason.
-
-`login` writes `{backend_url, api_key}` as 0600 JSON at the **per-user state root**
-(`~/.daintree/assistant-cli/credentials.json`) — one sign-in serves every project. An
-explicit `DAINTREE_ASSISTANT_STATE_DIR` / `--state-dir` moves it alongside that dir
-instead, which is what keeps tests and benchmarks from reading or clobbering a real
-sign-in. Nothing is written until verification passes, so a typo never persists. Implementation: `internal/credentials` (storage),
-`internal/cli/login.go` (flow), `internal/config` (resolution).
-
-Startup gates on a resolved key (`cli.ensureSignedIn`): an interactive TTY launch runs
-the login flow inline, before the ownership lease and before `app.Create`; every
-non-interactive path (one-shot, `--json`, `host`, `daemon`) fails fast with
-`not signed in — run daintree-assistant login`.
+**The CLI never probes a provider itself.** It holds no provider client by design, and
+the credential the account system will issue is one only the backend can resolve. Adding
+a direct provider call here would break both properties.
 
 ### Overrides
 
-`DAINTREE_API_KEY` and `DAINTREE_BACKEND_URL` are **trusted-env only** — a bound
-project's `.env` can supply neither. That is a security boundary, not tidiness: the key
-is spendable and the URL decides where it is sent, so a cloned repo must not be able to
-inject either. Overriding the URL keeps the stored key (the key is the caller's own
-credential, equally valid against any endpoint), which is exactly the local dev loop:
+`DAINTREE_BACKEND_URL` and `DAINTREE_API_KEY` are **trusted-env only** — a bound project's
+`.env` can supply neither. That is a security boundary, not tidiness: the URL decides
+where a turn is sent, and the key, when present, is spendable, so a cloned repo must not
+be able to inject either.
+
+The URL override is the whole endpoint mechanism now, and the local dev loop in its
+entirety:
 
 ```bash
 cd ../assistant-backend
 python -m daintree_assistant_server            # serves on 127.0.0.1:8473 (its .env pins the port)
 
-DAINTREE_BACKEND_URL=http://127.0.0.1:8473 daintree-assistant   # same sign-in, local backend
+DAINTREE_BACKEND_URL=http://127.0.0.1:8473 daintree-assistant
 ```
 
-e2e tests use the same override to point at a fake backend, plus `DAINTREE_API_KEY` to
-clear the sign-in gate.
+e2e tests use the same override to point at a fake backend. They need nothing else —
+there is no sign-in gate left to clear.
+
+A remote endpoint should still be `https://`. Nothing forces it any more (there is no
+prompt left to validate at, and a request with no bearer carries no secret of its own),
+but a turn's prose, tool arguments and results all cross that wire.
 
 ## Wire contract
 
@@ -246,9 +224,9 @@ The Go client mirrors it in `internal/backend`:
 
 ### Endpoint routing
 
-The backend picks which OpenRouter endpoint serves a request. Two of those decisions are
-legitimately the CALLER's, since the key and the bill are theirs, so `/v1/daintree/respond`
-accepts an optional `routing` block:
+The backend picks which upstream endpoint serves a request. Two of those decisions are
+still legitimately the CALLER's — which compliant endpoint sees their source, and how the
+pool is ranked — so `/v1/daintree/respond` accepts an optional `routing` block:
 
 ```jsonc
 "routing": {
@@ -271,8 +249,8 @@ additive), and **guarantee a route** (a strict mode plus a narrow allowlist can 
 pool, which fails closed as `upstream_no_compliant_provider` rather than quietly relaxing
 the filter).
 
-Config is **trusted-env only** — never a project `.env`, the same boundary the sign-in
-pair sits behind. A bound repository cannot drop the no-training floor (the backend sends
+Config is **trusted-env only** — never a project `.env`, the same boundary the endpoint
+and the optional bearer sit behind. A bound repository cannot drop the no-training floor (the backend sends
 that unconditionally), but it could pin every request to an endpoint of its choosing, or
 quietly cancel a user's zero-retention choice. Which compliant endpoint sees someone's
 source is not a decision a checked-in file should make.
@@ -296,10 +274,12 @@ NON-DEFAULT policy, since the default is what every install runs.
 
 ### Cost reporting
 
-Every upstream call is funded by the caller's own OpenRouter key, so what a request cost
-is **their** money. The backend reports OpenRouter's own figures — never a token-price
-estimate, because the router knows which of ~24 endpoints served the call and what cache
-discount applied, and anything derived client-side would be a guess presented as a bill.
+Daintree funds every upstream call now, so a reported cost is no longer the caller's bill
+— but it is still the only honest measure of what a turn actually spent, and the number
+that says whether a change made the assistant cheaper or more expensive. The backend
+reports the provider's own figures — never a token-price estimate, because the router
+knows which endpoint served the call and what cache discount applied, and anything derived
+client-side would be a guess presented as a bill.
 
 | where | field | meaning |
 |---|---|---|
@@ -309,7 +289,7 @@ discount applied, and anything derived client-side would be a guess presented as
 | `/v1/daintree/capabilities` | `respond.cost_reporting` | the contract, advertised so a client can degrade |
 
 Two rules the CLI **implements** rather than infers, because getting either wrong
-under-reports someone's actual bill while looking like a receipt:
+under-reports what a turn spent while looking like a receipt:
 
 1. **Absent means unknown, never free.** The block is omitted rather than zero-filled.
    Test key PRESENCE, not `!= null`.
@@ -344,8 +324,8 @@ orchestration spends real money on summarize/extract/classify tasks fired from t
 watchers that never appear as a turn. `internal/costledger` accumulates; `/cost` and
 `/doctor` render, hedging an incomplete total as `≥ $x` (truncated, never rounded up) and
 naming why. The ledger is deliberately unpersisted and counts from process launch or the
-last `/clear`; it outlives a `/login` client swap, so changing endpoint mid-session does
-not silently zero the bill.
+last `/clear`; it deliberately outlives the client it measures, so anything that rebuilds
+that client mid-session cannot silently zero the bill.
 
 Not counted anywhere: **skill learning**, which runs fire-and-forget on a stronger model
 after the response and can cost more than the turn that triggered it. It is off by
@@ -397,9 +377,9 @@ the CLI classifies from the code itself, so this table is the contract:
 
 | code | status | retried? | whose problem |
 |---|---|---|---|
-| `provider_invalid_api_key` | 401 | no | your key — replace or rotate it, then `/login` |
-| `provider_insufficient_credits` | 402 | no | your balance — add credit |
-| `provider_key_forbidden` | 403 | no | your key's model permissions / spend limit / guardrails (signing in again cannot help) |
+| `provider_invalid_api_key` | 401 | no | the credential funding the turn — the backend's own unless `DAINTREE_API_KEY` is set |
+| `provider_insufficient_credits` | 402 | no | that account's balance — add credit |
+| `provider_key_forbidden` | 403 | no | that key's model permissions / spend limit / guardrails |
 | `upstream_no_compliant_provider` | 503 | no | your routing policy matched no endpoint |
 | `upstream_rate_limited` | 429 | **yes** | transient (honours `Retry-After`) |
 | `upstream_timeout` | 504 | **yes** | transient |
@@ -491,8 +471,8 @@ with something unparseable (usually a provider or compatibility problem).
   **Gated on `capabilities.respond.display_context`:** `runtime` is validated with
   `extra="forbid"`, so a backend that predates the field would 422 the whole turn; the CLI
   fails closed and withholds the geometry until a handshake advertises support (the
-  descriptor is cached by `App.BackendCapabilities`, cleared and re-fetched on a `/login`
-  endpoint swap). Delete the gate once no such deployment is reachable.
+  descriptor is cached by `App.BackendCapabilities` and re-fetched when the endpoint
+  changes). Delete the gate once no such deployment is reachable.
 - **Worktree read state is explicit.** An omitted `runtime.worktree` means the live read was
   unavailable, `{current:null}` means Daintree definitively reports no current worktree,
   and a current object carries id/path/branch/issue/PR/status/last-commit fields.

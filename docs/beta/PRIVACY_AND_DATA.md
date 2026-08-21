@@ -76,7 +76,9 @@ window.
 | Async invocations | `state.db` | 7 days after finishing |
 | Artifacts (oversized results, archived transcripts) | `state.db` | 90 days / 1,000 rows — deliberately the same window as the conversation, so a transcript stub can never outlive the payload it points at |
 | Attention inbox | `state.db` | Until resolved (7 days once terminal) |
-| Sign-in (`{backend_url, api_key}`) | `credentials.json`, mode 0600 | Until `logout` |
+
+**No credential is stored at all.** There is no sign-in: the backend holds the upstream
+key and a request from the CLI carries no `Authorization` header.
 
 And under `~/.daintree/logs/`, only when `DAINTREE_ASSISTANT_DEBUG_LOG=1`:
 
@@ -84,8 +86,8 @@ And under `~/.daintree/logs/`, only when `DAINTREE_ASSISTANT_DEBUG_LOG=1`:
 | --- | --- |
 | Full session trace — model requests, tool calls with args and results, watcher lifecycle | Pruned past 7 days **at the next debug-logging launch** — not on a timer, so logs from a machine you stopped using stay until you run it again with tracing on |
 
-A state directory this CLI creates is 0700, and the sign-in, debug logs, and support
-bundles are written 0600. An **existing** directory's permissions are left as they are —
+A state directory this CLI creates is 0700, and debug logs and support bundles are
+written 0600. An **existing** directory's permissions are left as they are —
 `doctor` reports both, with the exact `chmod`, rather than silently changing something it
 did not create.
 
@@ -96,8 +98,8 @@ did not create.
 Credentials are stripped before anything is written to the **debug log**, the **audit
 rows**, the **run events**, the **console/JSONL output**, and the **cockpit's activity
 rows**. Two layers: recognisable shapes (bearer tokens, `sk-` keys, PATs, JWTs, PEM
-blocks, `export API_KEY=…`, URL userinfo), plus this process's own API key and MCP token
-by exact value.
+blocks, `export API_KEY=…`, URL userinfo), plus this process's own MCP token by exact
+value — and `DAINTREE_API_KEY` too, on the rare install that sets one.
 
 **Redaction covers tool activity, not prose.** Tool call arguments and results are
 scrubbed at the event source, which is what feeds the log, the audit rows, run events, the
@@ -131,15 +133,13 @@ separate, narrow artifact rather than "zip up the state directory".
 | --- | --- |
 | One memory | `/memory forget <id>` |
 | The current conversation (and cancel watchers/async) | `/clear` |
-| This project's state, keeping your sign-in | `daintree-assistant reset project-state` |
-| Only the sign-in | `daintree-assistant logout` (or `reset credentials`) |
-| This project's state **and** the sign-in | `daintree-assistant reset all-data` |
+| This project's conversation and supervision state | `daintree-assistant reset project-state` |
+| Everything this CLI has written for this project | `daintree-assistant reset all-data` |
 | Debug logs | `rm -rf ~/.daintree/logs` — or wherever `DAINTREE_ASSISTANT_LOG_DIR` points |
 
 Every `reset` scope stops the daemon, takes the owner lease, and shows you exactly what it
 will remove and what survives. It writes a timestamped backup first unless you pass
-`--no-backup` — and it never backs up the sign-in, since "remove my key" that leaves a
-plaintext copy has not removed it. It refuses to run
+`--no-backup`. It refuses to run
 against a directory that does not look like an assistant state directory — so a mistyped
 `DAINTREE_ASSISTANT_STATE_DIR` cannot turn it on your repository.
 

@@ -35,13 +35,13 @@ backend owns the system prompt, developer instructions, **skill/runbook selectio
 choice, prompt assembly, and the utility-model prompts. The CLI executes the local
 tool calls the backend asks for and streams the assistant's text. See `docs/BACKEND.md`.
 
-**Upstream transport is OpenRouter, and only OpenRouter.** The backend reaches every model
-— main and utility alike — through OpenRouter, request-scoped with the caller's own key
-(currently the tester's own OpenRouter key, which funds the turn). Model identities in this
-repo (`deepseek/deepseek-v4-flash-0731`, `openai/gpt-5.6-sol`) are **OpenRouter route ids**,
-not direct provider integrations; where a comment names model-specific protocol behaviour,
-read it as "that model's behaviour when reached through OpenRouter". There is no
-`DEEPSEEK_API_KEY` anywhere in this process.
+**The backend owns the upstream credential, and the CLI has none.** Every model call —
+main and utility alike — is funded by a key the SERVER holds; the CLI ships no provider
+credential and asks the user for none. Model identities that appear in this repo's
+comments are the backend's upstream route ids, not direct provider integrations; where a
+comment names model-specific protocol behaviour, read it as "that model's behaviour when
+reached through the backend's upstream". There is no provider API key anywhere in this
+process.
 
 > **You have standing permission to edit the backend at `../assistant-backend`.** Many
 > fixes here are really backend changes — the base/system prompt, developer instructions,
@@ -51,32 +51,38 @@ read it as "that model's behaviour when reached through OpenRouter". There is no
 > shape, fix it directly in `../assistant-backend` (prompt/skill changes land there; local
 > tool-shape changes land here) — no need to ask first.
 
-**Endpoint + sign-in.** The default endpoint is the deployed backend,
+**Endpoint, and NO sign-in.** The default endpoint is the deployed backend,
 `https://assistant.daintree.org` (`backend.DefaultBaseURL`); `backend.LocalBaseURL` is
 the local one (`http://127.0.0.1:8473`) you get by running `../assistant-backend`
-(`python -m daintree_assistant_server`). **The backend authenticates every request in
-every environment** — there is no unauthenticated mode — and the bearer token IS the
-caller's own upstream (OpenRouter) key, since the server holds no provider credential of
-its own. So `daintree-assistant login` picks an endpoint (official / custom / local) and
-stores `{backend_url, api_key}` 0600 at the per-user state root
-(`~/.daintree/assistant-cli/credentials.json`, `internal/credentials`); `logout` clears
-it. In the cockpit, `/auth` shows the sign-in read-only and `/login` re-authenticates
-**in place** (sheet → verify → hot swap, no restart) — which is why `App.Backend` is
-always a `backend.Swappable`: every consumer holds the wrapper, so a swap reaches
-Session, watchers, asyncwork and the workflow layer without re-wiring, and an in-flight
-stream finishes on the old client. Sign-in VERIFIES the key with the provider via the
-backend's `POST /v1/daintree/auth/verify` (`backend.CheckSignIn`) — our own auth is
-structural, so capabilities returns 200 for any well-formed string and a bad key would
-otherwise only surface on the first turn. The CLI must never probe the provider itself.
-Startup gates on a key: an interactive launch prompts, a one-shot/`--json`/host/daemon
-launch fails with `not signed in — run daintree-assistant login`. Overrides are the
-trusted env vars `DAINTREE_API_KEY` and `DAINTREE_BACKEND_URL` — a project `.env` can
-supply **neither** (it would redirect or steal a spendable key). Overriding the URL keeps
-the stored key, which is the local dev loop: sign in once, then point
-`DAINTREE_BACKEND_URL` at your local backend. The CLI still holds **no model credentials
-of its own and no provider client at all** — it forwards the caller's key and nothing
-else; the direct provider transport, the tier Router, and the model/provider config knobs
-were deleted once the backend became the only gateway.
+(`python -m daintree_assistant_server`). Point `DAINTREE_BACKEND_URL` at it — that
+trusted env var is the whole endpoint mechanism, and the local dev loop in its entirety.
+
+**There is no sign-in, and the CLI stores no credential.** The backend holds its own
+upstream key and serves a request that carries **no `Authorization` header at all**, so
+the CLI never prompts for a key, never writes one to disk, and never gates startup on
+one. `login` / `logout`, `/auth`, `/login`, the cockpit sign-in sheet, `internal/credentials`
+and the `reset credentials` scope are all GONE — do not reintroduce them. That is a
+deliberate stage, not the destination: Daintree account authentication is being built
+next, and it lands in the seams kept alive for it, not in a rebuilt OpenRouter-key flow.
+
+Two of those seams are load-bearing and must stay:
+
+- **`DAINTREE_API_KEY`** still resolves into `cfg.APIKey` (trusted env ONLY — a project
+  `.env` may supply neither it nor the URL, since one steals a spendable credential and
+  the other redirects where it is sent). When set, the client sends it as the bearer and
+  the backend PREFERS it over its own key for that request. Nothing sets it on a normal
+  install; it stays live, with the header, the shape check and `backend.ScrubKey`, so a
+  per-account credential later becomes a VALUE flowing through existing plumbing rather
+  than new plumbing.
+- **`App.Backend` is always a `backend.Swappable`.** Every consumer holds the wrapper, so
+  a client rebuild reaches Session, watchers, asyncwork and the workflow layer without
+  re-wiring. Nothing swaps today; in-place re-authentication is what it is kept for.
+
+`POST /v1/daintree/auth/verify` survives too, with its question changed: it now answers
+for whichever key the request WOULD spend — the backend's own, on every normal install —
+so it is the one probe that can say "this deployment can actually run a turn" before a
+turn is spent finding out. `doctor` is its only caller (`upstream credential` row). The
+CLI must never probe a provider itself.
 
 ## Commands
 
@@ -94,11 +100,9 @@ make install                                                  # go install with 
 ./bin/daintree-assistant --classic           # classic line REPL (also used for non-TTY)
 ./bin/daintree-assistant "which worktrees are ready?"   # one-shot, prints, exits
 ./bin/daintree-assistant --json "…"          # one-shot, JSONL events to stdout
-./bin/daintree-assistant login               # pick an endpoint (official/custom/local), store the API key
-./bin/daintree-assistant logout              # forget the stored sign-in
 ./bin/daintree-assistant doctor              # environment gate; `doctor --json` for the structured form
 ./bin/daintree-assistant support-bundle      # redacted diagnostics archive to send to a maintainer
-./bin/daintree-assistant reset <scope>       # project-state | credentials | all-data (lease-aware, backs up)
+./bin/daintree-assistant reset <scope>       # project-state | all-data (lease-aware, backs up)
 ./bin/daintree-assistant host --stdio        # embedded host: stdio NDJSON, PROTOCOL_VERSION 2
 
 # Gates (run before considering work done)
@@ -137,7 +141,7 @@ because that needs an Apple certificate this repo cannot provision.
 
 `make` targets: `build` · `install` · `test` · `test-race` · `vet` · `fmt` ·
 `generate` (`go generate ./...`) · `run` · `clean` · `db-reset` (delegates to
-`reset project-state`, which keeps your sign-in). `rtk` can mask the real `go` output, so verify a clean build/test
+`reset project-state`). `rtk` can mask the real `go` output, so verify a clean build/test
 with the real binary if a result looks off.
 
 There is **no ESLint/Prettier/Biome equivalent**: the only gates are `go build`,
@@ -158,9 +162,7 @@ internal/
                  RunPhase, ToolResult (Ok/Fail), AgentEvent union, DB-row records, constants
                  (MainPromptCacheKey, MaxToolIterations), WatchCondition DSL, IDs
   config/        LoadConfig(ConfigOverrides) → AppConfig; trusted-env boundary; DEFAULTS;
-                 resolves the sign-in (BackendURL / APIKey / CredentialsPath)
-  credentials/   the stored sign-in {backend_url, api_key} — 0600 JSON at the per-user
-                 state root; Load/Save (atomic rename)/Delete/Redact. Never logged
+                 resolves the endpoint (BackendURL) + the optional DAINTREE_API_KEY bearer
   ports/         interface seams: EventSink, Store, ToolRegistry, MCPClient, Queue
   projectinstructions/  Load(projectPath) → DAINTREE.md (16 KiB cap)
   debuglog/      StartDebugLog / LogDebug / CurrentDebugLogPath (0700/0600, 7-day prune)
@@ -378,8 +380,8 @@ every tool call with args+result, the watcher lifecycle) to a **global** dir (de
 ~30 call sites, so a new call site inherits the protection without knowing the rule
 exists. `internal/redact` does the work: credential SHAPES (bearer, `sk-`, PATs, JWTs,
 `NAME=value` env assignments, URL userinfo, PEM blocks) plus EXACT values registered via
-`redact.RegisterSecret` — the API key at boot and on `/login`, the MCP token at boot and
-on every daemon credential refresh. Registration is additive: a rotated key stays
+`redact.RegisterSecret` — the MCP token at boot and on every daemon credential refresh,
+plus `DAINTREE_API_KEY` at boot on the rare install that sets one. Registration is additive: a rotated key stays
 registered, because a log line written under it is still on disk. Block values are capped
 at 64 KiB with a size + sha256 prefix. The same redactor also guards the durable audit
 rows (`tools.safeJSON`) and the cockpit's approval sheet (`internal/ui/redact.go`).
@@ -476,9 +478,10 @@ tokens, never goes stale — see the prompt-cache invariant above.)
 
 ## Key environment variables
 
-`DAINTREE_API_KEY` / `DAINTREE_BACKEND_URL` (the sign-in pair — trusted-env ONLY, never a
-project `.env`; both normally come from `daintree-assistant login` instead. Overriding the
-URL keeps the stored key, so a local backend needs only `DAINTREE_BACKEND_URL`) ·
+`DAINTREE_BACKEND_URL` (the backend endpoint — trusted-env ONLY, never a project `.env`;
+defaults to the deployed backend, and pointing it at `http://127.0.0.1:8473` IS the local
+dev loop) · `DAINTREE_API_KEY` (OPTIONAL bearer, trusted-env ONLY, unset on a normal
+install — when set it overrides the backend's own upstream credential for this session) ·
 `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` /
 `DAINTREE_PROJECT_ID` / `DAINTREE_WINDOW_ID` (injected by Daintree) ·
 `DAINTREE_ROUTING_PRIVACY` / `DAINTREE_ROUTING_SORT` / `DAINTREE_ROUTING_ONLY` /
@@ -492,10 +495,10 @@ wording) ·
 `DAINTREE_ASSISTANT_LOG_DIR` · `DAINTREE_WORKFLOW_INTELLIGENCE` (rollout flag for the
 workflow execution-graph layer, off by default — needs a backend carrying the matching
 `workflow_state` turn-context contract + workflow tasks; see docs/WORKFLOW_INTELLIGENCE.md).
-(Model/provider variables — `OPENROUTER_API_KEY`, the legacy `DEEPSEEK_*` pair, and
-`DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL` — are **backend-only**. The CLI reads none of them,
-its `AppConfig` carries no model or provider fields at all, and the only credential it
-holds is the caller's own key, which it forwards verbatim to the backend.)
+(Model/provider variables — every `*_API_KEY` and the `DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL`
+trio — are **backend-only**. The CLI reads none of them and its `AppConfig` carries no
+model or provider fields at all. On a normal install it holds no credential whatsoever;
+the one it CAN hold, `DAINTREE_API_KEY`, it forwards verbatim and never stores.)
 Resolution order: CLI overrides → real process env (snapshotted **before** `.env` loads,
 the trusted-env boundary) → project `.env` → assistant's own `.env` → `DEFAULTS`. All in
 `internal/config`. State lives under `~/.daintree/assistant-cli/` (`state.db`; per-project

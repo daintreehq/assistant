@@ -5,6 +5,29 @@ guarantees, and the SQLite schema is a single clean baseline rather than a migra
 
 ## Unreleased — internal beta preparation
 
+### Changed — no sign-in, no API key
+
+- **The CLI no longer asks for, verifies, or stores a credential.** The backend holds its
+  own upstream key and serves a request that carries no `Authorization` header, so
+  Daintree pays for the model calls and a fresh install works as soon as the binary is on
+  your `PATH`. Removed: `login`, `logout`, the `/auth` and `/login` cockpit commands, the
+  sign-in sheet, the startup sign-in gate on every entry point, the `reset credentials`
+  scope, and `internal/credentials` (and with it `credentials.json` — the CLI now writes
+  no credential file at all). **A `credentials.json` left over from an earlier build is
+  ignored, not deleted; remove it yourself.**
+- **This is a stage, not the destination.** Daintree account authentication is being built
+  next. Three seams are kept live for it: `DAINTREE_API_KEY` (trusted env only, unset on a
+  normal install) still rides as a bearer that the backend prefers over its own key,
+  `App.Backend` stays a `backend.Swappable` so re-authentication can swap a delegate rather
+  than re-wire every consumer, and `/v1/daintree/auth/verify` keeps answering — now for
+  whichever key the request would spend.
+- **`doctor` reports an `upstream credential` row instead of `signed in` + `key valid`.**
+  Having no key is the healthy state now, so it is no longer a failed check. The row names
+  whose credential it just probed, and routes a rejection to whoever can fix it — the
+  backend's own is a backend-side problem, not yours. A `bearer token` row appears only
+  when `DAINTREE_API_KEY` is actually set.
+- `reset` now takes `project-state` or `all-data`; both are about this project's state.
+
 ### Security
 
 - **Closed an ungrantable-tool bypass.** A grant scoped to a *risk class* authorised
@@ -23,7 +46,6 @@ guarantees, and the SQLite schema is a single clean baseline rather than a migra
   masthead, a warning line in the classic REPL banner, a stderr/JSONL warning on one-shot
   and host runs — which inherit the bypass too, being the same `main` actor — plus a line
   in `doctor` and every support bundle.
-- The stored sign-in being world-readable is now a `doctor` **failure**, not a note.
 
 ### Added
 
@@ -33,13 +55,12 @@ guarantees, and the SQLite schema is a single clean baseline rather than a migra
 - **`doctor --json`**, and a structured `doctor` with a stable id per check, one next
   action each, and a non-zero exit only on real failures. New checks: duplicate binaries on
   PATH (Daintree resolves by name, so an older copy silently shadows this build), platform
-  supervision support, state-dir writability and privacy, credentials file mode, schema
-  version, owner lease, docs MCP, `AUTO_APPROVE`.
-- **`reset project-state | credentials | all-data`** — a safe replacement for
-  `rm -rf`-ing the state directory. Stops the daemon, takes the owner lease, shows what
-  dies and what survives, backs up first (unless `--no-backup`, and never the sign-in),
-  and refuses to run against anything that does not look like an assistant state
-  directory.
+  supervision support, state-dir writability and privacy, schema version, owner lease,
+  docs MCP, `AUTO_APPROVE`.
+- **`reset project-state | all-data`** — a safe replacement for `rm -rf`-ing the state
+  directory. Stops the daemon, takes the owner lease, shows what dies and what survives,
+  backs up first (unless `--no-backup`), and refuses to run against anything that does not
+  look like an assistant state directory.
 - **Generated capability reference** — `docs/generated/TOOLS.md`, `COMMANDS.md`, and
   `COMPATIBILITY.md`, projected from the live registry and diffed in CI.
 - **Internal beta documentation** under `docs/beta/`.
@@ -54,11 +75,10 @@ guarantees, and the SQLite schema is a single clean baseline rather than a migra
 
 ### Changed
 
-- Sign-in is **strict for remote endpoints**: a backend that does not serve
-  `/v1/daintree/auth/verify` now fails sign-in rather than warning through and persisting
-  an unverified, spendable key. Loopback keeps the lenient path for local development.
-- `make db-reset` delegates to `reset project-state`, and **keeps your sign-in** — it used
-  to delete it along with everything else.
+- A remote backend that does not serve `/v1/daintree/auth/verify` is a `doctor` failure;
+  loopback stays lenient, since a local backend is routinely mid-change.
+- `make db-reset` delegates to `reset project-state` instead of `rm -rf`-ing the state
+  directory from the shell.
 - Debug-log values are capped at 64 KiB, keeping the head *and* the tail (build output puts
   the failure at the end).
 

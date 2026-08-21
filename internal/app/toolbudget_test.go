@@ -11,10 +11,10 @@ import (
 
 // toolbudget_test.go bounds the tool projection's size.
 //
-// The inventory is sent on EVERY model round and the tester pays for it on their own
-// OpenRouter key. Measured on the backend: the tool schemas were ~61% of a representative
-// request — more than double the permanent system prompt. Nothing was enforcing that, so
-// it grew the way an unbounded thing grows: one reasonable paragraph at a time.
+// The inventory is sent on EVERY model round, and is paid for on every one. Measured on
+// the backend: the tool schemas were ~61% of a representative request — more than double
+// the permanent system prompt. Nothing was enforcing that, so it grew the way an
+// unbounded thing grows: one reasonable paragraph at a time.
 //
 // These are budgets, not laws of nature. An orchestrator tool genuinely needs more room
 // than a file read. What the budgets buy is that exceeding one has to be a decision

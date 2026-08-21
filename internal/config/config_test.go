@@ -27,8 +27,8 @@ func isolatedHome(t *testing.T) string {
 		"DAINTREE_ASSISTANT_TIER", "DAINTREE_ASSISTANT_AUTO_APPROVE",
 		"DAINTREE_ASSISTANT_OFFLINE", "DAINTREE_ASSISTANT_LOG_DIR", "DAINTREE_ASSISTANT_DEBUG_LOG",
 		"DAINTREE_MCP_URL", "DAINTREE_MCP_TOKEN", "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL",
-		// The sign-in pair: a developer with either exported would otherwise leak their
-		// real endpoint/key into every config test's expectations.
+		// The endpoint and the optional bearer: a developer with either exported would
+		// otherwise leak their real values into every config test's expectations.
 		"DAINTREE_BACKEND_URL", "DAINTREE_API_KEY",
 		"DAINTREE_LARGE_MODEL", "DAINTREE_MEDIUM_MODEL", "DAINTREE_SMALL_MODEL",
 		// Routing is VALIDATED at load, so an ambient invalid value here would fail

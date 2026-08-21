@@ -1,7 +1,7 @@
 // Package costledger accumulates what this session has spent on the caller's own
 // upstream key.
 //
-// Every model call the CLI makes is funded by the tester's OpenRouter key, and the
+// Every model call the CLI makes is funded by the backend's upstream credential, and the
 // prompt is large — so "what has this session cost me?" is a question they will ask, and
 // the difference between a tester who trusts the tool and one who quietly stops using it
 // is whether it can answer. The backend reports OpenRouter's own figures per call (it

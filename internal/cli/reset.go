@@ -20,10 +20,8 @@ import (
 // reset.go is the SAFE replacement for `rm -rf`-ing the state directory.
 //
 // The Makefile's db-reset target used to remove the whole state root from the shell,
-// which is wrong in five separate ways and quietly so:
+// which is wrong in four separate ways and quietly so:
 //
-//   - It deletes credentials.json along with the project state, so "reset my project"
-//     silently signs the user out and loses a key they may not have stored elsewhere.
 //   - It unlinks owner.lock while a live process still holds a flock on that INODE. The
 //     lock survives on the open descriptor, the next process creates a DIFFERENT file and
 //     acquires it trivially, and the single-owner invariant — the thing standing between
@@ -44,14 +42,13 @@ import (
 type ResetScope string
 
 const (
-	// ScopeProjectState removes this project's supervision and conversation state and
-	// KEEPS the sign-in. The common case: a schema change or a wedged project.
+	// ScopeProjectState removes this project's supervision and conversation state.
+	// The common case: a schema change or a wedged project.
 	ScopeProjectState ResetScope = "project-state"
-	// ScopeCredentials removes ONLY the stored sign-in — the same thing `logout` does,
-	// offered here so the reset vocabulary is complete rather than making the user
-	// remember that one scope lives under a different verb.
-	ScopeCredentials ResetScope = "credentials"
-	// ScopeAllData removes everything this CLI has ever written, sign-in included.
+	// ScopeAllData removes everything this CLI has ever written for this project.
+	//
+	// There is no separate credentials scope any more, because there is no stored
+	// credential: the backend holds its own upstream key and the CLI never writes one.
 	ScopeAllData ResetScope = "all-data"
 )
 
@@ -60,9 +57,8 @@ var resetScopes = []struct {
 	Scope ResetScope
 	Help  string
 }{
-	{ScopeProjectState, "this project's conversation, memories, watchers, timers, async work, workflows, artifacts and audit trail — KEEPS your sign-in"},
-	{ScopeCredentials, "only the stored endpoint + API key (same as `logout`)"},
-	{ScopeAllData, "this project's state AND the sign-in (other projects are untouched — run it in each)"},
+	{ScopeProjectState, "this project's conversation, memories, watchers, timers, async work, workflows, artifacts and audit trail"},
+	{ScopeAllData, "everything this CLI has written for this project (other projects are untouched — run it in each)"},
 }
 
 // ParseResetScope maps a subcommand word to a scope.
@@ -322,17 +318,15 @@ func assertLooksLikeStateDir(dir string, cfg config.AppConfig) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	credName := filepath.Base(cfg.CredentialsPath)
 	for _, e := range entries {
 		n := e.Name()
 		if n == "state.db" || strings.HasPrefix(n, "state.db-") ||
-			n == ipc.OwnerLockName || n == ipc.DaemonLockName ||
-			(credName != "" && n == credName) {
+			n == ipc.OwnerLockName || n == ipc.DaemonLockName {
 			return nil
 		}
 	}
 	return fmt.Errorf("refusing to reset: %q does not look like a Daintree Assistant state directory "+
-		"(no state.db, sign-in, or lease file). Check DAINTREE_ASSISTANT_STATE_DIR — pointing it at a "+
+		"(no state.db or lease file). Check DAINTREE_ASSISTANT_STATE_DIR — pointing it at a "+
 		"source directory would delete that directory's contents", dir)
 }
 
@@ -388,9 +382,6 @@ func resetTargets(cfg config.AppConfig, scope ResetScope) ([]resetTarget, error)
 	}
 
 	switch scope {
-	case ScopeCredentials:
-		add("sign-in", cfg.CredentialsPath)
-
 	case ScopeProjectState:
 		// Everything in the state dir EXCEPT the preserved set, rather than an allowlist
 		// of known filenames.
@@ -413,7 +404,7 @@ func resetTargets(cfg config.AppConfig, scope ResetScope) ([]resetTarget, error)
 		}
 
 	case ScopeAllData:
-		// The state dir's CONTENTS plus the sign-in — never the directory itself.
+		// The state dir's CONTENTS — never the directory itself.
 		//
 		// RemoveAll(stateDir) would unlink owner.lock along with everything else, while
 		// this process holds an flock on it. The lock lives on the open descriptor, so a
@@ -432,13 +423,6 @@ func resetTargets(cfg config.AppConfig, scope ResetScope) ([]resetTarget, error)
 			}
 			add(resetLabelFor(e.Name()), filepath.Join(stateDir, e.Name()))
 		}
-		// With an explicit state-dir override the sign-in lives inside the dir and the
-		// sweep above already has it; otherwise it sits at the per-user root, one level
-		// up. filepath.Rel rather than a string prefix, so a trailing separator or a
-		// ".." component cannot fool the containment test.
-		if !isAncestor(stateDir, filepath.Clean(cfg.CredentialsPath)) {
-			add("sign-in", cfg.CredentialsPath)
-		}
 
 	default:
 		return nil, fmt.Errorf("unknown reset scope %q", scope)
@@ -449,23 +433,14 @@ func resetTargets(cfg config.AppConfig, scope ResetScope) ([]resetTarget, error)
 // preservedByProjectStateReset reports whether a state-dir entry survives a
 // project-state reset.
 //
-// Two categories, for two quite different reasons:
-//
-//   - credentials.json — the whole point of this scope. It normally lives one level up at
-//     the per-user root, but an explicit DAINTREE_ASSISTANT_STATE_DIR puts it right here,
-//     and a directory sweep would take it with everything else. That is precisely the bug
-//     the shell version had, reintroduced by a different route.
-//
-//   - the LEASE FILES and the control socket. Deleting owner.lock while holding an flock
-//     on it is the inode-vs-path hazard this command exists to prevent: the lock lives on
-//     the open descriptor, so unlinking the path lets a second process create a NEW
-//     owner.lock, acquire it trivially, and start writing the same database while we still
-//     believe we own it. They also hold no state — a lease file is a pid stamp, recreated
-//     on demand — so removing them buys nothing and risks the one invariant that matters.
+// The LEASE FILES and the control socket, for one reason. Deleting owner.lock while
+// holding an flock on it is the inode-vs-path hazard this command exists to prevent: the
+// lock lives on the open descriptor, so unlinking the path lets a second process create a
+// NEW owner.lock, acquire it trivially, and start writing the same database while we
+// still believe we own it. They also hold no state — a lease file is a pid stamp,
+// recreated on demand — so removing them buys nothing and risks the one invariant that
+// matters.
 func preservedByProjectStateReset(name string, cfg config.AppConfig) bool {
-	if name == filepath.Base(cfg.CredentialsPath) {
-		return true
-	}
 	switch name {
 	case ipc.OwnerLockName, ipc.DaemonLockName:
 		return true
@@ -500,16 +475,9 @@ func resetSurvivorNotes(cfg config.AppConfig, scope ResetScope) []string {
 	notes := []string{"Your code, your worktrees, and Daintree itself are untouched."}
 	switch scope {
 	case ScopeProjectState:
-		notes = append(notes,
-			"Your sign-in is KEPT ("+cfg.CredentialsPath+") — you will not have to log in again.",
-			"Other projects' state is untouched.")
-	case ScopeCredentials:
-		notes = append(notes,
-			"Project state — memories, watchers, workflows, audit trail — is KEPT.",
-			"You will need to run `daintree-assistant login` before the next turn.")
+		notes = append(notes, "Other projects' state is untouched.")
 	case ScopeAllData:
 		notes = append(notes,
-			"This removes your sign-in as well — `daintree-assistant login` will be needed.",
 			// Being precise here matters: the command can only take the lease for THIS
 			// project, so reaching into sibling project directories would mean deleting
 			// state a live process might be writing. Saying "every project" would have
@@ -521,13 +489,8 @@ func resetSurvivorNotes(cfg config.AppConfig, scope ResetScope) []string {
 }
 
 // resetNextSteps tells the user what to do now.
-func resetNextSteps(scope ResetScope) []string {
-	switch scope {
-	case ScopeCredentials, ScopeAllData:
-		return []string{"Run `daintree-assistant login` to sign in again."}
-	default:
-		return []string{"Start the assistant normally — a fresh state is created on launch."}
-	}
+func resetNextSteps(ResetScope) []string {
+	return []string{"Start the assistant normally — a fresh state is created on launch."}
 }
 
 // backupTargets copies the targets into a timestamped sibling directory and returns its
@@ -557,19 +520,11 @@ func backupTargets(cfg config.AppConfig, targets []resetTarget) (string, error) 
 		}
 		dest = fmt.Sprintf("%s-%d", base, i)
 	}
-	credName := filepath.Base(cfg.CredentialsPath)
 	copied := 0
 	for _, t := range targets {
 		// Locks and sockets are process-lifetime artifacts; copying them would be
 		// meaningless at best and, for a socket, an error.
 		if strings.HasSuffix(t.Path, ".lock") || strings.HasSuffix(t.Path, ".sock") {
-			continue
-		}
-		// NEVER back up the sign-in. `reset credentials` means "remove my key"; writing a
-		// plaintext copy of a spendable credential into a new directory would make that
-		// statement false, and the user would have no idea the copy existed. Losing a key
-		// you can re-paste is a minor inconvenience; leaving one lying around is not.
-		if credName != "" && filepath.Base(t.Path) == credName {
 			continue
 		}
 		if err := copyPath(t.Path, filepath.Join(dest, filepath.Base(t.Path))); err != nil {
@@ -705,11 +660,9 @@ func ResetUsage() string {
 func resetScopeSummary(s ResetScope) string {
 	switch s {
 	case ScopeProjectState:
-		return "this project's state; KEEPS your sign-in"
-	case ScopeCredentials:
-		return "only the stored endpoint + API key"
+		return "this project's conversation and supervision state"
 	case ScopeAllData:
-		return "this project's state AND the sign-in"
+		return "everything this CLI has written for this project"
 	}
 	return ""
 }

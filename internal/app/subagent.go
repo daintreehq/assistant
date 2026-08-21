@@ -169,8 +169,8 @@ func (s subagentTranscriptSink) Put(content string) string {
 // Parallelizable.
 func (a *App) newSubagentRunner() *subagent.Runner {
 	return subagent.New(subagent.Deps{
-		// The Swappable, so a mid-run `/login` reaches the NEXT round rather than
-		// stranding the run on a dead endpoint.
+		// The Swappable, so a client replaced mid-run reaches the NEXT round rather
+		// than stranding the run on a dead endpoint.
 		Backend:    a.Backend,
 		Tools:      subagentDispatcher{app: a},
 		Transcript: subagentTranscriptSink{app: a},

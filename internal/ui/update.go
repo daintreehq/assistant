@@ -42,12 +42,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onKey(msg)
 
 	case tea.PasteMsg:
-		// The sign-in sheet takes paste FIRST: it hides the composer, and pasting is how
-		// an API key is actually entered — routing paste only to the composer silently
-		// dropped it, leaving the field stubbornly empty with no feedback.
-		if m.pendingSignIn != nil {
-			return m.onSignInPaste(msg.Content)
-		}
 		// Bracketed paste only reaches the composer when it owns keys.
 		if m.composerFocus() {
 			m.composer.Update(msg)
@@ -206,9 +200,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case CommandCompleteMsg:
 		return m.onCommandComplete(msg)
-
-	case SignInResultMsg:
-		return m.onSignInResult(msg)
 
 	case ApprovalRequestedMsg:
 		return m.onApprovalRequested(msg)

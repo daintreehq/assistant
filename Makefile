@@ -97,12 +97,11 @@ run: build
 clean:
 	rm -rf $(BIN_DIR)
 
-## db-reset: reset this project's local state (KEEPS your sign-in).
+## db-reset: reset this project's local state.
 #
 # DELEGATES to the CLI. It used to be `rm -rf "$(STATE_DIR)"` straight from the shell,
 # which was wrong in ways make cannot see:
 #
-#   - it deleted credentials.json along with the project state, silently signing you out;
 #   - it unlinked owner.lock while a live process still held a flock on that INODE, so
 #     the next process created a different file, acquired it trivially, and the
 #     single-owner invariant protecting the database was gone with no error anywhere;
@@ -115,7 +114,6 @@ clean:
 # something else holds it), backs up to a timestamped directory, and removes only this
 # project's state. --yes because a make target has nobody to prompt.
 #
-# Use `daintree-assistant reset all-data` for the nuclear option, or
-# `reset credentials` to drop only the sign-in.
+# Use `daintree-assistant reset all-data` for the nuclear option.
 db-reset: build
 	$(BIN) reset project-state --yes

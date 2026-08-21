@@ -162,7 +162,7 @@ var secretValuePatterns = []*regexp.Regexp{
 }
 
 // exact holds the literal secrets this process is holding. Guarded because
-// RegisterSecret runs at boot and on every `/login` hot-swap, while redaction runs from
+// RegisterSecret runs at boot and on every MCP credential refresh, while redaction runs from
 // tool goroutines, the scheduler, and the async coordinator concurrently.
 var exact struct {
 	sync.RWMutex
@@ -179,10 +179,10 @@ const minExactLength = 12
 
 // RegisterSecret adds a literal value to be removed from every redacted string.
 //
-// Call it with each real credential as it becomes known: the API key at boot and again
-// after a `/login` swap, the Daintree MCP token on connect and reconnect. Registering is
-// additive and idempotent — an old key stays registered after a rotation, which is
-// correct, since a log written before the swap can still contain it.
+// Call it with each real credential as it becomes known: the Daintree MCP token on
+// connect and reconnect, and DAINTREE_API_KEY at boot on the rare install that sets one.
+// Registering is additive and idempotent — an old value stays registered after a
+// rotation, which is correct, since a log written before it can still contain it.
 //
 // Safe to call with "" or a short value; both are ignored.
 func RegisterSecret(s string) {

@@ -38,36 +38,20 @@ copy — it cannot remove one that is already there, which is what `doctor` find
 
 ---
 
-## 2. Get a key
+## 2. There is nothing to sign in to
 
-You need an **OpenRouter API key**, and it should be a *dedicated, low-limit* one. It pays
-for every model call this assistant makes — including the background ones (watcher checks,
-async completions, summarize/extract/classify) that happen while you are not looking.
+No key, no login, no account. The Daintree Assistant backend holds its own upstream
+credential and **Daintree pays for the model calls** — including the background ones
+(watcher checks, async completions, summarize/extract/classify) that happen while you are
+not looking.
 
-The key never touches a model provider from your machine. It travels to the Daintree
-Assistant backend as a bearer token, and the backend uses it request-scoped to reach
-OpenRouter. It is stored 0600 under `~/.daintree/assistant-cli/`, never in your project.
-
----
-
-## 3. Sign in
-
-```bash
-daintree-assistant login
-```
-
-Pick **Official** (`https://assistant.daintree.org`) and paste the key. Input is masked.
-
-Sign-in asks the provider whether the key actually works, with a 30-second budget. A
-**definite rejection fails** — you cannot save a key the provider refuses. Two cases warn
-and save anyway, because neither is evidence the key is wrong and refusing would leave you
-unable to configure the CLI at all: **no credit remaining** (real, and every turn will
-fail until you top up) and **the provider could not be reached**. Read the warning; it says
-which happened.
+Nothing is stored on your machine and nothing reaches a model provider from it: the CLI
+sends its requests to the backend with no `Authorization` header, and the backend does the
+rest. Account sign-in is being built; when it lands, this page grows a step.
 
 ---
 
-## 4. Check the environment
+## 3. Check the environment
 
 ```bash
 daintree-assistant doctor
@@ -84,7 +68,7 @@ Read it top to bottom. Every line is one condition with one next action. You wan
 
 ---
 
-## 5. Launch it from inside Daintree
+## 4. Launch it from inside Daintree
 
 Open the Assistant panel. Daintree injects the MCP connection; the assistant picks it up.
 
@@ -93,7 +77,7 @@ selection, and copy/paste are your terminal's, not ours.
 
 ---
 
-## 6. First useful things to ask
+## 5. First useful things to ask
 
 Start read-only. These mutate nothing:
 

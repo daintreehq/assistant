@@ -32,9 +32,6 @@ import (
 func doctorOpts(t *testing.T) Options {
 	t.Helper()
 	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", t.TempDir())
-	// Signed in, so the sign-in gate is not what these tests measure. The temp state
-	// dir already isolates the credentials file from the developer's real sign-in.
-	t.Setenv("DAINTREE_API_KEY", "test-key")
 	// Force the workflow-intelligence flag OFF: with it ambiently on, CheckTasks
 	// would additionally require the three workflow ids and the core-only fixtures
 	// below would fail for an environment reason, not a code one.
@@ -113,9 +110,6 @@ func TestSchemaAutoReset_AuthorisesAndNotes(t *testing.T) {
 // through to startRepl, which intentionally detaches itself from that context.
 func TestRunInteractive_CancelledCockpitDoesNotFallBack(t *testing.T) {
 	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", t.TempDir())
-	// Signed in: runInteractive gates on a key before it ever reaches the cockpit seam,
-	// and an unset key would make this test measure the login prompt instead.
-	t.Setenv("DAINTREE_API_KEY", "test-key")
 	t.Setenv(NoDaemonEnv, "1")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -239,3 +233,89 @@ func TestRunDoctor_EmptyTaskInventoryFails(t *testing.T) {
 // The genuine "cannot verify" case is a capabilities FETCH error (an older backend
 // that 404s the endpoint). That must NOT fail doctor — it is covered by
 // TestRunDoctor_BackendReachableReturnsSuccess, whose stub serves only /health.
+
+// authRejectingBackendURL answers /health but 401s every authenticated route — which is
+// exactly what a backend predating this build does when the CLI sends no key at all.
+func authRejectingBackendURL(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"status":"ok"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"code":"invalid_api_key","message":"Invalid or missing API key."}}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// Having no key is the healthy state now, so doctor must not carry a "signed in" row —
+// a red line on every install would train people to ignore the whole report.
+func TestDoctorHasNoSignedInCheck(t *testing.T) {
+	t.Setenv("DAINTREE_BACKEND_URL", healthyBackendURL(t))
+	report, err := buildDoctorReport(context.Background(), doctorOpts(t))
+	if err != nil {
+		t.Fatalf("buildDoctorReport: %v", err)
+	}
+	for _, c := range report.Checks {
+		if strings.Contains(strings.ToLower(c.Label), "signed in") || c.ID == "auth.signedIn" {
+			t.Fatalf("doctor still reports a sign-in row: %+v", c)
+		}
+		// The bearer row is reported ONLY when one is actually being sent. doctorOpts
+		// sets no key, so its presence here would mean the row fires on every install.
+		if c.ID == "auth.bearer" {
+			t.Fatalf("the bearer row must stay hidden when no key is set: %+v", c)
+		}
+	}
+}
+
+// The failure this replaced the sign-in gate with. A backend that refuses the request at
+// its own door cannot serve a single turn, so reporting it as "could not check" would
+// have doctor conclude "no blocking problems" for an install that does not work at all.
+func TestDoctorFailsWhenTheBackendRejectsTheRequestOutright(t *testing.T) {
+	t.Setenv("DAINTREE_BACKEND_URL", authRejectingBackendURL(t))
+	report, err := buildDoctorReport(context.Background(), doctorOpts(t))
+	if err != nil {
+		t.Fatalf("buildDoctorReport: %v", err)
+	}
+	var found *DoctorCheck
+	for i := range report.Checks {
+		if report.Checks[i].ID == "auth.credentialUsable" {
+			found = &report.Checks[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("no upstream-credential row; a reachable backend must always be probed")
+	}
+	if found.Status != StatusFail {
+		t.Fatalf("a 401 at the backend's own door must FAIL, got %s (%s)", found.Status, found.Detail)
+	}
+	// The hint has to name the right culprit. With no key of our own, re-checking a
+	// credential the user never supplied is not an action they can take.
+	if !strings.Contains(found.Hint, "DAINTREE_BACKEND_URL") {
+		t.Errorf("the hint must point at the endpoint, not at a key the user never set: %q", found.Hint)
+	}
+	if code := RunDoctor(context.Background(), doctorOpts(t)); code != domain.OneShotExitCode.Error {
+		t.Fatalf("doctor must exit Error(%d) against a backend that refuses it, got %d", domain.OneShotExitCode.Error, code)
+	}
+}
+
+// The same row, told whose credential it just reported on. Getting this backwards sends
+// someone hunting for a setting that does not exist on their machine.
+func TestCredentialOwnershipWordingFollowsTheKey(t *testing.T) {
+	if s := credentialOwnerSuffix(""); !strings.Contains(s, "backend's own") {
+		t.Errorf("with no caller key the row must name the backend's credential: %q", s)
+	}
+	if s := credentialOwnerSuffix("k"); !strings.Contains(s, "DAINTREE_API_KEY") {
+		t.Errorf("with a caller key the row must name where it came from: %q", s)
+	}
+	if h := credentialFixHint(""); strings.Contains(h, "DAINTREE_API_KEY") {
+		t.Errorf("with no caller key the fix must not mention a variable they never set: %q", h)
+	}
+	if h := credentialFixHint("k"); !strings.Contains(h, "DAINTREE_API_KEY") {
+		t.Errorf("with a caller key the fix must name it: %q", h)
+	}
+}

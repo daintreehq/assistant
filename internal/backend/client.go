@@ -13,8 +13,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-
-	"github.com/daintreehq/assistant/internal/credentials"
 )
 
 // Backend is the full client surface the app depends on (satisfied by *Client, and
@@ -159,18 +157,18 @@ const (
 //
 // Without it, routing and classification disagree. Go's own proxy bypass fires only for
 // the exact lowercase host "localhost" and for parseable loopback IP literals, whereas
-// AllowsUnverifiedSignIn (credentials.IsLoopbackURL) also accepts "LOCALHOST",
+// AllowsUnverifiedSignIn (IsLoopbackURL) also accepts "LOCALHOST",
 // "localhost.", "dev.localhost", and "127.0.0.1." — every one of which genuinely
 // addresses this machine, and every one of which stock ProxyFromEnvironment would hand
-// to HTTP_PROXY. That gap is exactly wrong in two ways at once: over plain http the
-// proxy would receive the spendable bearer token in clear text, and a proxy answering
-// capabilities-then-404 would put the request back on the LENIENT sign-in path it was
-// classified onto, persisting an unverified key.
+// to HTTP_PROXY. That gap is exactly wrong in two ways at once: a host classified as
+// trusted-local would be routed through a third party, and over plain http that party
+// would see the whole turn — prose, tool arguments, results, and any bearer the request
+// happens to carry — in clear text.
 //
 // Deriving both from the same predicate makes the two agree by construction, so
 // widening the loopback definition later cannot silently reopen this.
 func proxyExceptLoopback(req *http.Request) (*url.URL, error) {
-	if req != nil && req.URL != nil && credentials.IsLoopbackURL(req.URL.String()) {
+	if req != nil && req.URL != nil && IsLoopbackURL(req.URL.String()) {
 		return nil, nil
 	}
 	return http.ProxyFromEnvironment(req)
@@ -753,9 +751,9 @@ type KeyVerification struct {
 	Detail string `json:"detail"`
 	// Usable answers a DIFFERENT question from Valid: not "does the provider recognise
 	// this credential" but "can the account behind it actually fund a turn". A key with
-	// a spent balance is valid and unusable, and a client reading only Valid shows a
-	// successful sign-in and then fails on the first real request with what looks like
-	// an unrelated error.
+	// a spent balance is valid and unusable, and a client reading only Valid reports
+	// health and then fails on the first real request with what looks like an unrelated
+	// error.
 	//
 	// A POINTER because an older backend omits the field entirely, and a plain bool
 	// would decode that absence as `false` — declaring every key on every older
@@ -774,10 +772,10 @@ type KeyVerification struct {
 }
 
 // ErrVerifyUnsupported reports a backend that does not serve the key-verification
-// route at all — as opposed to serving it and answering. Sign-in fails on it for any
+// route at all — as opposed to serving it and answering. `doctor` FAILS on it for any
 // REMOTE endpoint (an obsolete deployment or an intercepting proxy is a compatibility
-// failure) and downgrades it to a warning only for loopback, so the local development
-// loop keeps working. See CheckSignIn and AllowsUnverifiedSignIn.
+// failure) and reports it as merely unknown for loopback, where a backend mid-change is
+// routine. See AllowsUnverifiedSignIn.
 var ErrVerifyUnsupported = errors.New("backend does not support key verification")
 
 // verifyUnsupportedStatuses are the HTTP responses that mean "this deployment does not
@@ -786,27 +784,29 @@ var ErrVerifyUnsupported = errors.New("backend does not support key verification
 // 404 is the obvious one. 405 and 501 matter just as much: the client issues the
 // contractually correct POST, so a Method Not Allowed or Not Implemented answer is
 // itself evidence that the required contract is absent or intercepted — and mapping
-// them to an ordinary error would send them down CheckSignIn's soft "could not confirm"
-// branch, quietly restoring the warn-and-persist behaviour this gate exists to remove.
+// them to an ordinary error would send them down the soft "could not confirm" branch,
+// which reports as unknown rather than as the compatibility failure it is.
 //
 // Deliberately NOT included: transport failures and 5xx other than 501. Those mean
-// "could not check", which must never be reported as a verdict about the key.
+// "could not check", which must never be reported as a verdict about the credential.
 var verifyUnsupportedStatuses = map[int]bool{
 	http.StatusNotFound:         true,
 	http.StatusMethodNotAllowed: true,
 	http.StatusNotImplemented:   true,
 }
 
-// VerifyKey asks the backend whether the configured key actually works upstream.
+// VerifyKey asks the backend whether the credential this request would spend actually
+// works upstream — the backend's own on every normal install, ours when DAINTREE_API_KEY
+// named one.
 //
-// This is the ONLY meaningful validity check available. The backend authenticates
-// STRUCTURALLY — it holds no upstream credential — so /v1/daintree/capabilities answers
-// 200 for any well-formed string. Without this call, a wrong key is discovered on the
-// first real turn rather than at sign-in.
+// This is the ONLY meaningful check available. /health and /readyz answer for the
+// process, and /v1/daintree/capabilities answers 200 whether or not a turn could be
+// funded, so without this call a dead upstream account is discovered on the first real
+// turn. `doctor` is the caller.
 //
 // The CLI must never probe the provider itself: it holds no provider client by design
 // (that is what keeps prompts, model choice, and credentials on the server), and the
-// key becomes a subscription key later, at which point only the backend can resolve it.
+// credential an account system issues is one only the backend can resolve.
 func (c *Client) VerifyKey(ctx context.Context) (KeyVerification, error) {
 	var out KeyVerification
 	if err := c.doJSON(ctx, http.MethodPost, "/v1/daintree/auth/verify", struct{}{}, &out); err != nil {
@@ -818,11 +818,11 @@ func (c *Client) VerifyKey(ctx context.Context) (KeyVerification, error) {
 	}
 	// Scrub the key out of the free-text fields BEFORE anyone can render them. Detail
 	// and Label are backend-controlled strings that ride a 200 response — the success
-	// path, which no error-scrubbing wrapper covers — and they land in the login
-	// confirmation, the /auth view, the cockpit's sign-in sheet, and the debug log. A
-	// provider that echoes the submitted key into its rejection reason ("rejected
-	// sk-or-v1-…") would otherwise persist that key in the host's native scrollback,
-	// which the cockpit never clears. One choke point here beats N display-site fixes.
+	// path, which no error-scrubbing wrapper covers — and they land in the doctor
+	// credential row and the debug log. A no-op when no caller key is set, which is the
+	// normal case; when one IS set, a provider that echoes it into its rejection reason
+	// would otherwise persist it in the host's native scrollback, which the cockpit
+	// never clears. One choke point here beats N display-site fixes.
 	out.Detail = ScrubKey(out.Detail, c.apiKey)
 	out.Label = ScrubKey(out.Label, c.apiKey)
 	return out, nil

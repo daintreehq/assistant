@@ -13,8 +13,9 @@ Every check has a stable id. The ones with a failure mode worth explaining are b
 ```
   ok    platform         darwin/arm64 — background supervision supported
   ok    binary on PATH   /opt/homebrew/bin/daintree-assistant (v0.4.1, this build)
-  FAIL  key valid        the provider rejected this key: ...
-                         → Run `daintree-assistant login` with an active, funded key.
+  FAIL  upstream credential  the provider rejected this credential: ...
+                             → The backend's own upstream credential is rejected — this
+                               is a backend-side problem, not yours.
 ```
 
 - **`FAIL`** — broken. This is why the exit code is non-zero.
@@ -34,34 +35,29 @@ without `-e` a `false` result still exits 0.
 
 ---
 
-## `auth.signedIn` — no API key stored
+## `auth.credentialUsable` — the provider rejected this credential
 
-```bash
-daintree-assistant login
-```
+There is nothing for you to paste: on a normal install this row reports on the
+**backend's own** upstream credential, and its detail says so (`the backend's own`). A
+rejection there is ours to fix — report it.
 
-If you just ran it and this still fails, an env var is overriding the stored sign-in.
-`/auth` in the cockpit names it.
+The one case where it is yours: if the detail reads `(yours, from DAINTREE_API_KEY)`, you
+have that variable exported and the backend is spending YOUR key instead of its own.
+Unset it to fall back.
 
-## `auth.keyValid` — the provider rejected this key
+## `auth.credentialUsable` — valid but NO CREDIT remaining
 
-The key is structurally fine and the backend is reachable; OpenRouter does not accept it.
-Wrong key, revoked key, or a truncated paste. Compare `apiKeyLength` in a support bundle
-against what your key should be.
+Real, and every turn will fail until the account behind it is topped up. Same ownership
+rule as above: check whose credential the row names. Remember that background work spends
+too — watcher checks and async completions are model calls.
 
-## `auth.keyValid` — valid but NO CREDIT remaining
+## `auth.credentialUsable` — this backend does not serve `/v1/daintree/auth/verify`
 
-Real, and every turn will fail. Top up the account. Remember that background work spends
-too: watcher checks and async completions are model calls.
-
-## `auth.keyValid` — this backend does not serve `/v1/daintree/auth/verify`
-
-This is an **endpoint problem, not a verdict about your key** — the check never ran, so
-nothing was learned about the key either way, and re-pasting cannot help. Either the
-endpoint is out of date or something (a corporate proxy, a captive portal) is intercepting
-the route. Retry
-off the proxy, or point at a Local backend meanwhile. A **loopback** endpoint is allowed to
-lack this route — that is the development loop — but a remote one is not.
+This is an **endpoint problem, not a verdict about any credential** — the check never ran,
+so nothing was learned either way. Either the endpoint is out of date or something (a
+corporate proxy, a captive portal) is intercepting the route. Retry off the proxy, or
+point `DAINTREE_BACKEND_URL` at a local backend meanwhile. A **loopback** endpoint is
+allowed to lack this route — that is the development loop — but a remote one is not.
 
 ## `backend.reachable` — UNREACHABLE
 
@@ -136,7 +132,7 @@ telling you where the backup went. A non-TTY launch fails loudly instead, so a s
 destroys state silently. To do it deliberately:
 
 ```bash
-daintree-assistant reset project-state   # keeps your sign-in
+daintree-assistant reset project-state
 ```
 
 ---

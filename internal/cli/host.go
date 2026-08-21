@@ -23,13 +23,6 @@ import (
 // host.Run returns a nonzero code only when its stdin/factory precondition fails
 // (terminal stdin, nil factory); the normal path never returns (teardown os.Exits).
 func RunHost(ctx context.Context, opts Options) int {
-	// Gate before serving. The host speaks NDJSON over stdio with no terminal to prompt
-	// on, so a signed-out launch must fail loudly here rather than accept boot requests
-	// whose every turn then 401s.
-	if err := ensureSignedIn(ctx, overridesFromOptions(opts), false); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return domain.OneShotExitCode.Error
-	}
 	factory := func(fctx context.Context, params host.AppParams) (host.App, error) {
 		overrides := overridesFromOptions(opts)
 		// The descriptor's cwd is the authoritative project path; the loaded

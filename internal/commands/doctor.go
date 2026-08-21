@@ -10,7 +10,6 @@ import (
 
 	"github.com/daintreehq/assistant/internal/app"
 	"github.com/daintreehq/assistant/internal/backend"
-	"github.com/daintreehq/assistant/internal/credentials"
 	"github.com/daintreehq/assistant/internal/mcp"
 )
 
@@ -88,12 +87,18 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 	// probe budget replaying a refused socket to reach the same verdict.
 	ctx = backend.WithoutRetry(ctx)
 	push("backend url", true, a.Backend.BaseURL(), "")
-	// Sign-in FIRST: without a key every authenticated probe below 401s, and a wall of
-	// auth failures reads as "the backend is broken" when the real answer is one line.
-	// The unauthenticated probes (health/ready) still run and still mean something, so
-	// a signed-out doctor remains a useful connectivity check.
-	push("signed in", cfg.APIKey != "", credentials.Redact(cfg.APIKey),
-		"run `daintree-assistant login` (or set DAINTREE_API_KEY)")
+	// There is deliberately no "signed in" row. The backend holds its own upstream
+	// credential and serves a request that carries no Authorization header at all, so
+	// having no key is the normal working state — reporting it as a failed check would
+	// put a permanent red line on every healthy install.
+	//
+	// A key is worth a row only when one is actually being sent, because then it
+	// CHANGES which account funds the turn, and an inherited or stale DAINTREE_API_KEY
+	// is otherwise invisible. The value itself is never printed: naming the source is
+	// what makes it actionable.
+	if cfg.APIKey != "" {
+		push("bearer token", true, "sent from DAINTREE_API_KEY — this key funds the turn, not the backend's", "")
+	}
 	bctx, bcancel := context.WithTimeout(ctx, doctorProbeTimeout)
 	herr := a.Backend.Health(bctx)
 	bcancel()

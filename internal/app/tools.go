@@ -72,12 +72,11 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 		MCP:    contextMCPAdapter{c: a.MCP},
 		Router: contextRouterAdapter{tasks: a.Backend},
 		Queue:  contextQueueAdapter{app: a},
-		// Read through the Swappable every call so a /login endpoint change is reflected
+		// Read through the Swappable every call so a replaced client is reflected
 		// immediately, rather than pinning whatever URL was current at wiring time.
-		// Sanitized like any other model-visible endpoint: a custom backend URL comes
-		// from the trusted env / stored sign-in, which never passes through
-		// credentials.NormalizeBaseURL when it arrives as an override, so it can carry
-		// userinfo straight into a tool result the model may quote back.
+		// Sanitized like any other model-visible endpoint: DAINTREE_BACKEND_URL is taken
+		// as given, with no normalisation step to strip userinfo, so it could otherwise
+		// carry credentials straight into a tool result the model may quote back.
 		BackendURL: func() string {
 			if a.Backend == nil {
 				return ""
