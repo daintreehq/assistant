@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"time"
 
 	"github.com/daintreehq/assistant/internal/domain"
 )
@@ -29,10 +30,28 @@ type Store interface {
 		toolName string, riskClass domain.RiskClass, now int64) (*domain.AutomationGrantRecord, error)
 }
 
+// MCPCallOptions are the per-call knobs a tool handler may set on ONE MCP call.
+//
+// Timeout is the wire deadline for this call. Zero means "use the transport's own
+// default" (120s), which is right for every bounded Daintree read/write. It exists
+// for the handful of actions whose SERVER-SIDE budget legitimately exceeds that —
+// project.runCheck runs a project command for up to an hour — where the default
+// would abort the call long before the work it is waiting on could finish, and
+// report that abort as a tool error rather than as the truncation it is.
+//
+// Deliberately NOT a mirror of mcp.CallOptions: Retries is withheld, because a
+// wrapper that could ask for retries could ask for them on a non-idempotent
+// action. Retry-safety stays a property of the tool, decided in internal/mcp.
+type MCPCallOptions struct {
+	Timeout time.Duration
+}
+
 // MCPClient is the slice of the MCP transport that daintree.call forwards to.
-// CallTool returns the structured result; Connected gates the call.
+// CallTool returns the structured result; Connected gates the call. The opts
+// parameter carries per-call knobs (see MCPCallOptions); pass the zero value for
+// the transport default.
 type MCPClient interface {
-	CallTool(ctx context.Context, name string, args map[string]any) (MCPCallResult, error)
+	CallTool(ctx context.Context, name string, args map[string]any, opts MCPCallOptions) (MCPCallResult, error)
 	Connected() bool
 }
 

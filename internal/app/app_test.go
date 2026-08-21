@@ -112,8 +112,32 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 	// second inventory of its own.
 	//
 	// 79 with the terminal.moveToWorktree cohort-relocation wrapper (issue #347).
-	if got != 79 {
-		t.Errorf("registered tools = %d, want 79", got)
+	//
+	// 80 with tool.schema, the MCP input-schema lookup restored from #311/PR #314
+	// (issue #367). It is the counterpart to tool.search: search finds a tool's
+	// NAME, and until this landed nothing could report its ARGUMENT SHAPE, so a
+	// wrong guess had nowhere to be corrected.
+	//
+	// 88 with the eight issue #367 wrappers. These are the additions that make the
+	// inventory SMALLER in practice rather than larger: every one of them was
+	// previously reachable only through daintree.call, which is system risk and
+	// always confirmed, so asking an ordinary question — "what do the issue comments
+	// say?", "did the check pass?", "what errors were logged?" — cost a typed human
+	// approval. Six carry read risk and now run with none.
+	if got != 88 {
+		t.Errorf("registered tools = %d, want 88", got)
+	}
+	if !a.Registry.Has("tool.schema") {
+		t.Error("tool.schema (MCP input-schema lookup) must be registered")
+	}
+	for _, name := range []string{
+		"project.detectRunners", "project.runCheck", "forge.listIssueComments",
+		"agentSessionHistory.list", "browser.getConsoleMessages", "errors.recent",
+		"notifications.recent", "worktree.resource.status",
+	} {
+		if !a.Registry.Has(name) {
+			t.Errorf("%s (issue #367 typed wrapper) must be registered", name)
+		}
 	}
 	// Name the newest addition explicitly: the count alone would stay green if this
 	// tool were dropped while an unrelated one was added.

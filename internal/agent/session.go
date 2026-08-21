@@ -47,6 +47,10 @@ var coreToolNames = []string{
 	"queue.resolve",
 	"daintree.status",
 	"tool.search",
+	// tool.schema is core alongside tool.search: the discovery tools' note now
+	// tells the model to look up an argument shape with it, so it must never be
+	// possible to ship a build where that pointer names an absent tool.
+	"tool.schema",
 	"terminal.read",
 	// terminal.summarize is core: it is the DEFAULT the wake prompt names for reading a
 	// finished agent's output (raw scrollback may be garbled, repainted TUI output), in

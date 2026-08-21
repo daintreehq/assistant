@@ -197,13 +197,33 @@ func TestToolProjectionTotalIsBounded(t *testing.T) {
 		// own. Both tools are deliberate: the first keeps an expensive search out of
 		// the main conversation, the second replaces a hand-rolled passthrough. This
 		// is the noticing the budget exists to force.
-		{"default", ToolInventoryOptions{}, 83_500},
+		//
+		// Raised to 91.5 KB for issue #367: nine tools in one PR, measuring 89,383.
+		// This is the largest single raise the budget has taken, so it owes the
+		// clearest justification — and the justification is that these tools make the
+		// EXPENSIVE surface smaller even as they make this one bigger. Every one of
+		// them was previously reachable only through daintree.call: system risk,
+		// always confirmed, ungrantable, and carrying nothing but an opaque
+		// `arguments` bag. Reaching them cost a typed human approval AND a schema the
+		// model had to guess at, which is how a "just check the CI comments" step
+		// turned into several rounds. Six now carry read risk and run with no
+		// approval at all.
+		//
+		// Measured contribution: 8,262 bytes for the nine, after a compaction pass
+		// that took 957 bytes off the first draft. The largest is project.runCheck at
+		// 1,443 — under half of agentTask.spawnForEdits and well under a third of
+		// watcher.terminal.create, so none of them is an outlier worth singling out.
+		// tool.schema (803) pays for itself immediately: it is the tool that stops the
+		// model guessing the argument keys of everything else.
+		{"default", ToolInventoryOptions{}, 91_500},
 		// The flag adds seven execution-graph tools. It is off by default and off in
 		// production, so it gets its own ceiling rather than eating the default's
 		// headroom — but it is still bounded, because a rollout flag is not an excuse.
 		// Raised in lockstep with the default for the same two additions (~88.1 KB),
 		// and to the same ~2 KB of headroom rather than more.
-		{"workflow-intelligence", ToolInventoryOptions{WorkflowIntelligence: true}, 90_000},
+		// Raised in lockstep for the same nine additions (measuring 96,110), to the
+		// same ~2 KB of headroom rather than more.
+		{"workflow-intelligence", ToolInventoryOptions{WorkflowIntelligence: true}, 98_000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv, err := BuildToolInventory(tc.opts)

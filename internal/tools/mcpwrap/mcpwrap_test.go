@@ -17,12 +17,23 @@ type fakeMCP struct {
 	lastArgs  map[string]any
 	result    tools.MCPCallResult
 	err       error
+	// lastOpts records the per-call transport knobs so a test can prove the long
+	// deadline project.runCheck needs actually reaches the transport (and that no
+	// other wrapper quietly acquired one).
+	lastOpts tools.MCPCallOptions
+	// resultsByName routes a per-action result so a test can drive two wrappers,
+	// or a wrapper that reads before it acts, from one fake. Falls back to `result`.
+	resultsByName map[string]tools.MCPCallResult
 }
 
 func (f *fakeMCP) Connected() bool { return f.connected }
-func (f *fakeMCP) CallTool(_ context.Context, name string, args map[string]any) (tools.MCPCallResult, error) {
+func (f *fakeMCP) CallTool(_ context.Context, name string, args map[string]any, opts tools.MCPCallOptions) (tools.MCPCallResult, error) {
+	f.lastOpts = opts
 	f.lastName = name
 	f.lastArgs = args
+	if r, ok := f.resultsByName[name]; ok {
+		return r, f.err
+	}
 	return f.result, f.err
 }
 

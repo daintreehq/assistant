@@ -19,7 +19,7 @@ import (
 // client satisfies both, but declared locally to keep this package independently
 // compilable.
 type MCPClient interface {
-	CallTool(ctx context.Context, name string, args map[string]any) (tools.MCPCallResult, error)
+	CallTool(ctx context.Context, name string, args map[string]any, opts tools.MCPCallOptions) (tools.MCPCallResult, error)
 	Connected() bool
 }
 
