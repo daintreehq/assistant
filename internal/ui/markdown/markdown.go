@@ -89,13 +89,10 @@ func (r *Renderer) Render(content string, width int, expanded bool) Rendered {
 	if width < 1 {
 		width = 1
 	}
-	// Security: strip any ANSI the model may have injected into its own prose
-	// BEFORE hashing/parsing, so an injected SGR/OSC-8 can never reach the output
-	// and the cache key is computed over the sanitized text.
-	clean := content
-	if strings.IndexByte(content, '\x1b') >= 0 {
-		clean = ansi.Strip(content)
-	}
+	// Security: strip anything the model could use to drive the terminal itself
+	// BEFORE hashing/parsing, so it can never reach the output and the cache key
+	// is computed over the sanitized text.
+	clean := sanitizeInput(content)
 
 	key := cacheKey{
 		contentHash: hashContent(clean),
@@ -141,7 +138,10 @@ func (r *Renderer) render(clean string, width int) Rendered {
 	// consumer. (The no-color branch below strips all ANSI anyway, but the
 	// ordering is what makes the invariant obvious to a reader.)
 	styled = filterHyperlinkSchemes(styled)
-	plain := ansi.Strip(styled)
+	// stripHyperlinks first: ansi.Strip mis-frames an OSC payload whose bytes
+	// include 0x9C (the continuation byte of runes like 'Ü'), which would spill the
+	// tail of a legitimate URI — and its BEL — into the plain text.
+	plain := ansi.Strip(stripHyperlinks(styled))
 
 	if !r.theme.Mode.Colorize() {
 		// Color off: the output must carry no SGR. glamour may still emit reset
