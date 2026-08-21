@@ -55,7 +55,11 @@ func SetVersion(v string) { buildVersion = v }
 // launch, but equally runnable by hand in the foreground).
 func RunDaemon(ctx context.Context, opts Options) int {
 	r := render.Stdout()
-	overrides := buildOverrides(opts, r)
+	overrides, err := buildOverrides(opts, r)
+	if err != nil {
+		r.Error(err.Error())
+		return domain.OneShotExitCode.Error
+	}
 	sOpts := supervisor.Options{
 		Overrides: overrides,
 		Version:   buildVersion,
@@ -77,7 +81,7 @@ func RunDaemon(ctx context.Context, opts Options) int {
 // RunDaemonStop asks the project's daemon to exit.
 func RunDaemonStop(ctx context.Context, opts Options) int {
 	r := render.Stdout()
-	cfg, err := config.LoadConfig(overridesFromOptions(opts))
+	cfg, err := loadConfigFromOptions(opts)
 	if err != nil {
 		r.Error(err.Error())
 		return domain.OneShotExitCode.Error
@@ -99,7 +103,7 @@ func RunDaemonStop(ctx context.Context, opts Options) int {
 // not disturb a live cockpit or the daemon.
 func RunStatus(ctx context.Context, opts Options) int {
 	r := render.Stdout()
-	cfg, err := config.LoadConfig(overridesFromOptions(opts))
+	cfg, err := loadConfigFromOptions(opts)
 	if err != nil {
 		r.Error(err.Error())
 		return domain.OneShotExitCode.Error

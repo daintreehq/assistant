@@ -38,6 +38,18 @@ func spawnDaemon(cfg config.AppConfig, version string) error {
 	if cfg.ProjectID != "" {
 		env = append(env, "DAINTREE_PROJECT_ID="+cfg.ProjectID)
 	}
+	// The RESOLVED sign-in, not whatever happens to be in os.Environ(). These two can
+	// now come from --backend-url / --api-key-file, and a daemon that inherited only the
+	// environment would either boot signed out (and 401 inside every autonomous wake
+	// turn, looking alive while accomplishing nothing) or, worse, resume the same
+	// conversation against a DIFFERENT spendable key than the launch that spawned it.
+	// Env rather than argv deliberately: argv is world-readable through `ps`.
+	if cfg.BackendURL != "" {
+		env = append(env, "DAINTREE_BACKEND_URL="+cfg.BackendURL)
+	}
+	if cfg.APIKey != "" {
+		env = append(env, "DAINTREE_API_KEY="+cfg.APIKey)
+	}
 	cmd.Env = env
 
 	logPath := filepath.Join(cfg.StateDir, "daemon.log")

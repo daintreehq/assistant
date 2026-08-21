@@ -69,11 +69,14 @@ Two of those seams are load-bearing and must stay:
 
 - **`DAINTREE_API_KEY`** still resolves into `cfg.APIKey` (trusted env ONLY — a project
   `.env` may supply neither it nor the URL, since one steals a spendable credential and
-  the other redirects where it is sent). When set, the client sends it as the bearer and
-  the backend PREFERS it over its own key for that request. Nothing sets it on a normal
-  install; it stays live, with the header, the shape check and `backend.ScrubKey`, so a
-  per-account credential later becomes a VALUE flowing through existing plumbing rather
-  than new plumbing.
+  the other redirects where it is sent), as does **`--api-key-file PATH`** for a headless
+  caller (a path, never `--api-key`: argv is world-readable through `ps`). When set, the
+  client sends it as the bearer and the backend PREFERS it over its own key for that
+  request. Nothing sets either on a normal install; they stay live, with the header, the
+  shape check and `backend.ScrubKey`, so a per-account credential later becomes a VALUE
+  flowing through existing plumbing rather than new plumbing. A NAMED key that cannot be
+  read is fatal, never a fallback — falling through to the backend's own would bill the
+  wrong account behind a successful-looking run.
 - **`App.Backend` is always a `backend.Swappable`.** Every consumer holds the wrapper, so
   a client rebuild reaches Session, watchers, asyncwork and the workflow layer without
   re-wiring. Nothing swaps today; in-place re-authentication is what it is kept for.
@@ -210,6 +213,13 @@ internal/
   ui/            Bubble Tea cockpit (the ONLY bubbletea importers): model/update/view, pump,
                  scrollback, splash, composer/ theme/ markdown/
   host/          embedded host (run.go) — stdio NDJSON transport, PROTOCOL_VERSION 2
+  mcpserver/     the assistant AS an MCP server (`mcp --stdio`) so another agent can drive
+                 it as a sub-agent: per-session config (no server-held binding, because an
+                 MCP client cannot restart us), async-first ask/poll because a turn takes
+                 minutes, per-session approval brokering (decline/ask/auto, always
+                 bounded so a parked dispatch cannot wedge a turn), run-transcript and
+                 debug-log resources, and stale-binary reporting for the one thing a
+                 session argument cannot fix. See docs/HEADLESS.md
   terminal/      TTY-gated raw escapes (clear.go) — the ONLY host-scrollback wipe path
   deps/          build-time blank-import anchor (deps.go) — pins go.mod modules; NO runtime effect
   e2e/           end-to-end tests only: built-binary, fake backend/MCP, inline-contract, turn/race
@@ -514,6 +524,8 @@ guarantee, sub-agent skill selection, and the cockpit rows**),
 work + the local run-tracking tools), `docs/WORKFLOW_INTELLIGENCE.md` (the flag-gated
 workflow execution-graph layer: graph model, tools, observer, async linking, and the
 backend contract it expects),
+`docs/HEADLESS.md` (**driving the CLI from a script or another agent — the `mcp --stdio`
+server, the flags, the `--json` event schema, exit codes, isolation**),
 `README.md` (full overview), `docs/BUBBLE_TEA.md` (cockpit architecture),
 `docs/ARCHITECTURE.md`, `docs/DAINTREE_MCP.md` (Daintree's MCP protocol),
 `docs/DAINTREE_HOST.md` (how Daintree launches / displays / hides / restarts this CLI),

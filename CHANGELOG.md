@@ -16,8 +16,8 @@ guarantees, and the SQLite schema is a single clean baseline rather than a migra
   no credential file at all). **A `credentials.json` left over from an earlier build is
   ignored, not deleted; remove it yourself.**
 - **This is a stage, not the destination.** Daintree account authentication is being built
-  next. Three seams are kept live for it: `DAINTREE_API_KEY` (trusted env only, unset on a
-  normal install) still rides as a bearer that the backend prefers over its own key,
+  next. Three seams are kept live for it: `DAINTREE_API_KEY` and `--api-key-file` (both
+  unset on a normal install) still ride as a bearer the backend prefers over its own key,
   `App.Backend` stays a `backend.Swappable` so re-authentication can swap a delegate rather
   than re-wire every consumer, and `/v1/daintree/auth/verify` keeps answering — now for
   whichever key the request would spend.

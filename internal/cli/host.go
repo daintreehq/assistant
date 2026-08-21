@@ -23,8 +23,17 @@ import (
 // host.Run returns a nonzero code only when its stdin/factory precondition fails
 // (terminal stdin, nil factory); the normal path never returns (teardown os.Exits).
 func RunHost(ctx context.Context, opts Options) int {
+	// Resolved once, before serving: --api-key-file is read here, and an unreadable one
+	// must be fatal at the door rather than per boot request.
+	baseOverrides, err := overridesFromOptions(opts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return domain.OneShotExitCode.Error
+	}
 	factory := func(fctx context.Context, params host.AppParams) (host.App, error) {
-		overrides := overridesFromOptions(opts)
+		// Copy per boot: the factory runs once per session and mutates the project
+		// fields below, so the shared base must not be aliased.
+		overrides := baseOverrides
 		// The descriptor's cwd is the authoritative project path; the loaded
 		// DAINTREE.md content rides as an override (host.boot already read the file).
 		if params.ProjectPath != "" {

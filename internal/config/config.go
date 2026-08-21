@@ -105,7 +105,7 @@ type AppConfig struct {
 	// throughput.
 	//
 	// Resolved from TRUSTED env only, never a project .env — the same boundary the
-	// sign-in pair sits behind. A bound repository cannot drop the no-training floor
+	// endpoint sits behind. A bound repository cannot drop the no-training floor
 	// (the backend sends that unconditionally and does not derive it from this block),
 	// but it COULD pin every request to an endpoint of its choosing, or quietly stop a
 	// user's zero-retention choice from taking effect. Which compliant endpoint sees
@@ -309,6 +309,15 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 		} else {
 			cfg.StateDir = stateRoot
 		}
+	}
+	// Always ABSOLUTE, like logDir below. A relative state dir resolves against the
+	// working directory, and the two processes that share a project do not share one:
+	// spawnDaemon sets the child's cwd to the PROJECT path while handing it this same
+	// string. `--state-dir .state` launched from /tmp/harness would then give the
+	// foreground /tmp/harness/.state and the daemon <project>/.state — different flocks,
+	// different databases, and a credentials.json created inside the user's repository.
+	if abs, err := filepath.Abs(cfg.StateDir); err == nil {
+		cfg.StateDir = abs
 	}
 	// 0700: the state dir holds conversations, the audit trail, automation grants, and
 	// memories — owner-only, never world/group readable (mirrors the debug-log dir perms).

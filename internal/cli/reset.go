@@ -93,7 +93,7 @@ type ResetOptions struct {
 // rebuild cleanly.
 func RunReset(ctx context.Context, opts Options, scope ResetScope, ropts ResetOptions) int {
 	r := render.Stdout()
-	cfg, err := config.LoadConfig(overridesFromOptions(opts))
+	cfg, err := loadConfigFromOptions(opts)
 	if err != nil {
 		r.Error(err.Error())
 		return domain.OneShotExitCode.Error
