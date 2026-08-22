@@ -302,6 +302,10 @@ func (h *Host) boot(desc SessionDescriptor) {
 	if err := app.ConnectMCP(h.runCtx); err != nil {
 		h.tr.diag(fmt.Sprintf("host: MCP connect degraded: %v", err))
 	}
+	// Reported on the protocol, not only to stderr: a protocol-only consumer never
+	// reads stderr, which is how "engine up, control plane down" reached a user as an
+	// unqualified "Connected".
+	h.postMcpStatus()
 
 	// Daemon: surfaced attention events feed actionable wakes. The callback runs on
 	// a daemon goroutine; it must not touch loop-owned state directly, so it hands

@@ -179,6 +179,17 @@ func (h *hostAppAdapter) RunCommand(ctx context.Context, line string) host.Comma
 	return host.CommandOutcome{Text: buf.String(), Quit: res.Quit}
 }
 
+func (h *hostAppAdapter) McpStatus() (bool, *int, string) {
+	if h.app == nil {
+		return false, nil, ""
+	}
+	if h.app.MCP == nil {
+		return false, nil, ""
+	}
+	st := h.app.MCP.Status()
+	return st.Connected, st.ToolCount, st.Error
+}
+
 func (h *hostAppAdapter) CostSnapshot() (float64, bool) {
 	if h.app == nil || h.app.CostLedger == nil {
 		return 0, false

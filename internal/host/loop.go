@@ -526,6 +526,9 @@ func (h *Host) handleSlashCommand(line string) {
 		Quit:    out.Quit,
 		Unknown: out.Unknown,
 	})
+	// A command may have reconnected (or lost) the control plane — /reconnect exists
+	// precisely to change this — so re-report rather than leaving a stale status.
+	h.postMcpStatus()
 	if out.Quit {
 		h.cancelTurn()
 		h.teardown(ShutdownExit, "")
@@ -540,4 +543,13 @@ func (h *Host) postCost() {
 	}
 	total, complete := h.app.CostSnapshot()
 	h.bridge.PostCost(total, complete)
+}
+
+// postMcpStatus reports the control plane's reachability. Best-effort.
+func (h *Host) postMcpStatus() {
+	if h.app == nil || h.bridge == nil {
+		return
+	}
+	connected, toolCount, errMsg := h.app.McpStatus()
+	h.bridge.post(EvMcpStatus{Connected: connected, ToolCount: toolCount, Error: errMsg})
 }

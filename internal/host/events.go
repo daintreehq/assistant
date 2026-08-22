@@ -258,6 +258,32 @@ func (e EvToolSettled) encode(sid string, seq uint64) ([]byte, error) {
 // EvApprovalRequested — approval:requested. turnId optional. riskClass,
 // consequence, and argsSummary are optional display context (parity with a local
 // host approval); each is omitted from the wire object when empty.
+// EvMcpStatus — mcp:status. Whether the Daintree control plane is reachable, and how
+// many tools it is offering.
+//
+// Emitted at boot and again after any reconnect. Without it a host can only report
+// that the ENGINE is up, which says nothing about whether it can actually do anything:
+// a session that answers questions but cannot spawn an agent, while its status line
+// reads "Connected", is the most misleading state this protocol can produce.
+type EvMcpStatus struct {
+	Connected bool
+	// ToolCount is nil when the catalog has not been fetched yet.
+	ToolCount *int
+	// Error is the reason it is not connected, when there is one.
+	Error string
+}
+
+func (e EvMcpStatus) encode(sid string, seq uint64) ([]byte, error) {
+	f := map[string]any{"connected": e.Connected}
+	if e.ToolCount != nil {
+		f["toolCount"] = *e.ToolCount
+	}
+	if e.Error != "" {
+		f["error"] = e.Error
+	}
+	return marshalEvent("mcp:status", sid, seq, f)
+}
+
 // EvCommandResult — command:result. The output of a slash command the host routed
 // through the engine, as plain text.
 //

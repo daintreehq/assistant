@@ -30,6 +30,10 @@ type App interface {
 	// clearing and leaves the conversation intact.
 	RunCommand(ctx context.Context, line string) CommandOutcome
 
+	// McpStatus reports whether the Daintree control plane is reachable and how many
+	// tools it offers (nil count when the catalog is cold).
+	McpStatus() (connected bool, toolCount *int, errMsg string)
+
 	// CostSnapshot reports what this session has spent so far, in USD, and whether
 	// that figure is a total or a floor.
 	//
