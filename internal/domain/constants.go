@@ -115,7 +115,7 @@ const (
 
 	// LargeContextWindowTokens is the main (large) model's context window. It is reported
 	// on each UsageEvent and persisted to the durable run-event log for /explain; it is NOT
-	// "% toward auto-compaction". (The cockpit previously rendered a live CTX% gauge off this
+	// "% toward auto-compaction". (The attached session previously rendered a live CTX% gauge off this
 	// denominator; that gauge was removed as noise — context is managed for the operator.)
 	// The large tier is sized to a ~1M-token window.
 	LargeContextWindowTokens = 1_000_000

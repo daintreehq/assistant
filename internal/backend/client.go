@@ -821,7 +821,7 @@ func (c *Client) VerifyKey(ctx context.Context) (KeyVerification, error) {
 	// path, which no error-scrubbing wrapper covers — and they land in the doctor
 	// credential row and the debug log. A no-op when no caller key is set, which is the
 	// normal case; when one IS set, a provider that echoes it into its rejection reason
-	// would otherwise persist it in the host's native scrollback, which the cockpit
+	// would otherwise persist it in the host's native scrollback, which the attached session
 	// never clears. One choke point here beats N display-site fixes.
 	out.Detail = ScrubKey(out.Detail, c.apiKey)
 	out.Label = ScrubKey(out.Label, c.apiKey)
@@ -1048,7 +1048,7 @@ const maxRequestIDLen = 128
 //
 // The value is a header from whatever answered the request — for a custom endpoint or
 // an intercepting proxy, not necessarily our backend — and it is rendered straight into
-// terminal scrollback by the "report this with request id X" advice. The cockpit draws
+// terminal scrollback by the "report this with request id X" advice. The attached session draws
 // on the NORMAL screen buffer, so an ANSI escape smuggled through here would still be
 // repainting the user's terminal long after the session ended. Anything outside the
 // conservative id alphabet is dropped whole rather than sanitised: a mangled id is
@@ -1073,7 +1073,7 @@ func safeRequestID(v string) string {
 // The bearer token IS the caller's spendable credential, and an upstream we do not
 // control can echo the Authorization header into an error body — a 502 from the
 // provider, a proxy's error page, a terminal SSE `error` event. Those become
-// Error.Message and flow straight to surfaces that persist them: the cockpit renders on
+// Error.Message and flow straight to surfaces that persist them: the attached session renders on
 // the NORMAL screen buffer, so a leak stays in the host's native scrollback long after
 // the session, and the same text is appended to the 0600 debug log.
 //

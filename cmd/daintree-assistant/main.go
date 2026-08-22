@@ -1,9 +1,10 @@
 // Command daintree-assistant is the single static-binary entrypoint for Daintree's
 // local orchestration assistant. It parses the CLI surface, then routes to exactly
 // one of: environment/status commands, the persistent supervisor, the embedded
-// stdio host, a one-shot prompt, or the interactive path (Bubble Tea cockpit on a
-// TTY, classic REPL otherwise). All real wiring lives in internal/cli; this file is
-// the thin flag/route shim plus main's cockpit and build-version seams.
+// stdio host, a one-shot prompt, or the interactive line REPL. Daintree renders the
+// assistant natively over `host --stdio`; the REPL is the headless operator path, not
+// a product surface. All real wiring lives in internal/cli; this file is the thin
+// flag/route shim plus main's build-version seam.
 package main
 
 import (
@@ -19,14 +20,13 @@ import (
 
 	"github.com/daintreehq/assistant/internal/cli"
 	"github.com/daintreehq/assistant/internal/domain"
-	"github.com/daintreehq/assistant/internal/ui"
 )
 
 // version is injected at build time via -ldflags "-X main.version=…" (see Makefile).
 // It defaults to "dev" for a plain `go build`/`go run` with no ldflags. It is the
-// ONE value main owns end-to-end: stamped into the cockpit masthead and printed by
-// --version. Keep the variable named exactly `version` — the Makefile's ldflag path
-// (`-X main.version=$(VERSION)`) is byte-coupled to it.
+// ONE value main owns end-to-end: reported by `--version`, by the host handshake,
+// and by daemon descriptors. Keep the variable named exactly `version` — the
+// Makefile's ldflag path (`-X main.version=$(VERSION)`) is byte-coupled to it.
 var version = "dev"
 
 func main() {
@@ -46,17 +46,14 @@ func main() {
 	}
 	opts, route := parsed.Options, parsed.Route
 
-	// Stamp the build version into the cockpit masthead before any UI is constructed
-	// (UIVersion is a package var read at model-init time, so set it up front), and
-	// into the cli layer for daemon descriptors/status.
-	ui.UIVersion = version
+	// Stamp the build version into the cli layer for daemon descriptors, `status`,
+	// and the host handshake.
 	cli.SetVersion(version)
 
-	// Interactive mode owns Ctrl-C itself: the cockpit receives it as a raw key and
-	// the classic REPL uses it to cancel only the current turn. Capturing SIGINT in
-	// this parent context would permanently poison later classic turns. SIGTERM is
-	// always a process shutdown; one-shot and subcommand paths additionally use
-	// SIGINT as ordinary context cancellation.
+	// The line REPL owns Ctrl-C itself: it uses it to cancel only the current turn.
+	// Capturing SIGINT in this parent context would permanently poison later turns.
+	// SIGTERM is always a process shutdown; one-shot and subcommand paths
+	// additionally use SIGINT as ordinary context cancellation.
 	signals := []os.Signal{syscall.SIGTERM}
 	// MultiTurn belongs with the one-shot paths, not the interactive ones: it has no
 	// prompt argument, so HasPrompt is false, but it is headless and scripted and wants
@@ -67,11 +64,6 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), signals...)
 	defer stop()
-
-	// The cockpit runner is main's seam: internal/cli only knows the CockpitRunner
-	// type, internal/ui is the sole Bubble Tea importer, and main is where the two
-	// meet (so the UI-boundary invariant holds — cli never imports ui directly).
-	opts.Cockpit = ui.Run
 
 	var code int
 	switch route {
@@ -238,7 +230,7 @@ func parseArgs(args []string) (parsedArgs, error) {
 	// exists to prevent. --run-scheduler validates its bound here for the same reason.
 	//
 	// It insists on --json, which is not mere validation. Without it this flag would be a
-	// second, worse spelling of something that already exists — the classic REPL on piped
+	// second, worse spelling of something that already exists — the line REPL on piped
 	// stdin is multi-turn today — and the whole point of the flag is the half that route
 	// CANNOT do: emit the conversation as one JSONL transcript.
 	//
@@ -597,7 +589,7 @@ func stdioRequiresHostError() error {
 func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintf(w, "daintree-assistant %s — Daintree's local operations officer.\n\n", buildVersion)
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  daintree-assistant [options]                 interactive cockpit")
+	fmt.Fprintln(w, "  daintree-assistant [options]                 interactive line REPL")
 	fmt.Fprintln(w, "  daintree-assistant [options] <prompt...>     run one prompt and exit")
 	fmt.Fprintln(w, "  daintree-assistant [options] <command>")
 	fmt.Fprintln(w, "\nCommands:")
@@ -613,7 +605,7 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "  --project PATH      project root (default: current directory)")
 	fmt.Fprintln(w, "  --tier TIER         supervisor, operator, or system")
 	fmt.Fprintln(w, "  --offline           run without the Daintree MCP connection")
-	fmt.Fprintln(w, "  --classic           use the line-oriented REPL instead of the cockpit")
+	fmt.Fprintln(w, "  --classic           deprecated no-op (the line REPL is the only interactive mode)")
 	fmt.Fprintln(w, "  --json              emit JSONL for a one-shot prompt")
 	fmt.Fprintln(w, "  --mcp-url URL       Daintree MCP URL (env: DAINTREE_MCP_URL)")
 	fmt.Fprintln(w, "  --mcp-token TOKEN   Daintree MCP token (env: DAINTREE_MCP_TOKEN)")

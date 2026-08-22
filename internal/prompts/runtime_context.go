@@ -48,7 +48,7 @@ type MainPromptContext struct {
 	// Display is the live render geometry of the surface this reply will be drawn in
 	// — nil when there is no terminal to measure (a piped one-shot, the stdio host,
 	// the headless daemon), which the backend reads as "unknown" and answers with its
-	// own default width. Republished by the cockpit on every resize, so it is as live
+	// own default width. Republished by the attached session on every resize, so it is as live
 	// as the tier/MCP fields beside it.
 	Display             *DisplayContext
 	ProjectInstructions string
@@ -56,7 +56,7 @@ type MainPromptContext struct {
 
 // DisplayContext is how wide the assistant's own output actually is. Columns is the
 // terminal; ContentWidth is the narrower measure the reply is WRAPPED at, after the
-// cockpit's left inset, autowrap gutter, and the prose cap (ui.ContentMax) — so on a
+// attached session's left inset, autowrap gutter, and the prose cap (ui.ContentMax) — so on a
 // maximized window the two differ a lot and only ContentWidth describes the line the
 // model is really writing into.
 type DisplayContext struct {

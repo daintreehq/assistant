@@ -1,5 +1,5 @@
 // Package redact scrubs secret-looking values out of text on its way to somewhere it
-// will persist: the debug log, the durable audit rows, the approval sheet, the cockpit's
+// will persist: the debug log, the durable audit rows, the approval sheet, the attached session's
 // expanded activity rows.
 //
 // # Why this is a package and not a helper
@@ -11,7 +11,7 @@
 // includes an agent echoing its environment. None of that is the assistant's own
 // credential, so no amount of care with our own key protects it.
 //
-// Where it lands matters. The cockpit renders on the terminal's NORMAL screen buffer, so
+// Where it lands matters. The attached session renders on the terminal's NORMAL screen buffer, so
 // anything displayed persists in the host's native scrollback long after the session and
 // is never cleared. The debug log is an append-only file that outlives the process by a
 // week. The audit table is queryable and exportable by a tool the model itself can call.
@@ -42,7 +42,7 @@
 //	durable audit rows               args, result, and the summary column
 //	run_events (SQLite, /explain)    via the EventSink source
 //	the console + JSONL + host sinks  via the same source
-//	the cockpit's activity rows and ops previews, which seal into native scrollback
+//	the attached session's activity rows and ops previews, which seal into native scrollback
 //	the approval sheet and ^X detail
 //
 // NOT REDACTED — places where the raw value is what makes the thing work:

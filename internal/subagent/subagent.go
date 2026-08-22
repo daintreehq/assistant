@@ -221,7 +221,7 @@ type Deps struct {
 }
 
 // Progress reports a run's live state so the calling tool can forward it to the
-// cockpit's activity row. Called from the run goroutine; it must not block.
+// attached session's activity row. Called from the run goroutine; it must not block.
 type Progress func(msg string)
 
 // Runner executes briefs. It holds no per-run state, so one Runner serves every

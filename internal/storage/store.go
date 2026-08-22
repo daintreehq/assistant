@@ -12,7 +12,7 @@
 //
 // Construction is deliberately NON-destructive: watchers, async invocations,
 // and the attention inbox are PROJECT-scoped and survive process boundaries so
-// the supervisor daemon (or the next cockpit) can adopt them. The explicit
+// the supervisor daemon (or the next attached session) can adopt them. The explicit
 // owner-boot reconciliation lives in BeginOwnership; the only wholesale
 // teardown left is /clear (CancelLiveWatchers / CancelLiveAsyncInvocations /
 // ResolveAllOpenEvents).
@@ -173,7 +173,7 @@ func Open(dbPath string, opts *Options) (*Store, error) {
 // WAL`, which rewrites the file header), execs the schema, and runs a retention sweep
 // that DELETES rows. A diagnostic that wants to look at the audit trail — the support
 // bundle — would therefore mutate a database whose owner lease it does not hold, racing
-// a live cockpit or the daemon. A tool that changes the thing it is diagnosing is not a
+// a live attached session or the daemon. A tool that changes the thing it is diagnosing is not a
 // diagnostic.
 //
 // `mode=ro` makes that structural rather than a matter of discipline: SQLite itself
@@ -411,7 +411,7 @@ type OwnershipSummary struct {
 }
 
 // BeginOwnership is the owner-boot reconciliation, run ONCE by the process that
-// just acquired the project owner lock (cockpit, REPL, one-shot, or the
+// just acquired the project owner lock (attached session, REPL, one-shot, or the
 // supervisor daemon). It replaces the old destructive Open-time sweep: instead
 // of cancelling live supervision it ADOPTS it — the only cleanup is the spawn
 // roster (in-flight launch sagas are dead with the process that ran them; a

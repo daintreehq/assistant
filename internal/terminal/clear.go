@@ -1,4 +1,4 @@
-// Package terminal holds the TTY-gated raw escape sequences the cockpit writes
+// Package terminal holds the TTY-gated raw escape sequences the attached session writes
 // straight to the host terminal, OUTSIDE Bubble Tea's managed render path. These
 // are reserved for the two operations that must touch the host's own
 // screen+scrollback (the `/clear` wipe and the resize "nuclear redraw"); they are
@@ -22,7 +22,7 @@ import (
 //	\x1b[H   move the cursor home
 //
 // It deliberately does NOT touch the alternate screen buffer (\x1b[?1049h): the
-// cockpit lives on the normal buffer so the host keeps wheel/selection/copy-paste.
+// attached session lives on the normal buffer so the host keeps wheel/selection/copy-paste.
 const HostTerminalClear = "\x1b[2J\x1b[3J\x1b[H"
 
 // WindowTitlePrefix is the OSC-2 set-window-title introducer; the title text and
@@ -45,7 +45,7 @@ func isTTY(w io.Writer) bool {
 
 // ClearHost writes the host screen+scrollback wipe to w when w is a TTY. It is a
 // no-op on a non-TTY and swallows any write error (an out-of-band cue must never
-// break the cockpit). This is the `/clear` step-2 wipe and the resize-redraw wipe;
+// break the attached session). This is the `/clear` step-2 wipe and the resize-redraw wipe;
 // it is the ONLY sanctioned host-scrollback clear.
 func ClearHost(w io.Writer) {
 	if !isTTY(w) {
@@ -56,8 +56,8 @@ func ClearHost(w io.Writer) {
 }
 
 // SetTitle writes an OSC-2 window-title escape to w (TTY-only, errors swallowed).
-// The live cockpit sets the title through Bubble Tea's View.WindowTitle; this
-// helper restores a clean title on cockpit EXIT (Bubble Tea has already released
+// The live session sets the title through Bubble Tea's View.WindowTitle; this
+// helper restores a clean title on attached session EXIT (Bubble Tea has already released
 // the terminal by then, so the title must be written directly).
 func SetTitle(w io.Writer, title string) {
 	if !isTTY(w) {

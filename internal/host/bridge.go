@@ -12,6 +12,7 @@ import (
 
 	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/redact"
 )
 
 // Approval/redaction constants.
@@ -32,8 +33,11 @@ type RiskOfFunc func(toolName string) (domain.RiskClass, bool)
 
 // BridgeOptions configures a Bridge.
 type BridgeOptions struct {
-	SessionID         string
-	Post              PostFunc
+	SessionID string
+	Post      PostFunc
+	// PostStream is the backpressure lane for high-volume events. Defaults to Post
+	// when nil (tests, and any consumer that does not care to separate the two).
+	PostStream        PostFunc
 	RiskOf            RiskOfFunc   // default: always unknown
 	Now               func() int64 // default: domain.NowMS
 	ApprovalTimeoutMs int          // default: DefaultApprovalTimeoutMs (0 disables the timer)
@@ -54,6 +58,7 @@ type pendingApproval struct {
 type Bridge struct {
 	sessionID         string
 	post              PostFunc
+	postStream        PostFunc
 	riskOf            RiskOfFunc
 	now               func() int64
 	approvalTimeoutMs int
@@ -76,9 +81,13 @@ func NewBridge(opts BridgeOptions) *Bridge {
 	if opts.ApprovalTimeoutMs == 0 {
 		opts.ApprovalTimeoutMs = DefaultApprovalTimeoutMs
 	}
+	if opts.PostStream == nil {
+		opts.PostStream = opts.Post
+	}
 	return &Bridge{
 		sessionID:         opts.SessionID,
 		post:              opts.Post,
+		postStream:        opts.PostStream,
 		riskOf:            opts.RiskOf,
 		now:               opts.Now,
 		approvalTimeoutMs: opts.ApprovalTimeoutMs,
@@ -97,8 +106,19 @@ func genID(prefix string) string { return domain.NewID(prefix + "_") }
 // calls: AssistantStart fires once per round but only the FIRST opens the turn.
 // ---------------------------------------------------------------------------
 
-// Phase is live-only UI vocabulary with no host-protocol channel — dropped.
-func (b *Bridge) Phase(domain.RunPhase) {}
+// Phase forwards the explicit run lifecycle. v2 dropped it as "live-only UI
+// vocabulary"; under v3 the host IS the UI, and liveness inferred from "has any
+// token arrived" is exactly the heuristic domain.RunPhase exists to replace.
+func (b *Bridge) Phase(p domain.RunPhase) {
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	interrupted := b.interrupted
+	b.mu.Unlock()
+	if interrupted {
+		return
+	}
+	b.postStream(EvTurnPhase{TurnID: turnID, Phase: p.String()})
+}
 
 func (b *Bridge) AssistantStart() {
 	b.mu.Lock()
@@ -121,40 +141,112 @@ func (b *Bridge) AssistantToken(chunk string) {
 	}
 	turnID := b.activeTurnID
 	b.mu.Unlock()
-	b.post(EvTurnToken{TurnID: turnID, Chunk: chunk})
+	b.postStream(EvTurnToken{TurnID: turnID, Chunk: chunk})
 }
 
 // AssistantEnd closes the turn: "answered" if content is non-blank else "unknown".
-// (reasoning is not forwarded over the host protocol.)
-func (b *Bridge) AssistantEnd(content, _ string) {
+//
+// The content is carried on turn:end as the AUTHORITATIVE text (see EvTurnEnd) so a
+// consumer can replace whatever it accumulated from turn:token. Reasoning, when the
+// round produced any, goes out first as its own event — ahead of turn:end, so a host
+// that renders it can attach it to a turn that is still open.
+func (b *Bridge) AssistantEnd(content, reasoning string) {
+	if trimNonEmpty(reasoning) {
+		b.mu.Lock()
+		turnID := b.activeTurnID
+		interrupted := b.interrupted
+		b.mu.Unlock()
+		if !interrupted && turnID != "" {
+			b.post(EvTurnReasoning{TurnID: turnID, Text: reasoning})
+		}
+	}
 	outcome := OutcomeUnknown
 	if trimNonEmpty(content) {
 		outcome = OutcomeAnswered
 	}
-	b.closeTurn(outcome)
+	b.closeTurnWithContent(outcome, content, true)
 }
 
+// AssistantCancelled closes the turn as cancelled. The streamed buffer is dropped by
+// contract, so no authoritative content is claimed — a host keeps what it rendered
+// and marks the turn cancelled rather than blanking it.
 func (b *Bridge) AssistantCancelled(string) { b.closeTurn(OutcomeCancelled) }
 
-// Interjection has no host-protocol channel: the Daintree parent already holds the
-// text it sent as the mid-turn prompt (handlePrompt routes it to InjectPrompt while
-// busy), so echoing it back would be redundant. Dropped, like Phase.
-func (b *Bridge) Interjection(string) {}
+// Interjection reports a mid-turn steer at the moment the loop FOLDS IT IN. The host
+// sent the text, so v2 called echoing it redundant — but only the runtime knows when
+// it actually landed, and a transcript that shows the steer in the wrong place
+// misrepresents what the model saw when it answered.
+func (b *Bridge) Interjection(text string) {
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	interrupted := b.interrupted
+	b.mu.Unlock()
+	if interrupted {
+		return
+	}
+	b.post(EvTurnInterjection{TurnID: turnID, Text: text})
+}
 
-// SkillLoaded has no host-protocol channel (the parent doesn't surface the assistant's
-// internal skill loads); dropped, like Interjection.
+// SkillLoaded stays unforwarded. It is a per-ATTEMPT cue that fires on a delta, so a
+// retried round can report a load the committed round did not repeat — reconstructing
+// the active set from it is wrong by construction. SkillDecision is the authority.
 func (b *Bridge) SkillLoaded([]string) {}
 
-// SkillDecision likewise has no host-protocol channel. A host wanting the skill decision
-// reads the --json stream or the run transcript, not this bridge.
+// SkillDecision is diagnostic, not conversational: backend skill selection is prompt
+// assembly the user neither approves nor steers, and the runtime contract is that no
+// sink folds it into the transcript. It reaches a human only through an explicit
+// `/explain <run>` replay, which reads the durable run log — so the bridge still
+// drops it rather than putting prompt-assembly machinery on the conversation wire.
 func (b *Bridge) SkillDecision(agent.SkillDecisionEvent) {}
 
-// ToolBatch/ToolState/ToolProgress are live-footer-only in the loop; the host
-// protocol keys off the concrete tool:started/tool:settled events, so the
-// in-tool substep stream has no host channel and is dropped.
-func (b *Bridge) ToolBatch([]agent.BatchedToolCall) {}
-func (b *Bridge) ToolState(string, agent.ToolState) {}
-func (b *Bridge) ToolProgress(string, string)       {}
+// ToolBatch announces the WHOLE batch as queued before dispatch begins. Without it a
+// host can only reveal calls one at a time as each starts, which reads as the
+// assistant improvising rather than working through a plan it already made.
+func (b *Bridge) ToolBatch(calls []agent.BatchedToolCall) {
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	interrupted := b.interrupted
+	b.mu.Unlock()
+	if interrupted || len(calls) == 0 {
+		return
+	}
+	out := make([]BatchedCall, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, BatchedCall{
+			ToolCallID:  c.ID,
+			ToolID:      c.Name,
+			ArgsSummary: redactArgs(c.Args),
+			Danger:      b.isDanger(c.Name),
+		})
+	}
+	b.post(EvToolBatch{TurnID: turnID, Calls: out})
+}
+
+// ToolState promotes one announced call. "waiting" is the load-bearing one: it means
+// blocked on the USER, not on the tool, and a host that renders it as ordinary
+// progress leaves someone watching a spinner for their own unanswered approval.
+func (b *Bridge) ToolState(id string, state agent.ToolState) {
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	interrupted := b.interrupted
+	b.mu.Unlock()
+	if interrupted {
+		return
+	}
+	b.post(EvToolState{ToolCallID: id, State: string(state), TurnID: turnID})
+}
+
+// ToolProgress carries an in-tool substep so a long call does not look frozen.
+func (b *Bridge) ToolProgress(id string, msg string) {
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	interrupted := b.interrupted
+	b.mu.Unlock()
+	if interrupted {
+		return
+	}
+	b.postStream(EvToolProgress{ToolCallID: id, Message: msg, TurnID: turnID})
+}
 
 func (b *Bridge) ToolCall(ev agent.ToolCallEvent) {
 	b.mu.Lock()
@@ -205,7 +297,7 @@ func (b *Bridge) ToolResult(ev agent.ToolResultEvent) {
 	}
 	// An accepted async handle: surface it so the host can render "accepted,
 	// still running in the background" instead of a finished success (parity
-	// with the cockpit's yellow async-pending state).
+	// with the host's yellow async-pending state).
 	if ev.Result.Ok && ev.Result.Async != nil {
 		settled.AsyncID = ev.Result.Async.ID
 	}
@@ -217,22 +309,57 @@ func (b *Bridge) Error(message string) {
 	b.closeTurn(OutcomeUnknown)
 }
 
-// Warn has no protocol channel — intentionally dropped (like Info).
-func (b *Bridge) Warn(string) {}
+// Warn forwards a non-fatal warning (a tool loop repeating the same failure, a
+// pinned skill the backend could not honour). v2 dropped these, which meant that once
+// the local renderer was gone they reached nobody at all.
+func (b *Bridge) Warn(message string) { b.postNotice("warning", message) }
 
-// Info has no protocol channel — intentionally dropped.
-func (b *Bridge) Info(string) {}
+// Info forwards an informational notice.
+func (b *Bridge) Info(message string) { b.postNotice("info", message) }
 
-// Usage is not forwarded over the host protocol (token/cost stays in-process).
-func (b *Bridge) Usage(agent.UsageEvent) {}
+// postNotice is the shared Warn/Info path.
+func (b *Bridge) postNotice(level, message string) {
+	if !trimNonEmpty(message) {
+		return
+	}
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	b.mu.Unlock()
+	b.post(EvNotice{Level: level, Message: message, TurnID: turnID})
+}
+
+// Usage forwards per-round token accounting. ContextTokens against ContextWindow is
+// what drives a context meter, and ContextThreshold is where auto-compaction fires —
+// none of which a host can compute for itself.
+func (b *Bridge) Usage(ev agent.UsageEvent) {
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	b.mu.Unlock()
+	b.post(EvUsage{
+		TurnID:           turnID,
+		PromptTokens:     ev.PromptTokens,
+		CompletionTokens: ev.CompletionTokens,
+		TotalTokens:      ev.TotalTokens,
+		CachedTokens:     ev.CachedTokens,
+		CacheHitRatio:    ev.CacheHitRatio,
+		ContextTokens:    ev.ContextTokens,
+		ContextThreshold: ev.ContextThreshold,
+		ContextWindow:    ev.ContextWindow,
+	})
+}
 
 // TurnPrompt has no host-protocol channel — Daintree originated the prompt, so the
 // bridge drops it (it's persisted for /explain by the run-event sink).
 func (b *Bridge) TurnPrompt(string) {}
 
-// ModelRateLimited is a live cockpit health cue with no host-protocol channel —
-// dropped. The "Model rate-limited" reply still flows through the normal turn text.
-func (b *Bridge) ModelRateLimited() {}
+// ModelRateLimited signals the provider throttled us after the retry budget was
+// exhausted. A health cue that clears on the next usage event, not a turn failure.
+func (b *Bridge) ModelRateLimited() {
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	b.mu.Unlock()
+	b.post(EvModelRateLimited{TurnID: turnID})
+}
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -278,6 +405,14 @@ func (b *Bridge) Interrupt() {
 // active turn id) so AssistantEnd + AssistantCancelled can both fire — the first
 // closes, the second no-ops.
 func (b *Bridge) closeTurn(outcome TurnOutcomeClass) {
+	b.closeTurnWithContent(outcome, "", false)
+}
+
+// closeTurnWithContent closes the active turn, optionally carrying the authoritative
+// final text. hasContent distinguishes "the turn said nothing" from "the turn said
+// the empty string", which a host needs in order to tell a tool-only round from an
+// empty answer.
+func (b *Bridge) closeTurnWithContent(outcome TurnOutcomeClass, content string, hasContent bool) {
 	b.mu.Lock()
 	turnID := b.activeTurnID
 	if turnID == "" {
@@ -287,7 +422,13 @@ func (b *Bridge) closeTurn(outcome TurnOutcomeClass) {
 	b.activeTurnID = ""
 	now := b.now()
 	b.mu.Unlock()
-	b.post(EvTurnEnd{TurnID: turnID, EndedAt: now, Outcome: outcome})
+	b.post(EvTurnEnd{
+		TurnID:     turnID,
+		EndedAt:    now,
+		Outcome:    outcome,
+		Content:    content,
+		HasContent: hasContent,
+	})
 }
 
 // Confirm is the tool-confirm hook: mint an approval, emit approval:requested,
@@ -297,7 +438,7 @@ func (b *Bridge) closeTurn(outcome TurnOutcomeClass) {
 // The emitted approval:requested carries the request's display context — risk
 // class (passed through verbatim, so a per-confirm override survives), the
 // human-readable consequence, and a redacted args summary (redactArgs, the same
-// helper tool:started uses) — so Daintree's timeline matches a local cockpit
+// helper tool:started uses) — so Daintree's timeline matches a local host
 // approval. Empty fields are omitted by the event encoder.
 func (b *Bridge) Confirm(ctx context.Context, req ConfirmRequest) bool {
 	approvalID := genID("apr")
@@ -318,14 +459,15 @@ func (b *Bridge) Confirm(ctx context.Context, req ConfirmRequest) bool {
 	b.mu.Unlock()
 
 	b.post(EvApprovalRequested{
-		ApprovalID:  approvalID,
-		ToolID:      req.ToolName,
-		Summary:     req.Summary,
-		RequestedAt: now,
-		TurnID:      turnID,
-		RiskClass:   req.RiskClass,
-		Consequence: req.Consequence,
-		ArgsSummary: redactArgs(req.RawArgs),
+		ApprovalID:        approvalID,
+		ToolID:            req.ToolName,
+		Summary:           req.Summary,
+		RequestedAt:       now,
+		TurnID:            turnID,
+		RiskClass:         req.RiskClass,
+		Consequence:       req.Consequence,
+		ArgsSummary:       redactArgs(req.RawArgs),
+		NeedsTypedConfirm: req.NeedsTypedConfirm,
 	})
 
 	// Block on the decision. ctx cancellation (turn abort) also frees the dispatch:
@@ -447,6 +589,20 @@ func redactArgs(rawArgs string) string {
 	if rawArgs == "" {
 		return ""
 	}
+	// CREDENTIAL MASKING FIRST, structural summarization second.
+	//
+	// The structural pass below only collapses values by SHAPE and LENGTH — a short
+	// string passes through verbatim, so `{"password":"hunter2hunter2"}` used to cross
+	// the wire unchanged. Ordinary tool:started events were safe because the agent
+	// EventSink already sanitizes at the source, but a CONFIRM request does not come
+	// through that path: it is built straight from the dispatch arguments.
+	//
+	// So the masking has to happen at this boundary, not upstream of it. redact.String
+	// removes registered exact secrets first, then credential shapes (sensitive JSON
+	// keys, env assignments, PEM blocks, URL userinfo). Running it on the raw JSON text
+	// keeps key-aware rules working, since it can still see `"password":` next to its
+	// value — a value-by-value pass after the structure was flattened could not.
+	rawArgs = redact.String(rawArgs)
 	var v any
 	if err := json.Unmarshal([]byte(rawArgs), &v); err != nil {
 		// Not valid JSON: treat the raw string itself as the top-level string value.

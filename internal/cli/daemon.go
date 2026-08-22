@@ -100,7 +100,7 @@ func RunDaemonStop(ctx context.Context, opts Options) int {
 
 // RunStatus is the `daintree-assistant status` subcommand: the daemon-health
 // sibling of `doctor`. It never takes the owner lease — a status probe must
-// not disturb a live cockpit or the daemon.
+// not disturb a live attached session or the daemon.
 func RunStatus(ctx context.Context, opts Options) int {
 	r := render.Stdout()
 	cfg, err := loadConfigFromOptions(opts)

@@ -1,6 +1,6 @@
 package domain
 
-// RunPhase is the explicit run lifecycle of the active turn. The cockpit's
+// RunPhase is the explicit run lifecycle of the active turn. The attached session's
 // liveness is driven from this value, NEVER inferred from "is assistantText
 // empty" (that inference is the bug that makes spinners vanish mid-work).
 // Shared between the agent loop and the UI.

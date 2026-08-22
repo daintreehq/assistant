@@ -40,8 +40,8 @@ func Stdout() *Renderer { return New(os.Stdout) }
 
 // New builds a Renderer over w. Color is enabled only when w is a TTY *os.File and NO_COLOR
 // is unset. NO_COLOR is honored by PRESENCE (any value, even empty), via LookupEnv, so the
-// console agrees with the cockpit theme (theme.resolveMode) — previously an empty NO_COLOR
-// was ignored here (os.Getenv can't tell unset from empty) while the cockpit honored it.
+// console agrees with the attached session theme (theme.resolveMode) — previously an empty NO_COLOR
+// was ignored here (os.Getenv can't tell unset from empty) while the attached session honored it.
 func New(w io.Writer) *Renderer {
 	useColor := false
 	if f, ok := w.(*os.File); ok {

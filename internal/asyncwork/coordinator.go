@@ -15,7 +15,7 @@
 //     queue event (and the autonomous wake it triggers) is the only delivery
 //     channel, so the model transcript stays structurally valid.
 //   - PROJECT-scoped, owner-supervised: async futures survive process
-//     boundaries. Whichever process owns the project DB (an open cockpit or
+//     boundaries. Whichever process owns the project DB (an open attached session or
 //     the detached supervisor daemon) runs a coordinator, and Start ADOPTS the
 //     persisted live rows — rebuilding the poll state from the row itself —
 //     and retries any completion a prior owner finalized but died before

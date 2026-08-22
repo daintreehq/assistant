@@ -102,6 +102,9 @@ func RunHost(ctx context.Context, opts Options) int {
 		}
 		return &hostAppAdapter{app: a, ctx: fctx, own: own}, nil
 	}
+	// Report the engine build in host:ready so Daintree can version-gate without
+	// shelling out to `--version` separately.
+	host.BuildVersion = buildVersion
 	return host.Run(ctx, factory)
 }
 
@@ -124,11 +127,12 @@ func (h *hostAppAdapter) SetHooks(hooks host.AppHooks) {
 				return false, nil
 			}
 			return hooks.Confirm(cctx, host.ConfirmRequest{
-				ToolName:    req.ToolName,
-				Summary:     req.Summary,
-				RiskClass:   req.Risk,
-				Consequence: req.Consequence,
-				RawArgs:     string(req.Args),
+				ToolName:          req.ToolName,
+				Summary:           req.Summary,
+				RiskClass:         req.Risk,
+				Consequence:       req.Consequence,
+				RawArgs:           string(req.Args),
+				NeedsTypedConfirm: req.NeedsTypedConfirm,
 			}), nil
 		},
 	})

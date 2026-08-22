@@ -13,7 +13,7 @@ type CommandResult struct {
 	Quit    bool
 }
 
-// HandleSlashCommand handles a slash line in the classic REPL, printing the result
+// HandleSlashCommand handles a slash line in the line REPL, printing the result
 // via the renderer. It shares the same data accessors as the UI
 // handler so both surfaces stay in lockstep (the registry test asserts every
 // command is handled by both). clearHostTerminal is called on /clear by the caller

@@ -96,14 +96,14 @@ did not create.
 ## Redaction, and its limits
 
 Credentials are stripped before anything is written to the **debug log**, the **audit
-rows**, the **run events**, the **console/JSONL output**, and the **cockpit's activity
+rows**, the **run events**, the **console/JSONL output**, and the **attached session's activity
 rows**. Two layers: recognisable shapes (bearer tokens, `sk-` keys, PATs, JWTs, PEM
 blocks, `export API_KEY=…`, URL userinfo), plus this process's own MCP token by exact
 value — and `DAINTREE_API_KEY` too, on the rare install that sets one.
 
 **Redaction covers tool activity, not prose.** Tool call arguments and results are
 scrubbed at the event source, which is what feeds the log, the audit rows, run events, the
-console and JSONL sinks, and the cockpit's activity rows. Your messages, the assistant's
+console and JSONL sinks, and the attached session's activity rows. Your messages, the assistant's
 replies, and its reasoning are stored and displayed **verbatim** — so if the model repeats
 a credential it read, that is not caught.
 
@@ -152,7 +152,7 @@ daintree-assistant support-bundle --include-audit   # redacted, for support
 ```
 
 For your own records, the `audit.export` tool writes the full audit trail as JSON or CSV
-from inside a session. `/audit export json` does the same from the cockpit.
+from inside a session. `/audit export json` does the same from the attached session.
 
 ---
 

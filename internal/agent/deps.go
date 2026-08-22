@@ -190,7 +190,7 @@ type ArtifactPersister interface {
 // BackendStateStore is the durable mirror for the opaque backend state token
 // (satisfied by *storage.Store). The token is server-signed skill-selection
 // state, refreshed on every stream meta event; mirroring it lets a DIFFERENT
-// process (the supervisor daemon after a cockpit detach, or vice versa) resume
+// process (the supervisor daemon after an attached session detach, or vice versa) resume
 // the session with the backend's selector cadence intact instead of forcing a
 // from-scratch re-selection. Optional: nil keeps the token memory-only (the
 // default in tests). All writes are best-effort — never break a stream.
@@ -229,7 +229,7 @@ type SessionDeps struct {
 	// artifact.read survives cache eviction/restart (optional; nil ⇒ in-memory only).
 	ArtifactPersister ArtifactPersister
 	// BackendStateStore mirrors the opaque backend state token to durable storage on
-	// every stream meta so a cross-process session handover (cockpit ↔ supervisor
+	// every stream meta so a cross-process session handover (attached session ↔ supervisor
 	// daemon) replays it (optional; nil ⇒ memory-only, the default in tests).
 	BackendStateStore BackendStateStore
 	// InitialBackendState seeds the opaque token on construction — the persisted

@@ -135,6 +135,12 @@ func (h *Host) reportSync(code, message string) {
 // post sends an event through the transport, stamping the current session id.
 func (h *Host) post(ev HostEvent) { h.tr.send(h.sessionID, ev) }
 
+// postStream is the backpressure lane for high-volume events (tokens, tool progress,
+// phase beats). It WAITS for queue room instead of dropping the frame — see
+// streamHighWater. Control events keep using post, which never waits, so an approval
+// decision or an interrupt can never stall behind a token burst.
+func (h *Host) postStream(ev HostEvent) { h.tr.sendStream(h.sessionID, ev) }
+
 // Run is the entry point: install the stdout-fail hook, run the command loop, and
 // (on a terminal inbound) tear down. It blocks until teardown calls exit. The
 // caller wires os.Stdin/os.Stdout/os.Stderr.
@@ -276,9 +282,10 @@ func (h *Host) boot(desc SessionDescriptor) {
 
 	// Bridge: maps the agent event stream + confirm hook → wire events.
 	h.bridge = NewBridge(BridgeOptions{
-		SessionID: h.sessionID,
-		Post:      h.post,
-		RiskOf:    app.RiskOf,
+		SessionID:  h.sessionID,
+		Post:       h.post,
+		PostStream: h.postStream,
+		RiskOf:     app.RiskOf,
 	})
 
 	app.SetHooks(AppHooks{
@@ -318,7 +325,11 @@ func (h *Host) boot(desc SessionDescriptor) {
 	// Hand off from the boot guard to the steady-state fatal path.
 	h.guardActive = false
 	h.ready = true
-	ev := EvReady{ProtocolVersion: ProtocolVersion}
+	ev := EvReady{
+		ProtocolVersion: ProtocolVersion,
+		Version:         BuildVersion,
+		AutoApprove:     app.Config().AutoApprove,
+	}
 	if desc.ResumeSessionID != "" {
 		ev.ResumedSessionID = desc.ResumeSessionID
 	}

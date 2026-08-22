@@ -152,7 +152,7 @@ stateful mode takes is an `flock`, which has no Windows port. See
 
 ## `safety.autoApprove` — ON
 
-Mutating actions run without asking, **on every surface** — the cockpit, the classic REPL,
+Mutating actions run without asking, **on every surface** — the attached session, the line REPL,
 one-shot, `--json`, and the host — because all of them are the same `main` actor. It does
 not widen the tier gate, and unattended actors (watchers, timers, wake turns) still need a
 scoped grant. Unset `DAINTREE_ASSISTANT_AUTO_APPROVE` unless this is an automated harness.
@@ -169,7 +169,7 @@ determines who can fix it:
 | **Selector / skill** | wrong or missing runbook, bad plan, stops early, dumps a speculative 60-step plan | the backend's prompts/skills |
 | **Tool contract** | invalid arguments, a tool used for the wrong job, an unclear schema | this repo's tool definitions |
 | **Runtime** | backend, MCP, state, daemon, retries, lifecycle | this repo's runtime |
-| **UI / support** | rendering, cancellation, install, confusing messaging | this repo's cockpit and CLI |
+| **UI / support** | rendering, cancellation, install, confusing messaging | this repo's attached session and CLI |
 
 Then:
 
@@ -196,7 +196,7 @@ you what happened while you were gone.
 reaches your terminals through Daintree. It pauses rather than fabricating an outcome, and
 resumes on the next launch. (If `daintree-assistant status` says no daemon is running, the
 supervisor never started — spawning it is deliberately non-fatal — and background work will
-not survive the cockpit exiting at all.)
+not survive the attached session exiting at all.)
 
 **A long wait became background work.** Foreground waits have a shared budget so a chain of
 them cannot block a turn indefinitely. Past it, the work moves to async.

@@ -408,7 +408,7 @@ func TestBinaryJSONMultiTurnHandlesCRLFAndUnknownCommands(t *testing.T) {
 	}
 
 	// The typo is machine-detectable. This is the field's entire reason to exist: the
-	// handler still "handles" an unknown command (the cockpit gets a card), so only a
+	// handler still "handles" an unknown command (the attached session gets a card), so only a
 	// registry lookup can tell a script that /claer is not a command at all.
 	c := linesOfTypeN(t, lines, "command:result", 1)[0].raw
 	if got, _ := c["command"].(string); got != "/claer" {

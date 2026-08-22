@@ -15,7 +15,7 @@ import (
 // scanner on one path; if it ever regresses — a new non-streaming route, a provider
 // that reorders fragments, a refactor that forwards raw text — the visible symptom is
 // "[[DAINTREE:FINAL]]" printed at the top of a human's reply, in every surface at once
-// (cockpit, classic REPL, --json, the embedded host, the MCP server). Guarding at the
+// (attached session, line REPL, --json, the embedded host, the MCP server). Guarding at the
 // stream boundary covers all of them from one place, which a render-layer guard in
 // internal/ui could not: three of those five surfaces never render through it.
 const (

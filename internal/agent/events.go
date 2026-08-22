@@ -141,7 +141,7 @@ type SkillDecisionEvent struct {
 	Selector    SkillSelectorOutcome `json:"selector"`
 }
 
-// EventSink is the structured-event vocabulary the loop emits. The cockpit's
+// EventSink is the structured-event vocabulary the loop emits. The attached session's
 // LiveRunStatus is driven from Phase(), never inferred from "is text empty". Go
 // has no optional interface methods, so Usage is required; sinks that don't care
 // no-op it.
@@ -157,7 +157,7 @@ type EventSink interface {
 
 	// Interjection reports a message the human typed WHILE the turn was running, at the
 	// moment the loop folds it into history (the next tool-iteration boundary, see
-	// Session.foldInInjections). The cockpit renders it inline in the running turn; the
+	// Session.foldInInjections). The attached session renders it inline in the running turn; the
 	// durable log records it so /explain replay shows the mid-turn steer.
 	Interjection(text string)
 
@@ -167,7 +167,7 @@ type EventSink interface {
 	// emitted with an empty slice.
 	//
 	// DIAGNOSTIC ONLY — no sink may fold it into the running conversation. The durable run
-	// log, the --json stream and the debug trace consume it; the cockpit, console and host
+	// log, the --json stream and the debug trace consume it; the attached session, console and host
 	// sinks deliberately drop it, and there is no command that reports the active set. The
 	// ONE place it reaches a human is the explicit `/explain <run>` timeline, alongside
 	// that run's tool calls and errors — a retrospective diagnostic view the user asked
@@ -186,7 +186,7 @@ type EventSink interface {
 	// upstream model connects). A consumer asserting what a turn actually used reads this
 	// event and never reconstructs the active set from SkillLoaded.
 	//
-	// DIAGNOSTIC ONLY, exactly as SkillLoaded is: the cockpit, console and host sinks
+	// DIAGNOSTIC ONLY, exactly as SkillLoaded is: the attached session, console and host sinks
 	// drop it. See Session.emitSkillLoads for the standing argument.
 	SkillDecision(ev SkillDecisionEvent)
 
@@ -216,7 +216,7 @@ type EventSink interface {
 	TurnPrompt(input string)
 
 	// ModelRateLimited signals the provider throttled us after the retry budget was
-	// exhausted on a 429. A live-only health cue: the cockpit raises a "▲ Model
+	// exhausted on a 429. A live-only health cue: the attached session raises a "▲ Model
 	// rate-limited" badge that clears on the next successful Usage. No-op in sinks
 	// that don't render persistent health state.
 	ModelRateLimited()
@@ -633,7 +633,7 @@ func rawArgsAsAny(raw string) any {
 //	the console sink (stdout, and any terminal scrollback capturing it)
 //	the JSONL --json stream (whatever automation is consuming it)
 //	the embedded host's NDJSON transport (Daintree's process)
-//	the cockpit's collapsed activity rows, which SEAL INTO NATIVE SCROLLBACK
+//	the attached session's collapsed activity rows, which SEAL INTO NATIVE SCROLLBACK
 //	the ops deck's terminal previews
 //
 // Redacting at each sink means six chances to forget and six places to keep in step. The

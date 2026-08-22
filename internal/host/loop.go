@@ -53,7 +53,7 @@ func (h *Host) handleCommand(cmd HostCommand) {
 
 // handlePrompt runs a command-driven turn. A prompt sent while a turn is already
 // running is FOLDED into the running turn (InjectPrompt) — the model picks it up at its
-// next tool-iteration boundary ("between tasks"), matching the cockpit composer — rather
+// next tool-iteration boundary ("between tasks"), matching the host composer — rather
 // than rejected. The send runs on a worker goroutine so the command loop keeps servicing
 // interrupt/decide.
 func (h *Host) handlePrompt(text string) {
@@ -136,7 +136,7 @@ func (h *Host) finishPromptTurn(gen uint64, ctx context.Context) {
 
 	cancelled := ctx.Err() != nil
 	if cancelled {
-		// An aborted turn drops its unconsumed injections (the cockpit's Ctrl+C
+		// An aborted turn drops its unconsumed injections (the host's Ctrl+C
 		// discard): a message folded into work the user abandoned must not
 		// resurrect as a fresh turn. handleInterrupt discards too — this covers
 		// an injection that slipped in while the cancelled turn was unwinding.
@@ -214,7 +214,7 @@ func (h *Host) handleInterrupt() {
 	if cancel != nil {
 		// Drop buffered-but-unfolded injections BEFORE cancelling: the turn they
 		// were folded into is being abandoned, and finishPromptTurn must not
-		// resurrect them as a fresh turn (mirrors the cockpit's Ctrl+C discard).
+		// resurrect them as a fresh turn (mirrors the host's Ctrl+C discard).
 		// Guarded on a live COMMAND turn: during a wake (turnCancel nil) folded
 		// prompts stay — the wake keeps running and will consume them.
 		h.session.DiscardPendingInjections()
@@ -342,7 +342,7 @@ func (h *Host) reactWake() {
 		// Only record terminals as summarized on a REAL reply — Send returns a
 		// sentinel string on model failure (never throws), so a transient outage
 		// must not permanently downgrade later events to one-line acks. WATCHER
-		// events only (mirrors the cockpit): an async-tool completion carries a
+		// events only (mirrors the host): an async-tool completion carries a
 		// terminalId too, but must not poison the "got a full watcher summary" set
 		// — a later real watcher event for that terminal still earns the summary.
 		if !agent.IsWakeFailureReply(reply) {

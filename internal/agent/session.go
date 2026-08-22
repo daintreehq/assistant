@@ -437,7 +437,7 @@ func (s *Session) HasPendingInjections() bool {
 }
 
 // RetractPendingInjection removes and returns the most-recently buffered injection
-// that has NOT yet been folded in (LIFO — mirrors the cockpit's Esc-retract of a
+// that has NOT yet been folded in (LIFO — mirrors the attached session's Esc-retract of a
 // typed follow-up). ok is false when nothing is buffered (already folded in, or none
 // typed), in which case the caller leaves the running turn alone.
 func (s *Session) RetractPendingInjection() (string, bool) {
@@ -480,7 +480,7 @@ func (s *Session) drainPendingInjections() []string {
 }
 
 // foldInInjections drains any buffered injections into history and emits an
-// Interjection event per message so the cockpit can render it inline in the running
+// Interjection event per message so the attached session can render it inline in the running
 // turn. Returns how many were folded in (0 ⇒ nothing pending). Called at every point
 // where the turn would proceed to a model call or end, so a mid-turn message is always
 // picked up at the next boundary and never stranded.
@@ -1017,7 +1017,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			OnRetry: func(info backend.RetryInfo) {
 				retryCount++
 				// The retry budget now rides out a backend restart (~a minute of wall
-				// clock), so say so ONCE per round. Without any cue the cockpit shows
+				// clock), so say so ONCE per round. Without any cue the host shows
 				// an unchanged spinner and a retried turn is indistinguishable from a
 				// hang; but a note is a STANDALONE transcript cell appended after the
 				// active turn, so one per attempt would stack up to nine cells that
@@ -1050,7 +1050,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 				// chain-of-thought begins (backend/sse.go contract). Map only that
 				// value; any unknown/future phase keeps the current UI phase — a
 				// conservative posture so a new backend status can never blank or
-				// scramble the cockpit's liveness line.
+				// scramble the attached session's liveness line.
 				if st.Phase == "thinking" {
 					markThinking()
 				}
@@ -1657,7 +1657,7 @@ func (s *Session) mutationRunEnd(calls []models.ToolCallRequest, c int, allowedS
 
 // runParallelGroup dispatches calls[from:to) CONCURRENTLY (bounded by
 // maxParallelToolDispatch) and streams each member's settled result the moment it
-// completes — the cockpit shows every member live: all spinners appear together, then
+// completes — the host shows every member live: all spinners appear together, then
 // each row flips to done with its OWN true duration while siblings keep running,
 // instead of the whole group settling at once with the slowest call's wall-clock.
 //
@@ -2050,7 +2050,7 @@ func (s *Session) backendStatePtr() *string {
 // committed stream attempt. The CLI treats the state token as opaque
 // (store-and-replay only). The token is also mirrored to durable storage
 // (best-effort) so a DIFFERENT process — the supervisor daemon picking this session
-// up after a detach, or the next cockpit after the daemon — replays the same token
+// up after a detach, or the next attached session after the daemon — replays the same token
 // instead of forcing the backend to re-run skill selection from scratch
 // mid-conversation. The round's skill outcome (meta.Skills) is deliberately NOT retained
 // as session state: it is reported per round as it arrives (the caller emits
@@ -2479,7 +2479,7 @@ func (s *Session) buildRuntimeContext(pc prompts.MainPromptContext, openTerminal
 		OpenTerminals:   openTerminals,
 	}
 	if d := pc.Display; d != nil {
-		// Live like the rest of this block: the cockpit republishes on every resize, so
+		// Live like the rest of this block: the attached session republishes on every resize, so
 		// a window dragged narrower mid-session reaches the very next round.
 		rc.Display = backend.NewDisplayInfo(d.Columns, d.ContentWidth)
 	}

@@ -11,7 +11,7 @@ this CLI, and the backend — not any one of them alone.
 | Surface | Version | Failure mode when it mismatches |
 |---|---|---|
 | Backend wire protocol | `2` | backend answers HTTP 426; the turn cannot run |
-| Embedded host (`host --stdio`) NDJSON | `2` | Daintree and the CLI disagree on the request envelope |
+| Embedded host (`host --stdio`) NDJSON | `3` | Daintree and the CLI disagree on the request envelope |
 | SQLite state schema (`schemaUserVersion`) | `11` | an OLDER non-zero on-disk schema is refused; an interactive launch then moves it aside to a timestamped backup and recreates it (a non-TTY launch fails loudly instead). A NEWER schema — an older CLI against a newer DB — is accepted as-is |
 
 ## Backend tasks this CLI will call

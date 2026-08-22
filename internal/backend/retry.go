@@ -42,7 +42,7 @@ const (
 	// maxRetryAfterWait bounds how long a server-provided Retry-After can stall a
 	// turn. We HONOUR Retry-After (from an HTTP response or SSE error) rather than
 	// clamping it down to the jittered-backoff cap — retrying earlier than the server
-	// asked just burns the budget — but a pathological value can't freeze the cockpit.
+	// asked just burns the budget — but a pathological value can't freeze the attached session.
 	// It is pinned to the steady-state ceiling: a server asking for longer than the
 	// backoff's own maximum wait gets that maximum, and the budget absorbs the rest.
 	maxRetryAfterWait = defaultMaxDelay
@@ -88,7 +88,7 @@ func DefaultRetryPolicy() RetryPolicy {
 }
 
 // RetryInfo is handed to ClientConfig.OnRetry (and StreamCallbacks.OnRetry) just
-// before each backoff sleep, for observability and for the cockpit's "retrying…"
+// before each backoff sleep, for observability and for the attached session's "retrying…"
 // cue. Attempt is 0-based: 0 is the first failure (about to make the first retry).
 // MaxAttempts is the policy's total budget, so a renderer can say "2 of 10" without
 // reaching into the client. Op names the failing call ("respond", or the JSON

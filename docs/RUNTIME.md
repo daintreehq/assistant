@@ -53,7 +53,7 @@ large model's ~1M-token window (`LargeContextWindowTokens`).
    IDs, the active branch, an open grant — so the raw tail keeps them intact.
 5. **Durable facts are distilled into memory** off the critical path, after compaction, so
    the model stream is unblocked first. Novel facts are saved with source `compact`. This
-   step is **silent** — it emits no cockpit note.
+   step is **silent** — it emits no attached session note.
 
 The two markers that replace the dropped history are:
 
@@ -87,7 +87,7 @@ is different — it drops the conversation entirely (`[conversation cleared — 
 to initial state]`) with no summary, and it is the only wholesale teardown of
 project-scoped supervision state (watchers, async futures, the attention inbox).
 
-> **Not the same as the CTX gauge.** The cockpit's `CTX%` reads "% of the *model's*
+> **Not the same as the CTX gauge.** The attached session's `CTX%` reads "% of the *model's*
 > context window in use" against the large model's ~1M-token window
 > (`domain.LargeContextWindowTokens`), **not** "% toward auto-compaction." They measure
 > different things, though at a 500K soft threshold the gauge will read roughly half full
@@ -107,7 +107,7 @@ reword them casually.
 
 | What happened | Reply you see | Notes |
 |---|---|---|
-| Upstream/model rate limit or quota, after the backend's retry budget is spent | `Model rate-limited: …` | Raises a **model-health badge** in the cockpit, cleared automatically by the next successful usage event. |
+| Upstream/model rate limit or quota, after the backend's retry budget is spent | `Model rate-limited: …` | Raises a **model-health badge** in the attached session, cleared automatically by the next successful usage event. |
 | The Daintree assistant backend is unreachable | `Can't reach the Daintree assistant backend — is it running? …` | The most common local-dev failure. Named as a connectivity problem with a next step instead of a dialer blob mislabeled as a model error. `/doctor` probes exactly this. |
 | You pressed Escape to cancel the turn | `Turn cancelled` | A clean stop, not a failure — the loop treats it as such. |
 | Any other model/transport error | `Model error: …` | The underlying error text is appended. |
@@ -139,7 +139,7 @@ looking at:
    turn also stops retrying the moment any visible token has streamed, since a replay
    would duplicate on-screen text.
 
-   **Visibility:** a respond retry emits ONE cockpit note per round (a note is a
+   **Visibility:** a respond retry emits ONE attached session note per round (a note is a
    standalone transcript cell, so one per attempt would stack up and commit out of order
    with the answer). Every retry on every endpoint emits a `backend.retry` debug-log line
    carrying `op`, so a stalled turn is distinguishable from a stalled utility task.

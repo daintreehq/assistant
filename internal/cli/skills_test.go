@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daintreehq/assistant/internal/app"
 	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/storage"
 )
@@ -311,48 +310,56 @@ func TestFailedPinPreflightDoesNotDisplaceTheCurrentSession(t *testing.T) {
 	t.Setenv(NoDaemonEnv, "1")
 	t.Setenv("DAINTREE_BACKEND_URL", capabilitiesServer(t, twoSkillCatalog))
 
+	// Both launches run the line REPL, so give each one a closed stdin: it reads EOF
+	// and returns immediately, which is enough to reach (or fail before) adoption.
+	closeStdin(t)
+
 	// A normal launch, no pins: it adopts and becomes the project's current session.
-	var adopted string
 	good := Options{
 		Offline: boolPtr(true),
 		Project: project,
-		Cockpit: func(_ context.Context, a *app.App) error {
-			adopted = a.SessionID
-			return nil
-		},
 	}
 	if code := runInteractive(context.Background(), good, true); code != domain.OneShotExitCode.Success {
 		t.Fatalf("baseline launch exit = %d, want 0", code)
 	}
+	adopted := currentSessionPointer(t, stateDir)
 	if adopted == "" {
-		t.Fatal("the baseline launch never reached the cockpit seam")
-	}
-	if got := currentSessionPointer(t, stateDir); got != adopted {
-		t.Fatalf("current session = %q, want the baseline session %q", got, adopted)
+		t.Fatal("the baseline launch never adopted a current session")
 	}
 
-	// Now a launch with a mistyped pin. It must fail before adopting — and before the
-	// front end opens at all.
-	cockpitRan := false
+	// Now a launch with a mistyped pin. It must fail BEFORE adopting, leaving the
+	// pointer on the baseline session.
 	bad := Options{
 		Offline:        boolPtr(true),
 		Project:        project,
 		PinnedSkillIDs: []string{"daintree.foundatoin"},
-		Cockpit: func(context.Context, *app.App) error {
-			cockpitRan = true
-			return nil
-		},
 	}
 	if code := runInteractive(context.Background(), bad, true); code != domain.OneShotExitCode.Error {
 		t.Fatalf("a mistyped --skill launch exit = %d, want 1", code)
-	}
-	if cockpitRan {
-		t.Fatal("the cockpit opened despite a failed pin preflight")
 	}
 	if got := currentSessionPointer(t, stateDir); got != adopted {
 		t.Fatalf("a failed launch displaced the current session: %q, want %q — the supervisor "+
 			"would now resume a conversation that never ran a turn", got, adopted)
 	}
+}
+
+// closeStdin points os.Stdin at an already-closed pipe for the test's duration, so
+// the line REPL reads EOF and returns instead of blocking.
+func closeStdin(t *testing.T) {
+	t.Helper()
+	stdin, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stdin
+	os.Stdin = stdin
+	t.Cleanup(func() {
+		os.Stdin = original
+		_ = stdin.Close()
+	})
 }
 
 // currentSessionPointer reads the durable pointer the supervisor resumes from.

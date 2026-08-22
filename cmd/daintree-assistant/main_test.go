@@ -198,7 +198,7 @@ func TestParseArgsCarriesMultiTurn(t *testing.T) {
 
 // TestParseArgsRejectsMultiTurnMisuse: --multi-turn is a third prompt source, so it
 // obeys the same "name one source" rule as the other two — and it insists on --json,
-// without which it would just be a worse spelling of the classic REPL on piped stdin.
+// without which it would just be a worse spelling of the line REPL on piped stdin.
 func TestParseArgsRejectsMultiTurnMisuse(t *testing.T) {
 	for _, tt := range []struct {
 		name string

@@ -80,7 +80,7 @@ func newCtxParkingClient() (*Client, *ctxParkingLow) {
 // perfectly alive and merely slower than that one caller was willing to wait.
 //
 // The failure this pins was self-inflicted and reachable from two live call sites:
-// /doctor bounded its probes with a 5s context.WithTimeout against the cockpit's
+// /doctor bounded its probes with a 5s context.WithTimeout against the attached session's
 // LIVE client (whose own per-attempt budget is 20s), and the scheduler bounded each
 // job with a 120s context.WithTimeout threaded into every watcher MCP read. In both
 // cases a slow-but-alive server made the caller's deadline fire mid-attempt and

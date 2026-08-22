@@ -3,10 +3,10 @@
 // NDJSON request/response protocol the daemon serves on it.
 //
 // Ownership model (see docs/SUPERVISOR.md): exactly ONE process at a time —
-// an attached cockpit/REPL/one-shot OR the supervisor daemon — holds the
+// an attached session/REPL/one-shot OR the supervisor daemon — holds the
 // project's owner lock and with it the right to open state.db and run the
 // scheduler + async coordinator. flock is the primitive because the kernel
-// releases it when the holder dies, which is what makes a cockpit crash hand
+// releases it when the holder dies, which is what makes an attached-session crash hand
 // supervision back to the daemon without any cleanup code running.
 package ipc
 
@@ -21,7 +21,7 @@ import (
 
 // OwnerLockName / DaemonLockName are the two lease files, both living in the
 // per-project state dir (0700). owner.lock serializes DB ownership between a
-// cockpit and the daemon; daemon.lock makes the daemon a per-project singleton.
+// attached session and the daemon; daemon.lock makes the daemon a per-project singleton.
 const (
 	OwnerLockName  = "owner.lock"
 	DaemonLockName = "daemon.lock"
@@ -72,7 +72,7 @@ func (l *FileLock) TryAcquire() (bool, error) {
 
 // Acquire polls TryAcquire until it succeeds, ctx is done, or a real error
 // occurs. retryEvery bounds the handoff latency (the daemon reclaiming after a
-// cockpit exits, or a cockpit waiting out a daemon's in-flight wake turn).
+// attached session exits, or an attached session waiting out a daemon's in-flight wake turn).
 func (l *FileLock) Acquire(ctx context.Context, retryEvery time.Duration) error {
 	if retryEvery <= 0 {
 		retryEvery = 250 * time.Millisecond

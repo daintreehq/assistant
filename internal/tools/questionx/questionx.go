@@ -190,7 +190,7 @@ func handleAsk(ctx context.Context, raw json.RawMessage, tctx *tools.ToolContext
 	}
 
 	// Progress cue so the live footer reads "waiting for your choice" while blocked
-	// (ReportProgress is an optional field — nil in tests / non-cockpit sinks).
+	// (ReportProgress is an optional field — nil in tests / non-attached session sinks).
 	if tctx.ReportProgress != nil {
 		tctx.ReportProgress(tools.ToolProgress{Phase: tools.ProgressAwaitingQuestion, Message: "waiting for your choice"})
 	}

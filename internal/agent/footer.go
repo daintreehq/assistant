@@ -367,7 +367,7 @@ func activeWorktreeSection(ctx footerContext) (string, bool) {
 
 // sessionNoteSection emits the one-time `# Session note`: the titles of live watchers
 // this process ADOPTED from a prior owner at ownership boot (watchers are project-scoped
-// and keep running across assistant restarts and cockpit detach — the supervisor daemon
+// and keep running across assistant restarts and attached session detach — the supervisor daemon
 // or the next owner resumes them). The Session passes the titles only on the FIRST turn,
 // then nil, so the heads-up surfaces exactly once. Omitted (false) when there are none.
 func sessionNoteSection(ctx footerContext) (string, bool) {

@@ -40,7 +40,7 @@ selection instead of selecting again; repeated refs are also de-duplicated defen
 
 **A backend skill load never enters the conversation.** `SkillLoaded` is a diagnostic
 signal — the durable run log, the `--json` stream and the debug trace consume it; the
-cockpit, console and host sinks deliberately drop it (pinned by
+attached session, console and host sinks deliberately drop it (pinned by
 `internal/ui/render_skill_test.go` and `TestConsoleSinkSkillLoadedIsSilent`). The one
 place it reaches a human is the explicit **`/explain <run>`** timeline, where it prints as
 `✦ skill loaded: …` beside that run's tool calls and errors — a retrospective diagnostic

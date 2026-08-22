@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +12,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daintreehq/assistant/internal/app"
 	"github.com/daintreehq/assistant/internal/backend"
 	"github.com/daintreehq/assistant/internal/cli/render"
 	"github.com/daintreehq/assistant/internal/domain"
@@ -104,37 +102,10 @@ func TestSchemaAutoReset_AuthorisesAndNotes(t *testing.T) {
 	}
 }
 
-// A cancelled launch context is a shutdown request, not evidence that the cockpit
-// is unavailable. In particular, SIGTERM cancels main's launch context and Bubble
-// Tea returns an error; the CLI must exit with the cancelled code instead of falling
-// through to startRepl, which intentionally detaches itself from that context.
-func TestRunInteractive_CancelledCockpitDoesNotFallBack(t *testing.T) {
-	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", t.TempDir())
-	t.Setenv(NoDaemonEnv, "1")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	runnerCalled := false
-	opts := Options{
-		Offline: boolPtr(true),
-		Project: t.TempDir(),
-		Cockpit: func(context.Context, *app.App) error {
-			runnerCalled = true
-			cancel()
-			return context.Canceled
-		},
-	}
-
-	if code := runInteractive(ctx, opts, true); code != domain.OneShotExitCode.Cancelled {
-		t.Fatalf("cancelled cockpit exit = %d, want Cancelled(%d)", code, domain.OneShotExitCode.Cancelled)
-	}
-	if !runnerCalled {
-		t.Fatal("cockpit seam was not called")
-	}
-}
-
-// A real cockpit startup failure keeps the established classic-REPL fallback. Feed
-// that REPL an immediate EOF so the unit test exercises the branch without blocking.
-func TestRunInteractive_CockpitUnavailableStillFallsBack(t *testing.T) {
+// The interactive route is now the line REPL unconditionally — there is no second front end
+// to fall back FROM. Feed the REPL an immediate EOF so the unit test exercises
+// the route without blocking.
+func TestRunInteractive_RunsTheLineRepl(t *testing.T) {
 	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", t.TempDir())
 	t.Setenv("DAINTREE_API_KEY", "test-key")
 	t.Setenv(NoDaemonEnv, "1")
@@ -153,21 +124,15 @@ func TestRunInteractive_CockpitUnavailableStillFallsBack(t *testing.T) {
 		_ = stdin.Close()
 	})
 
-	runnerCalled := false
 	opts := Options{
 		Offline: boolPtr(true),
 		Project: t.TempDir(),
-		Cockpit: func(context.Context, *app.App) error {
-			runnerCalled = true
-			return errors.New("cockpit unavailable in test")
-		},
 	}
 
+	// ttyOK=true is the branch that used to select the attached session; it must now reach the
+	// REPL like any other, so a TTY launch cannot resurrect a front end that is gone.
 	if code := runInteractive(context.Background(), opts, true); code != domain.OneShotExitCode.Success {
-		t.Fatalf("fallback REPL exit = %d, want Success(%d)", code, domain.OneShotExitCode.Success)
-	}
-	if !runnerCalled {
-		t.Fatal("cockpit seam was not called")
+		t.Fatalf("interactive exit = %d, want Success(%d)", code, domain.OneShotExitCode.Success)
 	}
 }
 

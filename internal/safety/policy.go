@@ -42,7 +42,7 @@ var alwaysConfirm = setOf(
 // enough to demand a typed phrase (not a single keypress) from the interactive
 // human: system-level calls (daintree.call) and ALL git operations (a RiskGit
 // tool can rewrite or publish history — discard, reset, force-push). This is a single policy
-// axis so every surface — cockpit AND classic REPL — gates the same action with
+// axis so every surface — attached session AND line REPL — gates the same action with
 // equal friction, rather than each UI re-deriving the rule for itself.
 var typedConfirm = setOf(domain.RiskGit, domain.RiskSystem)
 
@@ -81,7 +81,7 @@ func AlwaysConfirm(risk domain.RiskClass) bool { return alwaysConfirm[risk] }
 // NeedsTypedConfirm reports whether the risk class demands a typed-phrase
 // confirmation (git/system) rather than a single-key approval. It is the single
 // source of truth carried on tools.ConfirmRequest.NeedsTypedConfirm so the
-// cockpit and the classic REPL enforce the same friction for the same action.
+// attached session and the line REPL enforce the same friction for the same action.
 func NeedsTypedConfirm(risk domain.RiskClass) bool { return typedConfirm[risk] }
 
 // PolicyDecision is the result of evaluating a (risk, tier) pair.

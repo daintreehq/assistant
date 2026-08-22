@@ -161,7 +161,7 @@ type ConfirmRequest struct {
 	Consequence string           `json:"consequence,omitempty"`
 	Args        json.RawMessage  `json:"args,omitempty"`
 	// NeedsTypedConfirm is the pre-computed safety.NeedsTypedConfirm(Risk) verdict,
-	// stamped at construction so every approval surface (cockpit, classic REPL)
+	// stamped at construction so every approval surface (attached session, line REPL)
 	// enforces the typed-phrase requirement for git/system actions without
 	// re-deriving the rule. Zero value (false) ⇒ a single-key approval is enough.
 	NeedsTypedConfirm bool `json:"needsTypedConfirm,omitempty"`
@@ -305,7 +305,7 @@ type Tool struct {
 	// tool, only when every member is ALREADY fully authorized (interactive main
 	// actor + auto-approve + tier allows — see the ParallelMutationSafe adapter;
 	// anything that would need a confirmation prompt or an automation grant stays
-	// serial, because the cockpit holds ONE pending approval and grant consumption
+	// serial, because the attached session holds ONE pending approval and grant consumption
 	// order must stay deterministic), and only up to the mutation cohort cap.
 	// Ordering caveat mirrors Parallelizable: never set it on a tool a later batch
 	// sibling depends on.
@@ -374,7 +374,7 @@ type ToolContext struct {
 	// execution under a policy nobody approved.
 	GatedTarget *TargetInfo
 
-	// --- liveness (always present in the cockpit; may be zero in tests) ---
+	// --- liveness (always present in the attached session; may be zero in tests) ---
 	// ToolCallID identifies this call's live footer row.
 	ToolCallID string
 	// ReportProgress emits an in-tool progress beat. The registry calls it for the

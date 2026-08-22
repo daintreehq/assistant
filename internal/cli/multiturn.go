@@ -31,7 +31,7 @@ var errNoPrompts = errors.New("--multi-turn: no prompts on stdin (one prompt per
 // empty script, an unreadable stdin, or a Session.Send error, which signals a broken
 // single-flight invariant rather than a failed answer). An ordinary failed turn is not
 // one: it is reported on its own turn:end, latched into the run's outcome by the sink,
-// and the next prompt still runs — matching the classic REPL, which prints the error
+// and the next prompt still runs — matching the line REPL, which prints the error
 // and loops.
 func runJSONTurns(ctx context.Context, a *app.App, sink *jsonout.Sink, in io.Reader) error {
 	lines := streamLines(ctx, in, maxPromptFileBytes)
@@ -101,7 +101,7 @@ func runJSONTurns(ctx context.Context, a *app.App, sink *jsonout.Sink, in io.Rea
 				Command: line,
 				// NOT cmd.Handled: that reports whether the handler consumed the line,
 				// which is true even for a command the catalog has never heard of (the
-				// cockpit still gets an "Unknown command" card to render). Only the
+				// attached session still gets an "Unknown command" card to render). Only the
 				// registry can answer whether the command EXISTS, and a script needs
 				// that answer to catch its own typos.
 				Handled:             commands.IsKnownCommand(line),

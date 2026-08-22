@@ -160,7 +160,7 @@ func handle(ctx context.Context, deps Deps, raw json.RawMessage, tctx *tools.Too
 	}
 
 	// Forward the sub-agent's round-by-round progress to this call's activity row.
-	// Without it the cockpit shows one frozen row for the whole run — which can be
+	// Without it the host shows one frozen row for the whole run — which can be
 	// a minute — and a delegation that looks hung is one the user cancels.
 	progress := progressForwarder(tctx)
 
