@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -8,6 +9,8 @@ import (
 
 	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/app"
+	"github.com/daintreehq/assistant/internal/cli/render"
+	"github.com/daintreehq/assistant/internal/commands"
 	"github.com/daintreehq/assistant/internal/config"
 	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/host"
@@ -158,6 +161,22 @@ func (h *hostAppAdapter) SetHooks(hooks host.AppHooks) {
 			return tools.AskChoiceAnswer{Label: ans.Label, Index: ans.Index, Text: ans.Text}, nil
 		},
 	})
+}
+
+// RunCommand routes a slash line through the SAME handler the line REPL uses, with
+// the renderer pointed at a buffer instead of stdout. Sharing the handler is the point:
+// the registry test asserts every command is served by both surfaces, so an embedded
+// host cannot quietly support a different set from the one the CLI documents.
+func (h *hostAppAdapter) RunCommand(ctx context.Context, line string) host.CommandOutcome {
+	if !commands.IsKnownCommand(line) {
+		return host.CommandOutcome{Unknown: true}
+	}
+	var buf bytes.Buffer
+	res := commands.HandleSlashCommand(ctx, line, h.app, render.New(&buf))
+	if !res.Handled {
+		return host.CommandOutcome{Unknown: true}
+	}
+	return host.CommandOutcome{Text: buf.String(), Quit: res.Quit}
 }
 
 func (h *hostAppAdapter) ConnectMCP(ctx context.Context) error {

@@ -236,6 +236,38 @@ func (e EvToolSettled) encode(sid string, seq uint64) ([]byte, error) {
 // EvApprovalRequested — approval:requested. turnId optional. riskClass,
 // consequence, and argsSummary are optional display context (parity with a local
 // host approval); each is omitted from the wire object when empty.
+// EvCommandResult — command:result. The output of a slash command the host routed
+// through the engine, as plain text.
+//
+// Commands are not conversation. Sending `/status` to the model as prose produces an
+// answer about the WORD status, spends a turn doing it, and leaves the user believing
+// they ran something. This event is how an embedded surface gets the same answer the
+// REPL prints.
+type EvCommandResult struct {
+	Command string
+	Text    string
+	// Quit reports that the command asked the session to end (/quit, /exit).
+	Quit bool
+	// Unknown reports that the line looked like a command but names none that exists,
+	// so the host can say so instead of silently doing nothing.
+	Unknown bool
+	TurnID  string
+}
+
+func (e EvCommandResult) encode(sid string, seq uint64) ([]byte, error) {
+	f := map[string]any{"command": e.Command, "text": e.Text}
+	if e.Quit {
+		f["quit"] = true
+	}
+	if e.Unknown {
+		f["unknown"] = true
+	}
+	if e.TurnID != "" {
+		f["turnId"] = e.TurnID
+	}
+	return marshalEvent("command:result", sid, seq, f)
+}
+
 // EvQuestionRequested — question:requested. The model called
 // user.askMultipleChoice and the turn is BLOCKED until the host answers with a
 // question:answer command naming this QuestionID.

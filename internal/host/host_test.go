@@ -29,8 +29,11 @@ type fakeApp struct {
 	rearmed []string
 }
 
-func (f *fakeApp) SetHooks(h AppHooks)                             { f.hooks = h }
-func (f *fakeApp) ConnectMCP(context.Context) error                { return nil }
+func (f *fakeApp) SetHooks(h AppHooks)              { f.hooks = h }
+func (f *fakeApp) ConnectMCP(context.Context) error { return nil }
+func (f *fakeApp) RunCommand(context.Context, string) CommandOutcome {
+	return CommandOutcome{}
+}
 func (f *fakeApp) StartScheduler(func(events []domain.QueueEvent)) {}
 func (f *fakeApp) Session() *agent.Session                         { return f.session }
 func (f *fakeApp) RiskOf(string) (domain.RiskClass, bool)          { return "", false }

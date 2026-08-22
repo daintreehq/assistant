@@ -22,6 +22,14 @@ type App interface {
 	// wake or early tool call is bridged.
 	SetHooks(hooks AppHooks)
 
+	// RunCommand executes a slash line (e.g. "/status") and returns its printed
+	// output, whether it asked to quit, and whether the command was unknown.
+	//
+	// The host routes commands here rather than sending them to the model, because a
+	// command is not conversation: "/clear" as prose produces an answer ABOUT
+	// clearing and leaves the conversation intact.
+	RunCommand(ctx context.Context, line string) CommandOutcome
+
 	// ConnectMCP attempts the MCP connection. Best-effort: a degraded MCP is NOT a
 	// boot failure (it surfaces in prompt context + tool results), so the returned
 	// error is informational only — the host logs it to stderr and proceeds.
@@ -105,6 +113,13 @@ type ConfirmRequest struct {
 	// NeedsTypedConfirm is safety.NeedsTypedConfirm's verdict for this dispatch,
 	// forwarded verbatim so the host never re-derives the rule. See EvApprovalRequested.
 	NeedsTypedConfirm bool
+}
+
+// CommandOutcome is the result of RunCommand.
+type CommandOutcome struct {
+	Text    string
+	Quit    bool
+	Unknown bool
 }
 
 // AskChoiceRequest is the host-side view of a user.askMultipleChoice dispatch.

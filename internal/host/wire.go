@@ -286,6 +286,7 @@ const (
 	CmdPrompt         HostCommandType = "prompt"
 	CmdApprovalDecide HostCommandType = "approval:decide"
 	CmdQuestionAnswer HostCommandType = "question:answer"
+	CmdCommand        HostCommandType = "command"
 	CmdInterrupt      HostCommandType = "interrupt"
 	CmdHibernate      HostCommandType = "hibernate"
 	CmdShutdown       HostCommandType = "shutdown"
@@ -301,6 +302,8 @@ type HostCommand struct {
 	// approval:decide
 	ApprovalID string
 	Decision   string
+	// command — the raw slash line, e.g. "/status"
+	CommandLine string
 	// question:answer
 	QuestionID string
 	// Index is the 0-based option the user chose. -1 means the question was
@@ -362,6 +365,10 @@ func ParseCommand(line []byte) (HostCommand, error) {
 		// approval:decided — collapse it to the safe default (rejected) so a parked
 		// dispatch unblocks declined rather than emitting an off-contract decision.
 		cmd.Decision = string(normalizeDecision(cmd.Decision))
+	case CmdCommand:
+		if err := wantString(raw, "line", &cmd.CommandLine); err != nil {
+			return HostCommand{}, errNotCommand
+		}
 	case CmdQuestionAnswer:
 		if err := wantString(raw, "questionId", &cmd.QuestionID); err != nil {
 			return HostCommand{}, errNotCommand

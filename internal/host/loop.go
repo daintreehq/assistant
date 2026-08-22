@@ -34,6 +34,8 @@ func (h *Host) handleCommand(cmd HostCommand) {
 		// Resolving an approval unblocks a parked dispatch goroutine. Off-loop-safe:
 		// the bridge guards its own state, so call directly (no blocking).
 		h.bridge.ResolveApproval(cmd.ApprovalID, ConfirmationDecision(cmd.Decision))
+	case CmdCommand:
+		h.handleSlashCommand(cmd.CommandLine)
 	case CmdQuestionAnswer:
 		// Same shape as approval:decide — unblocks a parked dispatch, bridge-guarded.
 		h.bridge.ResolveQuestion(cmd.QuestionID, cmd.Index)
@@ -507,4 +509,23 @@ func (h *Host) onPanic(r any) {
 func flushExit(code int) {
 	_ = os.Stdout.Sync()
 	os.Exit(code)
+}
+
+// handleSlashCommand runs a slash line and posts its output.
+//
+// Not a turn: no turn:start/turn:end is emitted and the model is never consulted, so a
+// command costs nothing and cannot be answered with prose about itself. A `/quit` is
+// honoured by winding the session down exactly as a shutdown command would.
+func (h *Host) handleSlashCommand(line string) {
+	out := h.app.RunCommand(h.runCtx, line)
+	h.post(EvCommandResult{
+		Command: line,
+		Text:    out.Text,
+		Quit:    out.Quit,
+		Unknown: out.Unknown,
+	})
+	if out.Quit {
+		h.cancelTurn()
+		h.teardown(ShutdownExit, "")
+	}
 }
