@@ -594,6 +594,169 @@ An empty script — stdin with no prompt on it at all, only blank lines or comma
 run **failure** (exit 1, reported on the stream), not a quiet success. It is nearly
 always a harness mistake, and a transcript of nothing should not look like a clean run.
 
+## Skill-authoring test loop
+
+Developing a runbook has two halves that fail differently, and the loop below exists to
+keep them apart. The **backend** owns skills — it loads them from disk, selects them, and
+injects the body — so an authoring mistake shows up there as a catalog that will not load.
+The **CLI** is what makes a run repeatable and readable: the same prompt every time, state
+that shares nothing with your cockpit, and a JSONL transcript that says which runbook was
+actually active. Without the second half you are reading prose and guessing.
+
+**1. Start the backend with an EMPTY overlay directory.** The packaged catalog is
+read-only in the sense that matters — a scratch edit must not land in the server's own
+tree — so the backend merges a second directory on top of it. Point it there in
+`../assistant-backend/.env`, where `.env.example` already carries the line commented out,
+rather than as a command prefix: `./dev` sources `.env` with `set -a` and deliberately
+overwrites the inherited environment, so a prefixed value loses to any line the file sets.
+(A direct `DAINTREE_SKILLS_OVERLAY_DIR=… python -m daintree_assistant_server` does honour
+the prefix — process environment outranks dotenv — but `./dev` is the usual way in.)
+
+```ini
+# ../assistant-backend/.env
+DAINTREE_SKILLS_OVERLAY_DIR=/tmp/skill-harness/skills
+```
+
+Then, from a first terminal, create the directory and start the server — leave it running:
+
+```bash
+mkdir -p /tmp/skill-harness/skills
+cd ../assistant-backend && ./dev
+```
+
+It binds the `HOST`/`PORT` from `.env`, which is `127.0.0.1:8473` only if you started from
+the scaffold. Empty is the deliberate starting state: the overlay is loaded during startup,
+so a skill that fails to parse there is a **readiness** failure rather than a reload
+failure — the server boots but stays unready, and the reload route below is
+readiness-gated, so it answers `503` and cannot dig you out. Boot empty and the first draft
+is recoverable without a restart.
+
+**2. Write the skill.** The filename stem MUST equal the frontmatter `id` — the loader
+passes `path.stem` as the expected id and rejects the file otherwise — so this one goes to
+`/tmp/skill-harness/skills/daintree.example.skill-under-test.md`. Only top-level `*.md`
+files in the directory are read; subdirectories are ignored.
+
+```markdown
+---
+id: daintree.example.skill-under-test
+title: Skill under test
+summary: One line the selector reads to decide whether this runbook fits.
+whenToUse: The situations this runbook is for, and the ones it is not.
+risk: read
+requiredTools:
+  - context.snapshot
+---
+
+## Procedure
+
+1. …
+```
+
+`id`, `title`, `summary` and `whenToUse` are required (those are the canonical spellings);
+`risk` defaults to `read`, `requiredTools` to empty, `foundation` to false. Frontmatter is
+validated with `extra="forbid"`, so a key the schema does not know is a load failure rather
+than an ignored line — the one authoring error that would otherwise look like the selector
+misbehaving. `requiredTools` names dotted CLI tools, but the names are only syntax-checked
+on load: a typo neither fails the reload nor creates a tool, so check them against the
+inventory yourself.
+
+An overlay skill whose `id` matches a packaged one **replaces** it; a new id is **added**.
+That is what lets you iterate on a shipped runbook and develop a new one with the same
+mechanism, without editing the server's tree either way. Give the overlay its own
+directory: pointing it at the packaged one is a no-op, and a path that exists but is not a
+directory fails the load outright.
+
+**3. Reload, from a second terminal.**
+
+```bash
+curl --fail-with-body -sS -X POST http://127.0.0.1:8473/v1/daintree/skills/reload
+```
+
+The **path** is captured once at startup, so moving the overlay needs a restart; its
+**contents** are re-read here, which is the whole point — edit, POST, run, without losing
+the process. Once the server is ready this is validate-before-swap: the entire replacement
+catalog is built and checked before it rebinds, so a skill caught half-written answers
+`409` and leaves the previous catalog serving. Fix the file and POST again; from that
+point on a malformed skill costs a request, not a restart.
+
+Both the variable and the route are development-only by construction: the route is mounted
+only when an overlay is configured on a non-hardened server, and a hardened deployment that
+sets a non-empty overlay value fails its readiness check. There is no way to reach this
+loop against production, which is why it can be this convenient.
+
+**4. Run the CLI against it, pinned and isolated.** List first — a reload that did not
+take, or an id that does not match its filename, is cheaper to find in a catalog read than
+in a spent turn:
+
+```bash
+daintree-assistant --backend-url http://127.0.0.1:8473 --list-skills --json
+```
+
+Then pin the runbook. `--skill` is what removes the ambiguity that makes runbook
+development frustrating: without it, a bad turn could mean a bad runbook *or* a selector
+that never picked it. See [Naming a skill](#naming-a-skill---skill-and---list-skills) for
+pin ordering, the preflight, and the warning codes a backend can answer with — a pin rides
+alongside the backend's own selection and can still be refused, which is why step 5 reads
+back what was active rather than assuming.
+
+```bash
+mkdir -p /tmp/skill-harness/case-001/run-01
+echo "the prompt this case exercises" > /tmp/skill-harness/case-001/prompt.txt
+
+daintree-assistant \
+  --backend-url http://127.0.0.1:8473 \
+  --skill daintree.example.skill-under-test \
+  --prompt-file /tmp/skill-harness/case-001/prompt.txt \
+  --state-dir /tmp/skill-harness/case-001/run-01/state \
+  --project-id skill-harness-case-001 \
+  --json > /tmp/skill-harness/case-001/run-01/run.jsonl
+```
+
+`--prompt-file` keeps the prompt in a file under the case directory rather than in shell
+quoting, so the prompt and the runbook it exercises are edited and diffed as a pair.
+
+`--state-dir` is what keeps the case out of the developer's own cockpit — no shared
+database, artifacts or lease (see [Isolation](#isolation)) — but note that it **isolates
+without resetting**: a re-run
+against the same directory inherits whatever the last one left there. Give each iteration
+an empty directory of its own, and reuse one only when the persistence is the thing under
+test. `--project-id` here is identity rather than isolation, since an explicit
+`--state-dir` outranks its scoping; it is also only the *fallback* project id — a connected
+Daintree supplies its own.
+
+**5. Read the transcript.** `skill:decision` is the committed answer to "which runbook was
+active", and `selector.degraded` is the field to gate on alongside it — see
+[The event stream](#the-event-stream) for why, and for the full shape.
+
+```bash
+cd /tmp/skill-harness/case-001/run-01
+
+jq -c 'select(.type == "skill:decision")
+       | {active: [.active[].id], degraded: .selector.degraded}' run.jsonl
+jq -c 'select(.type == "tool:call")   | {name, args}'            run.jsonl
+jq -c 'select(.type == "tool:result") | {name, ok, summary}'     run.jsonl
+jq -c 'select(.type == "result")      | {status, stats}'         run.jsonl
+```
+
+The reads answer the three questions a runbook is judged on: did it load, did it drive the
+tool calls it was written to drive, and what `result.stats` recorded — read as a lower
+bound on spend, for the reasons in [The event stream](#the-event-stream). `ok` lives on
+`tool:result` only; asking for it on a `tool:call` yields a silent `null`, not an error.
+
+Two limits are worth knowing before you script a case against this loop:
+
+- **The run above is ONE turn.** Each one-shot prompt run mints a fresh session, so a
+  runbook whose procedure spans a conversation cannot be exercised by running the command
+  twice — the second process shares the project state but not the conversation. Use
+  [`--multi-turn`](#multi-turn) to drive the whole script through one session and one
+  transcript.
+- **Background work does not settle unless the scheduler runs.** By default a one-shot
+  starts no scheduler, so `terminal.run.async` and `terminal.await.async` return
+  `ASYNC_UNAVAILABLE` rather than a handle nothing will resolve — and the backend is told
+  as much, so the model plans around it. A runbook that expects work to settle *after* the
+  turn needs [`--run-scheduler`](#background-work-in-a-one-shot-is-opt-in) and the positive
+  `--timeout` it requires. One that waits in-turn with `terminal.awaitAll` does not.
+
 ## Diagnosing a run
 
 `--debug-log` writes a structured trace to `<log-dir>/<date>-<sessionId>.log`, and the

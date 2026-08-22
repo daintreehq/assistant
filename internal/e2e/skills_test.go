@@ -182,3 +182,81 @@ func TestBinaryUnknownPinnedSkillSpendsNoTurn(t *testing.T) {
 		t.Fatalf("the backend served %d /respond request(s); an unknown pin must be caught before any turn", n)
 	}
 }
+
+// The round trip, in one invocation: the pin goes out on the wire AND the committed
+// decision comes back on stdout naming it. Both halves already have a test —
+// TestBinaryPinnedSkillReachesTheWire watches the request, TestBinaryJSONOneShot watches
+// the stream for the backend's own unforced selection — and both would keep passing if
+// the two ends came apart, because neither one ever pins a skill and then reads what the
+// transcript said about it. That correlation is what every future skill test stands on:
+// a harness asserts "the runbook under development was active" by reading skill:decision
+// after naming it with --skill, and nothing else proves those are the same skill.
+func TestBinaryPinnedSkillRoundTripsThroughJSON(t *testing.T) {
+	const (
+		skillID    = "daintree.foundation"
+		skillTitle = "Foundation"
+	)
+	// The fake does not honour pins — it replays a script — so the round's skills block
+	// stands in for a backend that did. That is the right seam: what is under test is the
+	// CLI's two ends, not the backend's obedience, which its own suite owns.
+	be := newFakeBackend(t, sseRound{
+		contentTokens: []string{"ok"},
+		skills: skillsBlock(false,
+			[]string{skillID, skillTitle},
+			[]string{skillID, skillTitle}),
+	})
+
+	// runSkillsCLI passes argv through verbatim, so --json is the caller's job; without it
+	// the answer channel carries prose and there is no decision to read.
+	stdout, stderr, code := runSkillsCLI(t, be.baseURL(),
+		"--json", "--skill", skillID, "hello")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stdout %q stderr %q)", code, stdout, stderr)
+	}
+
+	// Outbound: asserted on what the SERVER received, same shape as the wire-only test.
+	req := be.request(0)
+	if req == nil {
+		t.Fatal("the backend saw no /respond request")
+	}
+	sel, _ := req["selection"].(map[string]any)
+	if sel == nil {
+		t.Fatalf("no selection block on the wire: %+v", req)
+	}
+	pinned, _ := sel["pinned_skill_ids"].([]any)
+	if len(pinned) != 1 || pinned[0] != skillID {
+		t.Fatalf("selection.pinned_skill_ids = %v, want [%s]", pinned, skillID)
+	}
+
+	// Inbound: the committed decision on the real --json stream. Parsed as generic JSON so
+	// the emitted casing stays observable — a typed struct would silently accept either.
+	var decisions []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			t.Fatalf("stdout is not JSONL (%v): %q", err, line)
+		}
+		if raw["type"] == "skill:decision" {
+			decisions = append(decisions, raw)
+		}
+	}
+	if len(decisions) != 1 {
+		t.Fatalf("skill:decision count = %d, want one for the single scripted round:\n%s",
+			len(decisions), stdout)
+	}
+
+	// active is the authoritative committed set — newlyLoaded is only the delta, and a
+	// retained runbook never appears in it, so a harness that read the delta would miss
+	// the pin on every round after the first.
+	active, _ := decisions[0]["active"].([]any)
+	if len(active) != 1 {
+		t.Fatalf("skill:decision active = %#v, want the pinned skill", decisions[0]["active"])
+	}
+	entry, _ := active[0].(map[string]any)
+	if entry["id"] != skillID || entry["title"] != skillTitle {
+		t.Fatalf("active[0] = %#v, want id %q title %q", entry, skillID, skillTitle)
+	}
+}
