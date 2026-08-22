@@ -107,6 +107,28 @@ type ConfirmRequest struct {
 	NeedsTypedConfirm bool
 }
 
+// AskChoiceRequest is the host-side view of a user.askMultipleChoice dispatch.
+type AskChoiceRequest struct {
+	ToolCallID string
+	Question   string
+	Options    []AskChoiceOption
+	Default    int
+}
+
+// AskChoiceOption is one labelled choice. The LABEL is assigned by the engine so
+// every surface shows the same letter for the same option.
+type AskChoiceOption struct {
+	Label string
+	Text  string
+}
+
+// AskChoiceAnswer is the settled selection.
+type AskChoiceAnswer struct {
+	Label string
+	Index int
+	Text  string
+}
+
 // AppHooks bundles the hooks the host installs on the App.
 type AppHooks struct {
 	// AgentEvents is the bridge sink (agent.EventSink). The session emits through it.
@@ -114,6 +136,9 @@ type AppHooks struct {
 	// Confirm is the tool-confirm hook: a mutating tool calls it and blocks until
 	// the approval is decided (true) / rejected / times out (false).
 	Confirm func(ctx context.Context, req ConfirmRequest) bool
+	// AskChoice is the question hook: a multiple-choice tool calls it and blocks
+	// until the host answers or the question is dismissed.
+	AskChoice func(ctx context.Context, req AskChoiceRequest) (AskChoiceAnswer, error)
 }
 
 // AppFactory builds the App for a booted session. MCP url/token/tier/projectId

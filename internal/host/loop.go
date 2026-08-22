@@ -34,6 +34,9 @@ func (h *Host) handleCommand(cmd HostCommand) {
 		// Resolving an approval unblocks a parked dispatch goroutine. Off-loop-safe:
 		// the bridge guards its own state, so call directly (no blocking).
 		h.bridge.ResolveApproval(cmd.ApprovalID, ConfirmationDecision(cmd.Decision))
+	case CmdQuestionAnswer:
+		// Same shape as approval:decide — unblocks a parked dispatch, bridge-guarded.
+		h.bridge.ResolveQuestion(cmd.QuestionID, cmd.Index)
 	case CmdInterrupt:
 		h.handleInterrupt()
 	case CmdHibernate:

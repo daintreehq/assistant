@@ -236,6 +236,75 @@ func (e EvToolSettled) encode(sid string, seq uint64) ([]byte, error) {
 // EvApprovalRequested — approval:requested. turnId optional. riskClass,
 // consequence, and argsSummary are optional display context (parity with a local
 // host approval); each is omitted from the wire object when empty.
+// EvQuestionRequested — question:requested. The model called
+// user.askMultipleChoice and the turn is BLOCKED until the host answers with a
+// question:answer command naming this QuestionID.
+//
+// Labels (A, B, C…) are assigned by the engine, not the model, and travel with the
+// options so every surface shows the same letter for the same choice. A host that
+// generated its own would disagree with the transcript and the debug log.
+type EvQuestionRequested struct {
+	QuestionID  string
+	ToolCallID  string
+	TurnID      string
+	Question    string
+	Options     []QuestionOption
+	Default     int
+	RequestedAt int64
+}
+
+// QuestionOption is one labelled choice.
+type QuestionOption struct {
+	Label string
+	Text  string
+}
+
+func (e EvQuestionRequested) encode(sid string, seq uint64) ([]byte, error) {
+	opts := make([]map[string]any, 0, len(e.Options))
+	for _, o := range e.Options {
+		opts = append(opts, map[string]any{"label": o.Label, "text": o.Text})
+	}
+	f := map[string]any{
+		"questionId":  e.QuestionID,
+		"question":    e.Question,
+		"options":     opts,
+		"default":     e.Default,
+		"requestedAt": e.RequestedAt,
+	}
+	if e.ToolCallID != "" {
+		f["toolCallId"] = e.ToolCallID
+	}
+	if e.TurnID != "" {
+		f["turnId"] = e.TurnID
+	}
+	return marshalEvent("question:requested", sid, seq, f)
+}
+
+// EvQuestionAnswered — question:answered. Emitted once the question settles, so a
+// transcript records what was chosen (or that it was dismissed).
+type EvQuestionAnswered struct {
+	QuestionID string
+	TurnID     string
+	// Index is -1 when the question was dismissed without a choice.
+	Index int
+	Label string
+	Text  string
+}
+
+func (e EvQuestionAnswered) encode(sid string, seq uint64) ([]byte, error) {
+	f := map[string]any{"questionId": e.QuestionID, "index": e.Index}
+	if e.TurnID != "" {
+		f["turnId"] = e.TurnID
+	}
+	if e.Label != "" {
+		f["label"] = e.Label
+	}
+	if e.Text != "" {
+		f["text"] = e.Text
+	}
+	return marshalEvent("question:answered", sid, seq, f)
+}
+
 type EvApprovalRequested struct {
 	ApprovalID  string
 	ToolID      string

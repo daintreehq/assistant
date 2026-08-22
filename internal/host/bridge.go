@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+
 	"fmt"
+	"github.com/daintreehq/assistant/internal/tools"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +47,22 @@ type BridgeOptions struct {
 
 // pendingApproval is one outstanding confirm: a channel the confirm() caller
 // blocks on plus the auto-timeout timer.
+// ErrQuestionDismissed reports that the user closed the question without choosing.
+// Aliased to the tools sentinel so the question handler can tell "asked and declined"
+// from "could not ask" — they lead the model to different next moves.
+var ErrQuestionDismissed = tools.ErrQuestionDismissed
+
+// pendingQuestion parks a user.askMultipleChoice dispatch until the host answers.
+type pendingQuestion struct {
+	resolve chan questionOutcome
+	options []QuestionOption
+}
+
+// questionOutcome is the settled selection; Index -1 means dismissed.
+type questionOutcome struct {
+	Index int
+}
+
 type pendingApproval struct {
 	resolve chan ConfirmationDecision
 	timer   *time.Timer
@@ -67,6 +85,7 @@ type Bridge struct {
 	activeTurnID     string
 	interrupted      bool // latched until next startExchange
 	pendingApprovals map[string]*pendingApproval
+	pendingQuestions map[string]*pendingQuestion
 	toolStartedAt    map[string]int64
 }
 
@@ -92,6 +111,7 @@ func NewBridge(opts BridgeOptions) *Bridge {
 		now:               opts.Now,
 		approvalTimeoutMs: opts.ApprovalTimeoutMs,
 		pendingApprovals:  make(map[string]*pendingApproval),
+		pendingQuestions:  make(map[string]*pendingQuestion),
 		toolStartedAt:     make(map[string]int64),
 	}
 }
@@ -478,6 +498,88 @@ func (b *Bridge) Confirm(ctx context.Context, req ConfirmRequest) bool {
 	case <-ctx.Done():
 		b.ResolveApproval(approvalID, DecisionRejected)
 		return false
+	}
+}
+
+// AskChoice is the question hook: mint a question, emit question:requested, and BLOCK
+// the tool dispatch until the host answers.
+//
+// Symmetrical with Confirm above, and for the same reason: the model is asking a human
+// something, and only the surface attached to that human can answer. Without this hook
+// the host ran with AskChoice nil, which the tool reports as QUESTION_UNAVAILABLE — so
+// `user.askMultipleChoice` was advertised to the model and then failed every time it
+// was called, which is worse than not offering it at all.
+//
+// Cancellation resolves as a DISMISSAL rather than a selection. Picking an option on
+// the user's behalf because their turn was interrupted is the one outcome a question
+// surface must never produce.
+func (b *Bridge) AskChoice(ctx context.Context, req AskChoiceRequest) (AskChoiceAnswer, error) {
+	questionID := genID("qst")
+	resolve := make(chan questionOutcome, 1)
+
+	opts := make([]QuestionOption, 0, len(req.Options))
+	for _, o := range req.Options {
+		opts = append(opts, QuestionOption{Label: o.Label, Text: o.Text})
+	}
+
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	now := b.now()
+	b.pendingQuestions[questionID] = &pendingQuestion{resolve: resolve, options: opts}
+	b.mu.Unlock()
+
+	b.post(EvQuestionRequested{
+		QuestionID:  questionID,
+		ToolCallID:  req.ToolCallID,
+		TurnID:      turnID,
+		Question:    req.Question,
+		Options:     opts,
+		Default:     req.Default,
+		RequestedAt: now,
+	})
+
+	select {
+	case out := <-resolve:
+		if out.Index < 0 || out.Index >= len(opts) {
+			return AskChoiceAnswer{}, ErrQuestionDismissed
+		}
+		chosen := opts[out.Index]
+		return AskChoiceAnswer{Label: chosen.Label, Index: out.Index, Text: chosen.Text}, nil
+	case <-ctx.Done():
+		b.ResolveQuestion(questionID, -1)
+		return AskChoiceAnswer{}, ErrQuestionDismissed
+	}
+}
+
+// ResolveQuestion settles an outstanding question (answer / dismiss / drain). No-op if
+// not pending. Emits question:answered and unblocks the AskChoice caller.
+func (b *Bridge) ResolveQuestion(questionID string, index int) {
+	b.mu.Lock()
+	pq, ok := b.pendingQuestions[questionID]
+	if !ok {
+		b.mu.Unlock()
+		return
+	}
+	delete(b.pendingQuestions, questionID)
+	turnID := b.activeTurnID
+	b.mu.Unlock()
+
+	label, text := "", ""
+	if index >= 0 && index < len(pq.options) {
+		label, text = pq.options[index].Label, pq.options[index].Text
+	} else {
+		index = -1
+	}
+	b.post(EvQuestionAnswered{
+		QuestionID: questionID,
+		TurnID:     turnID,
+		Index:      index,
+		Label:      label,
+		Text:       text,
+	})
+	select {
+	case pq.resolve <- questionOutcome{Index: index}:
+	default:
 	}
 }
 

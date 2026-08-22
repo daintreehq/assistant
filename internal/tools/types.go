@@ -121,6 +121,12 @@ const (
 // the handler reports QUESTION_NOT_INTERACTIVE for that case instead.
 var ErrNoAskChoiceHook = errors.New("tools: no interactive question surface available")
 
+// ErrQuestionDismissed reports that a question WAS asked and the user closed it
+// without choosing. Distinct from ErrNoAskChoiceHook, which means it could not be
+// asked at all: the model needs to know the difference, because "nobody could ask you"
+// invites a retry through a different route while "you declined to answer" does not.
+var ErrQuestionDismissed = errors.New("tools: question dismissed without an answer")
+
 // ChoiceOption is one labelled option in an AskChoiceRequest. The Label (A, B, C…) is
 // assigned by the CLI, never by the model, so the model supplies only Text and can't
 // collide with or misspell the letters.

@@ -285,6 +285,7 @@ type HostCommandType string
 const (
 	CmdPrompt         HostCommandType = "prompt"
 	CmdApprovalDecide HostCommandType = "approval:decide"
+	CmdQuestionAnswer HostCommandType = "question:answer"
 	CmdInterrupt      HostCommandType = "interrupt"
 	CmdHibernate      HostCommandType = "hibernate"
 	CmdShutdown       HostCommandType = "shutdown"
@@ -300,6 +301,11 @@ type HostCommand struct {
 	// approval:decide
 	ApprovalID string
 	Decision   string
+	// question:answer
+	QuestionID string
+	// Index is the 0-based option the user chose. -1 means the question was
+	// dismissed without choosing.
+	Index int
 }
 
 // errNotCommand signals a line that is not a recognizable command — the running
@@ -356,6 +362,19 @@ func ParseCommand(line []byte) (HostCommand, error) {
 		// approval:decided — collapse it to the safe default (rejected) so a parked
 		// dispatch unblocks declined rather than emitting an off-contract decision.
 		cmd.Decision = string(normalizeDecision(cmd.Decision))
+	case CmdQuestionAnswer:
+		if err := wantString(raw, "questionId", &cmd.QuestionID); err != nil {
+			return HostCommand{}, errNotCommand
+		}
+		// A missing or unparseable index is a DISMISSAL, not a selection: answering
+		// on the user's behalf is the one thing a question surface must never do.
+		cmd.Index = -1
+		if v, ok := raw["index"]; ok {
+			var idx int
+			if err := json.Unmarshal(v, &idx); err == nil {
+				cmd.Index = idx
+			}
+		}
 	case CmdInterrupt, CmdHibernate, CmdShutdown:
 		// no extra fields
 	default:
