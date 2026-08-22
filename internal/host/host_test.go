@@ -36,6 +36,7 @@ func (f *fakeApp) RunCommand(context.Context, string) CommandOutcome {
 }
 func (f *fakeApp) CostSnapshot() (float64, bool)                   { return 0, false }
 func (f *fakeApp) McpStatus() (bool, *int, string)                 { return false, nil, "" }
+func (f *fakeApp) CommandCatalog() []CommandMeta                   { return nil }
 func (f *fakeApp) StartScheduler(func(events []domain.QueueEvent)) {}
 func (f *fakeApp) Session() *agent.Session                         { return f.session }
 func (f *fakeApp) RiskOf(string) (domain.RiskClass, bool)          { return "", false }

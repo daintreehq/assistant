@@ -179,6 +179,17 @@ func (h *hostAppAdapter) RunCommand(ctx context.Context, line string) host.Comma
 	return host.CommandOutcome{Text: buf.String(), Quit: res.Quit}
 }
 
+// CommandCatalog mirrors the CLI's own registry, so the two surfaces cannot offer
+// different command sets.
+func (h *hostAppAdapter) CommandCatalog() []host.CommandMeta {
+	rows := commands.PaletteRows()
+	out := make([]host.CommandMeta, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, host.CommandMeta{Name: r.Name, Syntax: r.Syntax, Palette: r.Desc})
+	}
+	return out
+}
+
 func (h *hostAppAdapter) McpStatus() (bool, *int, string) {
 	if h.app == nil {
 		return false, nil, ""

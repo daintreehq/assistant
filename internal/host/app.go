@@ -30,6 +30,9 @@ type App interface {
 	// clearing and leaves the conversation intact.
 	RunCommand(ctx context.Context, line string) CommandOutcome
 
+	// CommandCatalog is the command set this engine will accept.
+	CommandCatalog() []CommandMeta
+
 	// McpStatus reports whether the Daintree control plane is reachable and how many
 	// tools it offers (nil count when the catalog is cold).
 	McpStatus() (connected bool, toolCount *int, errMsg string)

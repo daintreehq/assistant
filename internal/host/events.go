@@ -84,6 +84,18 @@ type EvReady struct {
 	Backend          string
 	Routing          string
 	LogFile          string
+	// Commands is the engine's command catalog, so an embedded surface can offer the
+	// SAME set the CLI documents. Sent once, at ready: a host that hardcoded its own
+	// list would drift the first time a command was added or renamed, and would offer
+	// the user something the engine refuses.
+	Commands []CommandMeta
+}
+
+// CommandMeta is one entry in the command catalog.
+type CommandMeta struct {
+	Name    string
+	Syntax  string
+	Palette string
 }
 
 func (e EvReady) encode(sid string, seq uint64) ([]byte, error) {
@@ -104,6 +116,17 @@ func (e EvReady) encode(sid string, seq uint64) ([]byte, error) {
 		if v != "" {
 			f[k] = v
 		}
+	}
+	if len(e.Commands) > 0 {
+		cmds := make([]map[string]any, 0, len(e.Commands))
+		for _, c := range e.Commands {
+			cmds = append(cmds, map[string]any{
+				"name":    c.Name,
+				"syntax":  c.Syntax,
+				"palette": c.Palette,
+			})
+		}
+		f["commands"] = cmds
 	}
 	if e.ResumedSessionID != "" {
 		f["resumedSessionId"] = e.ResumedSessionID

@@ -342,7 +342,8 @@ func (h *Host) boot(desc SessionDescriptor) {
 		Backend:         mastheadBackend(rcfg.BackendURL),
 		Routing:         mastheadRouting(rcfg.Routing),
 		// Resolvable here because StartDebugLog ran above; "" when logging is off.
-		LogFile: debuglog.CurrentDebugLogPath(),
+		LogFile:  debuglog.CurrentDebugLogPath(),
+		Commands: app.CommandCatalog(),
 	}
 	if desc.ResumeSessionID != "" {
 		ev.ResumedSessionID = desc.ResumeSessionID
