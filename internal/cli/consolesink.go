@@ -1,6 +1,6 @@
-// Package cli owns CLI routing (one-shot / classic REPL / doctor / cockpit seam),
-// the human console sink, and the classic line REPL. The Bubble Tea cockpit is a
-// separate wave reached through the CockpitRunner seam.
+// Package cli owns CLI routing (one-shot / line REPL / host / mcp / daemon / doctor),
+// the human console sink, and the line REPL itself. There is no terminal UI beyond
+// this: Daintree renders the assistant natively over `host --stdio`.
 package cli
 
 import (
@@ -97,7 +97,7 @@ func (s *consoleSink) Interjection(text string) {
 	s.r.Info("you (mid-turn): " + text)
 }
 
-// SkillLoaded is DELIBERATELY silent, matching the cockpit: which runbooks the backend
+// SkillLoaded is DELIBERATELY silent, matching the attached session: which runbooks the backend
 // selected is prompt-assembly machinery, not a step in the operator's narrative. See
 // Session.emitSkillLoads.
 //
@@ -138,6 +138,6 @@ func (s *consoleSink) Info(m string)          { s.r.Info(m) }
 func (s *consoleSink) Usage(agent.UsageEvent) {}
 func (s *consoleSink) TurnPrompt(string)      {}
 
-// ModelRateLimited is a live-cockpit health badge; the console already prints the
+// ModelRateLimited is a live-attached session health badge; the console already prints the
 // "Model rate-limited" reply, so there's nothing extra to render here.
 func (s *consoleSink) ModelRateLimited() {}

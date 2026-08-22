@@ -145,7 +145,7 @@ func TestPromptRacingTurnCompletionIsNeverStranded(t *testing.T) {
 }
 
 // Interrupt semantics: aborting a turn discards its buffered-but-unfolded
-// injections (the cockpit's Ctrl+C discard) — a redirect typed into abandoned
+// injections (the host's Ctrl+C discard) — a redirect typed into abandoned
 // work must NOT resurrect as a fresh turn.
 func TestInterruptDiscardsUnfoldedInjection(t *testing.T) {
 	sess := newWakeSession()

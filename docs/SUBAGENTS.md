@@ -174,7 +174,7 @@ the prompt cache does not split.
 
 ## Interface
 
-The cockpit needed no new event type — a sub-agent run is a tool call, so it uses
+The attached session needed no new event type — a sub-agent run is a tool call, so it uses
 the surfaces tool calls already have. What it did need was three fixes, each found
 by rendering the rows and looking at them:
 
@@ -192,7 +192,7 @@ cannot read is one they cannot judge.
 
 **Live progress replaces the detail while it runs** (`round 3/10 · fs.search`),
 forwarded from the runner through `ToolContext.ReportProgress`. Without it the
-cockpit shows one frozen row for what can be a minute, and a delegation that looks
+attached session shows one frozen row for what can be a minute, and a delegation that looks
 hung is one the user kills.
 
 **Fan-out rows keep their identity.** The model is told to delegate several

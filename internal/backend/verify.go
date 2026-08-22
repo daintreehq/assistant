@@ -31,7 +31,7 @@ func (v KeyVerification) IsUsable() bool {
 // ScrubKey removes every occurrence of a secret from text destined for a human.
 //
 // A backend we do not control can echo the Authorization header into an error body,
-// and that text reaches the cockpit sheet and the 0600 debug log. The cockpit renders
+// and that text reaches the attached session sheet and the 0600 debug log. The attached session renders
 // on the NORMAL screen buffer, so a leaked key would persist in the host's scrollback
 // long after the session. Cheap insurance at the one boundary where untrusted text
 // meets a known secret — and it costs nothing on the normal path, where there is no

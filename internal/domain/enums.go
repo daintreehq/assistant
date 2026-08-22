@@ -263,7 +263,7 @@ const (
 	JsonlTurnEnd    JsonlEventType = "turn:end"
 	// JsonlCommandResult records a slash command run BETWEEN turns. A command is not a
 	// turn: it opens no bracket, moves no turn number, and cannot change the run's
-	// status — the classic REPL treats a command line the same way.
+	// status — the line REPL treats a command line the same way.
 	JsonlCommandResult JsonlEventType = "command:result"
 )
 

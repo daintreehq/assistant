@@ -127,7 +127,7 @@ flag is on (nil `SessionDeps.WorkflowDigestLister` ⇒ field omitted).
   ✓ → ○ ⚠ ×); `/workflow resume [msg]` runs `workflow_resume_digest`;
   `/workflow reconcile <id>` reconciles manually; `/workflow cancel <id>`
   cancels locally.
-- The cockpit operations deck gains a WORKFLOWS section (cap 3, two lines per
+- The attached session operations deck gains a WORKFLOWS section (cap 3, two lines per
   graph, width-clamped) that vanishes entirely when there are no open graphs.
 
 ## Safety

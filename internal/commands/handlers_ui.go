@@ -15,8 +15,8 @@ import (
 	"github.com/daintreehq/assistant/internal/workflowgraph"
 )
 
-// UICommandResult is the structured return of the cockpit slash handler.
-// The cockpit renders a card / switches a panel; nothing is printed.
+// UICommandResult is the structured return of the attached session slash handler.
+// The attached session renders a card / switches a panel; nothing is printed.
 type UICommandResult struct {
 	Handled         bool
 	Quit            bool
@@ -34,7 +34,7 @@ var inboxSeverities = map[string]domain.Severity{
 	"blocked":   domain.SeverityBlocked,
 }
 
-// HandleUICommand handles a slash line for the cockpit, returning structured data.
+// HandleUICommand handles a slash line for the attached session, returning structured data.
 // ctx carries cancellation for the model-backed commands (e.g. compact).
 func HandleUICommand(ctx context.Context, line string, a *app.App) UICommandResult {
 	return HandleUICommandWithProgress(ctx, line, a, nil)
@@ -44,8 +44,8 @@ func HandleUICommand(ctx context.Context, line string, a *app.App) UICommandResu
 // slow, model-backed commands (/compact runs two backend model calls back to back —
 // tens of seconds of otherwise total silence). progress is called with short
 // human-readable stage labels ("Compacting conversation…"); nil is fine (one-shot
-// and callers that have nowhere to show it). It is UI-thread-agnostic: the cockpit
-// routes it through the event pump, the classic REPL prints it.
+// and callers that have nowhere to show it). It is UI-thread-agnostic: the attached session
+// routes it through the event pump, the line REPL prints it.
 func HandleUICommandWithProgress(ctx context.Context, line string, a *app.App, progress func(stage string)) UICommandResult {
 	if progress == nil {
 		progress = func(string) {}
@@ -108,10 +108,17 @@ func HandleUICommandWithProgress(ctx context.Context, line string, a *app.App, p
 	case "permissions":
 		return UICommandResult{Handled: true, Title: "Permissions", Text: permissionsText(a, arg)}
 	case "approvals":
-		// The session approval allow-list lives on the cockpit Model (the UI intercepts
-		// /approvals before this handler — see ui.onSubmit). The REPL has no interactive
-		// per-call approvals, so this surface only explains where the command applies.
-		return UICommandResult{Handled: true, Title: "Approvals", Text: "Session tool approvals are managed in the cockpit. Press A (bounded) or F (forever this session) on an approval prompt; run /approvals there to list or clear them."}
+		// The session approval ALLOW-LIST was a terminal-UI feature: it lived on the
+		// cockpit's model, was populated by A/F keys on its approval sheet, and died
+		// with it. Nothing in the engine keeps a session allow-list today — the line
+		// REPL confirms every mutating call individually, and a native host owns its
+		// own approval UX (see EvApprovalRequested.NeedsTypedConfirm).
+		//
+		// Kept registered rather than removed so someone who types it gets the truth
+		// instead of "unknown command", which would read as a typo. Pointing at A/F
+		// keys that no longer exist was the worse failure: it described a way out that
+		// was not there.
+		return UICommandResult{Handled: true, Title: "Approvals", Text: "There is no session approval allow-list. Every mutating tool call is confirmed individually here; run with --auto-approve to skip confirmations for the whole session (see /permissions for what that allows)."}
 	case "memory":
 		return UICommandResult{Handled: true, Title: "Memory", Text: memoryText(a, rest)}
 	case "compact":
@@ -147,7 +154,7 @@ func HandleUICommandWithProgress(ctx context.Context, line string, a *app.App, p
 	}
 }
 
-// HelpTextUI is the cockpit help blob: the command list followed by
+// HelpTextUI is the attached session help blob: the command list followed by
 // the key cheat-sheet, so /help (and the ? view) document the whole keymap in one place.
 func HelpTextUI() string {
 	lines := append([]string{}, HelpLines()...)
@@ -157,7 +164,7 @@ func HelpTextUI() string {
 	return strings.Join(lines, "\n")
 }
 
-// KeyHelpLines is the SINGLE source of truth for the cockpit key cheat-sheet — surfaced by
+// KeyHelpLines is the SINGLE source of truth for the attached session key cheat-sheet — surfaced by
 // /help and the ? view, and kept in sync with the actual dispatch in internal/ui
 // (update_handlers + composer). One list so the help can never drift from the keymap.
 func KeyHelpLines() []string {
@@ -606,7 +613,7 @@ func backendText(a *app.App, arg string) string {
 }
 
 // BackendSwitchText applies a backend selection and renders the result. Exported so the
-// cockpit's picker sheet reports in exactly the same words as the typed command — two
+// attached session's picker sheet reports in exactly the same words as the typed command — two
 // surfaces describing the same action differently is how a user ends up unsure whether
 // the sheet did the same thing.
 func BackendSwitchText(a *app.App, arg string) string {
@@ -687,7 +694,7 @@ func tierDivergenceNote(a *app.App) string {
 // memoryText powers /memory: bare/list shows the pinned-first memory store, and
 // pin/unpin/forget curate by id. A pin-state change needs no runtime-context refresh —
 // pinned memories live in the uncached turn footer now (issue #263), re-read every round,
-// so the change surfaces on the assistant's next turn automatically. The classic REPL
+// so the change surfaces on the assistant's next turn automatically. The line REPL
 // reaches this via its default delegation to HandleUICommand, so there is no separate
 // REPL handler.
 func memoryText(a *app.App, rest []string) string {
@@ -773,7 +780,7 @@ func memoryText(a *app.App, rest []string) string {
 // compactRun checkpoints the conversation via the backend's checkpoint task then
 // compacts, after distilling any durable facts from the transcript so they survive
 // the discard. progress narrates each stage (two serial backend model calls — the
-// caller shows the labels so the user is never staring at a silent cockpit).
+// caller shows the labels so the user is never staring at a silent attached session).
 func compactRun(ctx context.Context, a *app.App, progress func(string)) string {
 	// The FULL flattened transcript, not a 12k tail: RunCheckpoint clamps to the task
 	// contract's own (much larger) bound, and the checkpoint prompt's whole job is to

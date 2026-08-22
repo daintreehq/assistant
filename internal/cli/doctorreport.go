@@ -136,7 +136,7 @@ func statusGlyph(s DoctorStatus) string {
 //
 // Background supervision rests on flock leases and setsid detachment, neither of which
 // has a Windows port. The `!unix` builds fail loudly rather than run without exclusion,
-// so on Windows timers, watchers, and async work simply stop when the cockpit exits.
+// so on Windows timers, watchers, and async work simply stop when the attached session exits.
 // A tester needs to know that BEFORE being told "I'll let you know when it's done".
 func CheckPlatform() DoctorCheck {
 	c := DoctorCheck{

@@ -72,7 +72,7 @@ Read it top to bottom. Every line is one condition with one next action. You wan
 
 Open the Assistant panel. Daintree injects the MCP connection; the assistant picks it up.
 
-The cockpit renders **inline**, in your terminal's normal screen buffer. Scrolling,
+The attached session renders **inline**, in your terminal's normal screen buffer. Scrolling,
 selection, and copy/paste are your terminal's, not ours.
 
 ---

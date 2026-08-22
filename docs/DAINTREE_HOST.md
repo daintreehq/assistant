@@ -47,7 +47,7 @@ The assistant is launched as a normal **PTY-backed terminal panel** — internal
 it starts an interactive login shell, then *types the command into it* (roughly
 `daintree-assistant\r`) so that when the CLI exits the shell is still there. Consequences:
 
-- The CLI runs under a **real TTY** in an interactive shell — the cockpit's raw-mode /
+- The CLI runs under a **real TTY** in an interactive shell — the attached session's raw-mode /
   alt-screen assumptions hold.
 - `os.Getenv("SHELL")`, the user's shell rc, and PATH are the user's normal login
   environment (see the env-hygiene note in §2).
@@ -68,7 +68,7 @@ bundling it.
 **Not the transport you might expect.** The CLI also ships a `host --stdio` NDJSON transport
 (`internal/host`). Daintree has a *contract* for driving the assistant as a
 `utilityProcess.fork()` structured host, but that path is **deferred and not wired** in the
-shipping app. Today's integration is 100% the **interactive PTY cockpit + env-injected MCP
+shipping app. Today's integration is 100% the **interactive PTY attached session + env-injected MCP
 over HTTP** described here. Don't assume Daintree is talking to `host --stdio`.
 
 ---
@@ -345,7 +345,7 @@ watched?"). Four distinct things survive independently, so keep the words apart 
 
 | | **Terminal transcript** (host scrollback) | **Conversation** (`state.db` history) | **Project state** (memory, workflows, audit, inbox) | **Background supervision** (watchers, async, timers) |
 | --- | --- | --- | --- | --- |
-| Panel hidden / project switch | survives | survives | survives | runs (cockpit owns the lease) |
+| Panel hidden / project switch | survives | survives | survives | runs (attached session owns the lease) |
 | Cockpit exits normally (`^C`, `/quit`) | cleared by the host | survives | survives | **continues** — the daemon re-acquires the lease and adopts the live rows |
 | Cockpit crashes / PTY killed | cleared by the host | survives | survives | **continues** — flock is kernel-released, so handover needs no cleanup |
 | Host **"+ New session"** | dropped deliberately | new conversation; the old one stays in `state.db` | survives | **continues**, and completions land in the attention inbox |
@@ -355,10 +355,10 @@ watched?"). Four distinct things survive independently, so keep the words apart 
 | `/clear` | wiped (the only scrollback wipe path) | cleared | survives | **cancelled** — `/clear` is the one wholesale teardown |
 | `reset project-state` | untouched | cleared | cleared | cancelled |
 | CLI upgrade with a schema bump | untouched | moved aside to a timestamped backup, then recreated | same | cancelled with the old DB |
-| **Windows** | as above | as above | as above | **never survives cockpit exit** — no supervisor on this platform |
+| **Windows** | as above | as above | as above | **never survives attached session exit** — no supervisor on this platform |
 
 The one-time **"While you were away"** notice (`App.AttachSummaryLines`, consumed on read)
-is how the second and third rows become visible: a fresh cockpit starts with a clean
+is how the second and third rows become visible: a fresh attached session starts with a clean
 transcript, but it tells you what the supervisor did while you were detached. It never
 repeats.
 

@@ -16,7 +16,7 @@ import (
 )
 
 // repl_test.go locks the REPL interrupt contract (runCancellable) and the console
-// phase-liveness cues — the two behaviors that keep the classic REPL responsive
+// phase-liveness cues — the two behaviors that keep the line REPL responsive
 // without killing the process or sitting mute through model latency.
 
 func TestRunCancellable_PropagatesNormalError(t *testing.T) {
@@ -58,7 +58,7 @@ func TestClassicREPL_ParentCancellationExits(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if code := startRepl(ctx, a); code != domain.OneShotExitCode.Cancelled {
-		t.Fatalf("cancelled classic REPL exit = %d, want %d", code, domain.OneShotExitCode.Cancelled)
+		t.Fatalf("cancelled line REPL exit = %d, want %d", code, domain.OneShotExitCode.Cancelled)
 	}
 }
 
@@ -90,7 +90,7 @@ func newSink(tty bool) (*consoleSink, *bytes.Buffer) {
 	return &consoleSink{r: r, diagnostics: r, tty: tty}, &buf
 }
 
-// Backend skill selection writes NOTHING to the console transcript, matching the cockpit.
+// Backend skill selection writes NOTHING to the console transcript, matching the attached session.
 // It is prompt-assembly machinery, not a step in the operator's narrative; the run log /
 // --json stream / debug trace keep the signal. Pinned so the cue is not reintroduced by
 // reflex.
@@ -207,7 +207,7 @@ func TestOneShotConsoleSinkSeparatesDiagnosticsAndTracksCancellation(t *testing.
 	}
 }
 
-// The classic-REPL confirm handler must mirror the cockpit's friction off the safety
+// The classic-REPL confirm handler must mirror the attached session's friction off the safety
 // gate's verdict: git/system (NeedsTypedConfirm) demand the typed phrase, everything
 // else keeps the single-key [y/N]. This is the divergence issue #210 fixes — the same
 // action must be equally hard to approve on either surface.

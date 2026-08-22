@@ -171,7 +171,7 @@ func (r *Run) append(e Event) {
 }
 
 // Recorder is the agent.EventSink that writes a turn into its Run. It is the MCP
-// server's equivalent of the cockpit's event pump and the --json sink.
+// server's equivalent of the attached session's event pump and the --json sink.
 //
 // Streamed TOKENS are deliberately dropped: the caller is another agent reading a
 // digest, not a human watching prose appear, and re-emitting every token would make a
@@ -200,7 +200,7 @@ func (rec *Recorder) flush() {
 // --- agent.EventSink ---
 
 // Phase, ToolBatch, ToolState and ToolProgress are live-footer vocabulary for a human
-// watching a cockpit. A polling agent gets nothing from them.
+// watching an attached session. A polling agent gets nothing from them.
 func (rec *Recorder) Phase(domain.RunPhase)             {}
 func (rec *Recorder) ToolBatch([]agent.BatchedToolCall) {}
 func (rec *Recorder) ToolState(string, agent.ToolState) {}

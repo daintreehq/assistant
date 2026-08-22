@@ -18,7 +18,7 @@ import (
 )
 
 // Exercises handleUiCommand + the disconnected /doctor probe. Builds an offline
-// App against a temp state dir and drives the structured cockpit slash handler,
+// App against a temp state dir and drives the structured attached session slash handler,
 // asserting the per-command behaviors: /status, /permissions
 // switch + reject-unknown, /inbox, /audit (grant_ok source bracket, sourceless row,
 // export json/csv/bad-format, list), /explain (empty/list/timeline/unknown/malformed/
@@ -205,16 +205,25 @@ func TestUIPermissionsNoWarnWhenTierUnchanged(t *testing.T) {
 	}
 }
 
-// TestUIApprovalsHandledFallback: /approvals is registered, so HandleUICommand must handle
-// it (the cockpit intercepts it earlier; the REPL surface just points to the cockpit).
+// TestUIApprovalsHandledFallback: /approvals stays registered so typing it gets the
+// truth rather than "unknown command" (which reads as a typo). The session
+// allow-list it used to manage was a terminal-UI feature and no longer exists, so the
+// one thing this must NOT do is describe affordances that are gone — the previous
+// text sent people to look for "A" and "F" keys on a sheet that was deleted.
 func TestUIApprovalsHandledFallback(t *testing.T) {
 	a := newOfflineApp(t)
 	r := ui(a, "/approvals")
 	if !r.Handled || r.Title != "Approvals" {
 		t.Fatalf("/approvals not handled: %+v", r)
 	}
-	if !strings.Contains(r.Text, "cockpit") {
-		t.Fatalf("/approvals fallback should point to the cockpit: %q", r.Text)
+	if !strings.Contains(r.Text, "no session approval allow-list") {
+		t.Fatalf("/approvals must say the allow-list is gone: %q", r.Text)
+	}
+	// Guard the actual regression: never point at a UI affordance that was deleted.
+	for _, gone := range []string{"Press A", "Press F", "attached session"} {
+		if strings.Contains(r.Text, gone) {
+			t.Fatalf("/approvals references a removed affordance %q: %s", gone, r.Text)
+		}
 	}
 }
 

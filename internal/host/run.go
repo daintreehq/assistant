@@ -10,7 +10,7 @@ import (
 // Serve runs the embedded host over the given streams until teardown exits the
 // process. It is the headless protocol core: in = command stdin (NDJSON, first
 // line = descriptor), out = event stdout (NDJSON), errw = diagnostics stderr.
-// factory builds the App for the booted session (the cockpit/cli wave provides
+// factory builds the App for the booted session (the host/cli wave provides
 // the concrete factory). Serve normally never returns — teardown calls os.Exit
 // after flushing — but it returns if Run unwinds without exiting (e.g. tests
 // injecting a non-exiting exit func).
@@ -28,7 +28,7 @@ func Serve(ctx context.Context, factory AppFactory, in io.Reader, out, errw io.W
 func Run(ctx context.Context, factory AppFactory) int {
 	if factory == nil {
 		_, _ = io.WriteString(os.Stderr,
-			"host: no App factory wired — the cockpit/cli wave must provide one.\n")
+			"host: no App factory wired — the host/cli wave must provide one.\n")
 		return 1
 	}
 	// Precondition: a usable command stream. If stdin is a terminal the host was
@@ -37,7 +37,7 @@ func Run(ctx context.Context, factory AppFactory) int {
 	if isTerminal(os.Stdin) {
 		_, _ = io.WriteString(os.Stderr,
 			"host: --stdio requires a piped command stream on stdin, not a terminal.\n"+
-				"Run `daintree-assistant` for the interactive cockpit, or pass a prompt for one-shot mode.\n")
+				"Run `daintree-assistant` for the line REPL, or pass a prompt for one-shot mode.\n")
 		return 1
 	}
 	Serve(ctx, factory, os.Stdin, os.Stdout, os.Stderr)
@@ -57,4 +57,4 @@ func isTerminal(f *os.File) bool {
 // ErrAppFactoryUnset is returned by the placeholder factory until the concrete
 // App is wired. It lets `host --stdio` build green now and boot-fail cleanly
 // (host:error bootstrap-error) rather than panic.
-var ErrAppFactoryUnset = errors.New("host: App factory not yet wired (cockpit/cli wave)")
+var ErrAppFactoryUnset = errors.New("host: App factory not yet wired (cli wave)")

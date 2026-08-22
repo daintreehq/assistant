@@ -204,7 +204,7 @@ type JsonTurnEndPayload struct {
 // JsonCommandResultPayload records one slash command run between turns.
 //
 // Title and Content come from the shared UI command handler, so a JSONL consumer sees
-// exactly what the cockpit would have shown — as DATA, never rendered, because stdout in
+// exactly what the attached session would have shown — as DATA, never rendered, because stdout in
 // --json mode carries only these lines.
 type JsonCommandResultPayload struct {
 	// Command is the line as read, leading slash included, with surrounding whitespace

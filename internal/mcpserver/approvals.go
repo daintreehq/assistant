@@ -90,7 +90,7 @@ type PendingApproval struct {
 //
 // It deliberately drops the dispatch's NeedsTypedConfirm flag, matching the embedded
 // host's boundary: typed-confirm friction is enforced on the surfaces that RENDER an
-// approval sheet — the cockpit and the classic REPL — not on one that delegates the
+// approval sheet — the host and the line REPL — not on one that delegates the
 // decision to an external caller which owns its own approval UX. The risk class travels
 // on Risk so that caller can still apply its own friction.
 type ApprovalRequest struct {
@@ -184,7 +184,7 @@ func (a *Approvals) Confirm(ctx context.Context, req ApprovalRequest) bool {
 		Risk:        string(req.Risk),
 		Consequence: req.Consequence,
 		Summary:     req.Summary,
-		// The same redactor that guards the durable audit rows and the cockpit's
+		// The same redactor that guards the durable audit rows and the attached session's
 		// approval sheet. An args preview a caller cannot see is useless; one that
 		// leaks a token is worse than useless.
 		Args:        redact.String(req.RawArgs),

@@ -233,7 +233,7 @@ func TestBridgeApprovalEnrichment(t *testing.T) {
 	// A long value must collapse to a "<string: N chars>" marker (proves redaction
 	// genuinely runs); a short value passes through verbatim — deliberate parity
 	// with tool:started's wire redaction (redactArgs is length-only, not
-	// credential-aware; the credential-masking redactor lives in the cockpit path).
+	// credential-aware; the credential-masking redactor lives in the host path).
 	longVal := strings.Repeat("a", 100)
 	done := make(chan bool, 1)
 	go func() {
@@ -285,7 +285,7 @@ func TestBridgeApprovalEnrichment(t *testing.T) {
 	}
 
 	// Encoded wire object must surface the three optional keys.
-	raw, err := req.encode("s")
+	raw, err := req.encode("s", 1)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestBridgeApprovalEnrichment(t *testing.T) {
 // TestApprovalRequestedEncodeOmitsEmpty asserts the optional display fields are
 // omitted from the wire object when empty (no empty strings / nulls leak).
 func TestApprovalRequestedEncodeOmitsEmpty(t *testing.T) {
-	raw, err := EvApprovalRequested{ApprovalID: "apr_1", ToolID: "git.push", Summary: "push?", RequestedAt: 5}.encode("s")
+	raw, err := EvApprovalRequested{ApprovalID: "apr_1", ToolID: "git.push", Summary: "push?", RequestedAt: 5}.encode("s", 1)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}

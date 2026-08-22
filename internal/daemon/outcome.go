@@ -215,7 +215,7 @@ type TerminalState struct {
 	// source resubscribe replays from), so the latch MUST be cleared at the
 	// ownership boundary — see Store.BeginOwnership. Without that reset an adopted
 	// watcher believes in a push channel that no longer exists after a
-	// cockpit↔daemon handover: ensureSubscribed early-returns, no Subscribe is ever
+	// attached session↔daemon handover: ensureSubscribed early-returns, no Subscribe is ever
 	// issued and no resources/updated can arrive, yet the quiet-subscribed path
 	// still widens the poll cadence to SubscribedReconcileMS on the strength of
 	// that phantom — delaying notice of a finished agent for the whole span. It

@@ -9,7 +9,7 @@ import (
 )
 
 // App is the SEAM to the full assistant runtime. The host depends on this
-// interface and the cockpit/cli wave fills it with the concrete App. The surface
+// interface and the host/cli wave fills it with the concrete App. The surface
 // it needs: wire the agent event sink + confirm hook, connect MCP best-effort,
 // start the daemon, drive the session, and shut down.
 //
@@ -82,19 +82,18 @@ type turnSession interface {
 // adapts its tool-context ConfirmRequest (tools.ConfirmRequest) into this when
 // calling the installed hook. Beyond the tool name + summary, it carries the
 // display context the approval:requested wire event surfaces so Daintree's
-// timeline matches a local cockpit approval: the risk class, the human-readable
+// timeline matches a local host approval: the risk class, the human-readable
 // consequence, and the raw args (redacted by the bridge before they cross the
 // wire). RiskClass is passed through (not re-derived from the registry) so a
 // tool's explicit per-confirm override — e.g. grant.create electing RiskSystem —
 // reaches the UI verbatim.
 //
-// Intentional scope boundary: this bridge deliberately drops NeedsTypedConfirm.
 // The embedded host does not render its own approval sheet — it delegates the
-// decision to its external caller (Daintree's orchestration UI), which owns the
-// approval UX. The typed-confirm friction (issue #210) is enforced on the surfaces
-// that DO render the sheet — the cockpit and the classic REPL — not here. The
-// risk-class label travels on RiskClass above so the external timeline can still
-// display it.
+// decision to its external caller (Daintree), which owns the approval UX. But the
+// VERDICT is not delegated: NeedsTypedConfirm is forwarded verbatim on the wire
+// (see EvApprovalRequested) so the caller enforces the friction without re-deriving
+// which risk classes are irreversible. Leaving it to be inferred from RiskClass
+// would fork a security rule into a second codebase, free to drift permissively.
 type ConfirmRequest struct {
 	ToolName    string
 	Summary     string
@@ -103,6 +102,9 @@ type ConfirmRequest struct {
 	// RawArgs is the raw JSON args string the model emitted. The bridge redacts it
 	// (redactArgs) before emitting the wire event — it never crosses verbatim.
 	RawArgs string
+	// NeedsTypedConfirm is safety.NeedsTypedConfirm's verdict for this dispatch,
+	// forwarded verbatim so the host never re-derives the rule. See EvApprovalRequested.
+	NeedsTypedConfirm bool
 }
 
 // AppHooks bundles the hooks the host installs on the App.
@@ -115,7 +117,7 @@ type AppHooks struct {
 }
 
 // AppFactory builds the App for a booted session. MCP url/token/tier/projectId
-// come from env via loadConfig, NOT the descriptor. The cockpit/cli wave provides
+// come from env via loadConfig, NOT the descriptor. The host/cli wave provides
 // the concrete factory; the host stores it so it can be tested with a fake.
 type AppFactory func(ctx context.Context, params AppParams) (App, error)
 

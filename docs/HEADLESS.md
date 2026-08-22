@@ -1,18 +1,20 @@
 # Headless operation
 
 How to drive the assistant from a script, a test harness, or another agent — without
-a terminal, without the cockpit, and without rewriting the process environment to say
-what argv says perfectly well.
+a terminal, and without rewriting the process environment to say what argv says
+perfectly well.
 
-There are five headless surfaces. Pick by how many turns you need, and by whether the
-caller is a script or another agent.
+**The whole binary is headless now.** There is no terminal UI: Daintree embeds it over
+`host --stdio` and renders the conversation natively. What follows is the full list of
+ways in; pick by how many turns you need, and by whether the caller is a script, an
+agent, or a person at a shell.
 
 | Surface | Turns | Output | Use it when |
 |---|---|---|---|
 | `mcp --stdio` | many | MCP tools | **another agent drives the assistant as a sub-agent** |
 | `--json <prompt>` | one | JSONL on stdout | scripting, CI gates, one-shot queries |
 | `--json --multi-turn` | many | JSONL on stdout | **testing a runbook that needs a short conversation** |
-| `--classic` + piped stdin | many | human-rendered | a multi-turn exchange you intend to read yourself |
+| the line REPL | many | plain lines | a person at a shell or over SSH (`--classic` is a deprecated no-op) |
 | `host --stdio` | many | NDJSON, protocol v2 | you are Daintree, or reimplementing it |
 
 If the caller is itself an agent — Claude Code, most immediately — reach for
@@ -303,7 +305,7 @@ Four rules worth knowing before you script against them:
 
 A harness should never touch the developer's real state. `--state-dir` relocates the
 database, the artifacts and the owner lease, so an isolated run shares nothing with a
-cockpit the developer has open. Nothing else needs supplying — there is no credential to
+attached session the developer has open. Nothing else needs supplying — there is no credential to
 carry across:
 
 ```bash
@@ -317,7 +319,7 @@ daintree-assistant \
 
 Exactly one process may own a project's `state.db` at a time. A one-shot run takes the
 lease briefly and never spawns a supervisor daemon, so it cannot litter the machine —
-but it will fail rather than double-open if a cockpit already owns that project. A
+but it will fail rather than double-open if an attached session already owns that project. A
 distinct `--state-dir` is the way to run alongside one.
 
 `--auto-approve` makes tier-allowed mutating tools run with nothing on screen to say
@@ -381,7 +383,7 @@ the committed round did not repeat. Never reconstruct the active set from it.
 
 `session` answers "where do I look when this goes wrong". It is emitted once the
 runtime exists, so it precedes every assistant and tool event — but a failure *before*
-that point (bad flags, signed out, the project lease held by a live cockpit) produces
+that point (bad flags, signed out, the project lease held by a live attached session) produces
 only `error` + `result` and **no session line at all**. Handle its absence.
 
 ```json
@@ -576,7 +578,7 @@ on stdout, which is worth knowing before piping a prompt file into a CI log.
 ### Failure, cancellation and the exit code
 
 **A run where turn two failed is a failed run.** A failed turn does not stop the script —
-the next prompt still runs, as it would in the classic REPL — but the failure is latched:
+the next prompt still runs, as it would in the line REPL — but the failure is latched:
 a later success cannot clear it. The outcome is worst-wins across turns, `error` >
 `cancelled` > `success`, and `result` reports the run's, while each `turn:end` reports
 its own turn's. Gate on `result`; it remains the only authority for the process.

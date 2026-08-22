@@ -245,7 +245,7 @@ func isAborted(ctx context.Context) bool {
 // Conflating them lets any caller-side timeout tear down the process-wide MCP
 // session (markDegraded nulls c.low, clears connected, and Closes the transport),
 // which is how a bounded /doctor probe or an over-budget scheduler job could take
-// the whole cockpit offline until the next reconnect. Callers are still expected
+// the whole attached session offline until the next reconnect. Callers are still expected
 // to bound best-effort reads with time.AfterFunc(cancel) rather than
 // context.WithTimeout (see internal/app/toolterminal.go) — this is the
 // belt-and-braces guard for the ones that don't.

@@ -82,7 +82,7 @@ func (a *App) PromptContext() prompts.MainPromptContext {
 }
 
 // Send runs one interactive user turn through the session. It is the interactive entry
-// point (cockpit/REPL user turns route through here); autonomous wake turns and one-shot
+// point (attached session/REPL user turns route through here); autonomous wake turns and one-shot
 // runs call Session.Send directly. The one-time session-ended-watchers note that this
 // wrapper used to consume now lives in the uncached footer, surfaced once by the Session
 // itself (sessionEndedNoteShown) — so Send is a thin pass-through with no post-turn work.
@@ -343,7 +343,7 @@ func (t *toolRunner) ParallelSafe(name string) bool {
 // ParallelHomogeneous opt-in, every member must be ALREADY fully authorized at
 // grouping time — interactive main actor, tier allows the risk, and auto-approve
 // removing the prompt. Anything that would reach dispatch's confirmation or
-// grant branch stays serial: the cockpit holds exactly ONE pending approval
+// grant branch stays serial: the attached session holds exactly ONE pending approval
 // (concurrent Confirm calls would overwrite each other's resolve channels), and
 // which concurrent call consumes a bounded grant's last use must never be
 // scheduling-dependent. The same dispatch pipeline still runs per call — this

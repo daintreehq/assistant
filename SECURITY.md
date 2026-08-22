@@ -23,7 +23,7 @@ to attach. **Do not attach a debug log**; it contains your whole conversation.
    source. The assistant only ever handled a copy.
 
 Then report it, including where you saw it: a log file, terminal scrollback, a support
-bundle, an audit export, or the cockpit. **Which surface it appeared on is the most useful
+bundle, an audit export, or the attached session. **Which surface it appeared on is the most useful
 detail** — each has a different redaction path, and knowing which one failed points
 straight at the gap.
 
@@ -34,7 +34,7 @@ class implies, is a security bug even when nothing leaked. Include:
 
 - the exact prompt
 - what it did
-- whether `AUTO_APPROVE` was on (the cockpit shows a red badge; `doctor` reports it)
+- whether `AUTO_APPROVE` was on (the attached session shows a red badge; `doctor` reports it)
 - your tier (`/permissions`)
 - a `support-bundle --include-audit`, which carries the tool sequence
 
@@ -54,7 +54,7 @@ Enforced properties, each with tests:
   cannot redirect where a turn is sent, nor supply a bearer on your behalf.
 - **Tool activity is scrubbed of known credential shapes** — tool call arguments and
   results, at the event source, which covers the debug log, audit rows, run events, the
-  console and JSONL sinks, and the cockpit's activity rows. The debug log additionally
+  console and JSONL sinks, and the attached session's activity rows. The debug log additionally
   scrubs every value at its write boundary. **Conversation prose is not scrubbed**: your
   messages and the model's replies are stored and displayed verbatim, so a credential the
   model repeats is not caught.

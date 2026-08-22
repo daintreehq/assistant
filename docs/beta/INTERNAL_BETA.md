@@ -50,7 +50,7 @@ Its natural jobs:
 
 Not "background work stops" — **it does not start at all.** Exactly one process at a time
 may own a project's state, and that lease is an `flock`, which has no Windows port. Every
-stateful mode takes the lease before doing anything: the cockpit, the classic REPL,
+stateful mode takes the lease before doing anything: the attached session, the line REPL,
 one-shot, `--json`, `doctor`, and the host. On Windows all of them fail at that step.
 Windows is not built or tested in CI, so "it compiles" is not a claim this project makes
 either.
@@ -80,7 +80,7 @@ healthy. If you see it, it is ours to fix, not yours.
 only when the supervisor daemon actually started. Spawning it is deliberately non-fatal,
 so a launch where it failed runs solo and silently loses background work on exit;
 `daintree-assistant status` tells you which you have. When it is running, it keeps
-watching after you close the cockpit and hands everything back on the next launch. But it reaches your terminals through Daintree's MCP, so when Daintree
+watching after you close the attached session and hands everything back on the next launch. But it reaches your terminals through Daintree's MCP, so when Daintree
 quits, supervision *pauses* — it does not fabricate outcomes, and it does not lose the
 work; it publishes a blocked item and resumes on the next launch. Nobody should be told
 "I'll have that done overnight" unless Daintree is staying up.
@@ -114,8 +114,8 @@ where it was already on, and its values are redacted and size-capped.)
    tool that reports success for work it did not do is the one we most need to hear about.
 4. **Do not leave `AUTO_APPROVE` on.** It is off by default. When on, mutating actions run
    without asking — and that applies to one-shot, `--json`, and host runs too, not just the
-   cockpit, because all of them are the same `main` actor. Every surface says so: a badge
-   on the cockpit's status line and masthead, a line in the classic REPL banner, a warning
+   attached session, because all of them are the same `main` actor. Every surface says so: a badge
+   on the attached session's status line and masthead, a line in the line REPL banner, a warning
    on stderr for scripted runs, and a `doctor` check. It does **not** widen the tier gate,
    and unattended actors (watchers, timers, wake turns) still need a scoped grant.
 

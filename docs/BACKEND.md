@@ -462,9 +462,9 @@ with something unparseable (usually a provider or compatibility problem).
   include environment or other sensitive configuration.
 - **The reply's own width is reported.** `runtime.display` carries `{columns,
   content_width}` in terminal cells: `columns` is the window, `content_width` the narrower
-  measure the assistant's markdown is actually wrapped at (after the cockpit's left inset,
+  measure the assistant's markdown is actually wrapped at (after the attached session's left inset,
   the autowrap gutter, and the `ui.ContentMax` prose cap) — the one the backend's response
-  contract is written against. The cockpit republishes on every resize
+  contract is written against. The attached session republishes on every resize
   (`App.SetDisplaySize`), so a dragged window lands on the next round. An omitted block
   means "unmeasured" — a piped one-shot, the stdio host, the headless daemon — and the
   backend applies its own default width rather than being handed a fabricated 80×24.

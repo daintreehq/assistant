@@ -665,7 +665,7 @@ func TestSpawnMCPDisconnectedFailsClean(t *testing.T) {
 		t.Fatalf("expected MCP_UNAVAILABLE, got %+v", res)
 	}
 	// The failure must point at /reconnect — the in-session recovery command that
-	// works in both the REPL and the cockpit (issue #211).
+	// works in both the REPL and the host (issue #211).
 	if !strings.Contains(res.Error.Message, "/reconnect") {
 		t.Errorf("disconnected spawn hint must name /reconnect: %q", res.Error.Message)
 	}

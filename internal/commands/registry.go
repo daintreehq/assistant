@@ -38,7 +38,7 @@ var COMMAND_REGISTRY = []CommandMeta{
 	{Name: "backend", Syntax: "/backend [target]", Palette: "which backend answers", Help: "switch backend (remembered); no arg lists, 'default' forgets"},
 	{Name: "routing", Syntax: "/routing", Palette: "which endpoints serve you", Help: "endpoint routing: privacy filter and ranking"},
 	{Name: "permissions", Syntax: "/permissions [tier]", Palette: "supervisor | operator | system", Help: "show or set tier (supervisor|operator|system)"},
-	{Name: "approvals", Syntax: "/approvals [clear]", Palette: "cockpit tool approvals", Help: "cockpit session approvals; clear resets them"},
+	{Name: "approvals", Syntax: "/approvals [clear]", Palette: "attached session tool approvals", Help: "attached session session approvals; clear resets them"},
 	{Name: "memory", Syntax: "/memory [sub]", Palette: "list · pin · unpin · forget", Help: "list | pin <id> | unpin <id> | forget <id>"},
 	{Name: "compact", Syntax: "/compact", Palette: "summarize the conversation", Help: "summarize + reset the conversation"},
 	{Name: "clear", Syntax: "/clear", Palette: "reset the conversation", Help: "drop the conversation — start fresh"},
@@ -161,7 +161,7 @@ func canonical(cmd string) string {
 // IsKnownCommand reports whether a slash line names a command the catalog actually has,
 // aliases included. It answers a DIFFERENT question from UICommandResult.Handled, and
 // the difference is deliberate: an unknown command is still "handled" — the handler
-// consumed the line and produced an "Unknown command" card for the cockpit to render —
+// consumed the line and produced an "Unknown command" card for the attached session to render —
 // so that field cannot tell a caller whether the command EXISTS.
 //
 // Only the JSONL stream needs the distinction, because only there is the reader a script

@@ -30,7 +30,7 @@ type TimerRecord struct {
 const WatcherEndedConsumedInTurn = "consumed_in_turn"
 
 // WatcherRecord supervises a terminal or PR. Project-scoped: a non-terminal row
-// survives process boundaries and is adopted by the next owner (cockpit or
+// survives process boundaries and is adopted by the next owner (attached session or
 // supervisor daemon) at ownership boot; /clear is the only wholesale teardown.
 // Unknown kind fails closed to "error".
 type WatcherRecord struct {

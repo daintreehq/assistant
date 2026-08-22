@@ -73,7 +73,7 @@ func handleThing(ctx context.Context, args json.RawMessage, tctx *tools.ToolCont
   errors rather than relying on the firewall.
 - **Honor `ctx` cancellation** — a turn can be cancelled (Escape). Long handlers should
   watch `ctx.Done()`. To surface a substep, emit a beat via `tctx.ReportProgress(...)` —
-  but **nil-check it first**: the field is unset outside the cockpit (tests, the classic
+  but **nil-check it first**: the field is unset outside the attached session (tests, the classic
   REPL), so calling it unconditionally panics.
 - **Side-channels never break a call.** Audit (debug log + DB row) and progress beats are
   panic-guarded by the registry — you never call confirm or audit yourself.

@@ -575,7 +575,7 @@ func skillRefLabels(refs []backend.SkillRef) []string {
 // session's history — the span it named, whether the splice was applied, and if not,
 // which gate refused it.
 //
-// This is the ONLY place a compaction surfaces. There is no cockpit card, no cue, and
+// This is the ONLY place a compaction surfaces. There is no card, no cue, and
 // no /compaction command, for the same reason backend skill loads are invisible: it is
 // prompt assembly, not a step the operator takes, and a per-turn notice about a
 // server-side optimisation would be noise on every turn once the feature is switched

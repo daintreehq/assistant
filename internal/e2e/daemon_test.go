@@ -549,7 +549,7 @@ func TestDaemonCredentialRevocationBlocksThenRecovers(t *testing.T) {
 }
 
 // TestDaemonTimerFiresDetached: a persisted due timer fires under the daemon
-// with no cockpit anywhere near it.
+// with no attached session anywhere near it.
 func TestDaemonTimerFiresDetached(t *testing.T) {
 	if raceEnabled {
 		t.Skip("subprocess test adds no race coverage")

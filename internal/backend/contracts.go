@@ -249,7 +249,7 @@ type RuntimeContext struct {
 // columns is the raw terminal, sent so the model can answer questions about the window
 // it is running in without inferring one number from the other. Both are cells, and
 // both are optional on the backend: a surface that knows its wrap width but not its
-// window (a future non-cockpit publisher) sends content_width alone rather than a
+// window (a future non-attached session publisher) sends content_width alone rather than a
 // guessed pair.
 //
 // Bounded by displayWidthMax to mirror the backend's validation: the request is

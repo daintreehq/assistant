@@ -26,9 +26,25 @@ import (
 // PROTOCOL_VERSION is the wire-format version. MUST equal Daintree's
 // ASSISTANT_HOST_PROTOCOL_VERSION; Daintree Zod-rejects an unrecognized version.
 //
-// It is 2: the transport is stdio NDJSON line frames. The framing is a breaking
-// change for any consumer of an older format, so the version moves in lockstep.
-const ProtocolVersion = 2
+// It is 3. v2 described a TERMINAL SESSION for a parent that drew an activity strip
+// beside an xterm; v3 describes a CONVERSATION for a parent that renders the whole
+// thing. Three changes make it breaking rather than additive:
+//
+//  1. Every event carries a monotonic `seq`. v2 dropped frames silently when the
+//     writer queue filled, with no way for a consumer to notice — unusable once the
+//     transcript IS the product. v3 applies backpressure to stream traffic instead,
+//     and `seq` makes any residual gap detectable rather than invisible.
+//  2. `turn:end` carries the authoritative final `content`. v2 carried only an
+//     outcome class, so a lost token frame could never be repaired.
+//  3. The event set covers what the runtime actually produces — phase, reasoning,
+//     interjections, the whole tool batch, tool state and progress, usage, cost, and
+//     notices — instead of the subset a strip needed.
+const ProtocolVersion = 3
+
+// BuildVersion is the engine build string reported in host:ready, injected by the
+// CLI layer at startup (main's -ldflags value). Package-level rather than an App
+// interface method because it is a build constant, not session state.
+var BuildVersion = "dev"
 
 // ---------------------------------------------------------------------------
 // Vocabularies (verbatim wire strings). Validated on decode.

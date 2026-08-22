@@ -5,10 +5,15 @@
 > protocol, the on-disk schema, and how authentication works. An update may mean
 > re-running install and losing local state.
 
-A single native Go binary: a local command-line **orchestration assistant for
+A single native Go binary: the **orchestration engine for
 [Daintree](https://github.com/daintreehq/daintree)**. It plans Daintree operations, spawns
 and supervises visible agent terminals, watches them with cheap models, schedules timers,
 and keeps your main conversation clean.
+
+**It is headless.** Daintree embeds this binary over `host --stdio` and renders the whole
+conversation natively in its own UI — there is no terminal interface to speak of here. The
+line REPL that remains is an operator convenience for a shell or an SSH session, not a
+product surface.
 
 **It is not a code editor and never edits your files.** When a change is needed it spawns
 a *visible* agent in a worktree and supervises it.
@@ -79,19 +84,21 @@ change is announced, then run `doctor`.
 ## Running it
 
 ```bash
-daintree-assistant                          # interactive cockpit
+daintree-assistant host --stdio             # THE embedding path — Daintree drives this
 daintree-assistant "which worktrees are ready?"   # one-shot, prints, exits
 daintree-assistant --json "…"               # one-shot, JSONL events to stdout
-daintree-assistant --classic                # plain line REPL (also the non-TTY fallback)
+daintree-assistant --json --multi-turn      # a whole conversation, one JSONL transcript
+daintree-assistant mcp --stdio              # the assistant AS an MCP server, for another agent
+daintree-assistant                          # line REPL (operator convenience)
 daintree-assistant doctor                   # environment check
 daintree-assistant status                   # supervisor health and live work
 daintree-assistant support-bundle           # redacted diagnostics to send a maintainer
 ```
 
-The cockpit renders **inline in your terminal's normal screen buffer** — never the
-alternate screen, never with the mouse captured — so the host terminal keeps native
-scrolling, selection, and copy-paste. `^O` opens the operations deck, `^X` toggles raw
-tool detail, `/help` lists the rest.
+The line REPL writes plain lines to the normal screen buffer — no alternate screen, no
+raw mode, no mouse capture — so the host terminal keeps native scrolling, selection, and
+copy-paste. `/help` lists the slash commands. `--classic` is accepted as a deprecated
+no-op; the REPL is the only interactive mode.
 
 **`doctor` is the gate.** It diagnoses the install, the backend (including whether its
 upstream credential can actually fund a turn — "no credit left" is its own verdict), and
@@ -133,7 +140,6 @@ every copy it finds.
 | --- | --- |
 | [`docs/BACKEND.md`](docs/BACKEND.md) | The model / skill / prompt story — **start here** |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How the pieces fit |
-| [`docs/BUBBLE_TEA.md`](docs/BUBBLE_TEA.md) | The cockpit contract |
 | [`docs/SUPERVISOR.md`](docs/SUPERVISOR.md) | The persistent daemon |
 | [`docs/TOOLS.md`](docs/TOOLS.md) | Adding a tool |
 | [`docs/LOGGING.md`](docs/LOGGING.md) | The debug-log event reference |

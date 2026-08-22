@@ -31,7 +31,7 @@ func TestIsKnownCommandAnswersCatalogMembership(t *testing.T) {
 }
 
 // TestUnknownCommandIsStillHandled documents WHY IsKnownCommand had to exist: the UI
-// handler's own bit cannot answer this question. If this ever flips, the cockpit lost
+// handler's own bit cannot answer this question. If this ever flips, the attached session lost
 // its "Unknown command" card — and the JSONL field could then have been the same bit.
 func TestUnknownCommandIsStillHandled(t *testing.T) {
 	res := HandleUICommand(t.Context(), "/claer", nil)

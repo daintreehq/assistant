@@ -13,7 +13,7 @@ import (
 )
 
 // ErrProjectBusy reports that another live process owns this project's DB —
-// most likely a second cockpit. The caller should surface it and exit rather
+// most likely a second attached session. The caller should surface it and exit rather
 // than wait forever.
 type ErrProjectBusy struct{ Pid int }
 
