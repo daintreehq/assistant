@@ -131,6 +131,7 @@ func (h *hostAppAdapter) SetHooks(hooks host.AppHooks) {
 			}
 			return hooks.Confirm(cctx, host.ConfirmRequest{
 				ToolName:          req.ToolName,
+				ToolKey:           req.ToolKey,
 				Summary:           req.Summary,
 				RiskClass:         req.Risk,
 				Consequence:       req.Consequence,

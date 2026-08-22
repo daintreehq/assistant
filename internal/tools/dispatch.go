@@ -185,6 +185,7 @@ func (r *Registry) Dispatch(ctx context.Context, name string, rawArgs json.RawMe
 				// A thrown/errored confirm is treated as a DECLINE, never approval.
 				ok, err := tctx.Confirm(ctx, ConfirmRequest{
 					ToolName:          effDisplay,
+					ToolKey:           effName,
 					Risk:              effRisk,
 					Summary:           tool.Description,
 					Consequence:       effConsequence,

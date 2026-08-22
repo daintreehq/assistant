@@ -225,23 +225,41 @@ func (b *Bridge) SkillLoaded([]string) {}
 // drops it rather than putting prompt-assembly machinery on the conversation wire.
 func (b *Bridge) SkillDecision(agent.SkillDecisionEvent) {}
 
+// postLive enqueues a tool-lifecycle event only if the turn has not been interrupted,
+// with the check and the enqueue under ONE lock hold.
+//
+// Splitting them is what let a stopped turn come back to life: Interrupt would
+// terminalize a call as cancelled, and an in-flight ToolState/ToolBatch/ToolCall —
+// already past its own check — would enqueue "queued" or "active" behind it, leaving a
+// row running on a turn the user had stopped. `post` is the transport's enqueue and
+// never re-enters the bridge, so holding the lock across it cannot deadlock.
+func (b *Bridge) postLive(ev HostEvent) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.interrupted {
+		return
+	}
+	b.post(ev)
+}
+
 // ToolBatch announces the WHOLE batch as queued before dispatch begins. Without it a
 // host can only reveal calls one at a time as each starts, which reads as the
 // assistant improvising rather than working through a plan it already made.
 func (b *Bridge) ToolBatch(calls []agent.BatchedToolCall) {
-	b.mu.Lock()
-	turnID := b.activeTurnID
-	interrupted := b.interrupted
-	b.mu.Unlock()
-	if interrupted || len(calls) == 0 {
+	if len(calls) == 0 {
 		return
 	}
-	out := make([]BatchedCall, 0, len(calls))
 	b.mu.Lock()
+	if b.interrupted {
+		b.mu.Unlock()
+		return
+	}
+	turnID := b.activeTurnID
 	for _, c := range calls {
 		b.liveTools[c.ID] = toolStateQueued
 	}
 	b.mu.Unlock()
+	out := make([]BatchedCall, 0, len(calls))
 	for _, c := range calls {
 		out = append(out, BatchedCall{
 			ToolCallID:  c.ID,
@@ -250,7 +268,7 @@ func (b *Bridge) ToolBatch(calls []agent.BatchedToolCall) {
 			Danger:      b.isDanger(c.Name),
 		})
 	}
-	b.post(EvToolBatch{TurnID: turnID, Calls: out})
+	b.postLive(EvToolBatch{TurnID: turnID, Calls: out})
 }
 
 // ToolState promotes one announced call. "waiting" is the load-bearing one: it means
@@ -270,7 +288,7 @@ func (b *Bridge) ToolState(id string, state agent.ToolState) {
 	turnID := b.activeTurnID
 	b.liveTools[id] = string(state)
 	b.mu.Unlock()
-	b.post(EvToolState{ToolCallID: id, State: string(state), TurnID: turnID})
+	b.postLive(EvToolState{ToolCallID: id, State: string(state), TurnID: turnID})
 }
 
 // ToolProgress carries an in-tool substep so a long call does not look frozen.
@@ -294,7 +312,7 @@ func (b *Bridge) ToolCall(ev agent.ToolCallEvent) {
 	b.toolStartedAt[ev.ID] = ev.StartedAt
 	turnID := b.activeTurnID
 	b.mu.Unlock()
-	b.post(EvToolStarted{
+	b.postLive(EvToolStarted{
 		ToolCallID:  ev.ID,
 		ToolID:      ev.Name,
 		ArgsSummary: redactArgs(ev.Args),
@@ -312,7 +330,10 @@ func (b *Bridge) ToolResult(ev agent.ToolResultEvent) {
 	}
 	startedAt, hadStart := b.toolStartedAt[ev.ID]
 	delete(b.toolStartedAt, ev.ID)
-	delete(b.liveTools, ev.ID)
+	// liveTools is NOT cleared here. Removing it before the settle is enqueued opens a
+	// window where an interrupt neither terminalizes this call (it is already gone
+	// from the snapshot) nor lets the settle through (the recheck suppresses it) —
+	// leaving the row active forever. It is cleared below, atomically with the post.
 	turnID := b.activeTurnID
 	b.mu.Unlock()
 
@@ -349,17 +370,15 @@ func (b *Bridge) ToolResult(ev agent.ToolResultEvent) {
 		settled.AsyncID = ev.Result.Async.ID
 		settled.AsyncTitle = redact.String(ev.Result.Async.Title)
 	}
-	// Re-checked immediately before posting. The work above runs outside the lock, so
-	// an interrupt can land in that window — and this call has already removed itself
-	// from liveTools, so Interrupt's snapshot will not terminalize it. Posting anyway
-	// would flip a row the user just stopped from "cancelled" back to "done", which
-	// contradicts the turn it belongs to.
+	// Validate, forget and enqueue under ONE hold. An interrupt either wins — and
+	// terminalizes this call, because it is still in liveTools — or loses, and the
+	// genuine settle goes out. There is no ordering in which the row is left running.
 	b.mu.Lock()
-	interruptedNow := b.interrupted
-	b.mu.Unlock()
-	if interruptedNow {
+	defer b.mu.Unlock()
+	if b.interrupted {
 		return
 	}
+	delete(b.liveTools, ev.ID)
 	b.post(settled)
 }
 
@@ -450,11 +469,20 @@ func (b *Bridge) SettleTurn(outcome TurnOutcomeClass) {
 // again" list. The highest classes are always re-confirmed. Ported verbatim from the
 // cockpit, which owned this rule when it owned the approval sheet.
 func rememberable(r domain.RiskClass) bool {
+	// An ALLOW-list, not a deny-list. A deny-list fails open: a risk class added later
+	// — or one this build does not recognise — would default to rememberable, quietly
+	// making a new class of action eligible for "don't ask again" that nobody decided
+	// should be. The classes named here are the ones judged safe to remember.
 	switch r {
-	case domain.RiskGit, domain.RiskSystem:
-		return false
+	case domain.RiskRead,
+		domain.RiskLocal,
+		domain.RiskUI,
+		domain.RiskTerminal,
+		domain.RiskProject,
+		domain.RiskExternal:
+		return true
 	}
-	return true
+	return false
 }
 
 // Tool lifecycle states, as they appear on the wire.
@@ -513,13 +541,15 @@ func (b *Bridge) Interrupt() {
 		}
 	}
 	b.liveTools = make(map[string]string)
-	b.mu.Unlock()
-
-	// Posted BEFORE turn:end so a consumer applying events in order never sees the
-	// turn close with calls still live.
+	// Posted under the SAME hold that latched `interrupted` and took the snapshot.
+	// Releasing first would let a ToolState already past its own check enqueue behind
+	// these terminal states and revive the row. Ordered before turn:end so a consumer
+	// applying events in order never sees the turn close with calls still live.
 	for id, state := range terminal {
 		b.post(EvToolState{ToolCallID: id, State: state, TurnID: turnID})
 	}
+	b.mu.Unlock()
+
 	b.closeTurn(OutcomeCancelled)
 }
 
@@ -591,6 +621,7 @@ func (b *Bridge) Confirm(ctx context.Context, req ConfirmRequest) bool {
 		ArgsSummary:       redactArgs(req.RawArgs),
 		NeedsTypedConfirm: req.NeedsTypedConfirm,
 		Rememberable:      rememberable(req.RiskClass),
+		ToolKey:           req.ToolKey,
 	})
 
 	// Block on the decision. ctx cancellation (turn abort) also frees the dispatch:

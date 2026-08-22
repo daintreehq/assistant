@@ -128,6 +128,9 @@ type ConfirmRequest struct {
 	// NeedsTypedConfirm is safety.NeedsTypedConfirm's verdict for this dispatch,
 	// forwarded verbatim so the host never re-derives the rule. See EvApprovalRequested.
 	NeedsTypedConfirm bool
+	// ToolKey is the effective identity the gates were applied to. See
+	// tools.ConfirmRequest.ToolKey.
+	ToolKey string
 }
 
 // CommandOutcome is the result of RunCommand.

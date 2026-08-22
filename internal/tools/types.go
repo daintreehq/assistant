@@ -161,7 +161,15 @@ type AskChoiceAnswer struct {
 // approval sheet leads with Consequence (plain-English effect / reversibility /
 // secret exposure), falling back to a per-risk phrase when empty.
 type ConfirmRequest struct {
-	ToolName    string           `json:"toolName"`
+	ToolName string `json:"toolName"`
+	// ToolKey is the EFFECTIVE identity the tier and risk gates were applied to, which
+	// for a dynamic tool is a composite id rather than the display name.
+	//
+	// Distinct from ToolName because ToolName is the human-facing label a person is
+	// asked to reason about, and two different underlying actions can present the same
+	// one. A surface that remembers "don't ask about this again" must key on the
+	// identity, or a standing approval given for one action silently covers another.
+	ToolKey     string           `json:"toolKey,omitempty"`
 	Risk        domain.RiskClass `json:"risk"`
 	Summary     string           `json:"summary"`
 	Consequence string           `json:"consequence,omitempty"`

@@ -435,6 +435,11 @@ type EvApprovalRequested struct {
 	// has forked a security rule into a second codebase, where it can drift silently
 	// and in the permissive direction.
 	Rememberable bool
+	// ToolKey is the effective identity the gates were applied to — a composite id for
+	// a dynamic tool. A host that remembers an approval must key on THIS, not on
+	// ToolID: two different actions can present the same display name, and a standing
+	// approval given for one would otherwise cover the other.
+	ToolKey string
 }
 
 func (e EvApprovalRequested) encode(sid string, seq uint64) ([]byte, error) {
