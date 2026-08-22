@@ -344,6 +344,7 @@ func (b *Bridge) ToolResult(ev agent.ToolResultEvent) {
 	// with the host's yellow async-pending state).
 	if ev.Result.Ok && ev.Result.Async != nil {
 		settled.AsyncID = ev.Result.Async.ID
+		settled.AsyncTitle = redact.String(ev.Result.Async.Title)
 	}
 	b.post(settled)
 }

@@ -211,6 +211,10 @@ type EvToolSettled struct {
 	// render it as a finished success (the host shows it as a distinct yellow
 	// pending state). Empty for every ordinary synchronous result.
 	AsyncID string
+	// AsyncTitle names the work an accepted async call handed off ("migrate the
+	// schema in wt_db"), so a host can say WHAT is running in the background rather
+	// than only that something is.
+	AsyncTitle string
 	// Summary is the tool's OWN human-readable line for what it did ("Pushed 3
 	// commits to origin/main"). Engine-authored, never raw arguments, so it is safe to
 	// carry across a UI boundary — and it is what the terminal cockpit showed instead
@@ -238,6 +242,9 @@ func (e EvToolSettled) encode(sid string, seq uint64) ([]byte, error) {
 	}
 	if e.AsyncID != "" {
 		f["asyncId"] = e.AsyncID
+	}
+	if e.AsyncTitle != "" {
+		f["asyncTitle"] = e.AsyncTitle
 	}
 	if e.Summary != "" {
 		f["summary"] = e.Summary
