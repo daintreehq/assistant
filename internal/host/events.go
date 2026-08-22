@@ -211,6 +211,15 @@ type EvToolSettled struct {
 	// render it as a finished success (the host shows it as a distinct yellow
 	// pending state). Empty for every ordinary synchronous result.
 	AsyncID string
+	// Summary is the tool's OWN human-readable line for what it did ("Pushed 3
+	// commits to origin/main"). Engine-authored, never raw arguments, so it is safe to
+	// carry across a UI boundary — and it is what the terminal cockpit showed instead
+	// of a bare tool id. Without it a host can only display the identifier and hope
+	// the user knows what it means.
+	Summary string
+	// ErrorMessage is the human sentence behind ErrorCode. A code alone tells a user
+	// that something failed, not what.
+	ErrorMessage string
 }
 
 func (e EvToolSettled) encode(sid string, seq uint64) ([]byte, error) {
@@ -229,6 +238,12 @@ func (e EvToolSettled) encode(sid string, seq uint64) ([]byte, error) {
 	}
 	if e.AsyncID != "" {
 		f["asyncId"] = e.AsyncID
+	}
+	if e.Summary != "" {
+		f["summary"] = e.Summary
+	}
+	if e.ErrorMessage != "" {
+		f["errorMessage"] = e.ErrorMessage
 	}
 	return marshalEvent("tool:settled", sid, seq, f)
 }

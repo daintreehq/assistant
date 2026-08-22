@@ -321,14 +321,23 @@ func (b *Bridge) ToolResult(ev agent.ToolResultEvent) {
 		}
 	}
 	result, severity, errorCode := resultToAudit(ev.Result)
+	errorMessage := ""
+	if ev.Result.Error != nil {
+		errorMessage = redact.String(ev.Result.Error.Message)
+	}
 	settled := EvToolSettled{
-		ToolCallID: ev.ID,
-		ToolID:     ev.Name,
-		DurationMs: durationMs,
-		Result:     result,
-		Severity:   severity,
-		ErrorCode:  errorCode,
-		TurnID:     turnID,
+		// Redacted on the way out, like every other model/tool-authored string that
+		// crosses this boundary: a summary or an error can quote an argument, and an
+		// argument can be a token.
+		Summary:      redact.String(ev.Result.Summary),
+		ErrorMessage: errorMessage,
+		ToolCallID:   ev.ID,
+		ToolID:       ev.Name,
+		DurationMs:   durationMs,
+		Result:       result,
+		Severity:     severity,
+		ErrorCode:    errorCode,
+		TurnID:       turnID,
 	}
 	// An accepted async handle: surface it so the host can render "accepted,
 	// still running in the background" instead of a finished success (parity
