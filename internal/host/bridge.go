@@ -433,6 +433,19 @@ const (
 	toolStateNotRun = "not-run"
 )
 
+// PostCost emits the session's cumulative spend. Called after a turn settles, which is
+// when the figure has actually moved and when a reader is most likely to look at it.
+//
+// EvCost existed on the wire from the start with no producer, so every embedded
+// session reported unknown cost forever — the one readout a user cannot reconstruct
+// from anything else on screen.
+func (b *Bridge) PostCost(total float64, complete bool) {
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	b.mu.Unlock()
+	b.post(EvCost{TurnID: turnID, Total: total, Complete: complete})
+}
+
 // Interrupt is the display side of an interrupt: latch interrupted, terminalize every
 // outstanding call, and close the turn as CANCELLED.
 //

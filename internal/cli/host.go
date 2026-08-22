@@ -179,6 +179,16 @@ func (h *hostAppAdapter) RunCommand(ctx context.Context, line string) host.Comma
 	return host.CommandOutcome{Text: buf.String(), Quit: res.Quit}
 }
 
+func (h *hostAppAdapter) CostSnapshot() (float64, bool) {
+	if h.app == nil || h.app.CostLedger == nil {
+		return 0, false
+	}
+	snap := h.app.CostLedger.Snapshot()
+	// LowerBound inverted: the ledger says "this is a floor", the wire says "this is
+	// complete". A host renders "≥ $x" when it is not.
+	return snap.Observed, !snap.LowerBound
+}
+
 func (h *hostAppAdapter) ConnectMCP(ctx context.Context) error {
 	// app.ConnectMcp returns a status, not an error; a degraded MCP is non-fatal, so
 	// surface its error text (if any) for the host's stderr diagnostic.

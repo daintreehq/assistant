@@ -30,6 +30,14 @@ type App interface {
 	// clearing and leaves the conversation intact.
 	RunCommand(ctx context.Context, line string) CommandOutcome
 
+	// CostSnapshot reports what this session has spent so far, in USD, and whether
+	// that figure is a total or a floor.
+	//
+	// Cumulative and session-wide, not per-turn: it includes the utility calls that
+	// watchers and background tasks make, which never appear as a turn and which a
+	// user has no other way to see.
+	CostSnapshot() (total float64, complete bool)
+
 	// ConnectMCP attempts the MCP connection. Best-effort: a degraded MCP is NOT a
 	// boot failure (it surfaces in prompt context + tool results), so the returned
 	// error is informational only — the host logs it to stderr and proceeds.

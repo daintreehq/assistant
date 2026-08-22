@@ -137,6 +137,8 @@ func (h *Host) handlePrompt(text string) {
 // settle any dangling assistant turn, reclaim injections the turn never
 // consumed, clear busy, and drain deferred wakes.
 func (h *Host) finishPromptTurn(gen uint64, ctx context.Context) {
+	// Cost BEFORE the turn settles, so it still carries the turn id it belongs to.
+	h.postCost()
 	h.bridge.SettleTurn(OutcomeAnswered)
 
 	cancelled := ctx.Err() != nil
@@ -528,4 +530,14 @@ func (h *Host) handleSlashCommand(line string) {
 		h.cancelTurn()
 		h.teardown(ShutdownExit, "")
 	}
+}
+
+// postCost emits the session's cumulative spend. Best-effort: a missing ledger reports
+// nothing rather than failing a turn over a display figure.
+func (h *Host) postCost() {
+	if h.app == nil || h.bridge == nil {
+		return
+	}
+	total, complete := h.app.CostSnapshot()
+	h.bridge.PostCost(total, complete)
 }
