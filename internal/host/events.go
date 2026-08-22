@@ -427,6 +427,14 @@ type EvApprovalRequested struct {
 	// in the permissive direction. safety.NeedsTypedConfirm stays the single source of
 	// truth; this field is its answer.
 	NeedsTypedConfirm bool
+	// Rememberable is the engine's verdict that this risk class MAY be added to a
+	// session "don't ask again" list. The highest classes (git, system) never can.
+	//
+	// Carried rather than left for the host to re-derive, for the same reason
+	// NeedsTypedConfirm is: a host that reimplements "which risks are safe to remember"
+	// has forked a security rule into a second codebase, where it can drift silently
+	// and in the permissive direction.
+	Rememberable bool
 }
 
 func (e EvApprovalRequested) encode(sid string, seq uint64) ([]byte, error) {

@@ -257,14 +257,17 @@ func (b *Bridge) ToolBatch(calls []agent.BatchedToolCall) {
 // blocked on the USER, not on the tool, and a host that renders it as ordinary
 // progress leaves someone watching a spinner for their own unanswered approval.
 func (b *Bridge) ToolState(id string, state agent.ToolState) {
+	// The interrupted check and the liveTools write happen under ONE lock hold.
+	// Splitting them let Interrupt run in the gap: it would terminalize this call as
+	// cancelled, and then this function — already past its check — would re-post
+	// "active" over the top and re-add the id, leaving a row spinning forever on a
+	// turn the user had stopped.
 	b.mu.Lock()
-	turnID := b.activeTurnID
-	interrupted := b.interrupted
-	b.mu.Unlock()
-	if interrupted {
+	if b.interrupted {
+		b.mu.Unlock()
 		return
 	}
-	b.mu.Lock()
+	turnID := b.activeTurnID
 	b.liveTools[id] = string(state)
 	b.mu.Unlock()
 	b.post(EvToolState{ToolCallID: id, State: string(state), TurnID: turnID})
@@ -345,6 +348,17 @@ func (b *Bridge) ToolResult(ev agent.ToolResultEvent) {
 	if ev.Result.Ok && ev.Result.Async != nil {
 		settled.AsyncID = ev.Result.Async.ID
 		settled.AsyncTitle = redact.String(ev.Result.Async.Title)
+	}
+	// Re-checked immediately before posting. The work above runs outside the lock, so
+	// an interrupt can land in that window — and this call has already removed itself
+	// from liveTools, so Interrupt's snapshot will not terminalize it. Posting anyway
+	// would flip a row the user just stopped from "cancelled" back to "done", which
+	// contradicts the turn it belongs to.
+	b.mu.Lock()
+	interruptedNow := b.interrupted
+	b.mu.Unlock()
+	if interruptedNow {
+		return
 	}
 	b.post(settled)
 }
@@ -430,6 +444,17 @@ func (b *Bridge) SettleTurn(outcome TurnOutcomeClass) {
 		outcome = OutcomeUnknown
 	}
 	b.closeTurn(outcome)
+}
+
+// rememberable reports whether a risk class may be added to a session "don't ask
+// again" list. The highest classes are always re-confirmed. Ported verbatim from the
+// cockpit, which owned this rule when it owned the approval sheet.
+func rememberable(r domain.RiskClass) bool {
+	switch r {
+	case domain.RiskGit, domain.RiskSystem:
+		return false
+	}
+	return true
 }
 
 // Tool lifecycle states, as they appear on the wire.
@@ -565,6 +590,7 @@ func (b *Bridge) Confirm(ctx context.Context, req ConfirmRequest) bool {
 		Consequence:       req.Consequence,
 		ArgsSummary:       redactArgs(req.RawArgs),
 		NeedsTypedConfirm: req.NeedsTypedConfirm,
+		Rememberable:      rememberable(req.RiskClass),
 	})
 
 	// Block on the decision. ctx cancellation (turn abort) also frees the dispatch:

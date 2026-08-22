@@ -362,6 +362,10 @@ func (h *Host) reactWake() {
 		h.turnMu.Unlock()
 	}()
 
+	// Wake turns spend money too — often the utility calls a user has no other way to
+	// see — so report before settling, exactly as the prompt path does. Without this
+	// the figure went stale until the next interactive turn happened to finish.
+	h.postCost()
 	h.bridge.SettleTurn(OutcomeAnswered)
 
 	h.turnMu.Lock()
