@@ -170,7 +170,7 @@ func TestBridgeInterruptSuppresses(t *testing.T) {
 	b := NewBridge(BridgeOptions{SessionID: "s", Post: c.post})
 	b.StartExchange()
 	b.AssistantStart()
-	b.Interrupt() // latches interrupted, closes turn agent-stuck
+	b.Interrupt() // latches interrupted, closes the turn as cancelled
 	b.AssistantToken("late")
 	b.ToolCall(agent.ToolCallEvent{ID: "t1", Name: "fs.read", StartedAt: 1})
 
@@ -180,11 +180,42 @@ func TestBridgeInterruptSuppresses(t *testing.T) {
 			t.Fatalf("interrupt failed to suppress: %v", c.types())
 		}
 	}
-	// The interrupt closed the assistant turn as agent-stuck.
+	// The interrupt closes the assistant turn as CANCELLED, not agent-stuck. The user
+	// pressed Stop; nothing hung. Recording a deliberate interruption as a fault
+	// misreports it in the transcript and in every tally built from outcomes.
 	snap := c.snapshot()
 	last := snap[len(snap)-1].(EvTurnEnd)
-	if last.Outcome != OutcomeAgentStuck {
-		t.Fatalf("interrupt close outcome=%q want agent-stuck", last.Outcome)
+	if last.Outcome != OutcomeCancelled {
+		t.Fatalf("interrupt close outcome=%q want cancelled", last.Outcome)
+	}
+}
+
+// An interrupt must terminalize every outstanding call. Without it the host was told
+// each call started and never told anything else, so a stopped turn left rows
+// rendering as "Running" permanently — describing work that is not happening.
+func TestBridgeInterruptTerminalizesOutstandingCalls(t *testing.T) {
+	c := &collector{}
+	b := NewBridge(BridgeOptions{SessionID: "s", Post: c.post})
+	b.StartExchange()
+	b.AssistantStart()
+	b.ToolBatch([]agent.BatchedToolCall{{ID: "t1", Name: "fs.read"}, {ID: "t2", Name: "git.status"}})
+	b.ToolState("t1", agent.ToolState("active"))
+
+	b.Interrupt()
+
+	states := map[string]string{}
+	for _, ev := range c.snapshot() {
+		if ts, ok := ev.(EvToolState); ok {
+			states[ts.ToolCallID] = ts.State
+		}
+	}
+	// The one that was running was cancelled; the one that never started was not run.
+	// The distinction is what tells a reader what the stop actually interrupted.
+	if states["t1"] != toolStateCancelled {
+		t.Errorf("running call state=%q want cancelled", states["t1"])
+	}
+	if states["t2"] != toolStateNotRun {
+		t.Errorf("queued call state=%q want not-run", states["t2"])
 	}
 }
 

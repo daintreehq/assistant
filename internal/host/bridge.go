@@ -86,7 +86,12 @@ type Bridge struct {
 	interrupted      bool // latched until next startExchange
 	pendingApprovals map[string]*pendingApproval
 	pendingQuestions map[string]*pendingQuestion
-	toolStartedAt    map[string]int64
+	// liveTools tracks announced-but-unsettled calls by id → last known state, so an
+	// interrupt can terminalize them. Without it a cancelled turn left every in-flight
+	// row rendering as "Running" forever: the host had been told the call started and
+	// was never told anything else.
+	liveTools     map[string]string
+	toolStartedAt map[string]int64
 }
 
 // NewBridge builds a Bridge with defaults filled.
@@ -112,6 +117,7 @@ func NewBridge(opts BridgeOptions) *Bridge {
 		approvalTimeoutMs: opts.ApprovalTimeoutMs,
 		pendingApprovals:  make(map[string]*pendingApproval),
 		pendingQuestions:  make(map[string]*pendingQuestion),
+		liveTools:         make(map[string]string),
 		toolStartedAt:     make(map[string]int64),
 	}
 }
@@ -231,6 +237,11 @@ func (b *Bridge) ToolBatch(calls []agent.BatchedToolCall) {
 		return
 	}
 	out := make([]BatchedCall, 0, len(calls))
+	b.mu.Lock()
+	for _, c := range calls {
+		b.liveTools[c.ID] = toolStateQueued
+	}
+	b.mu.Unlock()
 	for _, c := range calls {
 		out = append(out, BatchedCall{
 			ToolCallID:  c.ID,
@@ -253,6 +264,9 @@ func (b *Bridge) ToolState(id string, state agent.ToolState) {
 	if interrupted {
 		return
 	}
+	b.mu.Lock()
+	b.liveTools[id] = string(state)
+	b.mu.Unlock()
 	b.post(EvToolState{ToolCallID: id, State: string(state), TurnID: turnID})
 }
 
@@ -295,6 +309,7 @@ func (b *Bridge) ToolResult(ev agent.ToolResultEvent) {
 	}
 	startedAt, hadStart := b.toolStartedAt[ev.ID]
 	delete(b.toolStartedAt, ev.ID)
+	delete(b.liveTools, ev.ID)
 	turnID := b.activeTurnID
 	b.mu.Unlock()
 
@@ -407,9 +422,30 @@ func (b *Bridge) SettleTurn(outcome TurnOutcomeClass) {
 	b.closeTurn(outcome)
 }
 
-// Interrupt is the display side of an interrupt: latch interrupted, stop
-// forwarding the in-flight turn, close it "agent-stuck". No-op without an active
-// turn.
+// Tool lifecycle states, as they appear on the wire.
+const (
+	toolStateQueued  = "queued"
+	toolStateActive  = "active"
+	toolStateWaiting = "waiting"
+	// toolStateCancelled is a call that WAS running when the user stopped the turn.
+	toolStateCancelled = "cancelled"
+	// toolStateNotRun is a call that was announced but never started.
+	toolStateNotRun = "not-run"
+)
+
+// Interrupt is the display side of an interrupt: latch interrupted, terminalize every
+// outstanding call, and close the turn as CANCELLED.
+//
+// Two things changed here and both were wrong before. The outcome was "agent-stuck",
+// which describes an agent that hung — but the user pressed Stop, and recording their
+// deliberate interruption as a fault misreports it in the transcript and in every
+// tally built from outcomes. And nothing terminalized the calls: the host had been
+// told each one started and was never told anything else, so a stopped turn left rows
+// rendering as "Running" permanently, describing work that is not happening.
+//
+// A call that was running becomes "cancelled"; one that never started becomes
+// "not-run". The distinction matters to anyone reading back what a stop actually
+// interrupted.
 func (b *Bridge) Interrupt() {
 	b.mu.Lock()
 	if b.activeTurnID == "" {
@@ -417,8 +453,26 @@ func (b *Bridge) Interrupt() {
 		return
 	}
 	b.interrupted = true
+	turnID := b.activeTurnID
+	// Snapshot and clear under the lock; the posts happen outside it.
+	terminal := make(map[string]string, len(b.liveTools))
+	for id, state := range b.liveTools {
+		switch state {
+		case toolStateActive, toolStateWaiting:
+			terminal[id] = toolStateCancelled
+		default:
+			terminal[id] = toolStateNotRun
+		}
+	}
+	b.liveTools = make(map[string]string)
 	b.mu.Unlock()
-	b.closeTurn(OutcomeAgentStuck)
+
+	// Posted BEFORE turn:end so a consumer applying events in order never sees the
+	// turn close with calls still live.
+	for id, state := range terminal {
+		b.post(EvToolState{ToolCallID: id, State: state, TurnID: turnID})
+	}
+	b.closeTurn(OutcomeCancelled)
 }
 
 // closeTurn nulls the active turn and emits turn:end. Idempotent (guarded by the
