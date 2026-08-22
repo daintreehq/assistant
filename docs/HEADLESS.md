@@ -612,18 +612,24 @@ overwrites the inherited environment, so a prefixed value loses to any line the 
 (A direct `DAINTREE_SKILLS_OVERLAY_DIR=… python -m daintree_assistant_server` does honour
 the prefix — process environment outranks dotenv — but `./dev` is the usual way in.)
 
-```bash
-mkdir -p /tmp/skill-harness/skills
-# in ../assistant-backend/.env
+```ini
+# ../assistant-backend/.env
 DAINTREE_SKILLS_OVERLAY_DIR=/tmp/skill-harness/skills
 ```
 
-Start it and leave it running; it binds the `HOST`/`PORT` from `.env`, which is
-`127.0.0.1:8473` only if you started from the scaffold. Empty is the deliberate starting
-state: the overlay is loaded during startup, and a skill that fails to parse there is a
-**readiness** failure, not a reload failure — the server boots but stays unready, and the
-reload route below is readiness-gated, so it answers `503` and cannot dig you out. Boot
-empty and the first draft is recoverable without a restart.
+Then, from a first terminal, create the directory and start the server — leave it running:
+
+```bash
+mkdir -p /tmp/skill-harness/skills
+cd ../assistant-backend && ./dev
+```
+
+It binds the `HOST`/`PORT` from `.env`, which is `127.0.0.1:8473` only if you started from
+the scaffold. Empty is the deliberate starting state: the overlay is loaded during startup,
+so a skill that fails to parse there is a **readiness** failure rather than a reload
+failure — the server boots but stays unready, and the reload route below is
+readiness-gated, so it answers `503` and cannot dig you out. Boot empty and the first draft
+is recoverable without a restart.
 
 **2. Write the skill.** The filename stem MUST equal the frontmatter `id` — the loader
 passes `path.stem` as the expected id and rejects the file otherwise — so this one goes to
@@ -695,6 +701,8 @@ back what was active rather than assuming.
 
 ```bash
 mkdir -p /tmp/skill-harness/case-001/run-01
+echo "the prompt this case exercises" > /tmp/skill-harness/case-001/prompt.txt
+
 daintree-assistant \
   --backend-url http://127.0.0.1:8473 \
   --skill daintree.example.skill-under-test \
@@ -704,10 +712,12 @@ daintree-assistant \
   --json > /tmp/skill-harness/case-001/run-01/run.jsonl
 ```
 
-`--prompt-file` keeps the prompt in a file beside the runbook it exercises, so the two are
-edited and diffed together instead of living in shell quoting. `--state-dir` is what keeps
-the case out of the developer's own cockpit — no shared database, artifacts or lease (see
-[Isolation](#isolation)) — but note that it **isolates without resetting**: a re-run
+`--prompt-file` keeps the prompt in a file under the case directory rather than in shell
+quoting, so the prompt and the runbook it exercises are edited and diffed as a pair.
+
+`--state-dir` is what keeps the case out of the developer's own cockpit — no shared
+database, artifacts or lease (see [Isolation](#isolation)) — but note that it **isolates
+without resetting**: a re-run
 against the same directory inherits whatever the last one left there. Give each iteration
 an empty directory of its own, and reuse one only when the persistence is the thing under
 test. `--project-id` here is identity rather than isolation, since an explicit
@@ -729,8 +739,9 @@ jq -c 'select(.type == "result")      | {status, stats}'         run.jsonl
 ```
 
 The reads answer the three questions a runbook is judged on: did it load, did it drive the
-tool calls it was written to drive, and what did that cost. `ok` lives on `tool:result`
-only — asking for it on a `tool:call` yields a silent `null` rather than an error.
+tool calls it was written to drive, and what `result.stats` recorded — read as a lower
+bound on spend, for the reasons in [The event stream](#the-event-stream). `ok` lives on
+`tool:result` only; asking for it on a `tool:call` yields a silent `null`, not an error.
 
 Two limits are worth knowing before you script a case against this loop:
 
