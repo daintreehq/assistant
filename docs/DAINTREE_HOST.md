@@ -15,6 +15,43 @@ user switches projects?", this is the reference.
 > **observable contract** (env var names, error codes, tier semantics) is what to rely on. A
 > pointer list for cross-repo maintenance is at the end.
 
+## `host:ready` — the session facts a host renders (protocol v3)
+
+> **Note.** Most of this document describes the PTY embedding, where Daintree ran this
+> binary as a terminal panel. Daintree now embeds the engine **headless** over the stdio
+> NDJSON protocol in `internal/host/` and draws its own interface. The env contract and
+> tier semantics below still hold; the "terminal panel" framing does not.
+
+The first frame of a session is `host:ready`. Beyond `protocolVersion`, it carries the
+facts a host needs to state what this session *is* — the same set the CLI's own masthead
+stated, and for the same reason it exists at all: **a protocol-only consumer never reads
+stderr**, so anything mentioned only there is invisible to an embedding host.
+
+| Field | Meaning | Absent when |
+|---|---|---|
+| `version` | Engine build string (distinct from `protocolVersion`) | never sent empty |
+| `autoApprove` | This session runs mutating tools with **no** confirmation | always present (boolean) |
+| `tier` | Permission tier in force (`supervisor` / `operator` / `system`) | unset |
+| `tierGloss` | Plain-language reading of `tier` | unknown tier |
+| `backend` | A **non-default** backend endpoint, named and sanitized | the deployed default |
+| `routing` | A **non-default** endpoint-routing policy, as one line | the default policy |
+| `logFile` | Absolute path of this session's debug log | debug logging is off |
+
+Two rules hold for all of them:
+
+- **The engine resolves them, not the host.** Each is a policy judgement that depends on
+  constants this module owns — which backend URL is "the deployed one", what the local
+  endpoint is called, which routing policy is default, what a tier permits. A host that
+  re-derived them would need a second copy of all of that, wrong the first time any of it
+  changed. See [`internal/host/masthead.go`](../internal/host/masthead.go).
+- **Absent means "the default, which needs no announcement"** — except `logFile`, where
+  absent means logging is off. Only a *deviation* is reported, so a host can render these
+  unconditionally and stay quiet in the common case.
+
+`logFile` in particular cannot be worked out from outside: the engine picks the filename
+(`<date>-<sessionId>.log`), so a host that guessed it would show a path that does not
+exist the first time that format changes.
+
 ## TL;DR
 
 - The assistant is **one ordinary terminal panel** inside Daintree's "Assistant area" (the

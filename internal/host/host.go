@@ -325,10 +325,17 @@ func (h *Host) boot(desc SessionDescriptor) {
 	// Hand off from the boot guard to the steady-state fatal path.
 	h.guardActive = false
 	h.ready = true
+	rcfg := app.Config()
 	ev := EvReady{
 		ProtocolVersion: ProtocolVersion,
 		Version:         BuildVersion,
-		AutoApprove:     app.Config().AutoApprove,
+		AutoApprove:     rcfg.AutoApprove,
+		Tier:            string(rcfg.Tier),
+		TierGloss:       tierGloss(rcfg.Tier),
+		Backend:         mastheadBackend(rcfg.BackendURL),
+		Routing:         mastheadRouting(rcfg.Routing),
+		// Resolvable here because StartDebugLog ran above; "" when logging is off.
+		LogFile: debuglog.CurrentDebugLogPath(),
 	}
 	if desc.ResumeSessionID != "" {
 		ev.ResumedSessionID = desc.ResumeSessionID

@@ -65,17 +65,45 @@ func marshalEvent(typ, sessionID string, seq uint64, fields map[string]any) ([]b
 // (DAINTREE_ASSISTANT_AUTO_APPROVE). It was previously mentioned only on stderr, which
 // a protocol-only consumer never reads — so a host had no way to show that approvals
 // are switched off, which is exactly the state a user most needs to see.
+// The masthead fields below carry what the cockpit's own masthead stated, already
+// resolved (see masthead.go). They exist for the same reason AutoApprove does: they are
+// session facts that a protocol-only consumer has no other way to learn. Tier and
+// TierGloss say what this session is permitted to do; Backend says which endpoint
+// answers a turn, and is the ONLY readout of that since sign-in went away; Routing says
+// what privacy/selection policy was requested; LogFile says where the trace goes, which
+// is unanswerable from outside because the engine picks the filename. Empty means "the
+// default, which needs no announcement" — except LogFile, where empty means logging is
+// off.
 type EvReady struct {
 	ProtocolVersion  int
 	ResumedSessionID string
 	Version          string
 	AutoApprove      bool
+	Tier             string
+	TierGloss        string
+	Backend          string
+	Routing          string
+	LogFile          string
 }
 
 func (e EvReady) encode(sid string, seq uint64) ([]byte, error) {
 	f := map[string]any{
 		"protocolVersion": e.ProtocolVersion,
 		"autoApprove":     e.AutoApprove,
+	}
+	// Omitted when empty rather than sent as "": an absent key is how a consumer tells
+	// "the default" from "a value that happens to be blank", and it keeps the frame
+	// small for the common case where every one of these is the default.
+	for k, v := range map[string]string{
+		"tier":      e.Tier,
+		"tierGloss": e.TierGloss,
+		"backend":   e.Backend,
+		"routing":   e.Routing,
+		"logFile":   e.LogFile,
+	} {
+		if v != "" {
+			f[k] = v
+		}
 	}
 	if e.ResumedSessionID != "" {
 		f["resumedSessionId"] = e.ResumedSessionID
