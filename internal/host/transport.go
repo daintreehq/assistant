@@ -80,6 +80,11 @@ type transport struct {
 	// sendFailed, which both goroutines read and set.
 	writeMu    sync.Mutex
 	sendFailed bool // guarded by writeMu (writerLoop + the teardown sendSync path)
+	// sealed stops writerLoop accepting frames once teardown has begun, so nothing
+	// can be written after the terminal host:shutdown. writerBusy lets teardown wait
+	// for an already-dequeued frame rather than racing it.
+	sealed     bool
+	writerBusy bool
 	failOnce   sync.Once
 	onSendFail func(error)
 
@@ -100,14 +105,54 @@ type transport struct {
 	streamStalled bool
 }
 
-// encodeWithSeq stamps the next monotonic sequence number onto ev and encodes it as
-// one NDJSON frame. Sequence numbers start at 1, so a consumer can treat 0 as "no
-// frame seen yet" without ambiguity.
-func (t *transport) encodeWithSeq(sessionID string, ev HostEvent) ([]byte, error) {
+// stampAndEnqueue assigns the next sequence number, encodes the frame, and puts it
+// on the writer queue — ALL under one lock.
+//
+// The three steps are atomic together because splitting them reorders the stream. If
+// seq is assigned during encode and the enqueue happens after the lock is released,
+// two producers can interleave: A takes N, is descheduled, B takes N+1 and enqueues
+// first. The consumer then sees N+1 before N, reports a lost frame that was never
+// lost, and applies semantic events out of order. Holding the lock across the enqueue
+// is cheap because the enqueue is non-blocking — a stream producer does its waiting
+// BEFORE calling this, never while holding the lock.
+//
+// Returns false when the frame could not be queued (closed, or a full queue), having
+// still consumed its sequence number: a frame that does not arrive must leave a
+// visible hole rather than vanishing.
+func (t *transport) stampAndEnqueue(sessionID string, ev HostEvent) bool {
 	t.seqMu.Lock()
 	defer t.seqMu.Unlock()
+
 	t.seq++
-	return encodeSeq(ev, sessionID, t.seq)
+	data, err := encodeSeq(ev, sessionID, t.seq)
+	if err != nil {
+		t.diag(fmt.Sprintf("host: failed to encode event: %v", err))
+		return false
+	}
+	if len(data)+1 > maxFrameBytes {
+		t.diag(fmt.Sprintf("host: refusing oversize outbound frame (%d bytes)", len(data)))
+		return false
+	}
+	select {
+	case <-t.closed:
+		return false
+	default:
+	}
+	select {
+	case t.outQ <- data:
+		return true
+	default:
+		return false
+	}
+}
+
+// burnSeq consumes a sequence number without emitting anything, so a deliberately
+// shed frame leaves a DETECTABLE hole. Shedding silently would be v2's behaviour,
+// which is the thing v3 exists to stop.
+func (t *transport) burnSeq() {
+	t.seqMu.Lock()
+	t.seq++
+	t.seqMu.Unlock()
 }
 
 func newTransport(in io.Reader, out, errw io.Writer) *transport {
@@ -159,10 +204,24 @@ func (t *transport) writerLoop() {
 // onSendFail once on the first write error.
 func (t *transport) writeFrame(frame []byte) {
 	t.writeMu.Lock()
-	if t.sendFailed {
+	// Sealed: teardown owns the stream from here, and nothing may follow the terminal
+	// frame it is about to write.
+	if t.sendFailed || t.sealed {
 		t.writeMu.Unlock()
 		return
 	}
+	// Published so teardown can wait for an in-flight write instead of racing it.
+	//
+	// The clear MUST re-take the lock. writeFrame releases writeMu before returning on
+	// every path, so a bare `defer t.writerBusy = false` would write the field with no
+	// lock held while sendSync reads it under one — a genuine data race, and one the
+	// race detector catches immediately.
+	t.writerBusy = true
+	defer func() {
+		t.writeMu.Lock()
+		t.writerBusy = false
+		t.writeMu.Unlock()
+	}()
 	if _, werr := t.out.Write(append(frame, '\n')); werr != nil {
 		t.sendFailed = true
 		t.writeMu.Unlock()
@@ -233,39 +292,20 @@ func (t *transport) commands() <-chan inbound {
 	return ch
 }
 
-// send marshals + enqueues one event as a single NDJSON frame on the serialized
-// writer queue. The enqueue is NON-BLOCKING: a producer (the command loop
-// resolving an approval, a worker goroutine, the bridge) never blocks on a slow or
-// wedged stdout — that is the structural property that keeps decide/interrupt from
-// stalling the loop. A marshal error or oversize frame is dropped to stderr (never
-// stdout). A full queue / closed transport drops the frame.
+// send enqueues one CONTROL event. Non-blocking: the command loop resolving an
+// approval, or an interrupt, must never stall behind a token burst — that is the
+// structural property protocol v2 was protecting and v3 keeps. Stream producers stop
+// at streamHighWater, leaving the rest of the queue depth as control headroom.
 func (t *transport) send(sessionID string, ev HostEvent) {
-	data, err := t.encodeWithSeq(sessionID, ev)
-	if err != nil {
-		t.diag(fmt.Sprintf("host: failed to encode event: %v", err))
-		return
-	}
-	if len(data)+1 > maxFrameBytes {
-		t.diag(fmt.Sprintf("host: refusing oversize outbound frame (%d bytes)", len(data)))
-		return
-	}
-	select {
-	case <-t.closed:
-		// Transport closed (teardown in progress): drop. The teardown path emits its
-		// own final frames synchronously before Close.
-		return
-	default:
-	}
-	select {
-	case t.outQ <- data:
-	case <-t.closed:
-	default:
-		// The queue is FULL for a control frame. This should be unreachable: stream
-		// producers stop enqueueing at streamHighWater, leaving the rest of the depth
-		// as control headroom. Reaching it means stdout is genuinely wedged, in which
-		// case onSendFail has already tripped and teardown is under way. Say so loudly
-		// — under v3 a dropped frame is a protocol violation, not a routine shed.
-		t.diag("host: PROTOCOL GAP — dropped a control frame (writer queue full)")
+	if !t.stampAndEnqueue(sessionID, ev) {
+		select {
+		case <-t.closed:
+			// Teardown: the final frames go out through the teardown path.
+		default:
+			// Genuinely full means stdout is wedged and onSendFail has already tripped.
+			// The sequence number was consumed, so the gap is visible to the consumer.
+			t.diag("host: PROTOCOL GAP — dropped a control frame (writer queue full)")
+		}
 	}
 }
 
@@ -274,15 +314,9 @@ func (t *transport) send(sessionID string, ev HostEvent) {
 // where v2 dropped. It returns as soon as the frame is queued, the transport
 // closes, or the writer has already failed (parent gone) — never spins.
 func (t *transport) sendStream(sessionID string, ev HostEvent) {
-	data, err := t.encodeWithSeq(sessionID, ev)
-	if err != nil {
-		t.diag(fmt.Sprintf("host: failed to encode event: %v", err))
-		return
-	}
-	if len(data)+1 > maxFrameBytes {
-		t.diag(fmt.Sprintf("host: refusing oversize outbound frame (%d bytes)", len(data)))
-		return
-	}
+	// The WAIT happens before any sequence number is taken, so a frame that has to
+	// queue behind others does not reserve a number and then hand it over out of
+	// order. Only once there is room is the frame stamped and enqueued atomically.
 	deadline := time.Now().Add(streamBackpressureBudget)
 	for {
 		select {
@@ -290,49 +324,46 @@ func (t *transport) sendStream(sessionID string, ev HostEvent) {
 			return
 		default:
 		}
-		// Already shedding: give up at once rather than re-paying the budget.
-		t.stallMu.Lock()
-		stalled := t.streamStalled
-		t.stallMu.Unlock()
-		if stalled {
-			if len(t.outQ) >= streamHighWater {
-				return
-			}
-			// The consumer caught up — resume normal backpressure.
-			t.stallMu.Lock()
-			t.streamStalled = false
-			t.stallMu.Unlock()
-			t.diag("host: stream backpressure cleared; resuming")
-		}
-		// A FAILED writer never drains again; waiting for room would park the agent
-		// loop until teardown. Give up immediately — the parent is already gone.
+
+		// A FAILED writer never drains again; waiting would park the agent loop until
+		// teardown. Give up at once — the parent is already gone.
 		t.writeMu.Lock()
 		failed := t.sendFailed
 		t.writeMu.Unlock()
 		if failed {
 			return
 		}
+
+		// Already shedding: give up immediately rather than re-paying the budget.
+		t.stallMu.Lock()
+		stalled := t.streamStalled
+		t.stallMu.Unlock()
+		if stalled {
+			if len(t.outQ) >= streamHighWater {
+				t.burnSeq() // keep the loss visible
+				return
+			}
+			t.stallMu.Lock()
+			t.streamStalled = false
+			t.stallMu.Unlock()
+			t.diag("host: stream backpressure cleared; resuming")
+		}
+
 		if len(t.outQ) < streamHighWater {
-			select {
-			case t.outQ <- data:
-			case <-t.closed:
+			if !t.stampAndEnqueue(sessionID, ev) {
+				// Lost the race for the last slot, or closed. Either way the number was
+				// consumed by stampAndEnqueue, so the hole is detectable.
+				return
 			}
 			return
 		}
-		// A WEDGED-but-alive pipe is the case that must not deadlock us: a consumer
-		// that has stopped reading produces no write error, so sendFailed never trips
-		// and there is nothing to wait for. Bound the wait, then give the frame up.
-		//
-		// Dropping here is not a regression to v2's silent shed: seq was already
-		// stamped in encodeWithSeq above, so this frame's number is CONSUMED and the
-		// consumer sees a gap. That is the whole point of v3 — losing data under
-		// genuine backpressure is survivable, losing it invisibly is not.
+
+		// A WEDGED-but-alive pipe must not deadlock us: a consumer that stopped reading
+		// produces no write error, so sendFailed never trips and there is nothing to
+		// wait for. Bound the wait, then latch — paying the budget per frame would turn
+		// one unresponsive consumer into (frames × budget) of accumulated delay, which
+		// is a hang wearing a bounded wait's clothes.
 		if time.Now().After(deadline) {
-			// LATCH the stall. Paying the budget per frame would multiply one wedged
-			// consumer into (frames × budget) of accumulated delay, which is how a
-			// bounded wait turns back into a hang: the loop stays technically
-			// responsive while every token costs five seconds. Once stalled, stream
-			// frames are shed immediately until the queue actually drains.
 			t.stallMu.Lock()
 			first := !t.streamStalled
 			t.streamStalled = true
@@ -341,8 +372,10 @@ func (t *transport) sendStream(sessionID string, ev HostEvent) {
 				t.diag("host: PROTOCOL GAP — stream backpressure exceeded " +
 					streamBackpressureBudget.String() + "; shedding stream frames until the consumer drains")
 			}
+			t.burnSeq()
 			return
 		}
+
 		select {
 		case <-t.closed:
 			return
@@ -363,13 +396,57 @@ const streamBackpressurePoll = 2 * time.Millisecond
 // never coming back. Generous relative to any real stdout, short relative to a turn.
 const streamBackpressureBudget = 5 * time.Second
 
-// sendSync writes one event directly, bypassing the queue and blocking until the
-// write completes. Used ONLY by the teardown path for the final host:shutdown so
-// the reason reaches Daintree even though Close() will immediately stop the writer
-// goroutine (a queued frame could be lost in the close race). Safe to call from
-// the single teardown goroutine.
+// sendSync emits the FINAL frame of the session (host:shutdown) and guarantees it is
+// last on the wire.
+//
+// "Last" is the whole contract, and bypassing the queue cannot provide it. The writer
+// goroutine may already have dequeued a frame and be waiting on writeMu; a direct
+// write that merely takes the lock first would be followed by that frame, putting an
+// ordinary event AFTER a terminal one. A consumer that correctly stops reading at
+// shutdown would then lose the tail of the turn.
+//
+// So teardown SEALS the stream instead: it stops the writer from accepting anything
+// new, waits for whatever is already in flight to finish, and only then writes. The
+// wait is bounded — a wedged stdout must not hold teardown open forever — and the
+// frame still carries its sequence number, so a consumer can tell a truncated
+// shutdown from a clean one.
 func (t *transport) sendSync(sessionID string, ev HostEvent) {
-	data, err := t.encodeWithSeq(sessionID, ev)
+	// Seal first: writeFrame refuses new frames from here on, so nothing can slip in
+	// behind the shutdown after the drain below.
+	t.writeMu.Lock()
+	t.sealed = true
+	t.writeMu.Unlock()
+
+	// Wait for the writer to finish any frame it had already dequeued.
+	deadline := time.Now().Add(sealDrainBudget)
+	for {
+		t.writeMu.Lock()
+		busy := t.writerBusy
+		t.writeMu.Unlock()
+		if !busy || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(streamBackpressurePoll)
+	}
+
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+	if t.sendFailed {
+		return
+	}
+
+	// Flush what the queue still holds, in order, so the tail of the turn precedes
+	// the terminal frame rather than being discarded with it.
+	t.drainQueuedLocked(sealDrainBudget)
+	if t.sendFailed {
+		return
+	}
+
+	// Stamped last, so its sequence number is genuinely the highest of the session.
+	t.seqMu.Lock()
+	t.seq++
+	data, err := encodeSeq(ev, sessionID, t.seq)
+	t.seqMu.Unlock()
 	if err != nil {
 		t.diag(fmt.Sprintf("host: failed to encode event: %v", err))
 		return
@@ -378,32 +455,16 @@ func (t *transport) sendSync(sessionID string, ev HostEvent) {
 		t.diag(fmt.Sprintf("host: refusing oversize outbound frame (%d bytes)", len(data)))
 		return
 	}
-	// Take writeMu so this direct write can't interleave with a writerLoop frame
-	// still draining from outQ (teardown calls sendSync before Close()).
-	t.writeMu.Lock()
-	defer t.writeMu.Unlock()
-	if t.sendFailed {
-		return
-	}
-	// BARRIER, not a queue jump. sendSync bypasses outQ, so without this drain the
-	// terminal host:shutdown could overtake frames already accepted and be followed
-	// by them on the wire — a consumer that (correctly) stops at shutdown would then
-	// silently lose the tail of the turn, and one that did not would see events after
-	// a terminal event. Flush everything already queued first, so "shutdown is last"
-	// is a property of the stream rather than a hope about timing.
-	//
-	// Bounded: a wedged stdout must not hold teardown open forever, and the drain is
-	// best-effort by construction — the writer may still be mid-frame.
-	t.drainQueuedLocked(streamBackpressureBudget)
-	if t.sendFailed {
-		return
-	}
 	if _, werr := t.out.Write(append(data, '\n')); werr != nil {
 		t.sendFailed = true
 		return
 	}
 	flushWriter(t.out)
 }
+
+// sealDrainBudget bounds how long teardown waits for the writer to go idle and the
+// queue to flush before emitting the terminal frame.
+const sealDrainBudget = 2 * time.Second
 
 // drainQueuedLocked writes every frame currently buffered in outQ, in order. The
 // caller MUST hold writeMu (it writes t.out directly, exactly as writerLoop does).
