@@ -44,15 +44,28 @@ var approvalElicitSchema = &jsonschema.Schema{
 // parent is the server lifetime; each ask is additionally bounded by the approval's own
 // timeout, so a client that accepts the request and never answers costs one goroutine
 // for at most that long rather than for the session's life.
-func elicitNotifier(ss *mcp.ServerSession, approvals *Approvals, timeout time.Duration) func(PendingApproval) {
+func elicitNotifier(parent context.Context, ss *mcp.ServerSession, approvals *Approvals, timeout time.Duration) func(PendingApproval) {
 	if ss == nil {
 		return nil
+	}
+	if parent == nil {
+		parent = context.Background()
 	}
 	if timeout <= 0 {
 		timeout = DefaultApprovalTimeout
 	}
 	return func(pa PendingApproval) {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		// Bounded HERE as well as on the tool surfaces. The elicitation message
+		// interpolates the argument preview, so an unbounded one reached the client
+		// through this path regardless of what the listing and run projections capped —
+		// a bound that only some exits honour is not a bound.
+		pa = boundedApproval(pa)
+		// Derived from the SERVER lifetime, not Background. Background meant a close or
+		// a server shutdown left this goroutine alive until its timer expired — bounded,
+		// so not catastrophic, but it outlived the thing it was asking on behalf of and
+		// contradicted the lifetime this function's own comment claims. Shutdown now
+		// collapses every outstanding elicitation instead of waiting minutes for timers.
+		ctx, cancel := context.WithTimeout(parent, timeout)
 		defer cancel()
 
 		res, err := ss.Elicit(ctx, &mcp.ElicitParams{
@@ -104,5 +117,12 @@ func elicitMessage(pa PendingApproval) string {
 	if pa.Args != "" {
 		msg += "\n\nArguments: " + pa.Args
 	}
-	return msg
+	// The WHOLE message is bounded, not just the fields that went into it. This is a
+	// dialog a client renders — three separately-capped fields still concatenate into
+	// something no one can read, and the elicitation schema gives the answerer one
+	// boolean regardless of how much prose precedes it.
+	return truncateBytes(msg, maxElicitMessageBytes)
 }
+
+// maxElicitMessageBytes bounds the rendered approval prompt.
+const maxElicitMessageBytes = 4 << 10

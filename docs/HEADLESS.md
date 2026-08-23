@@ -271,18 +271,61 @@ than tool results so their cost is paid once, when diagnosing, instead of on eve
 
 | URI | What it is |
 |---|---|
-| `daintree://session/{sessionId}/run/{runId}` | the **complete** event timeline `poll` truncates |
-| `daintree://session/{sessionId}/log` | the tail of the structured debug trace |
+| `daintree://session/{sessionId}/run/{runId}[?fromSeq=N&limit=M]` | the run's event timeline, in pages larger than `poll`'s window |
+| `daintree://session/{sessionId}/log` | the tail of the **server process's** structured debug trace |
 
-The log is **per process, not per session** — `debuglog` keeps one active file, so a
-per-session log would silently redirect earlier sessions' writes into the newest
-session's file. Every session in this server therefore reports the same path; grep it by
-`sessionId` to separate them.
+Read the transcript when a poll reported a non-zero `withheldEvents`. It is **paged**,
+not unbounded — a resource that returned every retained event was the largest single
+response this server could produce, reachable by a caller with no idea how long the run
+was, and it had to be built and encoded in full before anyone could decide it was too
+big. Pass `fromSeq` and `limit`; the response carries `nextSeq`, `remaining`, `complete`
+and `totalEvents`, so you can size the job before you start and know when you have
+reached the end. "Larger than a poll window" is the useful property here; "unbounded"
+never was.
 
-Read the transcript when a poll reported a non-zero `withheldEvents`. Read the log when
-you need what actually happened rather than what the answer claims — it is bounded to
-the last 256 KB (the tail, because that is where a failure is), passed through the
-redactor, and only exists if the session was opened with `debugLog:true`.
+The log is **per process, not per session**, and the URI's session id addresses the
+server rather than isolating anything. `debuglog` keeps one active file — a per-session
+log would silently redirect earlier sessions' writes into the newest session's file — so
+every session in this server reports the same path, and that file contains every
+session's conversation and tool activity. Filter by the `sessionId` field on each line.
+Treat that as a convention, not a boundary: if isolation matters, run one session per
+server process, which is what the default `MaxSessions` is for. Real per-session logs
+need an injected logger rather than a package-global singleton, and that has not been
+built. The read is bounded to the last 256 KB (the tail, because that is where a failure
+is), passed through the redactor, and only exists if the session was opened with
+`debugLog:true`.
+
+### Everything a caller can ask for by the page has a ceiling
+
+A default is not a bound: it protects the caller that does not think about the size, not
+the server from the caller that does. Every model-visible collection therefore has a
+server maximum as well, and asking for more gets you the maximum plus the count you did
+not receive — never an error, and never a silent truncation.
+
+| Surface | Default | Server maximum |
+|---|---|---|
+| `poll` / `ask` events (`maxEvents`) | 40 | 500 |
+| transcript resource page (`limit`) | 500 | 500 |
+| `attention` items (`limit`) | 50 | 200 |
+| pending approvals (per run, and per `approvals` listing) | — | 50 |
+| approval argument preview | — | 4 KB |
+| async operations on a run | — | 100 |
+| text on one event (and one run error, attention title/summary) | — | 8 KB |
+| all event text in one response | — | 256 KB |
+| run content in a poll response | — | 64 KB |
+| debug-log tail | — | 256 KB |
+
+A page *count* is not a size bound — 500 events whose text is unbounded is unbounded — so
+the per-field and aggregate byte budgets above matter as much as the item counts. A
+truncation marker is counted *inside* the stated maximum rather than appended past it.
+
+`attention` pages **inside the runtime**, not after the fetch, and that is load-bearing
+rather than an optimisation: acknowledgement is version-conditional on the exact rows
+read, so a handler that fetched everything and then acknowledged a page would either mark
+rows it never delivered or consume a *newer* version than the one it showed. Because the
+page and the acknowledgement now cover the same rows, `limit` and `acknowledge:true`
+combine safely — only what the page actually carried is marked delivered. `more` says
+another page is waiting.
 
 ### When the binary changes underneath it
 

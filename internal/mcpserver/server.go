@@ -157,6 +157,12 @@ as a formality. Both modes may be refused by the server's launch policy, in whic
 the refusal says so.
 
 When a run needs diagnosing rather than summarising, read its resources instead of
-polling harder: daintree://session/{id}/run/{runId} is the complete timeline poll
-truncates, and daintree://session/{id}/log is the structured trace of every backend
-request and tool call.`
+polling harder: daintree://session/{id}/run/{runId} returns the timeline in pages larger
+than poll's window (append ?fromSeq=N&limit=M; the response reports nextSeq, remaining
+and complete), and daintree://session/{id}/log is the structured trace of every backend
+request and tool call for this whole SERVER PROCESS — filter it by sessionId.
+
+Nothing this server returns is unbounded. Every list has a server maximum as well as a
+default, and asking for more gives you the maximum plus a count of what was withheld —
+never an error, and never a silent truncation. If a response says something was withheld,
+read the rest rather than assuming you saw it all.`

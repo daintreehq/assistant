@@ -525,7 +525,7 @@ func TestRuntimeCallsAreRefusedOnceCloseHasBegun(t *testing.T) {
 	if err := sess.Inject("", "steer this"); !errors.Is(err, ErrNoSession) {
 		t.Errorf("inject on a closing session returned %v, want ErrNoSession", err)
 	}
-	if _, err := sess.Attention(context.Background(), false); !errors.Is(err, ErrNoSession) {
+	if _, _, err := sess.Attention(context.Background(), 0, false); !errors.Is(err, ErrNoSession) {
 		t.Errorf("attention on a closing session returned %v, want ErrNoSession", err)
 	}
 	if _, _, err := sess.AcknowledgeAttention(context.Background(), []string{"q_1"}); !errors.Is(err, ErrNoSession) {

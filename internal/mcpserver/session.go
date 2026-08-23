@@ -42,7 +42,19 @@ type Runtime interface {
 	// watcher findings, timer fires — that accumulated outside a turn. It returns only
 	// events not yet delivered to this caller; acknowledge marks the batch delivered so
 	// the next call reports only what is NEW.
-	Attention(ctx context.Context, acknowledge bool) ([]domain.QueueEvent, error)
+	//
+	// limit bounds the page (0 = unbounded), and it lives HERE rather than in the caller
+	// for two reasons. The inbox is durable and can hold a night's worth of rows, so
+	// paging after the fetch still materializes all of them. And acknowledgement is
+	// version-conditional on the exact rows READ — so a caller that fetched everything
+	// and then acknowledged a page would either mark rows it never delivered, or have to
+	// re-read them and acknowledge a NEWER version than the one it showed, silently
+	// consuming an update nobody saw.
+	//
+	// It reports `more` rather than a count: knowing whether another page exists costs
+	// one extra row, and knowing exactly how many costs a second query over the whole
+	// table.
+	Attention(ctx context.Context, limit int, acknowledge bool) (events []domain.QueueEvent, more bool, err error)
 	// AcknowledgeAttention marks the named inbox rows delivered, reporting how many
 	// matched and which ids did not. Separating it from the read is what makes delivery
 	// at-least-once: a response lost in transit costs a duplicate, not the item.
@@ -1140,11 +1152,11 @@ func (s *Session) Interrupt(expectRunID string) error {
 // Both inbox calls check `closed` first. They reach into the runtime's store, and a
 // session handed out by Get can begin closing before the call arrives — reading a store
 // that teardown is closing is a use-after-free wearing a database's clothes.
-func (s *Session) Attention(ctx context.Context, acknowledge bool) ([]domain.QueueEvent, error) {
+func (s *Session) Attention(ctx context.Context, limit int, acknowledge bool) ([]domain.QueueEvent, bool, error) {
 	if err := s.aliveForRuntimeCall(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return s.runtime.Attention(ctx, acknowledge)
+	return s.runtime.Attention(ctx, limit, acknowledge)
 }
 
 // AcknowledgeAttention consumes the named inbox rows.
@@ -1253,26 +1265,44 @@ func (a *appRuntime) CurrentRunID() string {
 	return a.currentRunID
 }
 
-func (a *appRuntime) Attention(ctx context.Context, acknowledge bool) ([]domain.QueueEvent, error) {
+func (a *appRuntime) Attention(ctx context.Context, limit int, acknowledge bool) ([]domain.QueueEvent, bool, error) {
 	a.attentionMu.Lock()
 	defer a.attentionMu.Unlock()
 	// NotifiedIsNull: only what has not already been handed to this caller. Without the
 	// filter a polling agent re-reads the same completions forever and cannot tell new
 	// work from old — the inbox keeps an event until it is RESOLVED, which is a
 	// different lifecycle from "seen".
-	events, err := a.app.Queue.Digest(ctx, domain.QueueDigestOptions{NotifiedIsNull: true})
+	//
+	// The limit is pushed into the QUERY, and asks for one row more than the page so
+	// "is there another page" is answered without a second count over the whole table.
+	opts := domain.QueueDigestOptions{NotifiedIsNull: true}
+	if limit > 0 {
+		plusOne := limit + 1
+		opts.MaxItems = &plusOne
+	}
+	events, err := a.app.Queue.Digest(ctx, opts)
 	if err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	more := false
+	if limit > 0 && len(events) > limit {
+		more = true
+		events = events[:limit]
 	}
 	// Acknowledging is version-conditional inside the store, so an event a publisher
 	// updated after this read stays un-notified and re-surfaces — an update can never
 	// be stamped away undelivered.
+	//
+	// It marks THESE rows, the exact snapshots being returned. That is why the page has
+	// to be applied before this point rather than by the caller afterwards: marking a
+	// fetch the caller then truncated would stamp rows nobody received, and re-reading
+	// to mark a page would acknowledge a newer version than the one that was shown.
 	if acknowledge && len(events) > 0 {
 		if err := a.app.Queue.MarkNotified(ctx, events); err != nil {
-			return events, err
+			return events, more, err
 		}
 	}
-	return events, nil
+	return events, more, nil
 }
 
 // AcknowledgeAttention marks exactly the named rows delivered.

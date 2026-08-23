@@ -194,7 +194,7 @@ func TestElicitationFailureFallsBackToPolling(t *testing.T) {
 
 // TestElicitNotifierIsNilWithoutASession guards the constructor's own precondition.
 func TestElicitNotifierIsNilWithoutASession(t *testing.T) {
-	if elicitNotifier(nil, NewApprovals(ApprovalDelegate, 0), time.Second) != nil {
+	if elicitNotifier(context.Background(), nil, NewApprovals(ApprovalDelegate, 0), time.Second) != nil {
 		t.Error("a nil client session must produce no notifier")
 	}
 }

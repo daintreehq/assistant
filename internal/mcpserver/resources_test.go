@@ -11,6 +11,7 @@ import (
 	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/redact"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/yosida95/uritemplate/v3"
 )
 
 // resources_test.go covers the two references a driving agent follows when a poll digest
@@ -214,11 +215,31 @@ func TestResourceTemplatesAreDiscoverable(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"daintree://session/{sessionId}/run/{runId}",
+		runTranscriptURITemplate,
 		"daintree://session/{sessionId}/log",
 	} {
 		if !found[want] {
 			t.Errorf("template %q is not advertised", want)
+		}
+	}
+}
+
+// The paging query has to be in the TEMPLATE, or the SDK's regexp match rejects a paged
+// URI and the whole feature is unreachable: the base resource answers, its `remaining`
+// points at a continuation URI, and that URI matches no resource at all.
+func TestTranscriptTemplateMatchesBothPagedAndUnpagedURIs(t *testing.T) {
+	tmpl, err := uritemplate.New(runTranscriptURITemplate)
+	if err != nil {
+		t.Fatalf("the transcript template is not a valid URI template: %v", err)
+	}
+	for _, uri := range []string{
+		"daintree://session/ses_1/run/mrun_1",
+		"daintree://session/ses_1/run/mrun_1?fromSeq=500",
+		"daintree://session/ses_1/run/mrun_1?limit=100",
+		"daintree://session/ses_1/run/mrun_1?fromSeq=500&limit=100",
+	} {
+		if !tmpl.Regexp().MatchString(uri) {
+			t.Errorf("the template does not match %q, so that read reaches no handler", uri)
 		}
 	}
 }

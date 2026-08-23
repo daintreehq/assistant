@@ -139,14 +139,28 @@ func (f *fakeRuntime) InjectPrompt(text string) {
 	f.injected = append(f.injected, text)
 }
 
-func (f *fakeRuntime) Attention(_ context.Context, acknowledge bool) ([]domain.QueueEvent, error) {
+// Attention mirrors the production runtime: the LIMIT is applied here, before anything is
+// acknowledged, and only the rows actually returned are marked. Paging in the caller
+// instead would stamp rows the response never carried.
+func (f *fakeRuntime) Attention(_ context.Context, limit int, acknowledge bool) ([]domain.QueueEvent, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.attErr != nil {
-		return nil, f.attErr
+		return nil, false, f.attErr
+	}
+	page := f.attention
+	more := false
+	if limit > 0 && len(page) > limit {
+		page = page[:limit]
+		more = true
 	}
 	f.acked = acknowledge
-	return f.attention, nil
+	if acknowledge {
+		for _, e := range page {
+			f.ackedIDs = append(f.ackedIDs, e.ID)
+		}
+	}
+	return page, more, nil
 }
 
 func (f *fakeRuntime) AcknowledgeAttention(_ context.Context, ids []string) (int, []string, error) {
@@ -601,16 +615,38 @@ func TestAttentionPeeksByDefaultAndAcksExplicitly(t *testing.T) {
 		t.Errorf("a peek must say what the caller still owes, got note %q", out.Note)
 	}
 
-	// acknowledge:true is still available for a caller that accepts the risk.
+	// acknowledge:true is still available for a caller that accepts the risk. It now
+	// consumes by ID rather than by asking the read to mark everything it touched: the
+	// response is PAGED, and a read that acknowledged its whole fetch would stamp items
+	// the page dropped — losing exactly the reports that arrive nowhere else.
 	yes := true
 	if err := call(t, cs, "daintree.attention", AttentionInput{SessionID: sess.SessionID, Acknowledge: &yes}, &out); err != nil {
 		t.Fatalf("attention: %v", err)
 	}
 	fake.mu.Lock()
-	acked = fake.acked
+	consumed := append([]string(nil), fake.ackedIDs...)
+	readAcked := fake.acked
 	fake.mu.Unlock()
-	if !acked {
+	if !readAcked {
 		t.Error("acknowledge:true must consume")
+	}
+	if len(consumed) == 0 {
+		t.Error("acknowledge:true consumed nothing")
+	}
+	for _, item := range out.Items {
+		found := false
+		for _, id := range consumed {
+			if id == item.ID {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("item %q was returned but not acknowledged", item.ID)
+		}
+	}
+	if len(consumed) != len(out.Items) {
+		t.Errorf("%d items acknowledged but %d returned — the two must match exactly",
+			len(consumed), len(out.Items))
 	}
 
 	// The explicit ack is the supported path, and it is idempotent: a retry after an
@@ -913,7 +949,20 @@ func TestStaleInjectionsAreDiscarded(t *testing.T) {
 	if err := call(t, cs, "daintree.interrupt", SessionRefInput{SessionID: sess.SessionID}, &ActedOutput{}); err != nil {
 		t.Fatalf("interrupt: %v", err)
 	}
-	if fake.discardCount() <= before {
+	// POLLED, not read once. Interrupt discards only while the run it cancelled is still
+	// current — deliberately, so it cannot delete a message belonging to a successor —
+	// and the turn goroutine clears `current` on its own schedule. Reading the counter
+	// the instant interrupt returns therefore races the very ordering the scoping exists
+	// to protect, and this test failed roughly one run in five on that race.
+	discarded := false
+	for i := 0; i < 200 && !discarded; i++ {
+		if fake.discardCount() > before {
+			discarded = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !discarded {
 		t.Error("interrupt must discard buffered injections, or the next turn inherits them")
 	}
 

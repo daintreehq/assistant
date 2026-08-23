@@ -38,9 +38,18 @@ const (
 	RunCancelled RunStatus = "cancelled"
 )
 
-// Event is one recorded step of a run, in the vocabulary the --json stream already
-// uses. Keeping the two vocabularies identical is deliberate: a consumer that learned
-// one can read the other, and docs/HEADLESS.md documents both.
+// Event is one recorded step of a run: a DIGEST of what the runtime emitted, in
+// vocabulary borrowed from the --json stream.
+//
+// It is a projection, not the same schema, and the difference is worth stating because
+// the comment here used to claim they were identical. This shape uses generic `text`,
+// `tool` and `callId` fields; it drops tool ARGUMENTS, the run phase, tool batch/state/
+// progress, and model rate-limit events; and it reduces a skill decision to titles plus
+// a degraded flag. That is the right projection for a polling agent — those are the
+// live-footer events a human watches and a poller pays context for — but a caller told
+// the vocabularies were identical would go looking for fields that are not coming.
+//
+// The full-fidelity record is the debug log, which is what the log resource is for.
 type Event struct {
 	Seq  int    `json:"seq"`
 	Ts   int64  `json:"ts"`
@@ -197,6 +206,13 @@ func (r *Run) WaitForChange(ctx context.Context, sinceSeq int, sinceRev uint64, 
 func (r *Run) AsyncOperations() []AsyncOperation {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.asyncOperationsLocked()
+}
+
+// asyncOperationsLocked copies the ledger. Callers hold r.mu — SnapshotFull uses it to
+// take the ledger in the SAME hold as the events, so a response cannot describe a run
+// state that never existed.
+func (r *Run) asyncOperationsLocked() []AsyncOperation {
 	out := make([]AsyncOperation, 0, len(r.asyncOrder))
 	for _, id := range r.asyncOrder {
 		if op, ok := r.asyncOps[id]; ok {
@@ -227,19 +243,98 @@ func (r *Run) Status() RunStatus {
 // maxEvents. The cap matters: a long orchestration turn produces hundreds of events and
 // the caller is an LLM paying context for every one of them, so poll returns a WINDOW
 // and reports how much it withheld rather than dumping the lot.
+//
+// The window is SLICED, not scanned. Event.Seq is assigned as the index it is appended
+// at (see append), so the events at or after sinceSeq are exactly events[sinceSeq:] —
+// walking the whole list to rediscover that made every poll of a long run O(events) for
+// a window of forty, and a caller polling every second pays it every second.
 func (r *Run) Snapshot(sinceSeq, maxEvents int) (evs []Event, remaining int, st RunStatus, content, errMsg string, stats domain.JsonRunStats, startedAt, endedAt int64) {
+	snap := r.SnapshotFull(sinceSeq, maxEvents)
+	return snap.Events, snap.Remaining, snap.Status, snap.Content, snap.Error,
+		snap.Stats, snap.StartedAt, snap.EndedAt
+}
+
+// RunSnapshot is everything a response needs about a run, read under ONE lock hold.
+//
+// The single hold is the point. Taking the events, then the total count, then the async
+// ledger as three separate reads produced responses describing a run that never existed:
+// a page could report `complete:true, remaining:0` alongside a `totalEvents` that had
+// already grown past it, and a caller stopping on `complete` would silently miss the
+// tail.
+type RunSnapshot struct {
+	Events []Event
+	// Remaining is events past this window.
+	Remaining int
+	// NextSeq is the cursor to continue from — the seq after the last event returned,
+	// NORMALIZED to the tail. An out-of-range cursor used to be echoed straight back, so
+	// a caller that asked for fromSeq 9999 on a ten-event run was told to continue at
+	// 9999 and would then skip every event the run went on to produce.
+	NextSeq int
+	// TotalEvents is the run's full retained length, from the same hold as Events.
+	TotalEvents int
+	Status      RunStatus
+	Content     string
+	Error       string
+	Stats       domain.JsonRunStats
+	StartedAt   int64
+	EndedAt     int64
+	Async       []AsyncOperation
+}
+
+// SnapshotFull reads the whole consistent picture of a run in one lock hold.
+func (r *Run) SnapshotFull(sinceSeq, maxEvents int) RunSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, e := range r.events {
-		if e.Seq >= sinceSeq {
-			evs = append(evs, e)
-		}
+
+	// A negative sinceSeq is "from the start", not an index to subtract from the end.
+	from := sinceSeq
+	if from < 0 {
+		from = 0
 	}
-	if maxEvents > 0 && len(evs) > maxEvents {
-		remaining = len(evs) - maxEvents
-		evs = evs[:maxEvents]
+	if from > len(r.events) {
+		from = len(r.events)
 	}
-	return evs, remaining, r.status, r.content, r.errMsg, r.stats, r.startedAt, r.endedAt
+	window := r.events[from:]
+	remaining := 0
+	if maxEvents > 0 && len(window) > maxEvents {
+		remaining = len(window) - maxEvents
+		window = window[:maxEvents]
+	}
+	// COPIED, not aliased — the returned slice outlives this lock, and r.events grows by
+	// append, which can write into the same backing array a caller is still reading. The
+	// per-event clone covers Event.Skills, which a shallow slice copy leaves shared.
+	evs := make([]Event, 0, len(window))
+	for _, e := range window {
+		evs = append(evs, e.clone())
+	}
+
+	// The cursor is `from` plus what was returned — never the caller's raw sinceSeq, so
+	// a cursor past the tail comes back as the tail rather than as itself.
+	next := from + len(evs)
+
+	return RunSnapshot{
+		Events:      evs,
+		Remaining:   remaining,
+		NextSeq:     next,
+		TotalEvents: len(r.events),
+		Status:      r.status,
+		Content:     r.content,
+		Error:       r.errMsg,
+		Stats:       r.stats,
+		StartedAt:   r.startedAt,
+		EndedAt:     r.endedAt,
+		Async:       r.asyncOperationsLocked(),
+	}
+}
+
+// clone deep-copies the reference fields on an Event. Skills is a slice, so a plain
+// struct copy leaves it aliased to the retained event — a caller could mutate the run's
+// own history, and a JSON encode could race an append.
+func (e Event) clone() Event {
+	if e.Skills != nil {
+		e.Skills = append([]string(nil), e.Skills...)
+	}
+	return e
 }
 
 // settle records the terminal state exactly once and releases anyone waiting on Done.
@@ -267,6 +362,9 @@ func (r *Run) settle(st RunStatus, content, errMsg string) {
 }
 
 // append records one event under the lock, stamping the next seq.
+//
+// Seq IS the index. Snapshot slices on that identity rather than scanning, so anything
+// that inserted, removed or reordered events would silently return the wrong window.
 func (r *Run) append(e Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

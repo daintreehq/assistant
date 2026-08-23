@@ -164,6 +164,11 @@ type Approvals struct {
 	// construction, so it cannot race the per-ask SetNotify rebinding.
 	onChange func(runID string)
 
+	// life is cancelled when the broker is torn down, so a pushed notification bound to
+	// it dies with the session rather than with its own timer.
+	life       context.Context
+	lifeCancel context.CancelFunc
+
 	mu      sync.Mutex
 	pending map[string]*PendingApproval
 	order   []string
@@ -219,10 +224,20 @@ func (a *Approvals) SetOnChange(fn func(runID string)) {
 }
 
 // SetNotify installs the push hook (elicitation). Safe to call before any request.
-func (a *Approvals) SetNotify(fn func(PendingApproval)) {
+//
+// The returned context is cancelled when this broker is torn down (RejectAll), so a
+// notifier can bind an outstanding push to the session's life. Without it an elicitation
+// the client never answered outlived the session that raised it, sitting until its own
+// timeout — bounded, but a session that closes should not leave a question about it
+// still on someone's screen.
+func (a *Approvals) SetNotify(fn func(PendingApproval)) context.Context {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.notify = fn
+	if a.lifeCancel == nil {
+		a.life, a.lifeCancel = context.WithCancel(context.Background())
+	}
+	return a.life
 }
 
 // Confirm is the tool-confirm hook. It runs on the agent's dispatch goroutine and
@@ -471,8 +486,16 @@ func (a *Approvals) RejectRun(runID string) {
 func (a *Approvals) RejectAll() {
 	a.mu.Lock()
 	ids := append([]string(nil), a.order...)
+	cancel := a.lifeCancel
 	a.mu.Unlock()
 	for _, id := range ids {
 		a.Resolve(id, DecisionCancelled)
+	}
+	// Collapse any pushed notification still outstanding. Resolving the approval frees
+	// the DISPATCH, but an elicitation the client has not answered is a separate
+	// goroutine holding a separate request open — and it would otherwise sit until its
+	// own timer, asking about a session that no longer exists.
+	if cancel != nil {
+		cancel()
 	}
 }

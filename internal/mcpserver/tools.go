@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -24,6 +25,152 @@ import (
 // for every event, so poll returns a WINDOW and says how much it withheld rather than
 // dumping a whole orchestration turn.
 const defaultPollEvents = 40
+
+// The server-side ceilings on everything a caller can ask for by the page.
+//
+// Every one of these existed only as a DEFAULT before, which is not a bound: a caller
+// choosing maxEvents:100000 got them, and a caller choosing nothing got a resource that
+// returned a whole orchestration turn. The distinction matters because the caller is a
+// model whose request size can be steered by whatever it has been reading, and because
+// the response has to be held in memory and encoded before anyone can decide it was too
+// big. A default protects the caller that does not think about it; a maximum protects the
+// server from the caller that does.
+//
+// They are clamped rather than refused. A caller that asked for more than the server will
+// give gets what the server will give, plus the count it did not — which is a usable
+// answer, where an error is one more round trip to reach the same page.
+const (
+	// MaxPollEvents caps one poll or transcript page.
+	MaxPollEvents = 500
+	// MaxAttentionItems caps one inbox read. The inbox is durable and unbounded: a
+	// project left running overnight accumulates every watcher finding and async
+	// completion, and the first read after that must not be the whole night.
+	MaxAttentionItems = 200
+	// MaxPendingApprovals caps the parked confirmations reported on a run. A turn cannot
+	// realistically park more than a handful — the first one blocks it — so a list past
+	// this means something is wrong, and truncating it is better than paying for it.
+	MaxPendingApprovals = 50
+	// MaxApprovalPreviewBytes caps the redacted argument preview on ONE approval. Args
+	// can be an entire file's worth of content, and a caller deciding whether to allow a
+	// call needs the shape of them, not all of them.
+	MaxApprovalPreviewBytes = 4096
+	// MaxContentBytes caps the assistant content carried on a run response. The full
+	// text is always available from the run transcript resource; what this stops is a
+	// single poll response carrying a megabyte of prose the caller did not ask for.
+	MaxContentBytes = 64 << 10
+	// MaxEventTextBytes caps the text on ONE event.
+	//
+	// A page count alone does not bound a response: 500 events whose text is unbounded
+	// is unbounded. Event text carries a round's whole assistant answer, a flushed
+	// prose buffer, or a tool result summary, so the per-event cap and the page cap are
+	// both load-bearing — neither is redundant.
+	MaxEventTextBytes = 8 << 10
+	// MaxResponseTextBytes is the AGGREGATE budget across one response's events. Even
+	// with a per-event cap, 500 × 8 KB is four megabytes; this stops the page early and
+	// reports the rest as withheld rather than encoding all of it to find out.
+	MaxResponseTextBytes = 256 << 10
+	// MaxAsyncOperations caps the background-handle ledger reported on a run. It grows
+	// for the life of a long orchestration turn and is re-sent on every poll.
+	MaxAsyncOperations = 100
+)
+
+// clampPageSize folds a caller-supplied page size onto the server's default and maximum.
+func clampPageSize(requested, def, max int) int {
+	if requested <= 0 {
+		requested = def
+	}
+	if requested > max {
+		return max
+	}
+	return requested
+}
+
+// truncateBytes shortens a string to at most max BYTES, cutting on a rune boundary so the
+// result is never invalid UTF-8, and says how much it dropped.
+//
+// Bytes rather than runes because the thing being bounded is the response size, and a
+// rune count says nothing about that.
+func truncateBytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	// The marker is counted INSIDE max, not appended past it. A ceiling that the
+	// truncation itself pushes you over is not a ceiling, and the overshoot compounds:
+	// every event in a page can carry one.
+	//
+	// Its length varies with the byte count it reports, so it is rendered first and the
+	// text is cut to whatever room is left. A max too small to hold even the marker
+	// yields the marker alone — the honest answer, since there is no room to say
+	// anything else.
+	marker := func(dropped int) string {
+		return fmt.Sprintf("\n…[%d more bytes truncated by this server]", dropped)
+	}
+	room := max - len(marker(len(s)))
+	if room < 0 {
+		room = 0
+	}
+	cut := room
+	if cut > len(s) {
+		cut = len(s)
+	}
+	// Walk back off a partial rune. A byte-exact cut through a multi-byte character is
+	// invalid UTF-8, which a JSON encoder silently replaces — so the caller sees
+	// corruption where it should see truncation.
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	out := s[:cut] + marker(len(s)-cut)
+	if len(out) <= max {
+		return out
+	}
+	// The marker alone does not fit. Cut IT rather than let the bound be exceeded — a
+	// caller with a very small budget still needs to see that something was dropped,
+	// and the ceiling has to hold whatever it is set to.
+	trimmed := marker(len(s))
+	if len(trimmed) > max {
+		trimmed = trimmed[:max]
+		// Drop a trailing PARTIAL rune. Testing RuneStart on the last byte is the wrong
+		// check here — for a complete multi-byte rune that byte is a continuation byte,
+		// so it would strip valid characters, and for a partial one it can still leave
+		// an incomplete sequence behind. Decoding the last rune answers the actual
+		// question: is the tail a whole character?
+		for len(trimmed) > 0 {
+			if r, size := utf8.DecodeLastRuneInString(trimmed); r == utf8.RuneError && size <= 1 {
+				trimmed = trimmed[:len(trimmed)-1]
+				continue
+			}
+			break
+		}
+	}
+	return trimmed
+}
+
+// boundedApproval is the ONE projection of a parked approval that leaves this server.
+//
+// It exists because the caps were being applied in one place and bypassed in two: the
+// run projection truncated the argument preview while daintree.approvals returned the
+// whole object, and the elicitation message interpolated the raw string. A 10 MB set of
+// arguments therefore reached a caller through either of the other two paths regardless
+// of MaxApprovalPreviewBytes. A bound that only one of three exits honours is not a bound.
+func boundedApproval(pa PendingApproval) PendingApproval {
+	pa.Args = truncateBytes(pa.Args, MaxApprovalPreviewBytes)
+	pa.Consequence = truncateBytes(pa.Consequence, MaxEventTextBytes)
+	pa.Summary = truncateBytes(pa.Summary, MaxEventTextBytes)
+	return pa
+}
+
+// boundedApprovals projects a list, capped, reporting how many it left out.
+func boundedApprovals(in []PendingApproval, max int) (out []PendingApproval, remaining int) {
+	if len(in) > max {
+		remaining = len(in) - max
+		in = in[:max]
+	}
+	out = make([]PendingApproval, 0, len(in))
+	for _, pa := range in {
+		out = append(out, boundedApproval(pa))
+	}
+	return out, remaining
+}
 
 // DefaultRunDeadline bounds a turn that names no timeoutMs of its own.
 //
@@ -61,6 +208,33 @@ func resolveRunDeadline(timeoutMs int) (time.Duration, error) {
 		return 0, fmt.Errorf(
 			"timeoutMs %d exceeds this server's maximum of %d (%s); a run holds the session and its project lease, "+
 				"so there is no unbounded option", timeoutMs, maxMs, MaxRunDeadline)
+	}
+	return time.Duration(timeoutMs) * time.Millisecond, nil
+}
+
+// resolveApprovalTimeout folds a caller's approvalTimeoutMs onto a Duration, validating
+// the INTEGER first.
+//
+// Same overflow as the run deadline, with a worse ending. time.Duration is int64
+// NANOSECONDS, so a large millisecond count wraps negative — and NewApprovals reads a
+// non-positive timeout as "use the default". A caller asking for an enormous approval
+// window would silently get five minutes, which is the one direction that matters here:
+// the parked dispatch it thought it had an hour to answer is denied while it is still
+// deciding.
+func resolveApprovalTimeout(timeoutMs int) (time.Duration, error) {
+	if timeoutMs < 0 {
+		return 0, fmt.Errorf(
+			"approvalTimeoutMs must not be negative (got %d) — the timeout is the only thing that bounds a parked approval",
+			timeoutMs)
+	}
+	if timeoutMs == 0 {
+		return 0, nil // NewApprovals substitutes DefaultApprovalTimeout.
+	}
+	const maxMs = int64(MaxApprovalTimeout / time.Millisecond)
+	if int64(timeoutMs) > maxMs {
+		return 0, fmt.Errorf(
+			"approvalTimeoutMs %d exceeds this server's maximum of %d (%s); a parked approval holds the whole turn, "+
+				"so there is no unbounded option", timeoutMs, maxMs, MaxApprovalTimeout)
 	}
 	return time.Duration(timeoutMs) * time.Millisecond, nil
 }
@@ -162,6 +336,9 @@ type RunOutput struct {
 	Events    []Event `json:"events"`
 	// NextSeq is what to pass as sinceSeq on the next poll to get only new events.
 	NextSeq int `json:"nextSeq"`
+	// TotalEvents is the run's full retained length, taken in the SAME lock hold as the
+	// events, so it cannot describe a longer run than the page it sits beside.
+	TotalEvents int `json:"totalEvents"`
 	// WithheldEvents is how many events past the window were dropped from this
 	// response. Never silently truncate: a caller that cannot see this would read a
 	// partial timeline as the whole one.
@@ -177,6 +354,11 @@ type RunOutput struct {
 	// maxEvents. Status is "accepted", never "finished" — these settle OUTSIDE the run
 	// and are reported through daintree.attention, never as a late event here.
 	AsyncOperations []AsyncOperation `json:"asyncOperations"`
+	// WithheldAsyncOperations and WithheldApprovals report what these two lists left
+	// out. Neither is ever silently short: a caller reading a truncated async ledger
+	// would conclude work it started had never been accepted.
+	WithheldAsyncOperations int `json:"withheldAsyncOperations,omitempty"`
+	WithheldApprovals       int `json:"withheldApprovals,omitempty"`
 	// PendingApprovals are confirmations this session is PARKED on. A run showing these
 	// is not merely slow — it is stopped until they are answered, which is invisible
 	// from `status` alone.
@@ -194,7 +376,7 @@ type PollInput struct {
 	SessionID string `json:"sessionId"`
 	RunID     string `json:"runId"`
 	SinceSeq  int    `json:"sinceSeq,omitempty" jsonschema:"Return only events with seq >= this. Pass the previous response's nextSeq to read incrementally."`
-	MaxEvents int    `json:"maxEvents,omitempty" jsonschema:"Cap on events in this response. Default 40."`
+	MaxEvents int    `json:"maxEvents,omitempty" jsonschema:"Cap on events in this response. Default 40, clamped to the server maximum of 500. Ask for more and you get 500 plus a withheldEvents count, not an error."`
 	WaitMs    int    `json:"waitMs,omitempty" jsonschema:"Block up to this long for the run to settle before responding. Capped at 120000. Use it to avoid a tight polling loop."`
 }
 
@@ -207,6 +389,10 @@ type ApprovalsOutput struct {
 	DecisionAuthority string            `json:"decisionAuthority" jsonschema:"Who settles these approvals. caller-agent means you do - this is not a human safety boundary."`
 	Pending           []PendingApproval `json:"pending"`
 	Count             int               `json:"count"`
+	// Remaining is parked approvals beyond this page. A turn stops at its FIRST
+	// approval, so a list this long means something is wrong — but truncating it
+	// silently would hide that rather than report it.
+	Remaining int `json:"remaining,omitempty" jsonschema:"Parked approvals beyond this response. Answer these, then list again."`
 	// Note explains an empty list when the reason is the MODE rather than the absence
 	// of mutating work — otherwise "0 pending" reads as "nothing wanted approval".
 	Note string `json:"note,omitempty"`
@@ -275,6 +461,10 @@ type AttentionInput struct {
 	// It stays a pointer so "not supplied" remains distinguishable from an explicit
 	// false, which keeps the field free to change meaning without silently flipping.
 	Acknowledge *bool `json:"acknowledge,omitempty" jsonschema:"Mark the returned items delivered in the same call. Default false. Prefer leaving this unset and calling daintree.attention.ack once you have acted on the items - acknowledging inside the read loses them if this response never arrives."`
+	// Limit bounds the page. The inbox is DURABLE and unbounded — a project left running
+	// overnight accumulates every watcher finding and async completion — so the first
+	// read after a long detachment could otherwise be the whole night in one response.
+	Limit int `json:"limit,omitempty" jsonschema:"Maximum items to return. Default 50, clamped to the server maximum of 200. Items beyond the page stay in the inbox unacknowledged: acknowledge what you got, then read again. Safe to combine with acknowledge - only the items this page actually carried are marked delivered."`
 }
 
 // AttentionAckInput acknowledges inbox items the caller has actually processed.
@@ -319,7 +509,13 @@ type AttentionItem struct {
 // AttentionOutput is the inbox digest.
 type AttentionOutput struct {
 	Items []AttentionItem `json:"items"`
-	Count int             `json:"count"`
+	// More says another page is waiting. A COUNT would need a second query over the
+	// whole inbox; whether one more row exists costs one extra row on the query that
+	// was already running. Never truncate silently: an inbox read is the only report
+	// background work ever makes, and a caller that cannot see it was paged would read a
+	// partial inbox as an empty one.
+	More  bool `json:"more" jsonschema:"Another page of unacknowledged items is waiting. Acknowledge what you received, then read again."`
+	Count int  `json:"count"`
 	// Note says what the caller still owes: unacknowledged items are reported again.
 	Note string `json:"note,omitempty"`
 }
@@ -355,10 +551,9 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 			return nil, SessionOutput{}, fmt.Errorf(
 				"unknown approvals mode %q — use \"decline\", \"delegate\" or \"auto\"", in.Approvals)
 		}
-		if in.ApprovalTimeoutMs < 0 {
-			return nil, SessionOutput{}, fmt.Errorf(
-				"approvalTimeoutMs must not be negative (got %d) — the timeout is the only thing that bounds a parked approval",
-				in.ApprovalTimeoutMs)
+		approvalTimeout, aerr := resolveApprovalTimeout(in.ApprovalTimeoutMs)
+		if aerr != nil {
+			return nil, SessionOutput{}, aerr
 		}
 		// Rejected here rather than trimmed away: an empty entry means the caller built
 		// the array from something that came back blank, and silently dropping it opens a
@@ -375,7 +570,7 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 			StateDir: in.StateDir, LogDir: in.LogDir, DebugLog: in.DebugLog,
 			ProjectID: in.ProjectID, WindowID: in.WindowID,
 			Approvals:       mode,
-			ApprovalTimeout: time.Duration(in.ApprovalTimeoutMs) * time.Millisecond,
+			ApprovalTimeout: approvalTimeout,
 			Skills:          in.Skills,
 		})
 		if err != nil {
@@ -438,7 +633,13 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 		// confirmation can be PUSHED to it rather than only waiting to be polled. Re-bound
 		// per ask because that client is the one currently asking; harmless when the
 		// client cannot elicit, since Elicit then errors and the approval stays parked.
-		sess.Approvals().SetNotify(elicitNotifier(req.Session, sess.Approvals(), sess.ApprovalTimeout()))
+		// Bound by BOTH the server lifetime and this session's. SetNotify hands back a
+		// context cancelled when the broker is torn down, so an elicitation dies with
+		// the session that raised it; the server lifetime covers the case where the
+		// process stops first. Either alone leaves a stale question on someone's screen.
+		approvalLife := sess.Approvals().SetNotify(nil)
+		sess.Approvals().SetNotify(elicitNotifier(
+			joinContexts(lifetime, approvalLife), req.Session, sess.Approvals(), sess.ApprovalTimeout()))
 		deadline, derr := resolveRunDeadline(in.TimeoutMs)
 		if derr != nil {
 			return nil, RunOutput{}, derr
@@ -481,11 +682,7 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 				waitForChange(ctx, run, in.SinceSeq, run.Revision(), in.WaitMs)
 			}
 		}
-		max := in.MaxEvents
-		if max <= 0 {
-			max = defaultPollEvents
-		}
-		return nil, renderRun(run, in.SinceSeq, max, sess.Approvals()), nil
+		return nil, renderRun(run, in.SinceSeq, clampPageSize(in.MaxEvents, defaultPollEvents, MaxPollEvents), sess.Approvals()), nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -546,12 +743,14 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 			return nil, ApprovalsOutput{}, err
 		}
 		mode := sess.Approvals().Mode()
-		pending := sess.Approvals().Pending()
+		all := sess.Approvals().Pending()
+		pending, remaining := boundedApprovals(all, MaxPendingApprovals)
 		out := ApprovalsOutput{
 			Mode:              string(mode),
 			DecisionAuthority: mode.DecisionAuthority(),
 			Pending:           pending,
 			Count:             len(pending),
+			Remaining:         remaining,
 		}
 		if out.Pending == nil {
 			out.Pending = []PendingApproval{}
@@ -615,18 +814,34 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 		// is at-most-once delivery, and these rows are the only report background work
 		// ever makes.
 		ack := in.Acknowledge != nil && *in.Acknowledge
-		events, err := sess.Attention(ctx, ack)
+		// ALWAYS PEEK FIRST, then page, then acknowledge only what the page carried.
+		//
+		// Runtime.Attention(ctx, true) marks everything it RETURNED as notified, and it
+		// cannot know this handler is about to drop a page's worth — so asking it to
+		// acknowledge a read that is then paged would stamp items this response never
+		// carried, permanently losing exactly the reports that arrive nowhere else.
+		// Splitting the read from the acknowledgement lets both bounds hold: the
+		// response is paged, and only the ids actually delivered are consumed.
+		// The page is pushed INTO the runtime, not applied to what it returns. Paging
+		// afterwards would still materialize a night's worth of rows, and — worse —
+		// acknowledgement is version-conditional on the exact rows read, so marking a
+		// fetch the handler then truncated would stamp rows nobody received.
+		limit := clampPageSize(in.Limit, 50, MaxAttentionItems)
+		events, more, err := sess.Attention(ctx, limit, ack)
 		if err != nil {
 			return nil, AttentionOutput{}, err
 		}
-		out := AttentionOutput{Count: len(events), Items: make([]AttentionItem, 0, len(events))}
+		out := AttentionOutput{Count: len(events), More: more, Items: make([]AttentionItem, 0, len(events))}
 		for _, e := range events {
+			// Title and Summary are written by whatever published the row — a watcher, a
+			// tool, a backend — so they are externally sourced and bounded like every
+			// other such string that reaches a response.
 			item := AttentionItem{
 				ID:       e.ID,
 				Severity: string(e.Severity),
 				Source:   string(e.Source),
-				Title:    e.Title,
-				Summary:  e.Summary,
+				Title:    truncateBytes(e.Title, MaxEventTextBytes),
+				Summary:  truncateBytes(e.Summary, MaxEventTextBytes),
 				Count:    e.Count,
 			}
 			if e.Target != nil {
@@ -723,14 +938,65 @@ func describe(s *Session, info *BinaryInfo) SessionOutput {
 	return out
 }
 
+// boundEventText caps each event's text and stops the page once the aggregate budget is
+// spent, returning the events that fit and how many were dropped for the budget.
+//
+// It trims rather than refuses, and it stops rather than encoding the rest to discover
+// the response is too big. The dropped count is folded into withheldEvents, which the
+// caller already reads — so a page shortened for size is indistinguishable, to a
+// consumer, from one shortened for count, and both say how much is left.
+func boundEventText(evs []Event) ([]Event, int) {
+	budget := MaxResponseTextBytes
+	for i := range evs {
+		if budget <= 0 {
+			// Everything from here on is dropped. Reported, never silent.
+			return evs[:i], len(evs) - i
+		}
+		evs[i].Text = truncateBytes(evs[i].Text, MaxEventTextBytes)
+		evs[i].Summary = truncateBytes(evs[i].Summary, MaxEventTextBytes)
+		evs[i].Error = truncateBytes(evs[i].Error, MaxEventTextBytes)
+		budget -= len(evs[i].Text) + len(evs[i].Summary) + len(evs[i].Error)
+	}
+	return evs, 0
+}
+
+// joinContexts returns a context cancelled when EITHER parent is.
+//
+// context has no built-in join, and the alternative — picking one parent — is wrong in
+// both directions here: the server lifetime misses a session closing under a live
+// elicitation, and the session lifetime misses the process stopping. The goroutine ends
+// with the derived context, so it cannot outlive what it is bound to.
+func joinContexts(a, b context.Context) context.Context {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	ctx, cancel := context.WithCancel(a)
+	go func() {
+		defer cancel()
+		select {
+		case <-b.Done():
+		case <-ctx.Done():
+		}
+	}()
+	return ctx
+}
+
 // waitBudget clamps a caller's wait to something this server is willing to hold a
 // request open for.
 func waitBudget(waitMs int) time.Duration {
-	budget := time.Duration(waitMs) * time.Millisecond
-	if budget <= 0 || budget > maxBlockWait {
-		budget = maxBlockWait
+	// Bounded as an INTEGER first. Converting a large millisecond count straight to a
+	// Duration wraps int64 nanoseconds negative, which then reads as non-positive and
+	// takes the same branch as "unset" — so an absurd wait and no wait at all produced
+	// identical behaviour. Here they still converge on the cap, but by a route that says
+	// so rather than by an accident of arithmetic.
+	const maxMs = int64(maxBlockWait / time.Millisecond)
+	if waitMs <= 0 || int64(waitMs) > maxMs {
+		return maxBlockWait
 	}
-	return budget
+	return time.Duration(waitMs) * time.Millisecond
 }
 
 // waitForSettle blocks until the run finishes, the caller gives up, or the (capped)
@@ -776,7 +1042,17 @@ func hasPendingApproval(run *Run, approvals *Approvals) bool {
 
 // renderRun projects a run into its tool response. approvals may be nil (tests).
 func renderRun(run *Run, sinceSeq, maxEvents int, approvals *Approvals) RunOutput {
-	evs, withheld, status, content, errMsg, stats, startedAt, endedAt := run.Snapshot(sinceSeq, maxEvents)
+	// ONE lock hold for the events, the total, the outcome and the async ledger — see
+	// RunSnapshot. Reading them separately produced responses describing a run state
+	// that never existed.
+	snap := run.SnapshotFull(sinceSeq, maxEvents)
+	evs, withheld := snap.Events, snap.Remaining
+	status, content, errMsg := snap.Status, snap.Content, snap.Error
+	stats, startedAt, endedAt := snap.Stats, snap.StartedAt, snap.EndedAt
+	// Bound the events themselves, not just how many of them there are. A page count
+	// alone is not a size bound when each event's text can be a whole round's answer.
+	evs, droppedForBudget := boundEventText(evs)
+	withheld += droppedForBudget
 	out := RunOutput{
 		RunID:          run.ID,
 		SessionID:      run.SessionID,
@@ -789,28 +1065,47 @@ func renderRun(run *Run, sinceSeq, maxEvents int, approvals *Approvals) RunOutpu
 	}
 	// nextSeq is the seq AFTER the last event returned, so an incremental caller never
 	// re-reads nor skips. With a withheld tail it is the next withheld event, not the
-	// end of the timeline.
-	out.NextSeq = sinceSeq
-	if len(evs) > 0 {
-		out.NextSeq = evs[len(evs)-1].Seq + 1
+	// end of the timeline. It comes from the snapshot, normalized to the tail — echoing
+	// a caller's out-of-range cursor back told it to continue at a point every future
+	// event would fall below, so it would skip the whole rest of the run.
+	out.NextSeq = snap.NextSeq
+	if droppedForBudget > 0 {
+		// The size budget shortened the page below the count the snapshot cursor
+		// assumed, so the cursor has to follow the events actually returned.
+		out.NextSeq = snap.NextSeq - droppedForBudget
 	}
-	out.AsyncOperations = run.AsyncOperations()
+	out.TotalEvents = snap.TotalEvents
+	out.AsyncOperations = snap.Async
 	if endedAt > 0 {
 		out.DurationMs = int(endedAt - startedAt)
 	} else {
 		out.DurationMs = int(domain.NowMS() - startedAt)
 	}
 	if approvals != nil {
-		// Only this run's approvals: a stale one from an abandoned turn would read as a
-		// blocker on work that is not actually waiting.
 		// This run's approvals ONLY. A blanket match would report every completed run in
-		// the session as BLOCKED while any turn was parked.
+		// the session as BLOCKED while any turn was parked, and a stale one from an
+		// abandoned turn would read as a blocker on work that is not actually waiting.
+		mine := make([]PendingApproval, 0, 4)
 		for _, pa := range approvals.Pending() {
 			if pa.RunID == run.ID {
-				out.PendingApprovals = append(out.PendingApprovals, pa)
+				mine = append(mine, pa)
 			}
 		}
+		var withheldApprovals int
+		out.PendingApprovals, withheldApprovals = boundedApprovals(mine, MaxPendingApprovals)
+		out.WithheldApprovals = withheldApprovals
 	}
+	// Externally-sourced strings, all of which can be arbitrarily large: a backend can
+	// return a multi-megabyte error, and the async ledger accumulates for the life of a
+	// long run. Bounding the events alone left three ways to blow the same response up.
+	out.Error = truncateBytes(out.Error, MaxEventTextBytes)
+	if len(out.AsyncOperations) > MaxAsyncOperations {
+		out.WithheldAsyncOperations = len(out.AsyncOperations) - MaxAsyncOperations
+		out.AsyncOperations = out.AsyncOperations[:MaxAsyncOperations]
+	}
+	// The full text is always available from the run transcript resource. What this
+	// stops is one poll response carrying a megabyte of prose nobody asked for.
+	out.Content = truncateBytes(out.Content, MaxContentBytes)
 	// Stable empty arrays, never null. A caller loops over these; `omitempty` turning
 	// an empty list into a missing key is a needless special case in every consumer.
 	if out.Events == nil {
