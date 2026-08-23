@@ -38,9 +38,20 @@ type fakeRuntime struct {
 	confirmInSend *ApprovalRequest
 	confirmResult chan bool
 
+	// silent makes Send return cleanly WITHOUT emitting any terminal event — the shape a
+	// runtime with an unwired sink produces, and the one the server must refuse rather
+	// than report as an empty success.
+	silent bool
+	// closeErr makes Close fail, modelling a teardown that leaves the project lease held.
+	closeErr error
+	// closeBlock, when set, holds Close open until it is closed — a teardown that hangs,
+	// which is the case the whole closing-state machine exists for.
+	closeBlock chan struct{}
+
 	mu           sync.Mutex
 	release      chan struct{}
 	sends        int
+	closeCount   int
 	sendInFlight bool
 	lastRunID    string
 	discards     int
@@ -84,6 +95,11 @@ func (f *fakeRuntime) Send(ctx context.Context, prompt, runID string, sink agent
 	script := f.script
 	confirmReq := f.confirmInSend
 	f.mu.Unlock()
+	// Wrap the sink so the fake can tell whether the script already produced a terminal
+	// event. A real runtime always emits exactly one; the fake must too, and must not
+	// emit a SECOND one over a script that did its own.
+	tracked := &terminalTrackingSink{EventSink: sink}
+	sink = tracked
 	if script != nil {
 		script(sink)
 	}
@@ -100,7 +116,18 @@ func (f *fakeRuntime) Send(ctx context.Context, prompt, runID string, sink agent
 	}()
 	select {
 	case <-release:
-		return "answered: " + prompt, nil
+		reply := "answered: " + prompt
+		// Emit the terminal event a real runtime emits. Returning a reply with no
+		// terminal event is the BROKEN-SINK shape, which the server now refuses as
+		// RUN_EVENT_STREAM_INCOMPLETE — so a fake that did that would be modelling the
+		// bug rather than the runtime. See f.silent for a fake that models it on purpose.
+		f.mu.Lock()
+		silent := f.silent
+		f.mu.Unlock()
+		if !silent && !tracked.sawTerminal {
+			tracked.EventSink.AssistantEnd(reply, "")
+		}
+		return reply, nil
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
@@ -145,14 +172,27 @@ func (f *fakeRuntime) AcknowledgeAttention(_ context.Context, ids []string) (int
 	return acked, unknown, nil
 }
 
-func (f *fakeRuntime) Close() error {
+func (f *fakeRuntime) closes() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.closeCount
+}
+
+func (f *fakeRuntime) Close() error {
+	if f.closeBlock != nil {
+		<-f.closeBlock
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closeCount++
 	if f.sendInFlight {
 		f.closedDuringSend = true
 	}
 	f.closed = true
-	return nil
+	// closeErr models a teardown that fails — a lease that will not release, a store
+	// that will not close. The registry must keep that session VISIBLE rather than
+	// deleting it, because the project is then stuck and nobody can see why.
+	return f.closeErr
 }
 
 func (f *fakeRuntime) letFinish() {
@@ -606,7 +646,7 @@ func TestCloseReleasesTheRuntime(t *testing.T) {
 	if err := call(t, cs, "daintree.ask", AskInput{SessionID: sess.SessionID, Prompt: "long"}, &RunOutput{}); err != nil {
 		t.Fatalf("ask: %v", err)
 	}
-	if err := call(t, cs, "daintree.session.close", SessionRefInput{SessionID: sess.SessionID}, &ActedOutput{}); err != nil {
+	if err := call(t, cs, "daintree.session.close", SessionRefInput{SessionID: sess.SessionID}, &CloseOutput{}); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 	if !fake.isClosed() {
@@ -1278,7 +1318,7 @@ func TestSessionCloseWaitsForAParkedDispatch(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = call(t, cs, "daintree.session.close", SessionRefInput{SessionID: sess.SessionID}, &ActedOutput{})
+		_ = call(t, cs, "daintree.session.close", SessionRefInput{SessionID: sess.SessionID}, &CloseOutput{})
 	}()
 	select {
 	case <-done:
@@ -1572,4 +1612,34 @@ func TestSessionOpenDistinguishesEmptySkillsFromOmitted(t *testing.T) {
 	if got.Skills != nil {
 		t.Fatalf("an omitted skills argument must stay nil so it inherits the default, got %#v", got.Skills)
 	}
+}
+
+// terminalTrackingSink forwards every event and notes whether a TERMINAL one went past.
+//
+// It exists because the server now treats "returned cleanly, emitted no terminal event"
+// as RUN_EVENT_STREAM_INCOMPLETE — the shape an unwired sink produces. A fake runtime has
+// to model a correct runtime (exactly one terminal event) rather than the bug, and a
+// script that emits its own must not then get a second one appended.
+type terminalTrackingSink struct {
+	agent.EventSink
+	sawTerminal bool
+}
+
+func (s *terminalTrackingSink) AssistantEnd(content, reasoning string) {
+	s.sawTerminal = true
+	s.EventSink.AssistantEnd(content, reasoning)
+}
+
+func (s *terminalTrackingSink) AssistantCancelled(content string) {
+	s.sawTerminal = true
+	s.EventSink.AssistantCancelled(content)
+}
+
+// Error is terminal too: Recorder.Error proposes RunFailed, because a turn failure is a
+// sentinel reply rather than a returned error. Without it a fake whose script emits an
+// error got an AssistantEnd appended on top, producing a double-terminal stream no real
+// runtime can produce — and letting a failure test pass for the wrong reason.
+func (s *terminalTrackingSink) Error(message string) {
+	s.sawTerminal = true
+	s.EventSink.Error(message)
 }

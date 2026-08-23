@@ -358,6 +358,28 @@ func (rec *Recorder) flush() {
 	rec.run.append(Event{Type: "assistant:content", Text: text})
 }
 
+// FinalizePartial drains whatever prose was streamed but never terminated, and returns
+// it. Called by the turn goroutine on an exit path that produced NO terminal event.
+//
+// Without it the buffer was simply dropped. The comment on `buffer` promised that a round
+// interrupted before assistant:end "still reports what it had said", and that was true
+// only for the paths that happened to call flush() — a new AssistantStart, an
+// interjection, a skill load. A turn cancelled or errored mid-sentence hit none of them,
+// so the one case the buffer exists for was the one it did not cover.
+//
+// It runs on the turn goroutine after Send has returned, which is the same goroutine the
+// sink callbacks ran on, so the unsynchronized buffer read is safe here in a way it would
+// not be from a poll handler.
+func (rec *Recorder) FinalizePartial() string {
+	if rec.buffer == "" {
+		return ""
+	}
+	text := rec.buffer
+	rec.buffer = ""
+	rec.run.append(Event{Type: "assistant:partial", Text: text})
+	return text
+}
+
 // --- agent.EventSink ---
 
 // Phase, ToolBatch, ToolState and ToolProgress are live-footer vocabulary for a human
@@ -385,7 +407,17 @@ func (rec *Recorder) AssistantEnd(content, _ string) {
 	rec.propose(RunSucceeded, content, "")
 }
 
+// AssistantCancelled records an interrupted turn.
+//
+// The buffer is dropped ONLY when the cancellation carried content of its own. The real
+// agent emits AssistantCancelled("") — it has no final answer to give — and clearing the
+// buffer there threw away the one account of what the turn had been saying, which is
+// precisely what the buffer exists to keep. The partial is promoted to the cancellation's
+// content instead, so a caller reading the run sees the prose rather than a sentinel.
 func (rec *Recorder) AssistantCancelled(content string) {
+	if content == "" {
+		content = rec.buffer
+	}
 	rec.buffer = ""
 	rec.run.append(Event{Type: "assistant:cancelled", Text: content})
 	rec.propose(RunCancelled, content, "")
@@ -452,8 +484,21 @@ func (rec *Recorder) ToolResult(ev agent.ToolResultEvent) {
 }
 
 func (rec *Recorder) Error(message string) {
+	// Whatever was streamed before the failure is the account of what the turn was
+	// doing. It is flushed as its own event AND carried as the candidate's content, so a
+	// caller polling the run gets the prose rather than only the error sentinel.
+	partial := rec.buffer
 	rec.flush()
 	rec.run.append(Event{Type: "error", Text: message})
+	if partial != "" {
+		rec.mu.Lock()
+		if rec.candidate == nil {
+			rec.candidate = &terminalCandidate{status: RunFailed, content: partial, errMsg: message}
+			rec.mu.Unlock()
+			return
+		}
+		rec.mu.Unlock()
+	}
 	// An Error event is fatal for the turn but Send still returns normally (turn
 	// failures are sentinel replies, not errors), so record it as the terminal
 	// candidate or the run would settle `success` off the backstop.

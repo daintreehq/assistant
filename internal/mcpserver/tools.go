@@ -25,6 +25,46 @@ import (
 // dumping a whole orchestration turn.
 const defaultPollEvents = 40
 
+// DefaultRunDeadline bounds a turn that names no timeoutMs of its own.
+//
+// Generous relative to a real orchestration turn, which spawns agents and waits on them —
+// the bound exists to clear a WEDGED run, not to hurry a slow one. A run that is
+// genuinely still working past this is doing something the caller should be told about
+// rather than left waiting on indefinitely.
+const DefaultRunDeadline = 30 * time.Minute
+
+// MaxRunDeadline is the ceiling on a caller-supplied timeoutMs. The deadline is the only
+// thing that reclaims a session from a run that will never finish, so a caller must not
+// be able to stretch it to the point where it stops being one.
+const MaxRunDeadline = 2 * time.Hour
+
+// resolveRunDeadline folds a caller's timeoutMs onto this server's bounds.
+//
+// A non-positive value takes the default rather than meaning "no limit": "unbounded" is
+// not a thing this surface offers, for the same reason the approval timeout has no off
+// switch — the run holds the session, and with it the project's owner lease.
+//
+// The millisecond value is validated as an INTEGER before it becomes a Duration.
+// time.Duration is int64 NANOSECONDS, so multiplying a large millisecond count overflows
+// and wraps negative, which then reads as "non-positive" and silently becomes the
+// default — a caller asking for an enormous timeout would get 30 minutes and no
+// indication that its number had been thrown away.
+func resolveRunDeadline(timeoutMs int) (time.Duration, error) {
+	if timeoutMs < 0 {
+		return 0, fmt.Errorf("timeoutMs must not be negative (got %d)", timeoutMs)
+	}
+	if timeoutMs == 0 {
+		return DefaultRunDeadline, nil
+	}
+	const maxMs = int64(MaxRunDeadline / time.Millisecond)
+	if int64(timeoutMs) > maxMs {
+		return 0, fmt.Errorf(
+			"timeoutMs %d exceeds this server's maximum of %d (%s); a run holds the session and its project lease, "+
+				"so there is no unbounded option", timeoutMs, maxMs, MaxRunDeadline)
+	}
+	return time.Duration(timeoutMs) * time.Millisecond, nil
+}
+
 // maxBlockWait caps `ask` in block mode. It is deliberately short relative to a real
 // orchestration turn: block mode is for quick questions, and anything longer must go
 // async or the MCP client's own request timeout decides the outcome instead of us.
@@ -74,7 +114,24 @@ type OpenInput struct {
 type SessionOutput struct {
 	SessionID string       `json:"sessionId"`
 	Facts     RuntimeFacts `json:"facts"`
-	Busy      bool         `json:"busy"`
+	// State is open, closing, or close-failed. A closing session cannot take work; a
+	// close-failed one may still be holding the project's owner lease.
+	State string `json:"state" jsonschema:"open, closing, or close-failed. close-failed means the project lease may still be held."`
+	Busy  bool   `json:"busy"`
+	// CurrentRunID names the turn in flight, or "" when idle. It is here for RESPONSE
+	// LOSS: an ask whose response never arrived leaves a caller knowing only that the
+	// session is busy, and a retry returns the same unhelpful refusal. This is the fact
+	// that turns "something is running" back into "poll this".
+	CurrentRunID string `json:"currentRunId,omitempty" jsonschema:"The runId of the turn in flight, if any. Use it to recover a handle you lost."`
+	// RecentRuns recovers a handle AFTER the run finished, which is the case a fast run
+	// lands in: currentRunId is already empty, and a retried ask on an idle session is
+	// accepted and simply does the work twice.
+	RecentRuns []RunSummary `json:"recentRuns" jsonschema:"The most recent runs, newest first, with a short echo of each prompt. Use this to find a runId whose ask response you never received."`
+	// CloseStartedAt is when teardown began on a closing/close-failed session, so a
+	// caller can tell "just started" from "stuck".
+	CloseStartedAt int64 `json:"closeStartedAt,omitempty"`
+	// CloseError is why a close-failed session did not tear down.
+	CloseError string `json:"closeError,omitempty"`
 	// Warnings surface conditions that will silently ruin a run if unnoticed —
 	// principally a degraded MCP connection and a binary that has been rebuilt since
 	// this server started.
@@ -91,6 +148,10 @@ type AskInput struct {
 	Prompt    string `json:"prompt" jsonschema:"What to ask the assistant."`
 	Wait      bool   `json:"wait,omitempty" jsonschema:"Block until the turn finishes instead of returning a handle. Only for quick questions - an orchestration turn takes minutes and will exceed the wait cap. Default false."`
 	WaitMs    int    `json:"waitMs,omitempty" jsonschema:"How long to block when wait is true, in milliseconds. Capped at 120000. On expiry the run keeps going and you poll it."`
+	// TimeoutMs bounds the RUN, which is a different thing from WaitMs bounding this
+	// CALL. Letting the wait expire leaves the turn going; letting the deadline expire
+	// cancels it.
+	TimeoutMs int `json:"timeoutMs,omitempty" jsonschema:"How long this RUN may take before it is cancelled, in milliseconds. Not the same as waitMs, which only bounds how long this call blocks. Defaults to 1800000 (30 minutes) and is capped by the server; there is no unbounded option, because a run holds the session and its project lease."`
 }
 
 // RunOutput is the state of one run: its outcome so far plus a window of its events.
@@ -164,6 +225,19 @@ type ApproveInput struct {
 	// looking at instead of a bare "not found".
 	RunID   string `json:"runId,omitempty" jsonschema:"The runId you were watching when you decided, from daintree.ask. Recommended: a decision that arrives after its turn ended is rejected rather than applied to a successor."`
 	Approve bool   `json:"approve" jsonschema:"true to allow the tool call, false to refuse it. Refusing lets the turn continue without that call."`
+}
+
+// CloseOutput is what session.close reports.
+//
+// It carries a STATE rather than only a boolean because the three outcomes a caller must
+// tell apart — I closed it, someone already had, it would not close — are not the same
+// answer with a different flag. The third one means a project lease is still held.
+type CloseOutput struct {
+	// Acted is true only for the call that performed the teardown.
+	Acted bool `json:"acted"`
+	// State is "closed", "already-closed", "closing", or "close-failed".
+	State   string `json:"state" jsonschema:"closed, already-closed, closing (teardown is still running; it stays listed until it finishes), or close-failed (the project lease may still be held and only restarting this server releases it)."`
+	Message string `json:"message,omitempty"`
 }
 
 // SessionRefInput is the shape of every tool that only needs a session.
@@ -327,12 +401,25 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "daintree.session.close",
 		Description: "Close a session: cancel any running turn, tear down the runtime, release the project lease. " +
-			"Always close a session you opened — the lease blocks other processes from opening the same project.",
-	}, func(_ context.Context, _ *mcp.CallToolRequest, in SessionRefInput) (*mcp.CallToolResult, ActedOutput, error) {
-		if err := reg.Close(in.SessionID); err != nil {
-			return nil, ActedOutput{}, err
+			"Always close a session you opened — the lease blocks other processes from opening the same project. " +
+			"Safe to retry: closing an already-closed session reports acted:false rather than failing, so a lost response " +
+			"costs a duplicate call and not a stuck lease.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SessionRefInput) (*mcp.CallToolResult, CloseOutput, error) {
+		res, err := reg.Close(ctx, in.SessionID)
+		out := CloseOutput{Acted: res.Acted, State: res.State, Message: res.Message}
+		if err != nil {
+			// IsError with a NIL Go error, not a returned error. The SDK short-circuits
+			// on a handler error and never marshals the typed output — so returning one
+			// would have thrown away the very fields that say a project lease is stuck,
+			// leaving the caller a text blob to parse. Flag it as a failure AND hand back
+			// the structured state.
+			out.Message = err.Error()
+			return &mcp.CallToolResult{IsError: true}, out, nil
 		}
-		return nil, ActedOutput{Acted: true, Message: "session closed"}, nil
+		if out.Message == "" {
+			out.Message = "session closed and its project lease released"
+		}
+		return nil, out, nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -352,7 +439,11 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 		// per ask because that client is the one currently asking; harmless when the
 		// client cannot elicit, since Elicit then errors and the approval stays parked.
 		sess.Approvals().SetNotify(elicitNotifier(req.Session, sess.Approvals(), sess.ApprovalTimeout()))
-		run, err := sess.Ask(lifetime, in.Prompt)
+		deadline, derr := resolveRunDeadline(in.TimeoutMs)
+		if derr != nil {
+			return nil, RunOutput{}, derr
+		}
+		run, err := sess.Ask(lifetime, in.Prompt, deadline)
 		if err != nil {
 			return nil, RunOutput{}, err
 		}
@@ -587,7 +678,31 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 func describe(s *Session, info *BinaryInfo) SessionOutput {
 	facts := s.Facts()
 	snap := info.Snapshot()
-	out := SessionOutput{SessionID: s.ID, Facts: facts, Busy: s.Busy(), Server: snap}
+	state := s.State()
+	// ONE snapshot: reading busy and the current run separately could report busy:true
+	// with no current run (or the reverse) when a turn settles between the two reads —
+	// a state the session was never actually in.
+	live := s.Live()
+	out := SessionOutput{
+		SessionID:      s.ID,
+		Facts:          facts,
+		State:          string(state),
+		Busy:           live.Busy,
+		CurrentRunID:   live.CurrentRunID,
+		RecentRuns:     live.Recent,
+		CloseStartedAt: s.CloseStartedAt(),
+		Server:         snap,
+	}
+	if out.RecentRuns == nil {
+		// Stable empty array, never null — a caller loops over this.
+		out.RecentRuns = []RunSummary{}
+	}
+	if err := s.CloseError(); err != nil {
+		out.CloseError = err.Error()
+		out.Warnings = append(out.Warnings,
+			"This session did not close cleanly, so its project owner lease may still be held and other processes "+
+				"cannot open the project. Retry daintree.session.close; if it keeps failing, restart the MCP server.")
+	}
 	if !facts.MCPConnected {
 		out.Warnings = append(out.Warnings,
 			"MCP is not connected: this session runs in degraded local mode and every terminal/orchestration tool will report 'not connected'.")

@@ -139,6 +139,28 @@ var (
 		"use daintree.poll to watch it, daintree.inject to steer it, or daintree.interrupt to abandon it")
 )
 
+// BusyError is ErrBusy with the live run named.
+//
+// The bare sentinel told a caller that recovered from a lost ask response exactly what it
+// already knew — something is running — and left it with no handle. Carrying the id makes
+// the refusal actionable in the one case where the caller genuinely does not have it.
+type BusyError struct {
+	CurrentRunID string
+}
+
+func (e *BusyError) Error() string {
+	if e.CurrentRunID == "" {
+		return ErrBusy.Error()
+	}
+	return fmt.Sprintf("this session already has a turn in flight (run %s) — do not retry; "+
+		"call daintree.poll with runId %s to watch it, daintree.inject to steer it, or daintree.interrupt to abandon it",
+		e.CurrentRunID, e.CurrentRunID)
+}
+
+// Is makes errors.Is(err, ErrBusy) work on a BusyError, so existing callers that test the
+// sentinel keep working while new ones can pull the id out with errors.As.
+func (e *BusyError) Is(target error) bool { return target == ErrBusy }
+
 // Session is one live assistant conversation held open across MCP tool calls.
 type Session struct {
 	ID      string
@@ -151,6 +173,23 @@ type Session struct {
 	// order keeps run ids oldest-first so pruning drops the oldest completed run.
 	order  []string
 	closed bool
+	// closeStarted and closeErr make a session's teardown observable. A close that hangs
+	// or fails is exactly the case a caller needs to SEE — the runtime may still hold
+	// the project lease — and "gone from the list" is the one report that cannot
+	// distinguish it from a clean close.
+	closeStarted int64
+	closeErr     error
+	// closeDone closes when teardown finishes, so a second caller — a concurrent
+	// session.close, or CloseAll at shutdown — can WAIT on the close already running
+	// instead of either starting a second one over the same runtime or returning a
+	// stale success while the first is still unwinding.
+	closeDone chan struct{}
+	// closeSettled closes after the REGISTRY has finished its bookkeeping for this
+	// teardown — removed from `closing`, and reinserted as close-failed if it failed.
+	// It is separate from closeDone because the two become true at different moments,
+	// and a caller told "closed" before the bookkeeping lands would see the session in
+	// whichever map it happened to catch. Owned by Registry.Close.
+	closeSettled chan struct{}
 	// turns tracks the turn GOROUTINES, which is not the same as the runs being
 	// settled. The recorder settles a run on assistant:end — while Send is still
 	// unwinding, persisting the conversation and closing out its round. Waiting on the
@@ -162,6 +201,22 @@ type Session struct {
 // an agent accumulates runs indefinitely otherwise, and every one retains its whole
 // event list. Completed runs are dropped oldest-first; a live run is never pruned.
 const maxRunsPerSession = 32
+
+// ErrEventStreamIncomplete is the outcome of a turn that returned cleanly but emitted no
+// terminal event.
+//
+// It is deliberately a FAILURE. The runtime's contract is that a turn ends with a
+// terminal event; a return with none is a broken event stream, and the state that
+// produces it — a sink that was never wired — is one this package has already shipped
+// once. Reporting it as an empty success is how that bug stayed invisible: the caller was
+// told the run completed, so nothing looked wrong except that nothing had happened.
+// errRunDeadline is the cause attached to a run's own timeout, so an expiry can be told
+// apart from the server lifetime expiring around it.
+var errRunDeadline = errors.New("run deadline exceeded")
+
+var ErrEventStreamIncomplete = errors.New("RUN_EVENT_STREAM_INCOMPLETE: the turn returned without " +
+	"emitting a terminal event, so this run has no trustworthy outcome. Any content below is diagnostic, " +
+	"not an answer — treat the work as not done and check the session's debug log")
 
 // RunMismatchError is returned when a run-correlated call names a run that is no longer
 // the live one. It carries BOTH ids because the only useful recovery is to look at what
@@ -198,8 +253,33 @@ type Registry struct {
 
 	mu       sync.Mutex
 	sessions map[string]*Session
-	closed   bool
+	// opening counts opens that have passed the cap check but not yet registered. The
+	// cap is about RESOURCES, and the expensive part — the project lease, the database,
+	// the MCP connection — all happens before registration. Counting only the map let
+	// 100 concurrent opens under MaxSessions:1 every one of them build a full runtime
+	// and contend for the same lease, with 99 torn down afterwards. Reserving here caps
+	// the work rather than the bookkeeping.
+	opening int
+	// closing holds sessions whose teardown has started but not finished, so a failed or
+	// slow close stays VISIBLE instead of vanishing from session.list while the runtime
+	// may still hold the project lease.
+	closing map[string]*Session
+	closed  bool
 }
+
+// SessionState is where a session is in its lifecycle, as reported to a caller.
+type SessionState string
+
+const (
+	// StateOpen is a session that can take work.
+	StateOpen SessionState = "open"
+	// StateClosing is a session whose teardown is running. It cannot take work and its
+	// lease may still be held.
+	StateClosing SessionState = "closing"
+	// StateCloseFailed is a session whose teardown returned an error or exceeded its
+	// deadline. The lease is believed still held; the process may need restarting.
+	StateCloseFailed SessionState = "close-failed"
+)
 
 // SetPolicy installs the process policy. Call it once, at launch, before any session is
 // opened; there is deliberately no tool that reaches it — a ceiling a session argument
@@ -237,7 +317,12 @@ func NewUnconfinedRegistry(lifetime context.Context, factory RuntimeFactory) *Re
 	if lifetime == nil {
 		lifetime = context.Background()
 	}
-	return &Registry{factory: factory, lifetime: lifetime, sessions: map[string]*Session{}}
+	return &Registry{
+		factory:  factory,
+		lifetime: lifetime,
+		sessions: map[string]*Session{},
+		closing:  map[string]*Session{},
+	}
 }
 
 // Open builds a runtime and registers a session for it.
@@ -247,30 +332,57 @@ func (r *Registry) Open(ctx context.Context, p OpenParams) (*Session, error) {
 		r.mu.Unlock()
 		return nil, errors.New("server is shutting down")
 	}
-	// Checked BEFORE the factory runs. A policy violation must not have already
-	// acquired a project lease, opened a database, or connected MCP by the time it is
-	// refused — the refusal would then be the only thing that was not a side effect.
+	// RESERVE the slot, do not merely count it. The cap is about resources, and every
+	// expensive thing an open does — taking the project lease, opening the database,
+	// connecting MCP — happens below, before registration. Counting only the registered
+	// map meant 100 concurrent opens under MaxSessions:1 all passed, all built a full
+	// runtime, all contended for the same lease, and 99 were torn down after the work
+	// was already done. Counting in-flight opens caps the WORK.
 	//
-	// This early check is an OPTIMISATION, not the enforcement point: it is read
-	// outside the lock the registration takes, so the session count it sees can be
-	// stale. The authoritative re-check happens below, under the lock that inserts.
-	policy, open := r.policy, len(r.sessions)
-	r.mu.Unlock()
+	// A session that is closing still counts: its runtime may still hold the lease, so
+	// admitting a replacement now is admitting two.
+	policy, live := r.policy, len(r.sessions)+len(r.closing)+r.opening
 	if policy != nil {
-		if err := policy.Check(p, open); err != nil {
+		if err := policy.Check(p, live); err != nil {
+			r.mu.Unlock()
 			return nil, err
 		}
 	}
+	r.opening++
+	r.mu.Unlock()
+
+	// Released on EVERY exit from here on, including the panic path — a leaked
+	// reservation is a cap that ratchets down until the server admits nothing.
+	//
+	// `released` lets the registration below give the slot back under the SAME lock hold
+	// that inserts the session. Doing it in this defer alone left a window where an
+	// opener was counted in BOTH sessions and opening, so a concurrent opener under a
+	// cap of 2 saw 1+2-1 == 2 and refused itself even though the two of them exactly
+	// filled the cap.
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			r.opening--
+		}
+	}
+	defer func() {
+		r.mu.Lock()
+		release()
+		r.mu.Unlock()
+	}()
 
 	rt, err := r.factory(ctx, r.lifetime, p)
 	if err != nil {
 		return nil, err
 	}
 	s := &Session{
-		ID:      rt.SessionID(),
-		runtime: rt,
-		facts:   rt.Facts(),
-		runs:    map[string]*Run{},
+		ID:           rt.SessionID(),
+		runtime:      rt,
+		facts:        rt.Facts(),
+		runs:         map[string]*Run{},
+		closeDone:    make(chan struct{}),
+		closeSettled: make(chan struct{}),
 	}
 	// A run parked on an approval produces no further events of its own, so without
 	// this a long poll would sit through its entire budget while the turn was STOPPED
@@ -305,18 +417,30 @@ func (r *Registry) Open(ctx context.Context, p OpenParams) (*Session, error) {
 		_ = rt.Close()
 		return nil, fmt.Errorf("session id %q is already open", s.ID)
 	}
-	// THE session cap is enforced here, not by the early check above. Building the
-	// runtime is slow (lease, database, MCP connect) and must not hold this lock, so
-	// two concurrent opens can both pass a count read before either had registered —
-	// admitting two sessions under a cap of one. Re-checking under the insert lock is
-	// what actually makes the cap hold; the runtime we just built is torn down rather
-	// than leaked, exactly as the clash path above does.
-	if policy != nil && policy.MaxSessions > 0 && len(r.sessions) >= policy.MaxSessions {
-		r.mu.Unlock()
-		_ = rt.Close()
-		return nil, &PolicyError{Field: "session.open", Reason: fmt.Sprintf(
-			"this server allows %d concurrent session(s) and %d are open; close one first",
-			policy.MaxSessions, len(r.sessions))}
+	// The cap is re-checked here as well as reserved above. The reservation makes the
+	// count correct for concurrent opens; this backstop covers the case the reservation
+	// cannot — an open that was admitted while a slot was free and arrives after
+	// something else registered under a policy installed in between. The runtime we just
+	// built is torn down rather than leaked, exactly as the clash path above does.
+	//
+	// r.opening excludes THIS open (it is still counted, so subtract one) — otherwise a
+	// single open under MaxSessions:1 would refuse itself.
+	// Give the reservation back FIRST, so this open is counted once — as a session —
+	// rather than simultaneously as a session and as an opening.
+	release()
+	// The cap is re-checked here as well as reserved above, as a backstop for an
+	// interleaving the reservation cannot cover on its own. It uses the policy captured
+	// BEFORE the factory ran, deliberately: SetPolicy is a launch-time call, so there is
+	// no mid-open policy change to catch, and re-reading would mean an open could be
+	// judged by two different ceilings.
+	if policy != nil && policy.MaxSessions > 0 {
+		if live := len(r.sessions) + len(r.closing) + r.opening; live >= policy.MaxSessions {
+			r.mu.Unlock()
+			_ = rt.Close()
+			return nil, &PolicyError{Field: "session.open", Reason: fmt.Sprintf(
+				"this server allows %d concurrent session(s) and %d are open or closing; close one first",
+				policy.MaxSessions, live)}
+		}
 	}
 	r.sessions[s.ID] = s
 	r.mu.Unlock()
@@ -341,52 +465,271 @@ func (r *Registry) Get(id string) (*Session, error) {
 func (r *Registry) List() []*Session {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]*Session, 0, len(r.sessions))
+	out := make([]*Session, 0, len(r.sessions)+len(r.closing))
 	for _, s := range r.sessions {
+		out = append(out, s)
+	}
+	// CLOSING sessions are listed too. They count against MaxSessions — their runtime
+	// may still hold the project lease, so admitting a replacement would admit two — and
+	// a session that consumes capacity while being invisible is capacity nobody can
+	// account for. Under MaxSessions:1 a hung close otherwise refused every new session
+	// while session.list reported none, which is the least debuggable shape this can
+	// take. Their State() says closing.
+	for _, s := range r.closing {
 		out = append(out, s)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
-// Close closes one session: cancel any live turn, tear the runtime down, release the
-// lease. Idempotent.
-func (r *Registry) Close(id string) error {
-	r.mu.Lock()
-	s, ok := r.sessions[id]
-	delete(r.sessions, id)
-	r.mu.Unlock()
-	if !ok {
-		return fmt.Errorf("%w: %q", ErrNoSession, id)
-	}
-	return s.close()
+// CloseResult describes what a close call actually did, so a retry after a lost response
+// is a report rather than an error.
+type CloseResult struct {
+	// Acted is true only for the call that performed the teardown. A retry that finds
+	// the session already gone reports false and succeeds.
+	Acted bool
+	// State is where the session ended up: closed, or close-failed.
+	State string
+	// Message explains a non-acting outcome.
+	Message string
 }
+
+// Close closes one session: cancel any live turn, tear the runtime down, release the
+// lease.
+//
+// It is IDEMPOTENT in the sense that matters — a retry after a lost response is not an
+// error. Returning "no such session" for a close that had already succeeded made the one
+// call a caller is told to always make into the one that looks like it failed, so a
+// harness either ignored the error (and could not tell a real one) or retried forever.
+//
+// The session stays visible while it closes. Deleting it up front meant a teardown that
+// hung or failed took the session out of session.list while its runtime might still hold
+// the project lease — the caller could not retry, could not see it, and had no way to
+// learn the lease was stuck.
+func (r *Registry) Close(ctx context.Context, id string) (CloseResult, error) {
+	r.mu.Lock()
+	if s, closing := r.closing[id]; closing {
+		r.mu.Unlock()
+		// Another call owns the teardown. Wait for it under the CALLER's context rather
+		// than starting a second one over the same runtime — the caller asked whether
+		// this session is closed, and "someone else is closing it" is not that answer.
+		return r.awaitClose(ctx, id, s, false)
+	}
+	s, ok := r.sessions[id]
+	if !ok {
+		r.mu.Unlock()
+		// Never opened, or already closed and forgotten. Both are the state the caller
+		// asked for, so neither is a failure.
+		return CloseResult{Acted: false, State: "already-closed",
+			Message: "no session with that id is open; it was closed already, or never existed"}, nil
+	}
+	if err := s.CloseError(); err != nil {
+		// A teardown that already FAILED is terminal. Runtime.Close tears down an App —
+		// store, MCP client, scheduler, lease — and running it again over a half-closed
+		// one is not a retry, it is a second teardown of something that is already
+		// partly gone. So say so plainly rather than pretending to have tried again.
+		r.mu.Unlock()
+		return CloseResult{Acted: false, State: string(StateCloseFailed), Message: err.Error()},
+			fmt.Errorf("session %q already failed to close and cannot be torn down again; its project lease is "+
+				"believed still held, so restart this MCP server to release it (the OS drops the flock on exit): %w", id, err)
+	}
+	delete(r.sessions, id)
+	r.closing[id] = s
+	// Ownership is claimed HERE, synchronously, before the lock is released. Claiming it
+	// inside the goroutine left a window in which this call's own wait could win the
+	// race, become the owner, and block inside Runtime.Close — which honours no context,
+	// so the deadline that was supposed to release the caller never applied.
+	owner := s.beginClose()
+	r.mu.Unlock()
+
+	// The goroutine is launched EITHER WAY, because this call moved the session into
+	// `closing` either way and something has to move it back out.
+	//
+	// The not-owner case is a shutdown race: CloseAll can claim the teardown between the
+	// lookup above and beginClose. Skipping the goroutine there left the session parked
+	// in `closing` forever — invisible to Get, listed as closing, and permanently
+	// consuming a slot against MaxSessions, which under a cap of one means the server
+	// never admits another session again.
+	//
+	// Teardown itself runs on the SERVER's lifetime, not this tool call's. A close that
+	// hangs must not hold the MCP request handler open: the SDK waits for in-flight
+	// handlers before Run returns, so a wedged handler stopped the server's own CloseAll
+	// from ever running — the process stayed alive holding every project's flock, which
+	// is the exact opposite of what closing a session is for.
+	go func() {
+		// Bookkeeping FIRST, then the signal. A caller woken by closeSettled must find
+		// the registry already consistent — told "closed" before the maps were updated,
+		// it would see the session in whichever map it happened to catch.
+		defer close(s.closeSettled)
+		var err error
+		if owner {
+			err = s.finishClose()
+		} else {
+			// Someone else owns it. Wait, unbounded, for the outcome: this goroutine has
+			// no caller to release, and the bookkeeping below must not run until the
+			// teardown it describes has actually finished.
+			err = s.closeWait(context.Background())
+		}
+		r.mu.Lock()
+		delete(r.closing, id)
+		if err != nil {
+			// Keep it visible as close-failed: the lease is believed still held, and a
+			// caller that cannot see that has no way to know the project is stuck.
+			r.sessions[id] = s
+		}
+		r.mu.Unlock()
+	}()
+
+	return r.awaitClose(ctx, id, s, owner)
+}
+
+// closeReportBudget is how long a session.close call waits for a teardown before
+// reporting that it is still running. Short relative to a hung close, long enough that
+// the ordinary case — which takes milliseconds — still answers "closed".
+const closeReportBudget = 10 * time.Second
+
+// awaitClose waits for a teardown and turns it into a report. acted says whether THIS
+// call is the one that started it.
+func (r *Registry) awaitClose(ctx context.Context, id string, s *Session, acted bool) (CloseResult, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, closeReportBudget)
+	defer cancel()
+
+	err := s.closeWait(waitCtx)
+	if err == nil {
+		// The teardown finished; wait for the registry to reflect it, so the state this
+		// call reports and the state the next session.list shows cannot disagree.
+		select {
+		case <-s.closeSettled:
+		case <-waitCtx.Done():
+		}
+	}
+	switch {
+	case err == nil:
+		if acted {
+			return CloseResult{Acted: true, State: "closed"}, nil
+		}
+		return CloseResult{Acted: false, State: "closed",
+			Message: "another call was already closing this session; it has now finished"}, nil
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		// Still running. NOT an error: the teardown continues on its own goroutine and
+		// the lease will be released when it finishes. Reporting a failure here would
+		// send a caller chasing a problem that may not exist.
+		return CloseResult{Acted: acted, State: string(StateClosing), Message: "teardown is taking longer than " +
+			closeReportBudget.String() + " and is still running; the session stays listed as closing until it " +
+			"finishes, and its project lease is released then"}, nil
+	default:
+		return CloseResult{Acted: acted, State: string(StateCloseFailed), Message: err.Error()},
+			fmt.Errorf("session %q did not close cleanly, and its project lease may still be held: %w", id, err)
+	}
+}
+
+// closeAllBudget bounds server shutdown. A tool that ignores cancellation cannot be
+// killed from inside the process, so the honest choice is to stop WAITING for it and let
+// the OS release that project's flock on exit, rather than let one wedged session hold
+// every other project's lease hostage.
+const closeAllBudget = 20 * time.Second
 
 // CloseAll tears down every session. Called on server shutdown so no process exits
 // still holding a project lease.
+//
+// Sessions close CONCURRENTLY and under a shared deadline. Sequentially, one session
+// whose turn ignored cancellation blocked every session after it in the loop — so a
+// single wedged tool call kept every other project's lease held for as long as the
+// process lived. Concurrency means a stuck one costs only itself; the deadline means it
+// does not cost the exit either.
 func (r *Registry) CloseAll() {
 	r.mu.Lock()
 	r.closed = true
-	all := make([]*Session, 0, len(r.sessions))
+	all := make([]*Session, 0, len(r.sessions)+len(r.closing))
 	for id, s := range r.sessions {
 		all = append(all, s)
 		delete(r.sessions, id)
 	}
+	// Sessions already being torn down are waited on too, under the SAME budget. Left
+	// out, a close that was in flight when the server stopped got no bound at all — and
+	// its lease was exactly the one shutdown exists to release.
+	for _, s := range r.closing {
+		all = append(all, s)
+	}
 	r.mu.Unlock()
-	for _, s := range all {
-		_ = s.close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var wg sync.WaitGroup
+		for _, s := range all {
+			wg.Add(1)
+			go func(s *Session) {
+				defer wg.Done()
+				_ = s.close()
+			}(s)
+		}
+		wg.Wait()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(closeAllBudget):
+		// Deliberately returning with goroutines still running. They are blocked in a
+		// turn that is not coming back, and the process is exiting — the OS releases
+		// what they hold. Waiting longer trades a bounded exit for an unbounded one.
 	}
 }
 
+// close tears the session down, or waits for the teardown already running. Safe to call
+// concurrently: the first caller owns it and every other one waits.
+//
+// Waiting rather than returning early is the point. An early return told a second caller
+// "closed" while the runtime was still unwinding — so shutdown could move on and the
+// process could exit with the store closing underneath a live turn, which is the race
+// this whole path exists to avoid.
 func (s *Session) close() error {
+	if s.beginClose() {
+		return s.finishClose()
+	}
+	return s.closeWait(context.Background())
+}
+
+// beginClose claims ownership of the teardown, reporting whether THIS caller got it.
+//
+// Ownership is claimed separately from running the teardown so a caller can take it,
+// hand the work to a goroutine, and then only ever WAIT. Folding the two together meant
+// whoever reached the function first became the owner — including a caller that meant to
+// wait with a deadline, which then blocked inside Runtime.Close, which honours no
+// context at all.
+func (s *Session) beginClose() bool {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.closed {
-		s.mu.Unlock()
-		return nil
+		return false
 	}
 	s.closed = true
+	s.closeStarted = domain.NowMS()
+	return true
+}
+
+// closeWait blocks until the teardown finishes, and reports its outcome. It NEVER runs
+// the teardown itself.
+//
+// ctx bounds only the wait: a caller that gives up gets an answer, and the close keeps
+// going on the goroutine that owns it.
+func (s *Session) closeWait(ctx context.Context) error {
+	select {
+	case <-s.closeDone:
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.closeErr
+	case <-ctx.Done():
+		return fmt.Errorf("teardown of session %q is still running: %w", s.ID, ctx.Err())
+	}
+}
+
+// finishClose runs the teardown. Only the caller that won beginClose may call it.
+func (s *Session) finishClose() error {
+	s.mu.Lock()
 	current := s.current
 	s.mu.Unlock()
+	defer close(s.closeDone)
 
 	// Cancel the live turn FIRST, then wait for its GOROUTINE — not merely for the run
 	// to settle. Tearing the runtime down under a live Send would close the store and
@@ -398,7 +741,40 @@ func (s *Session) close() error {
 	// dispatch parked on an approval nobody is left to answer.
 	s.runtime.Approvals().RejectAll()
 	s.turns.Wait()
-	return s.runtime.Close()
+	err := s.runtime.Close()
+	s.mu.Lock()
+	s.closeErr = err
+	s.mu.Unlock()
+	return err
+}
+
+// State reports where this session is in its lifecycle.
+func (s *Session) State() SessionState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case s.closeErr != nil:
+		return StateCloseFailed
+	case s.closed:
+		return StateClosing
+	default:
+		return StateOpen
+	}
+}
+
+// CloseStartedAt is when teardown began, or 0. Reported alongside a closing state so a
+// caller can tell "just started" from "stuck for ten minutes".
+func (s *Session) CloseStartedAt() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closeStarted
+}
+
+// CloseError is the last teardown failure, or nil.
+func (s *Session) CloseError() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closeErr
 }
 
 // Facts describes what this session is bound to.
@@ -416,6 +792,86 @@ func (s *Session) Busy() bool {
 	defer s.mu.Unlock()
 	return s.current != nil
 }
+
+// LiveState is a session's run-related facts, read under ONE lock hold.
+//
+// Reading Busy() and CurrentRunID() separately could report busy:true with no current
+// run, or the reverse, because the turn can settle between the two calls — a caller
+// diffing those two fields would see a state the session was never actually in.
+type LiveState struct {
+	Busy         bool
+	CurrentRunID string
+	// Recent is the retained runs, newest first, so a caller that lost an ask response
+	// can recover the handle even after the run finished.
+	Recent []RunSummary
+}
+
+// RunSummary is one retained run, as reported for recovery.
+type RunSummary struct {
+	RunID     string `json:"runId"`
+	Status    string `json:"status"`
+	StartedAt int64  `json:"startedAt"`
+	EndedAt   int64  `json:"endedAt,omitempty"`
+	// Prompt is a bounded echo of what was asked, so a caller can recognize ITS run
+	// among several rather than having to poll each one to find out.
+	Prompt string `json:"prompt,omitempty"`
+}
+
+// maxRecentRunSummaries bounds the recovery list. Enough to find a run a caller lost
+// track of; not so many that session.list becomes a transcript.
+const maxRecentRunSummaries = 5
+
+// promptEchoBytes bounds the prompt echo in a run summary.
+const promptEchoBytes = 160
+
+// Live reports this session's run state as a single consistent snapshot.
+//
+// It exists for RESPONSE LOSS. If ask starts a turn and its response never arrives, the
+// caller is left knowing only that the session is busy, and retrying ask says the same
+// unhelpful thing again. CurrentRunID recovers the handle while the turn is live —
+// Recent recovers it afterwards, which is the case a fast run lands in and the one a
+// caller cannot otherwise get out of, since a retried ask on an idle session is accepted
+// and simply does the work twice.
+func (s *Session) Live() LiveState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := LiveState{Busy: s.current != nil}
+	if s.current != nil {
+		out.CurrentRunID = s.current.ID
+	}
+	// Newest first: the run a caller is looking for is almost always the last one.
+	for i := len(s.order) - 1; i >= 0 && len(out.Recent) < maxRecentRunSummaries; i-- {
+		run, ok := s.runs[s.order[i]]
+		if !ok {
+			continue
+		}
+		_, _, status, _, _, _, startedAt, endedAt := run.Snapshot(0, 1)
+		out.Recent = append(out.Recent, RunSummary{
+			RunID:     run.ID,
+			Status:    string(status),
+			StartedAt: startedAt,
+			EndedAt:   endedAt,
+			Prompt:    truncateRunes(run.Prompt, promptEchoBytes),
+		})
+	}
+	return out
+}
+
+// truncateRunes shortens a string on a RUNE boundary, so a multi-byte character is never
+// cut in half into invalid UTF-8 that a JSON encoder then has to replace.
+func truncateRunes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
+}
+
+// CurrentRunID is the id of the turn in flight, or "" when the session is idle.
+func (s *Session) CurrentRunID() string { return s.Live().CurrentRunID }
 
 // Run resolves a run id within this session.
 func (s *Session) Run(id string) (*Run, error) {
@@ -449,17 +905,38 @@ func (s *Session) Runs() []*Run {
 // parent is the SERVER's lifetime context, not the tool call's: a tool call's context
 // dies when its response is sent, which for an async ask is immediately. Binding the
 // turn to it would cancel every run the instant it was accepted.
-func (s *Session) Ask(parent context.Context, prompt string) (*Run, error) {
+func (s *Session) Ask(parent context.Context, prompt string, deadline time.Duration) (*Run, error) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("%w (id %q)", ErrNoSession, s.ID)
 	}
 	if s.current != nil {
+		id := s.current.ID
 		s.mu.Unlock()
-		return nil, ErrBusy
+		return nil, &BusyError{CurrentRunID: id}
 	}
-	ctx, cancel := context.WithCancel(parent)
+	// A run with no deadline lives until it completes, the caller interrupts, or the
+	// server stops — so a wedged one holds the session (and its project lease) for as
+	// long as the process runs, and the caller's only recovery is to notice and
+	// interrupt. A bound makes the stuck case self-clearing.
+	//
+	// It is still COOPERATIVE: cancelling a context only stops code that watches one.
+	// A tool that ignores cancellation is bounded by CloseAll's deadline at shutdown,
+	// not by this.
+	var (
+		ctx    context.Context
+		cancel context.CancelFunc
+	)
+	if deadline > 0 {
+		// WithTimeoutCause, so an expiry can be attributed. The SERVER lifetime can also
+		// carry a deadline, and ctx.Err() reads DeadlineExceeded for either — labelling a
+		// server shutdown as "this run exceeded its limit" would send a caller tuning a
+		// timeout that had nothing to do with it.
+		ctx, cancel = context.WithTimeoutCause(parent, deadline, errRunDeadline)
+	} else {
+		ctx, cancel = context.WithCancel(parent)
+	}
 	run := NewRun(domain.NewID("mrun_"), s.ID, prompt, cancel)
 	// Drop anything a previous turn buffered but never folded in, BEFORE the new run
 	// becomes visible. InjectPrompt only BUFFERS — a turn interrupted past its final
@@ -512,9 +989,27 @@ func (s *Session) Ask(parent context.Context, prompt string) (*Run, error) {
 			switch {
 			case ctx.Err() != nil:
 				status, content, errMsg = RunCancelled, reply, ""
+				// A deadline that expired is a different fact from a caller that
+				// interrupted, and a caller cannot tell them apart from "cancelled"
+				// alone — one means "you stopped it", the other "it ran too long".
+				if errors.Is(context.Cause(ctx), errRunDeadline) {
+					errMsg = fmt.Sprintf("RUN_DEADLINE_EXCEEDED: this run exceeded its %s limit and was cancelled. "+
+						"Nothing was rolled back — poll the events to see how far it got, and any background work it "+
+						"started stays live and reports through daintree.attention", deadline)
+					run.append(Event{Type: "error", Text: errMsg})
+				}
+				if content == "" {
+					// The turn was stopped mid-sentence. Whatever it had streamed is
+					// the only account of what it was doing, and dropping it was the
+					// gap the recorder's buffer existed to close.
+					content = rec.FinalizePartial()
+				}
 			case err != nil:
 				run.append(Event{Type: "error", Text: err.Error()})
 				status, content, errMsg = RunFailed, reply, err.Error()
+				if content == "" {
+					content = rec.FinalizePartial()
+				}
 			default:
 				// Prefer what the STREAM said over the bare return: a turn that failed
 				// reports its failure as an `error` event and still returns a sentinel
@@ -525,8 +1020,21 @@ func (s *Session) Ask(parent context.Context, prompt string) (*Run, error) {
 						content = reply
 					}
 				} else {
-					// Backstop for a turn that returns without any terminal event.
-					status, content, errMsg = RunSucceeded, reply, ""
+					// NO TERMINAL EVENT, AND NO ERROR. This is not an empty success —
+					// it is exactly the shape a broken event sink produces, which this
+					// package has already shipped once: a run that recorded nothing
+					// reported itself as a clean completion and the caller believed it.
+					//
+					// The reply is kept as diagnostic content, because it may be the
+					// only thing that says what happened. What the caller must not be
+					// told is that the run finished cleanly.
+					partial := rec.FinalizePartial()
+					content = reply
+					if content == "" {
+						content = partial
+					}
+					status, errMsg = RunFailed, ErrEventStreamIncomplete.Error()
+					run.append(Event{Type: "error", Text: errMsg})
 				}
 			}
 		}()
@@ -572,6 +1080,12 @@ func (s *Session) pruneLocked() {
 func (s *Session) Inject(expectRunID, text string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// A session obtained from Get can start closing before the call reaches here. Acting
+	// then reports acted:true for a message folded into a turn that is already being
+	// cancelled — and, worse, touches a runtime whose store may be closing underneath.
+	if s.closed {
+		return fmt.Errorf("%w (id %q is closing)", ErrNoSession, s.ID)
+	}
 	current := s.current
 	if current == nil {
 		return ErrNoActiveRun
@@ -622,13 +1136,40 @@ func (s *Session) Interrupt(expectRunID string) error {
 }
 
 // Attention reads the project's attention inbox.
+//
+// Both inbox calls check `closed` first. They reach into the runtime's store, and a
+// session handed out by Get can begin closing before the call arrives — reading a store
+// that teardown is closing is a use-after-free wearing a database's clothes.
 func (s *Session) Attention(ctx context.Context, acknowledge bool) ([]domain.QueueEvent, error) {
+	if err := s.aliveForRuntimeCall(); err != nil {
+		return nil, err
+	}
 	return s.runtime.Attention(ctx, acknowledge)
 }
 
 // AcknowledgeAttention consumes the named inbox rows.
 func (s *Session) AcknowledgeAttention(ctx context.Context, ids []string) (int, []string, error) {
+	if err := s.aliveForRuntimeCall(); err != nil {
+		return 0, nil, err
+	}
 	return s.runtime.AcknowledgeAttention(ctx, ids)
+}
+
+// aliveForRuntimeCall refuses an operation on a session whose teardown has begun.
+//
+// It is a check, not a gate: it narrows the window rather than closing it, since close
+// can still start between this returning and the runtime call landing. Closing it
+// properly needs a per-session operation refcount that teardown drains, which is a
+// larger change than this one. What it does remove is the common case — a caller holding
+// a session id across a close — and it makes the refusal say what happened instead of
+// failing somewhere inside the store.
+func (s *Session) aliveForRuntimeCall() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return fmt.Errorf("%w (id %q is closing)", ErrNoSession, s.ID)
+	}
+	return nil
 }
 
 // appRuntime adapts the concrete *app.App onto the Runtime seam. It lives here rather

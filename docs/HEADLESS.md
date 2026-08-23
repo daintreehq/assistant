@@ -145,7 +145,43 @@ Things worth knowing before you drive it:
   an ambiguous failure is idempotent: already-acknowledged ids come back under `unknown`
   rather than erroring. (`acknowledge:true` is still available if you accept the risk.)
 - **Always close what you open.** A session holds the project's owner lease for its whole
-  life, and a leaked one blocks every other process from opening that project.
+  life, and a leaked one blocks every other process from opening that project. Close is
+  **safe to retry**: an already-closed session reports `acted:false, state:"already-closed"`
+  rather than erroring, so a lost response costs a duplicate call and not a stuck lease.
+
+  Teardown runs on the server, not inside your call. A close that takes longer than ten
+  seconds returns `state:"closing"` and keeps going — the session stays **listed** in that
+  state until it finishes, and its lease is released then. A teardown that genuinely
+  **fails** is terminal: the session stays listed as `state:"close-failed"` with its lease
+  believed still held, and retrying does not tear it down again, because running
+  `Runtime.Close` over a half-closed App is not a retry. Restarting the MCP server is what
+  releases it; the OS drops the flock on exit.
+
+  Both states count against `MaxSessions`, since their runtime may still hold the lease —
+  which is exactly why they are listed rather than hidden.
+- **Recovering from a lost response.** Every session reports `currentRunId` *and*
+  `recentRuns` (newest first, each with a short echo of its prompt), and `ask`'s busy
+  refusal names the live run. So an `ask` whose response never arrived is recoverable
+  either way: while the turn is still going, `currentRunId` hands the handle back; once it
+  has finished — the case a fast run lands in — `recentRuns` does. That second half
+  matters more than it sounds, because a retried `ask` on an idle session is *accepted*,
+  and simply does the work twice.
+- **A run is bounded.** `timeoutMs` on `ask` caps the RUN (default 30 minutes, server
+  capped); `waitMs` only caps how long the *call* blocks. Letting a wait expire leaves the
+  turn going; letting the deadline expire cancels it, and the outcome says
+  `RUN_DEADLINE_EXCEEDED` rather than the bare `cancelled` you would get from your own
+  interrupt. There is no unbounded option: a run holds the session, and the session holds
+  the project lease. The bound is cooperative — a tool that ignores cancellation is
+  reclaimed at shutdown, not by this.
+- **A turn that records no terminal event FAILS.** It does not report an empty success.
+  That shape is what a runtime with an unwired event sink produces — a bug this server has
+  shipped once — and calling it success is exactly why it went unnoticed: the caller was
+  told the run completed, so nothing looked wrong except that nothing had happened. The
+  outcome is `error` with `RUN_EVENT_STREAM_INCOMPLETE`, and any content is diagnostic
+  rather than an answer.
+- **Interrupted prose is kept.** A turn cancelled or failed mid-sentence reports what it
+  had streamed rather than only a sentinel — including the shape the runtime actually
+  produces, where the cancellation itself carries no content.
 - **Mutating tools need approval,** and the mode is per session:
   - `decline` — refuse immediately and carry on. Safe for an unattended caller, but the
     session can never actually change anything. This is what an omitted `approvals`

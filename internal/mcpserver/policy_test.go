@@ -183,26 +183,38 @@ func TestPolicyRefusalNeverBuildsARuntime(t *testing.T) {
 	}
 }
 
-// The session cap must hold under CONCURRENT opens. Building a runtime is slow (lease,
-// database, MCP connect) so it cannot happen under the registry lock — which means the
-// count an open reads before building is stale by the time it registers. Enforcing only
-// on that early read admitted two sessions under a cap of one.
-func TestPolicySessionCapHoldsUnderConcurrentOpens(t *testing.T) {
+// The session cap must hold under CONCURRENT opens, and it must cap the WORK rather than
+// the bookkeeping.
+//
+// Building a runtime is slow — project lease, database, MCP connect — so it cannot happen
+// under the registry lock, which means the count an open reads before building is stale
+// by the time it registers. Enforcing only on that early read admitted two sessions under
+// a cap of one. Re-checking at insert time fixed the count but not the cost: every
+// concurrent open still built a full runtime and contended for the same lease, and all
+// but one were torn down after the expensive part was already done.
+//
+// So the cap is RESERVED, and this asserts both halves: one session opens, and only one
+// factory ever ran.
+func TestPolicySessionCapReservesCapacityBeforeBuildingARuntime(t *testing.T) {
 	const cap = 1
+	const attempts = 8
 
-	var built sync.WaitGroup
+	var factoryMu sync.Mutex
+	factoryCalls := 0
+	entered := make(chan struct{}, attempts)
 	release := make(chan struct{})
 	reg := NewUnconfinedRegistry(context.Background(), func(_, _ context.Context, _ OpenParams) (Runtime, error) {
-		// Park every factory call until both opens are past the early check, which is
-		// exactly the interleaving that defeats a check-then-act cap.
-		built.Done()
+		factoryMu.Lock()
+		factoryCalls++
+		factoryMu.Unlock()
+		entered <- struct{}{}
+		// Hold the factory open so every other attempt is racing a build in flight,
+		// which is the interleaving that defeats a check-then-act cap.
 		<-release
 		return newFakeRuntime(domain.NewID("ses_")), nil
 	})
 	reg.SetPolicy(ServerPolicy{MaxSessions: cap})
 
-	const attempts = 2
-	built.Add(attempts)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	opened := 0
@@ -217,7 +229,12 @@ func TestPolicySessionCapHoldsUnderConcurrentOpens(t *testing.T) {
 			}
 		}()
 	}
-	built.Wait()
+	// Wait for the one build that should be admitted, then let it finish. The others
+	// must have been refused without ever reaching the factory.
+	<-entered
+	// Give any wrongly-admitted attempt a moment to reach the factory, so this fails on
+	// the bug rather than on scheduling luck.
+	time.Sleep(100 * time.Millisecond)
 	close(release)
 	wg.Wait()
 
@@ -228,6 +245,35 @@ func TestPolicySessionCapHoldsUnderConcurrentOpens(t *testing.T) {
 	}
 	if got := len(reg.List()); got != cap {
 		t.Fatalf("registry holds %d sessions, want %d", got, cap)
+	}
+	factoryMu.Lock()
+	defer factoryMu.Unlock()
+	if factoryCalls != cap {
+		t.Fatalf("%d runtimes were built under a cap of %d — the cap bounds the registry but not the "+
+			"lease/database/MCP work each open pays for", factoryCalls, cap)
+	}
+}
+
+// A reservation that is not released is a cap that ratchets down until the server admits
+// nothing. Every exit from Open must give it back — including a factory that fails.
+func TestAFailedOpenReleasesItsReservation(t *testing.T) {
+	fail := true
+	reg := NewUnconfinedRegistry(context.Background(), func(_, _ context.Context, _ OpenParams) (Runtime, error) {
+		if fail {
+			return nil, errors.New("lease contended")
+		}
+		return newFakeRuntime("ses_ok"), nil
+	})
+	reg.SetPolicy(ServerPolicy{MaxSessions: 1})
+
+	for i := 0; i < 5; i++ {
+		if _, err := reg.Open(context.Background(), OpenParams{}); err == nil {
+			t.Fatal("the failing factory reported success")
+		}
+	}
+	fail = false
+	if _, err := reg.Open(context.Background(), OpenParams{}); err != nil {
+		t.Fatalf("five failed opens exhausted the cap: %v", err)
 	}
 }
 
