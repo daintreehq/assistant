@@ -61,6 +61,12 @@ type Runtime interface {
 	AcknowledgeAttention(ctx context.Context, ids []string) (acked int, unknown []string, err error)
 	// Approvals brokers this runtime's tool confirmations. Never nil.
 	Approvals() *Approvals
+	// Questions brokers this runtime's multiple-choice questions. Never nil.
+	//
+	// Separate from Approvals because they are separate decisions with opposite safe
+	// defaults — an unanswered approval denies, an unanswered question cancels — and
+	// collapsing them would force one timeout policy onto both. See questions.go.
+	Questions() *Questions
 	// Close tears the runtime down and releases the project lease.
 	Close() error
 }
@@ -113,6 +119,16 @@ type OpenParams struct {
 	Approvals ApprovalMode
 	// ApprovalTimeout bounds a parked approval; zero uses DefaultApprovalTimeout.
 	ApprovalTimeout time.Duration
+	// Questions selects the multiple-choice mode, INDEPENDENTLY of Approvals. They were
+	// derived from one another at first, and that defeated the case questions were added
+	// for: a harness that wants planning questions while keeping mutations declined
+	// could not have them without also granting approval authority it did not want.
+	// Empty means decline.
+	Questions QuestionMode
+	// QuestionTimeout bounds a parked question; zero uses DefaultQuestionTimeout. Its own
+	// field because approvalTimeoutMs is documented as meaningful only for approvals, and
+	// borrowing it made a one-second approval timeout silently cancel every question.
+	QuestionTimeout time.Duration
 	// Skills pins backend runbooks for every turn of this session. nil inherits the
 	// process-level --skill defaults; a non-nil empty slice explicitly clears them.
 	Skills []string
@@ -400,7 +416,7 @@ func (r *Registry) Open(ctx context.Context, p OpenParams) (*Session, error) {
 	// this a long poll would sit through its entire budget while the turn was STOPPED
 	// rather than merely slow. Installed once, here, so it cannot race the per-ask
 	// rebinding of the elicitation hook.
-	rt.Approvals().SetOnChange(func(runID string) {
+	touchRun := func(runID string) {
 		if runID == "" {
 			return
 		}
@@ -410,7 +426,12 @@ func (r *Registry) Open(ctx context.Context, p OpenParams) (*Session, error) {
 		if run != nil {
 			run.Touch()
 		}
-	})
+	}
+	rt.Approvals().SetOnChange(touchRun)
+	// A run parked on a QUESTION is stopped for exactly the same reason as one parked on
+	// an approval, and produces no further events of its own — so a long poll would sit
+	// through its whole budget over a turn that is not going to move.
+	rt.Questions().SetOnChange(touchRun)
 
 	r.mu.Lock()
 	// Losing the shutdown race must not strand a live runtime holding the project
@@ -750,8 +771,9 @@ func (s *Session) finishClose() error {
 		current.Cancel()
 	}
 	// Reject before waiting, not after: turns.Wait() would otherwise block on a
-	// dispatch parked on an approval nobody is left to answer.
+	// dispatch parked on an approval — or a question — nobody is left to answer.
 	s.runtime.Approvals().RejectAll()
+	s.runtime.Questions().CancelAll()
 	s.turns.Wait()
 	err := s.runtime.Close()
 	s.mu.Lock()
@@ -794,6 +816,9 @@ func (s *Session) Facts() RuntimeFacts { return s.facts }
 
 // Approvals is this session's confirmation broker.
 func (s *Session) Approvals() *Approvals { return s.runtime.Approvals() }
+
+// Questions is this session's multiple-choice broker.
+func (s *Session) Questions() *Questions { return s.runtime.Questions() }
 
 // ApprovalTimeout is how long this session parks an unanswered approval.
 func (s *Session) ApprovalTimeout() time.Duration { return s.runtime.Approvals().Timeout() }
@@ -1128,6 +1153,10 @@ func (s *Session) Interrupt(expectRunID string) error {
 	// the captured run can finish and a new one start before this lands, and cancelling
 	// the new turn's approvals would abort work nobody asked to stop.
 	s.runtime.Approvals().RejectRun(current.ID)
+	// Questions too, and run-scoped for the same reason: the captured run can finish and
+	// a successor start before this lands, and cancelling the new turn's questions would
+	// abort work nobody asked to stop.
+	s.runtime.Questions().CancelRun(current.ID)
 	// Discard here as well as at the next Ask: an interrupt is the likeliest way for an
 	// injection to miss its fold window, and leaving it buffered means the next turn
 	// silently inherits an instruction meant for the abandoned one.
@@ -1192,6 +1221,7 @@ type appRuntime struct {
 	facts     RuntimeFacts
 	release   func()
 	approvals *Approvals
+	questions *Questions
 	// runMu guards currentRunID, which the confirm hook reads from the DISPATCH
 	// goroutine while Send sets it from the turn goroutine.
 	runMu        sync.Mutex
@@ -1204,14 +1234,21 @@ type appRuntime struct {
 }
 
 // NewAppRuntime wraps a constructed App. release hands the project lease back.
-func NewAppRuntime(a *app.App, facts RuntimeFacts, approvals *Approvals, release func()) Runtime {
+func NewAppRuntime(a *app.App, facts RuntimeFacts, approvals *Approvals, questions *Questions, release func()) Runtime {
+	// Both brokers default to their DECLINE mode rather than to nil. A nil broker would
+	// have to be nil-checked at every call site, and the one that got missed would panic
+	// mid-turn; a declining broker simply refuses, which is the safe answer anyway.
 	if approvals == nil {
 		approvals = NewApprovals(ApprovalDecline, 0)
 	}
-	return &appRuntime{app: a, facts: facts, approvals: approvals, release: release}
+	if questions == nil {
+		questions = NewQuestions(QuestionDecline, 0)
+	}
+	return &appRuntime{app: a, facts: facts, approvals: approvals, questions: questions, release: release}
 }
 
 func (a *appRuntime) Approvals() *Approvals     { return a.approvals }
+func (a *appRuntime) Questions() *Questions     { return a.questions }
 func (a *appRuntime) SessionID() string         { return a.app.SessionID }
 func (a *appRuntime) Facts() RuntimeFacts       { return a.facts }
 func (a *appRuntime) InjectPrompt(t string)     { a.app.Session.InjectPrompt(t) }

@@ -145,6 +145,50 @@ func truncateBytes(s string, max int) string {
 	return trimmed
 }
 
+// boundedQuestion is the ONE projection of a parked question that leaves this server.
+//
+// Same rule as boundedApproval, and applied at every exit for the same reason: the
+// question text and the option text both come from the MODEL, so both are externally
+// sourced and neither is bounded at its source. A question listing and a run's
+// pendingQuestions must not be two different answers about how big a response can get.
+func boundedQuestion(pq PendingQuestion) PendingQuestion {
+	pq.Question = truncateBytes(pq.Question, MaxEventTextBytes)
+	if len(pq.Options) > maxQuestionOptions {
+		pq.Options = pq.Options[:maxQuestionOptions]
+	}
+	// Copied before mutating: the slice is shared with the broker's retained question,
+	// and truncating in place would edit what the next reader sees.
+	opts := make([]QuestionOption, 0, len(pq.Options))
+	for _, o := range pq.Options {
+		o.Text = truncateBytes(o.Text, maxQuestionOptionBytes)
+		opts = append(opts, o)
+	}
+	pq.Options = opts
+	return pq
+}
+
+// boundedQuestions projects a list, capped, reporting how many it left out. Silent
+// truncation would tell a caller to answer everything shown while another blocker waited.
+func boundedQuestions(in []PendingQuestion, max int) (out []PendingQuestion, remaining int) {
+	if len(in) > max {
+		remaining = len(in) - max
+		in = in[:max]
+	}
+	out = make([]PendingQuestion, 0, len(in))
+	for _, pq := range in {
+		out = append(out, boundedQuestion(pq))
+	}
+	return out, remaining
+}
+
+// maxQuestionOptions and maxQuestionOptionBytes bound a question's option list. The tool
+// schema already asks for 2–26 labelled options, so these are the ceiling for a model
+// that ignores it rather than a limit anyone should meet.
+const (
+	maxQuestionOptions     = 26
+	maxQuestionOptionBytes = 2 << 10
+)
+
 // boundedApproval is the ONE projection of a parked approval that leaves this server.
 //
 // It exists because the caps were being applied in one place and bypassed in two: the
@@ -239,6 +283,27 @@ func resolveApprovalTimeout(timeoutMs int) (time.Duration, error) {
 	return time.Duration(timeoutMs) * time.Millisecond, nil
 }
 
+// resolveQuestionTimeout folds a caller's questionTimeoutMs onto a Duration, validating
+// the integer first — same overflow class as the approval timeout, where a large
+// millisecond count wraps int64 nanoseconds negative and then reads as "use the default".
+func resolveQuestionTimeout(timeoutMs int) (time.Duration, error) {
+	if timeoutMs < 0 {
+		return 0, fmt.Errorf(
+			"questionTimeoutMs must not be negative (got %d) — the timeout is the only thing that bounds a parked question",
+			timeoutMs)
+	}
+	if timeoutMs == 0 {
+		return 0, nil // NewQuestions substitutes DefaultQuestionTimeout.
+	}
+	const maxMs = int64(MaxQuestionTimeout / time.Millisecond)
+	if int64(timeoutMs) > maxMs {
+		return 0, fmt.Errorf(
+			"questionTimeoutMs %d exceeds this server's maximum of %d (%s); a parked question holds the whole turn, "+
+				"so there is no unbounded option", timeoutMs, maxMs, MaxQuestionTimeout)
+	}
+	return time.Duration(timeoutMs) * time.Millisecond, nil
+}
+
 // maxBlockWait caps `ask` in block mode. It is deliberately short relative to a real
 // orchestration turn: block mode is for quick questions, and anything longer must go
 // async or the MCP client's own request timeout decides the outcome instead of us.
@@ -274,7 +339,14 @@ type OpenInput struct {
 	// work it exists for.
 	Approvals string `json:"approvals,omitempty" jsonschema:"How to answer a mutating tool. decline: skip it and carry on. delegate: park it for YOU - the calling agent - to settle with daintree.approve; this is delegation, not human authorization, and no human is guaranteed to see the request. auto: never ask. OMITTING this field INHERITS the launch configuration - it becomes auto on a server launched with auto-approve, and decline otherwise - so pass decline explicitly if you need fail-closed behaviour whatever the server was launched with. Choose delegate only if you will actually poll for approvals, since a parked call blocks the whole turn until it is answered or times out. The server's launch policy may refuse delegate or auto outright."`
 	// ApprovalTimeoutMs bounds a parked approval so a forgotten one cannot pin the turn.
-	ApprovalTimeoutMs int `json:"approvalTimeoutMs,omitempty" jsonschema:"How long a parked approval waits before it is denied, in milliseconds. Default 300000 (5 minutes). Only meaningful when approvals is delegate."`
+	ApprovalTimeoutMs int `json:"approvalTimeoutMs,omitempty" jsonschema:"How long a parked APPROVAL waits before it is denied, in milliseconds. Default 300000 (5 minutes). Only meaningful when approvals is delegate; questions have their own questionTimeoutMs."`
+	// Questions is separate from Approvals on purpose. Answering a question authorises
+	// nothing — it picks among options the assistant itself proposed — so a session that
+	// declines every mutation can still answer planning questions, which is exactly the
+	// shape a read-mostly harness wants and was impossible while the two were coupled.
+	Questions string `json:"questions,omitempty" jsonschema:"How to answer the assistant's multiple-choice questions. decline (the default): the question is refused and the asking tool call fails, so the turn proceeds without it. delegate: park it for YOU to answer with daintree.question.answer. Independent of approvals - answering a question grants no authority, it only picks among options the assistant proposed, so declining every mutation and still answering questions is a valid combination."`
+	// QuestionTimeoutMs bounds a parked question.
+	QuestionTimeoutMs int `json:"questionTimeoutMs,omitempty" jsonschema:"How long a parked QUESTION waits before it is CANCELLED, in milliseconds. Default 300000 (5 minutes). Note cancelled, not defaulted: there is no safe default answer to 'which of these did you mean?'."`
 	// Skills is the MCP twin of the CLI's repeatable --skill. The two headless surfaces
 	// must not drift: a runbook you can pin from argv you must be able to pin here.
 	//
@@ -359,6 +431,11 @@ type RunOutput struct {
 	// would conclude work it started had never been accepted.
 	WithheldAsyncOperations int `json:"withheldAsyncOperations,omitempty"`
 	WithheldApprovals       int `json:"withheldApprovals,omitempty"`
+	WithheldQuestions       int `json:"withheldQuestions,omitempty"`
+	// PendingQuestions are multiple-choice questions this run is PARKED on. Reported
+	// beside the approvals for the same reason: a run showing either is not slow, it is
+	// STOPPED, and a caller polling harder will never move it.
+	PendingQuestions []PendingQuestion `json:"pendingQuestions,omitempty"`
 	// PendingApprovals are confirmations this session is PARKED on. A run showing these
 	// is not merely slow — it is stopped until they are answered, which is invisible
 	// from `status` alone.
@@ -424,6 +501,30 @@ type CloseOutput struct {
 	// State is "closed", "already-closed", "closing", or "close-failed".
 	State   string `json:"state" jsonschema:"closed, already-closed, closing (teardown is still running; it stays listed until it finishes), or close-failed (the project lease may still be held and only restarting this server releases it)."`
 	Message string `json:"message,omitempty"`
+}
+
+// QuestionsOutput lists what a session is parked on.
+type QuestionsOutput struct {
+	Mode string `json:"mode" jsonschema:"decline or delegate."`
+	// DecisionAuthority repeats, at the list level, whose answers these are.
+	DecisionAuthority string            `json:"decisionAuthority" jsonschema:"Who answers these. caller-agent means you do."`
+	Pending           []PendingQuestion `json:"pending"`
+	Count             int               `json:"count"`
+	// Remaining is parked questions beyond this response. A turn stops at its FIRST
+	// question, so a list this long means something is wrong — and truncating it
+	// silently would hide that rather than report it.
+	Remaining int    `json:"remaining,omitempty" jsonschema:"Parked questions beyond this response. Answer these, then list again."`
+	Note      string `json:"note,omitempty"`
+}
+
+// AnswerQuestionInput answers one parked question.
+type AnswerQuestionInput struct {
+	SessionID  string `json:"sessionId"`
+	QuestionID string `json:"questionId" jsonschema:"The id from daintree.questions or from a run's pendingQuestions."`
+	// Choice is an INDEX into the question's options, not a label. An out-of-range value
+	// cancels the call rather than being clamped — see the tool description.
+	Choice int    `json:"choice" jsonschema:"The 0-based index of the option you are choosing, from the question's options array. An out-of-range index CANCELS the tool call rather than being clamped to the nearest option, because guessing an answer and then acting on it is worse than not answering."`
+	RunID  string `json:"runId,omitempty" jsonschema:"The runId you were watching when you decided, from daintree.ask. Recommended: an answer that arrives after its turn ended is rejected rather than applied to a successor."`
 }
 
 // SessionRefInput is the shape of every tool that only needs a session.
@@ -555,6 +656,15 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 		if aerr != nil {
 			return nil, SessionOutput{}, aerr
 		}
+		questionMode := QuestionMode(strings.TrimSpace(in.Questions))
+		if questionMode != "" && !questionMode.Valid() {
+			return nil, SessionOutput{}, fmt.Errorf(
+				"unknown questions mode %q — use \"decline\" or \"delegate\"", in.Questions)
+		}
+		questionTimeout, qerr := resolveQuestionTimeout(in.QuestionTimeoutMs)
+		if qerr != nil {
+			return nil, SessionOutput{}, qerr
+		}
 		// Rejected here rather than trimmed away: an empty entry means the caller built
 		// the array from something that came back blank, and silently dropping it opens a
 		// session pinned to less than was asked for — the same silent-underrun --skill
@@ -571,6 +681,8 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 			ProjectID: in.ProjectID, WindowID: in.WindowID,
 			Approvals:       mode,
 			ApprovalTimeout: approvalTimeout,
+			Questions:       questionMode,
+			QuestionTimeout: questionTimeout,
 			Skills:          in.Skills,
 		})
 		if err != nil {
@@ -651,7 +763,7 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 		if in.Wait {
 			waitForSettle(ctx, run, in.WaitMs)
 		}
-		return nil, renderRun(run, 0, defaultPollEvents, sess.Approvals()), nil
+		return nil, renderRunWith(run, 0, defaultPollEvents, sess.Approvals(), sess.Questions()), nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -676,13 +788,13 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 			// possibly past the approval's own timeout. Checking for a pending approval
 			// before waiting covers parked-before-capture, parked-between, and
 			// parked-after alike.
-			if !hasPendingApproval(run, sess.Approvals()) {
+			if !hasPendingDecision(run, sess.Approvals(), sess.Questions()) {
 				// Revision captured BEFORE the wait: a change that lands between here
 				// and the select must not be slept through either.
 				waitForChange(ctx, run, in.SinceSeq, run.Revision(), in.WaitMs)
 			}
 		}
-		return nil, renderRun(run, in.SinceSeq, clampPageSize(in.MaxEvents, defaultPollEvents, MaxPollEvents), sess.Approvals()), nil
+		return nil, renderRunWith(run, in.SinceSeq, clampPageSize(in.MaxEvents, defaultPollEvents, MaxPollEvents), sess.Approvals(), sess.Questions()), nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -799,6 +911,73 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 		}
 		return nil, ActedOutput{}, fmt.Errorf(
 			"no approval %q is pending in this session — call daintree.approvals to see what is waiting", in.ApprovalID)
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "daintree.questions",
+		Description: "List the multiple-choice QUESTIONS this session is parked on. A question is not an approval: " +
+			"it is the assistant asking which of several options you meant, and it BLOCKS the turn until answered. " +
+			"An unanswered one is cancelled on a timer rather than defaulted, because there is no safe default for " +
+			"'which did you mean?'.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, in SessionRefInput) (*mcp.CallToolResult, QuestionsOutput, error) {
+		sess, err := reg.Get(in.SessionID)
+		if err != nil {
+			return nil, QuestionsOutput{}, err
+		}
+		qs := sess.Questions()
+		pending, remaining := boundedQuestions(qs.Pending(), MaxPendingApprovals)
+		out := QuestionsOutput{
+			Mode:              string(qs.Mode()),
+			DecisionAuthority: "caller-agent",
+			Pending:           pending,
+			Count:             len(pending),
+			Remaining:         remaining,
+		}
+		if out.Pending == nil {
+			out.Pending = []PendingQuestion{}
+		}
+		if qs.Mode() != QuestionDelegate {
+			out.DecisionAuthority = "none"
+			if len(pending) == 0 {
+				out.Note = "This session does not park questions — the assistant's multiple-choice questions are " +
+					"declined and the tool call fails. Open a session with approvals:\"delegate\" to answer them yourself."
+			}
+		}
+		return nil, out, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "daintree.question.answer",
+		Description: "Answer one parked multiple-choice question by the INDEX of the option you are choosing, " +
+			"releasing the blocked tool call. Read the options first. An out-of-range index cancels the call " +
+			"instead of picking the nearest option — an invented answer the turn then acts on is worse than no answer.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, in AnswerQuestionInput) (*mcp.CallToolResult, ActedOutput, error) {
+		sess, err := reg.Get(in.SessionID)
+		if err != nil {
+			return nil, ActedOutput{}, err
+		}
+		// Correlation and settlement in ONE call under the broker's lock — checking
+		// first and answering after leaves a window in which the checked question
+		// settles and another is inserted.
+		settled, rangeErr := sess.Questions().AnswerForRun(in.QuestionID, in.RunID, in.Choice)
+		var mismatch *QuestionRunMismatchError
+		if errors.As(rangeErr, &mismatch) {
+			return nil, ActedOutput{}, rangeErr
+		}
+		if rangeErr != nil {
+			// The question WAS settled — as a cancellation. Reported as an error so the
+			// caller sees that its answer did not land, with the outcome named.
+			return nil, ActedOutput{}, rangeErr
+		}
+		if settled {
+			return nil, ActedOutput{Acted: true, Message: "question " + in.QuestionID + " answered"}, nil
+		}
+		if prior, ok := sess.Questions().Outcome(in.QuestionID); ok {
+			return nil, ActedOutput{Acted: false, Message: "question " + in.QuestionID +
+				" was already settled (" + prior + "); the tool call has moved on"}, nil
+		}
+		return nil, ActedOutput{}, fmt.Errorf(
+			"no question %q is pending in this session — call daintree.questions to see what is waiting", in.QuestionID)
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -1026,15 +1205,28 @@ func waitForChange(ctx context.Context, run *Run, sinceSeq int, sinceRev uint64,
 	run.WaitForChange(ctx, sinceSeq, sinceRev, waitBudget(waitMs))
 }
 
-// hasPendingApproval reports whether this run is currently blocked on a confirmation.
-// approvals may be nil (tests).
-func hasPendingApproval(run *Run, approvals *Approvals) bool {
-	if approvals == nil {
-		return false
+// hasPendingDecision reports whether this run is currently STOPPED waiting on a caller —
+// on a confirmation or on a multiple-choice question. Either broker may be nil (tests).
+//
+// A long poll must never sleep through this. The revision counter alone cannot catch a
+// decision that parked BETWEEN two polls: the handler then captures an already-advanced
+// revision, sinceSeq is at the event tail, and nothing further will ever be signalled —
+// so the caller waits out its whole budget on a turn that is stopped, possibly past the
+// decision's own timeout. Checking for a parked decision before waiting covers
+// parked-before-capture, parked-between, and parked-after alike.
+func hasPendingDecision(run *Run, approvals *Approvals, questions *Questions) bool {
+	if approvals != nil {
+		for _, pa := range approvals.Pending() {
+			if pa.RunID == run.ID {
+				return true
+			}
+		}
 	}
-	for _, pa := range approvals.Pending() {
-		if pa.RunID == run.ID {
-			return true
+	if questions != nil {
+		for _, pq := range questions.Pending() {
+			if pq.RunID == run.ID {
+				return true
+			}
 		}
 	}
 	return false
@@ -1042,6 +1234,13 @@ func hasPendingApproval(run *Run, approvals *Approvals) bool {
 
 // renderRun projects a run into its tool response. approvals may be nil (tests).
 func renderRun(run *Run, sinceSeq, maxEvents int, approvals *Approvals) RunOutput {
+	return renderRunWith(run, sinceSeq, maxEvents, approvals, nil)
+}
+
+// renderRunWith is renderRun plus the question broker. Split rather than widened at every
+// call site because most callers have no question broker to hand and a nil one behaves
+// exactly as before.
+func renderRunWith(run *Run, sinceSeq, maxEvents int, approvals *Approvals, questions *Questions) RunOutput {
 	// ONE lock hold for the events, the total, the outcome and the async ledger — see
 	// RunSnapshot. Reading them separately produced responses describing a run state
 	// that never existed.
@@ -1103,6 +1302,17 @@ func renderRun(run *Run, sinceSeq, maxEvents int, approvals *Approvals) RunOutpu
 		out.WithheldAsyncOperations = len(out.AsyncOperations) - MaxAsyncOperations
 		out.AsyncOperations = out.AsyncOperations[:MaxAsyncOperations]
 	}
+	if questions != nil {
+		// This run's questions ONLY, same as the approvals above: a question from an
+		// abandoned turn would read as a blocker on work that is not waiting.
+		mineQ := make([]PendingQuestion, 0, 2)
+		for _, pq := range questions.Pending() {
+			if pq.RunID == run.ID {
+				mineQ = append(mineQ, pq)
+			}
+		}
+		out.PendingQuestions, out.WithheldQuestions = boundedQuestions(mineQ, MaxPendingApprovals)
+	}
 	// The full text is always available from the run transcript resource. What this
 	// stops is one poll response carrying a megabyte of prose nobody asked for.
 	out.Content = truncateBytes(out.Content, MaxContentBytes)
@@ -1130,6 +1340,15 @@ func nextAction(out RunOutput) string {
 		return fmt.Sprintf(
 			"BLOCKED on %d approval(s) for %s. The turn cannot proceed until you call daintree.approve for each id in pendingApprovals; unanswered ones are denied on a timer.",
 			n, strings.Join(names, ", "))
+	}
+	if n := len(out.PendingQuestions); n > 0 {
+		// Named separately from an approval, because the caller does something
+		// different: it picks an option rather than allowing or refusing an action, and
+		// an unanswered one is CANCELLED rather than denied.
+		return fmt.Sprintf(
+			"BLOCKED on %d question(s). The turn cannot proceed until you call daintree.question.answer with the "+
+				"index of the option you choose, for each id in pendingQuestions; unanswered ones are cancelled on a timer.",
+			n)
 	}
 	switch RunStatus(out.Status) {
 	case RunRunning:

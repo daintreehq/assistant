@@ -70,6 +70,13 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 	policy.AllowAutoApprove = cfg.AutoApprove
 	// Delegation is a launch decision, not a session one. See Options.AllowDelegatedApprovals.
 	policy.AllowDelegatedApprovals = opts.AllowDelegatedApprovals
+	// QUESTIONS are permitted by default, unlike approvals, and the asymmetry is the
+	// point. An approval releases an action the assistant wants to take; a question picks
+	// among options the assistant itself proposed, and answering one authorises nothing
+	// that declining would have prevented — the turn proceeds with a choice instead of a
+	// cancelled call. Gating it would only mean the surface built to test the product
+	// still could not reach the branches the product reaches.
+	policy.AllowDelegatedQuestions = true
 	policy.MaxTier = domain.Tier(cfg.Tier)
 	policy.DefaultTier = domain.Tier(cfg.Tier)
 	policy.DefaultProject = cfg.ProjectPath
@@ -195,11 +202,34 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 		// over: it would mix turns together, and it would look like the recording is
 		// handled when it is not.
 		approvals := mcpserver.NewApprovals(mode, p.ApprovalTimeout)
+		// Questions are INDEPENDENT of approvals. Deriving one from the other defeated the
+		// case they were added for: a harness that wants planning questions while keeping
+		// mutations declined could not have them without also granting approval authority
+		// it did not want. There is no auto-answer either — bypassing a confirmation is a
+		// decision an operator can make, but answering "which of these did you mean?" on
+		// someone's behalf is not.
+		questionMode := p.Questions
+		if questionMode == "" {
+			questionMode = mcpserver.QuestionDecline
+		}
+		questions := mcpserver.NewQuestions(questionMode, p.QuestionTimeout)
 		// runtime is captured by the hook so an approval can name the run it blocks.
 		// Assigned below, after the facts are built; the hook only ever reads it on a
 		// dispatch, which cannot happen before the runtime exists.
 		var runtime interface{ CurrentRunID() string }
 		a.SetHooks(app.AppHooks{
+			// AskChoice is wired HERE, which is what closes the parity gap: without it
+			// the runtime has no question surface, user.askMultipleChoice reports
+			// QUESTION_UNAVAILABLE, and a turn that needed a planning decision took a
+			// different path on this surface than it takes in the product — so an
+			// end-to-end run could not reach the branch it was written to test.
+			AskChoice: func(cctx context.Context, req tools.AskChoiceRequest) (tools.AskChoiceAnswer, error) {
+				runID := ""
+				if runtime != nil {
+					runID = runtime.CurrentRunID()
+				}
+				return questions.Ask(cctx, req, runID)
+			},
 			Confirm: func(cctx context.Context, req tools.ConfirmRequest) (bool, error) {
 				runID := ""
 				if runtime != nil {
@@ -250,7 +280,7 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 			PinnedSkills:        a.PinnedSkillIDs(),
 			PinPreflightWarning: pinNotice,
 		}
-		rt := mcpserver.NewAppRuntime(a, facts, approvals, own.Release)
+		rt := mcpserver.NewAppRuntime(a, facts, approvals, questions, own.Release)
 		if withRun, ok := rt.(interface{ CurrentRunID() string }); ok {
 			runtime = withRun
 		}

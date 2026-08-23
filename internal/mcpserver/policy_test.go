@@ -286,10 +286,10 @@ func TestPollDoesNotWaitWhenTheRunIsAlreadyParkedOnAnApproval(t *testing.T) {
 	run := NewRun("mrun_p", "ses_p", "prompt", func() {})
 	approvals := NewApprovals(ApprovalDelegate, 0)
 
-	if hasPendingApproval(run, approvals) {
+	if hasPendingDecision(run, approvals, nil) {
 		t.Fatal("a fresh run reported a pending approval")
 	}
-	if hasPendingApproval(run, nil) {
+	if hasPendingDecision(run, nil, nil) {
 		t.Fatal("a nil broker must report nothing pending, not panic")
 	}
 
@@ -301,17 +301,17 @@ func TestPollDoesNotWaitWhenTheRunIsAlreadyParkedOnAnApproval(t *testing.T) {
 	<-parked
 
 	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && !hasPendingApproval(run, approvals) {
+	for time.Now().Before(deadline) && !hasPendingDecision(run, approvals, nil) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if !hasPendingApproval(run, approvals) {
+	if !hasPendingDecision(run, approvals, nil) {
 		t.Fatal("the parked approval was never visible to the poll pre-check")
 	}
 
 	// An approval parked against a DIFFERENT run must not short-circuit this one's wait
 	// — that would turn every poll in the session into a busy loop.
 	other := NewRun("mrun_other", "ses_p", "prompt", func() {})
-	if hasPendingApproval(other, approvals) {
+	if hasPendingDecision(other, approvals, nil) {
 		t.Error("another run's approval was reported as blocking this one")
 	}
 

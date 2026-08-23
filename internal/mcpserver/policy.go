@@ -68,6 +68,17 @@ type ServerPolicy struct {
 	// Separate, but not independent in one direction: AllowAutoApprove implies this,
 	// because auto is strictly the broader grant. See Check.
 	AllowDelegatedApprovals bool
+	// AllowDelegatedQuestions permits questions:"delegate", where the caller agent
+	// answers the assistant's multiple-choice questions.
+	//
+	// It is a much weaker grant than delegated APPROVAL, and the difference is worth
+	// stating because the two look alike. An approval releases an action the assistant
+	// wants to take; a question picks among options the assistant itself proposed, and
+	// answering one authorises nothing that declining would have prevented — the turn
+	// simply proceeds with a choice rather than a cancelled call. So a server can
+	// reasonably permit questions while refusing approvals, which is exactly the shape a
+	// read-mostly harness wants.
+	AllowDelegatedQuestions bool
 	// AllowedProjectRoots, when non-empty, confines a session's project path to these
 	// directories. Paths are cleaned and compared after symlink-free lexical
 	// normalization, and a prefix match must land on a path SEPARATOR so /srv/appfoo
@@ -269,6 +280,10 @@ func (p ServerPolicy) Check(in OpenParams, openSessions int) error {
 	// release. An operator who granted the broader authority cannot coherently be
 	// refusing the narrower one, and refusing it would push a caller that wanted to
 	// review each call toward the mode that reviews none.
+	if in.Questions == QuestionDelegate && !p.AllowDelegatedQuestions {
+		return &PolicyError{Field: "questions:\"delegate\"", Reason: "this server does not let the calling agent " +
+			"answer the assistant's multiple-choice questions; they will be declined and the asking tool call fails"}
+	}
 	if mode == ApprovalDelegate && !p.AllowDelegatedApprovals && !p.AllowAutoApprove {
 		return &PolicyError{Field: "approvals:\"delegate\"", Reason: "this server does not let the calling agent " +
 			"settle its own approval requests; use \"decline\", which skips the mutating call and lets the turn carry on"}

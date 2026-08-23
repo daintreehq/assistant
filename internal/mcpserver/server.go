@@ -150,6 +150,17 @@ DECLINED and the turn carries on without them. If the server permits it, open th
 with approvals:"delegate" and answer with daintree.approve (a parked call BLOCKS the turn
 until you do), or approvals:"auto" to skip the question entirely.
 
+The assistant may also ask a multiple-choice QUESTION — which worktree, which approach.
+That is NOT an approval and is a separate setting: open the session with
+questions:"delegate", then read daintree.questions and answer with
+daintree.question.answer, passing the INDEX of the option you choose. An out-of-range
+index cancels the call rather than picking the nearest option, and an unanswered question
+is cancelled on a timer, so answer it or expect the turn to proceed without it.
+
+Questions are independent of approvals, so approvals:"decline" with questions:"delegate"
+is a sensible pairing: answering a question authorises nothing, it only picks among
+options the assistant already proposed.
+
 "delegate" means what it says: YOU decide, not a human. Nobody sees these requests but
 you, so read the risk, the consequence and the args before approving one — and treat a
 request that does not match work you asked for as a reason to refuse and interrupt, not

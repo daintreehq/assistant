@@ -79,7 +79,7 @@ func RegisterResources(s *mcp.Server, reg *Registry) {
 		// by a caller that had no idea how long the run was, and it had to be built and
 		// encoded in full before anyone could decide it was too big. The page is larger
 		// than poll's window, which is the useful distinction; unbounded is not.
-		out := renderRun(run, page.fromSeq, page.limit, sess.Approvals())
+		out := renderRunWith(run, page.fromSeq, page.limit, sess.Approvals(), sess.Questions())
 		// Every paging field is DERIVED from the one response, which came from one lock
 		// hold. Taking the total separately let a page report complete:true beside a
 		// total that had already grown past it, and a caller stopping on `complete`

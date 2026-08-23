@@ -322,7 +322,7 @@ available on every surface, and the honest table is:
 | Surface | Approval | Multiple-choice question |
 | --- | --- | --- |
 | Native host (`host --stdio`) | `approval:requested` → `approval:decide` | `question:requested` → `question:answer` |
-| MCP (`mcp --stdio`) | `daintree.approvals` / `daintree.approve`, or MCP elicitation — **delegated to the calling agent, not a human**, and only when launched with `--allow-delegated-approvals` | **not implemented** — the tool reports `QUESTION_UNAVAILABLE` |
+| MCP (`mcp --stdio`) | `daintree.approvals` / `daintree.approve`, or MCP elicitation | `daintree.questions` / `daintree.question.answer` |
 | JSONL one-shot (`--json`) | none — the tool is declined and the turn continues | **not implemented** — `QUESTION_UNAVAILABLE` |
 | Line REPL | terminal prompt | terminal prompt |
 
@@ -337,10 +337,18 @@ That asymmetry drives the rest of the contract: an unanswered approval times out
 *rejected*, while an unanswered question times out to **cancelled**. An out-of-range
 `choiceIndex` cancels rather than clamping, for the same reason.
 
-The two rows above are also not the same KIND of decision, and the table should not be read
-as though they were. On the native host a person sees the sheet and answers it. On MCP the
-request goes to the model driving the session, which answers its own request — delegation,
-not authorization. See [HEADLESS.md](HEADLESS.md#delegate-is-delegation-not-human-authorization).
+The two MCP cells are also not the same KIND of decision as their native-host neighbours,
+and the table should not be read as though they were. On the native host a person sees the
+sheet and answers it. On MCP the request goes to the model driving the session, which
+answers its own request — delegation, not authorization — and both are available only when
+the server was launched to permit it. See
+[HEADLESS.md](HEADLESS.md#delegate-is-delegation-not-human-authorization).
+
+MCP questions follow the same rules the native host does, because they are the same
+asymmetry: no default answer, a timeout that CANCELS rather than defaults, an out-of-range
+index that cancels rather than clamping, questions tied to their `runId` and `toolCallId`,
+interrupt and close releasing them, and a parked question waking a long poll. Approvals and
+questions stay distinct tools throughout.
 
 `/backend`'s endpoint picker reuses this channel, marked local so Esc dismisses it instead of
 cancelling the turn.

@@ -81,6 +81,7 @@ What `mcp --stdio` pins by default:
 | `tier` | at most the process tier | a request *above* the ceiling is refused, never quietly downgraded — a caller told it has system tier would read every later refusal as a bug |
 | `approvals: "auto"` | refused unless the process itself was launched with auto-approve | a session cannot grant itself unattended mutation |
 | `approvals: "delegate"` | refused unless launched with `--allow-delegated-approvals` (or with `--auto-approve`, which is the broader grant and implies it) | the caller agent settling its own requests is delegation, not authorization — see below |
+| `questions: "delegate"` | **permitted** by default | answering a question authorises nothing the assistant could not already do; it picks among options the assistant proposed, so gating it would only stop this surface reaching the branches the product reaches |
 
 Path confinement compares **resolved** paths: both the allowlisted root and the requested
 path go through `filepath.EvalSymlinks` first, so `/allowed/link -> /etc` is outside the
@@ -112,6 +113,8 @@ more code than the safe one rather than less.
 | `daintree.attention.ack` | acknowledge the items you have processed |
 | `daintree.approvals` | list confirmations the session is **parked** on |
 | `daintree.approve` | answer one, releasing or refusing the blocked call |
+| `daintree.questions` | list multiple-choice questions the session is **parked** on |
+| `daintree.question.answer` | answer one by the index of the option you choose |
 
 Every tool has a generated input *and* output schema, so a caller discovers the exact
 argument shape rather than guessing it.
@@ -207,6 +210,35 @@ Things worth knowing before you drive it:
   A blocked run is reported as blocked: pending approvals ride the run's `poll` response
   and its `nextAction` says so, because "still running" would send you polling harder at
   something that will never move on its own.
+
+- **Multiple-choice questions are answerable too,** and that is what makes this surface
+  able to test the product rather than a variation on it. The assistant sometimes needs a
+  planning decision — which worktree, which of three approaches — and MCP used to report
+  `QUESTION_UNAVAILABLE`, so a turn that hit one took a *different path here than it takes
+  in Daintree*. An end-to-end run that cannot reach the same branch is not testing the
+  thing it claims to test. `daintree.questions` lists what is parked;
+  `daintree.question.answer` answers one by the **index** of the option you choose.
+
+  A question is not an approval, and the difference decides the defaults. An approval asks
+  "may I do this?", which has one safe answer — no — so an unanswered one times out to
+  *rejected* and the turn carries on having skipped the call. A question asks "which of
+  these did you mean?", which has **no safe answer at all**: inventing one puts words in
+  your mouth and then acts on them. So an unanswered question times out to **cancelled**,
+  an out-of-range index **cancels rather than clamping** to the nearest option, and there
+  is no default anywhere in the path. A parked question blocks the turn and wakes a long
+  poll exactly as a parked approval does, and it rides the run's `pendingQuestions`.
+
+  Questions are their **own** setting — `questions: "decline" | "delegate"`, defaulting to
+  `decline`, with its own `questionTimeoutMs`. They were derived from the approval mode at
+  first, and that defeated the case they were added for: a harness that wants planning
+  questions while keeping mutations declined could not have them without also granting
+  approval authority it did not want. Answering a question authorises nothing — it picks
+  among options the assistant itself proposed — so `approvals:"decline"` with
+  `questions:"delegate"` is a perfectly coherent session, and the common one for a
+  read-mostly test.
+
+  There is deliberately no auto-*answer*. Bypassing a confirmation is a decision an
+  operator can make; answering "which of these did you mean?" on someone's behalf is not.
 
 #### `delegate` is delegation, not human authorization
 

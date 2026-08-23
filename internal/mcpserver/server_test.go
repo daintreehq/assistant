@@ -12,6 +12,7 @@ import (
 
 	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/tools"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -27,6 +28,7 @@ type fakeRuntime struct {
 	id        string
 	facts     RuntimeFacts
 	approvals *Approvals
+	questions *Questions
 
 	// script runs inside Send with the REAL sink the session installed. Driving events
 	// through it is deliberate: recording used to be broken in production precisely
@@ -37,6 +39,11 @@ type fakeRuntime struct {
 	// while a dispatch was still parked — the exact ordering these tests exist to pin.
 	confirmInSend *ApprovalRequest
 	confirmResult chan bool
+	// askInSend, when set, raises a multiple-choice QUESTION on the send goroutine, the
+	// way a real user.askMultipleChoice dispatch does. Same reasoning as confirmInSend:
+	// detaching it would let turns.Wait() return while a dispatch was still parked.
+	askInSend *tools.AskChoiceRequest
+	askResult chan askOutcome
 
 	// silent makes Send return cleanly WITHOUT emitting any terminal event — the shape a
 	// runtime with an unwired sink produces, and the one the server must refuse rather
@@ -72,11 +79,14 @@ func newFakeRuntime(id string) *fakeRuntime {
 		facts:         RuntimeFacts{Project: "/repo", Tier: "operator", BackendURL: "http://127.0.0.1:8473", LogPath: "/logs/x.log", MCPConnected: true, MCPTransport: "streamable-http", ApprovalMode: string(ApprovalDecline)},
 		release:       make(chan struct{}),
 		approvals:     NewApprovals(ApprovalDecline, 0),
+		questions:     NewQuestions(QuestionDecline, 0),
 		confirmResult: make(chan bool, 4),
+		askResult:     make(chan askOutcome, 4),
 	}
 }
 
 func (f *fakeRuntime) Approvals() *Approvals { return f.approvals }
+func (f *fakeRuntime) Questions() *Questions { return f.questions }
 func (f *fakeRuntime) SessionID() string     { return f.id }
 func (f *fakeRuntime) Facts() RuntimeFacts   { return f.facts }
 
@@ -108,6 +118,13 @@ func (f *fakeRuntime) Send(ctx context.Context, prompt, runID string, sink agent
 		req.RunID = runID
 		// Blocks HERE, on the turn goroutine, exactly as a parked dispatch does.
 		f.confirmResult <- f.approvals.Confirm(ctx, req)
+	}
+	f.mu.Lock()
+	askReq := f.askInSend
+	f.mu.Unlock()
+	if askReq != nil {
+		ans, err := f.questions.Ask(ctx, *askReq, runID)
+		f.askResult <- askOutcome{ans: ans, err: err}
 	}
 	defer func() {
 		f.mu.Lock()
@@ -1691,4 +1708,10 @@ func (s *terminalTrackingSink) AssistantCancelled(content string) {
 func (s *terminalTrackingSink) Error(message string) {
 	s.sawTerminal = true
 	s.EventSink.Error(message)
+}
+
+// askOutcome is what a faked user.askMultipleChoice dispatch got back.
+type askOutcome struct {
+	ans tools.AskChoiceAnswer
+	err error
 }
