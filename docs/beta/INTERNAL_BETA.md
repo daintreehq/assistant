@@ -92,10 +92,10 @@ non-TTY launch (one-shot, `--json`, host, daemon) fails loudly instead, so a scr
 destroys state silently. Conversation history and memories for that project do not
 survive.
 
-**Workflow Intelligence is off.** The execution-graph layer
-(`DAINTREE_WORKFLOW_INTELLIGENCE=1`) is not part of this beta. It needs a matching backend
-and its own test pass, and enabling it early would hide ordinary failures behind extra
-state.
+**Workflow Intelligence is on.** The execution-graph layer is enabled by default now that
+the backend advertises the three workflow tasks it needs. Set
+`DAINTREE_WORKFLOW_INTELLIGENCE=0` to run without it — worth doing if you are chasing an
+ordinary failure and want the smaller surface.
 
 **The model is not always right.** It can misread a terminal, pick the wrong worktree, or
 stop early. That is what you are testing — see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).

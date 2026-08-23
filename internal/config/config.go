@@ -115,8 +115,8 @@ type AppConfig struct {
 
 	// WorkflowIntelligence gates the client-owned workflow execution-graph layer
 	// (graph tools, dispatch observer, turn-context digests, backend workflow
-	// tasks). Rollout flag: the backend must carry the matching TurnContext
-	// contract before this is on, so it defaults off.
+	// tasks). Defaults ON; DAINTREE_WORKFLOW_INTELLIGENCE=0 turns it off for a
+	// backend that does not carry the matching TurnContext contract.
 	WorkflowIntelligence bool
 
 	// Routing is the caller's endpoint-selection preference, sent to the backend on
@@ -306,11 +306,23 @@ func loadConfig(overrides ConfigOverrides, ensureStateDir bool) (AppConfig, erro
 	cfg.ProjectID = FirstString(deref(overrides.ProjectID), e.trustedOrOwnGet("DAINTREE_PROJECT_ID"))
 	cfg.WindowID = FirstString(deref(overrides.WindowID), e.trustedOrOwnGet("DAINTREE_WINDOW_ID"))
 	cfg.DebugLog = resolveBool(overrides.DebugLog, e.trustedOrOwnGet("DAINTREE_ASSISTANT_DEBUG_LOG"))
-	// The workflow-intelligence rollout flag is trustedOrOwn like DebugLog: a
-	// bound project's .env must not be able to flip a feature that changes what
-	// the backend is sent (workflow_state would 422 on a backend without the
-	// matching contract).
-	cfg.WorkflowIntelligence = resolveBool(overrides.WorkflowIntelligence, e.trustedOrOwnGet("DAINTREE_WORKFLOW_INTELLIGENCE"))
+	// The workflow-intelligence flag is trustedOrOwn like DebugLog: a bound project's
+	// .env must not be able to flip a feature that changes what the backend is sent.
+	//
+	// ON unless something turns it off. It was a rollout flag defaulting off while the
+	// backend caught up, and the backend has caught up — it advertises `workflow_plan`,
+	// `workflow_reconcile` and `workflow_resume_digest`, and its skill catalog ships
+	// "Execute a durable workflow graph", which the selector loads at high confidence
+	// for any large request. A client with the flag off registers none of the graph
+	// tools that skill is written against, so the model is instructed to build a
+	// durable workflow and handed nothing to build it with: it announces the plan,
+	// finds no tool, and announces it again. The rollout finished on the server and was
+	// never flipped on the client, and this is what that looked like from the outside.
+	cfg.WorkflowIntelligence = resolveBoolDefault(
+		overrides.WorkflowIntelligence,
+		e.trustedOrOwnGet("DAINTREE_WORKFLOW_INTELLIGENCE"),
+		true,
+	)
 
 	// Endpoint routing. Validated HERE so a typo is a startup error naming the valid
 	// choices, rather than a 400 that lands mid-turn after the user has typed a message.
@@ -455,6 +467,28 @@ func resolveBool(override *bool, envValue string) bool {
 		return *override
 	}
 	return strings.TrimSpace(envValue) == "1"
+}
+
+// resolveBoolDefault is resolveBool for a setting that is ON unless something says
+// otherwise: the override wins, then the env var, then the default.
+//
+// It exists because resolveBool cannot express "unset means on" — an unset variable and
+// an explicit "0" are the same empty-ish input to it, so a default-on setting could
+// never be turned off. Accepted OFF spellings are "0", "false", "no" and "off", case
+// insensitive; anything else non-empty is ON, because a typo in a feature switch should
+// leave the feature working rather than silently disable it.
+func resolveBoolDefault(override *bool, envValue string, def bool) bool {
+	if override != nil {
+		return *override
+	}
+	switch strings.ToLower(strings.TrimSpace(envValue)) {
+	case "":
+		return def
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
 }
 
 // snapshotEnv copies the current process environment into a map.

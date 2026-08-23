@@ -56,7 +56,7 @@ type ToolDoc struct {
 }
 
 // workflowGraphTools are the execution-graph tools that register only under
-// DAINTREE_WORKFLOW_INTELLIGENCE=1. Named here so the generated reference can label
+// DAINTREE_WORKFLOW_INTELLIGENCE. Named here so the generated reference can label
 // them instead of appearing to promise them unconditionally; the drift test builds the
 // registry with the flag ON and OFF and asserts this set is exactly the difference, so
 // the list cannot rot.
@@ -307,7 +307,7 @@ func RenderCompatibilityManifest() string {
 	b.WriteString("failure rather than a warning (the 2026-07-07 de-versioning incident, which a\n")
 	b.WriteString("count-only check could not see).\n\n")
 	writeTaskList(&b, "Always required", backend.CoreTaskIDs())
-	writeTaskList(&b, "Required with `DAINTREE_WORKFLOW_INTELLIGENCE=1`", backend.WorkflowTaskIDs())
+	writeTaskList(&b, "Required unless `DAINTREE_WORKFLOW_INTELLIGENCE=0`", backend.WorkflowTaskIDs())
 
 	b.WriteString("\n## Endpoints\n\n")
 	b.WriteString("| Endpoint | URL |\n|---|---|\n")

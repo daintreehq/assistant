@@ -14,7 +14,7 @@ import (
 // The workflow-intelligence graph tools (workflow.plan / getGraph / next /
 // attachResource / recordEvidence / reconcile / cancel). They extend — never
 // replace — the flat workflow.create/get/list/update ledger tools, and are
-// registered ONLY when Deps.Graph is wired (DAINTREE_WORKFLOW_INTELLIGENCE=1),
+// registered ONLY when Deps.Graph is wired (unless DAINTREE_WORKFLOW_INTELLIGENCE=0),
 // so a disabled build's toolset is byte-identical to before.
 
 const codeGraphNotFound = "WORKFLOW_GRAPH_NOT_FOUND"

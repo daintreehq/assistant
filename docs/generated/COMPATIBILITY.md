@@ -33,7 +33,7 @@ count-only check could not see).
 - `terminal_summarize`
 - `watcher_classify`
 
-**Required with `DAINTREE_WORKFLOW_INTELLIGENCE=1`** (3)
+**Required unless `DAINTREE_WORKFLOW_INTELLIGENCE=0`** (3)
 
 - `workflow_plan`
 - `workflow_reconcile`

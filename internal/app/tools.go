@@ -145,7 +145,7 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 	})...)
 	all = append(all, workflow.Tools(workflow.Deps{
 		Store: workflowStoreAdapter{s: a.Store},
-		// Graph is nil unless DAINTREE_WORKFLOW_INTELLIGENCE=1, in which case the
+		// Graph is nil when DAINTREE_WORKFLOW_INTELLIGENCE=0, in which case the
 		// seven execution-graph tools register alongside the flat ledger tools.
 		Graph: a.workflowGraphToolService(),
 	})...)
