@@ -266,11 +266,19 @@ func (b *Bridge) ToolBatch(calls []agent.BatchedToolCall) {
 	b.mu.Unlock()
 	out := make([]BatchedCall, 0, len(calls))
 	for _, c := range calls {
+		verb, _ := presentToolVerb(c.Name)
 		out = append(out, BatchedCall{
 			ToolCallID:  c.ID,
 			ToolID:      c.Name,
 			ArgsSummary: redactArgs(c.Args),
 			Danger:      b.isDanger(c.Name),
+			Verb:        verb,
+			ActiveVerb:  presentToolActiveVerb(c.Name),
+			// Redacted like every other free-text field: the target is lifted straight
+			// out of the raw arguments, which is exactly the material redactArgs exists
+			// to guard. A command line or a saved memory body is a plausible place for a
+			// credential to appear.
+			Target: redact.String(presentToolTarget(c.Name, c.Args)),
 		})
 	}
 	b.postLive(EvToolBatch{TurnID: turnID, Calls: out})

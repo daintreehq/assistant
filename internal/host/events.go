@@ -603,6 +603,15 @@ type BatchedCall struct {
 	ToolID      string `json:"toolId"`
 	ArgsSummary string `json:"argsSummary"`
 	Danger      bool   `json:"danger"`
+	// Verb is the settled human label ("Read", "Delegated"); ActiveVerb is its
+	// in-progress form ("Delegating") for the tools that visibly block for many
+	// seconds, empty when the settled label reads correctly either way. Target is the
+	// verb's object, pulled from the raw args and redacted. All three are empty for a
+	// tool the presentation table does not know, which is the signal to fall back to
+	// the raw tool id — never to invent a label. See presentation.go.
+	Verb       string `json:"verb,omitempty"`
+	ActiveVerb string `json:"activeVerb,omitempty"`
+	Target     string `json:"target,omitempty"`
 }
 
 // EvToolBatch — tool:batch. The WHOLE batch announced as queued before sequential
