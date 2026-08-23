@@ -543,12 +543,23 @@ func (e EvShutdown) encode(sid string, seq uint64) ([]byte, error) {
 type EvTurnPhase struct {
 	TurnID string
 	Phase  string
+	// Wake marks a phase belonging to a turn the assistant started ITSELF.
+	//
+	// Carried here as well as on turn:start because a wake emits its first phase
+	// BEFORE the turn opens (the session reports "analyzing" while it decides what to
+	// do). A host that learned this only from turn:start therefore had a window where
+	// it knew work was happening but not that Stop could not reach it, and offered the
+	// control anyway.
+	Wake bool
 }
 
 func (e EvTurnPhase) encode(sid string, seq uint64) ([]byte, error) {
 	f := map[string]any{"phase": e.Phase}
 	if e.TurnID != "" {
 		f["turnId"] = e.TurnID
+	}
+	if e.Wake {
+		f["wake"] = true
 	}
 	return marshalEvent("turn:phase", sid, seq, f)
 }

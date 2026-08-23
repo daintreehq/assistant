@@ -147,7 +147,7 @@ func (b *Bridge) Phase(p domain.RunPhase) {
 	if b.interrupted {
 		return
 	}
-	b.postStream(EvTurnPhase{TurnID: b.activeTurnID, Phase: p.String()})
+	b.postStream(EvTurnPhase{TurnID: b.activeTurnID, Phase: p.String(), Wake: b.wakeTurn})
 }
 
 func (b *Bridge) AssistantStart() {
