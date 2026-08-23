@@ -63,6 +63,12 @@ type Options struct {
 	// carry the SAME trust as the env vars they shadow (argv is as trusted as env) and
 	// win over them, per the FirstString order in config.LoadConfig.
 	BackendURL string
+	// AllowDelegatedApprovals is the `mcp --stdio` opt-in for approvals:"delegate",
+	// where the CALLING AGENT settles each confirmation rather than a human. It is a
+	// launch decision because only the operator knows whether the agent on the other
+	// end of the pipe is a person's terminal or an unattended loop over a repository
+	// that could steer it. Ignored by every other entry point.
+	AllowDelegatedApprovals bool
 	// APIKeyFile is a path, never the key itself: argv is world-readable through `ps`,
 	// so there is deliberately no --api-key. Read once, in overridesFromOptions.
 	APIKeyFile string

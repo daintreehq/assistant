@@ -146,9 +146,15 @@ One turn runs at a time per session. To steer a turn already running, use
 daintree.inject rather than a second ask; to abandon it, daintree.interrupt.
 
 Mutating tools — terminal commands, git operations — need approval. By default they are
-DECLINED and the turn carries on without them, so if you want the assistant to actually
-change something, open the session with approvals:"ask" and answer with daintree.approve
-(a parked call blocks the turn), or approvals:"auto" to skip asking entirely.
+DECLINED and the turn carries on without them. If the server permits it, open the session
+with approvals:"delegate" and answer with daintree.approve (a parked call BLOCKS the turn
+until you do), or approvals:"auto" to skip the question entirely.
+
+"delegate" means what it says: YOU decide, not a human. Nobody sees these requests but
+you, so read the risk, the consequence and the args before approving one — and treat a
+request that does not match work you asked for as a reason to refuse and interrupt, not
+as a formality. Both modes may be refused by the server's launch policy, in which case
+the refusal says so.
 
 When a run needs diagnosing rather than summarising, read its resources instead of
 polling harder: daintree://session/{id}/run/{runId} is the complete timeline poll

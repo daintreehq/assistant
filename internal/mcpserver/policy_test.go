@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -95,7 +96,9 @@ func TestPolicyGatesAutoApprove(t *testing.T) {
 	if err := strict.Check(OpenParams{Approvals: ApprovalAuto}, 0); err == nil {
 		t.Fatal("approvals:auto was permitted under a policy that did not allow it")
 	}
-	for _, mode := range []ApprovalMode{ApprovalAsk, ApprovalDecline, ""} {
+	// Decline (and an omitted mode, which resolves to it here) is always available: it
+	// grants nothing.
+	for _, mode := range []ApprovalMode{ApprovalDecline, ""} {
 		if err := strict.Check(OpenParams{Approvals: mode}, 0); err != nil {
 			t.Errorf("mode %q was refused: %v", mode, err)
 		}
@@ -235,7 +238,7 @@ func TestPolicySessionCapHoldsUnderConcurrentOpens(t *testing.T) {
 // the approval's own timeout, on a run that is blocked rather than slow.
 func TestPollDoesNotWaitWhenTheRunIsAlreadyParkedOnAnApproval(t *testing.T) {
 	run := NewRun("mrun_p", "ses_p", "prompt", func() {})
-	approvals := NewApprovals(ApprovalAsk, 0)
+	approvals := NewApprovals(ApprovalDelegate, 0)
 
 	if hasPendingApproval(run, approvals) {
 		t.Fatal("a fresh run reported a pending approval")
@@ -660,4 +663,142 @@ func TestServeModelFacingRefusesAPolicyThatConfinesNothing(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "tier ceiling") {
 		t.Fatalf("a model-facing server accepted an empty policy: %v", err)
 	}
+}
+
+// Delegation is gated SEPARATELY from auto-approve, because it is a separate question.
+// Under delegate the caller agent settles each confirmation — which is useful for a
+// harness and wrong for an unattended loop over a repository that can steer that agent —
+// and only the operator knows which they launched.
+func TestPolicyGatesDelegatedApprovalsIndependentlyOfAutoApprove(t *testing.T) {
+	strict := ServerPolicy{MaxTier: domain.TierSystem}
+	err := strict.Check(OpenParams{Approvals: ApprovalDelegate}, 0)
+	var pe *PolicyError
+	if !errors.As(err, &pe) {
+		t.Fatalf("delegate was permitted under a policy that did not allow it: %v", err)
+	}
+	if !strings.Contains(pe.Reason, "calling agent") {
+		t.Errorf("the refusal does not say who would have been deciding: %q", pe.Reason)
+	}
+
+	// Allowing auto-approve must NOT imply allowing delegation, nor the reverse: they
+	// are different grants and a policy that conflated them would surprise in both
+	// directions.
+	// The one direction that DOES follow: auto is strictly the broader grant (it runs
+	// every tier-permitted call with nothing consulted), so an operator who allowed it
+	// cannot coherently be refusing the mode that reviews each call first. Refusing
+	// would push a caller toward the mode that reviews none.
+	autoOnly := ServerPolicy{AllowAutoApprove: true}
+	if err := autoOnly.Check(OpenParams{Approvals: ApprovalDelegate}, 0); err != nil {
+		t.Errorf("a server that allows auto refused the narrower delegate: %v", err)
+	}
+	delegateOnly := ServerPolicy{AllowDelegatedApprovals: true}
+	if err := delegateOnly.Check(OpenParams{Approvals: ApprovalAuto}, 0); err == nil {
+		t.Error("AllowDelegatedApprovals silently enabled auto-approve")
+	}
+	if err := delegateOnly.Check(OpenParams{Approvals: ApprovalDelegate}, 0); err != nil {
+		t.Errorf("an explicitly allowed delegate was refused: %v", err)
+	}
+}
+
+// The mode name is the thing this phase is fixing: "ask" implied a human. Every pending
+// approval now states whose decision it actually is, in the payload, so a caller does not
+// have to infer authority from a word.
+func TestPendingApprovalNamesItsDecisionAuthority(t *testing.T) {
+	if got := ApprovalDelegate.DecisionAuthority(); got != "caller-agent" {
+		t.Errorf("delegate authority = %q, want caller-agent", got)
+	}
+	for _, m := range []ApprovalMode{ApprovalDecline, ApprovalAuto} {
+		if got := m.DecisionAuthority(); got != "none" {
+			t.Errorf("%q authority = %q, want none", m, got)
+		}
+	}
+	if ApprovalDelegate.DecisionAuthority() == "human" {
+		t.Error("delegation must never describe itself as human authorization")
+	}
+
+	a := NewApprovals(ApprovalDelegate, 2*time.Second)
+	done := make(chan bool, 1)
+	go func() {
+		done <- a.Confirm(context.Background(), ApprovalRequest{
+			Tool: "git.push", Risk: domain.RiskGit, NeedsTypedConfirm: true, RunID: "mrun_1",
+		})
+	}()
+	var pending []PendingApproval
+	for i := 0; i < 200 && len(pending) == 0; i++ {
+		pending = a.Pending()
+		if len(pending) == 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected one parked approval, got %d", len(pending))
+	}
+	if pending[0].DecisionAuthority != "caller-agent" {
+		t.Errorf("pending approval authority = %q, want caller-agent", pending[0].DecisionAuthority)
+	}
+	a.Resolve(pending[0].ID, DecisionRejected)
+	<-done
+}
+
+// needsTypedConfirm lost omitempty: a caller distinguishing "no extra friction needed"
+// from "the peer is too old to tell me" cannot do it from an absent field, and the
+// approval whose friction requirement silently vanished is the one an automated caller
+// waves through.
+func TestNeedsTypedConfirmIsAlwaysPresentOnTheWire(t *testing.T) {
+	body, err := json.Marshal(PendingApproval{ID: "apr_1", Tool: "fs.read", NeedsTypedConfirm: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"needsTypedConfirm":false`) {
+		t.Errorf("a false needsTypedConfirm was omitted from the wire shape: %s", body)
+	}
+	if !strings.Contains(string(body), `"decisionAuthority"`) {
+		t.Errorf("decisionAuthority was omitted from the wire shape: %s", body)
+	}
+}
+
+// A half-done rename is worse than no rename: the mode is refused under its old name
+// while the error, the schemas and the guidance still recommend it, which reads to a
+// model as a server bug and becomes a retry loop. This pins the whole model-facing
+// surface at once.
+func TestTheApprovalModeVocabularyIsDelegateEverywhereOnTheWire(t *testing.T) {
+	surfaces := map[string]string{
+		"server instructions": instructions,
+	}
+	// Every tool schema and description the SDK will generate, taken from the struct
+	// tags rather than re-derived, so a tag that kept the old word is caught here.
+	for name, tag := range map[string]string{
+		"OpenInput.Approvals":         fieldTag(t, OpenInput{}, "Approvals"),
+		"OpenInput.ApprovalTimeoutMs": fieldTag(t, OpenInput{}, "ApprovalTimeoutMs"),
+		"ApprovalsOutput.Mode":        fieldTag(t, ApprovalsOutput{}, "Mode"),
+	} {
+		surfaces[name] = tag
+	}
+
+	for where, text := range surfaces {
+		lower := strings.ToLower(text)
+		// The bare word "ask" appears legitimately in "daintree.ask" and in prose like
+		// "never ask", so match the shapes that would actually mislead a caller into
+		// sending approvals:"ask".
+		for _, bad := range []string{`approvals is ask`, `approvals:"ask"`, `"ask"`, `is ask.`} {
+			if strings.Contains(lower, strings.ToLower(bad)) {
+				t.Errorf("%s still advertises the old mode name via %q: %s", where, bad, text)
+			}
+		}
+	}
+
+	// And the refusal a caller gets for the old name must name the new one.
+	if !strings.Contains(instructions, "delegate") {
+		t.Error("the server instructions never mention the delegate mode")
+	}
+}
+
+// fieldTag returns a struct field's jsonschema description.
+func fieldTag(t *testing.T, v any, field string) string {
+	t.Helper()
+	f, ok := reflect.TypeOf(v).FieldByName(field)
+	if !ok {
+		t.Fatalf("no field %q on %T", field, v)
+	}
+	return f.Tag.Get("jsonschema")
 }

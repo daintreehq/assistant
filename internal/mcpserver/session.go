@@ -95,8 +95,9 @@ type OpenParams struct {
 	ProjectID    string
 	WindowID     string
 	DebugLog     *bool
-	// Approvals selects the confirmation mode. Empty inherits the process default
-	// (auto when --auto-approve/DAINTREE_ASSISTANT_AUTO_APPROVE is set, else decline).
+	// Approvals selects the confirmation mode. Empty INHERITS the process default —
+	// auto when --auto-approve/DAINTREE_ASSISTANT_AUTO_APPROVE is set, else decline —
+	// which is why the policy judges the RESOLVED mode rather than this field.
 	Approvals ApprovalMode
 	// ApprovalTimeout bounds a parked approval; zero uses DefaultApprovalTimeout.
 	ApprovalTimeout time.Duration

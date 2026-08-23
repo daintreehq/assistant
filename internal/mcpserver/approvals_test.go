@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -11,7 +12,7 @@ import (
 	"github.com/daintreehq/assistant/internal/redact"
 )
 
-// approvals_test.go pins the property that makes "ask" safe to offer at all: a parked
+// approvals_test.go pins the property that makes delegation safe to offer at all: a parked
 // dispatch is ALWAYS bounded. Every exit — decision, timeout, cancellation, teardown —
 // releases it, because a confirm hook that could block forever would wedge the turn and,
 // through it, the session.
@@ -48,8 +49,8 @@ func TestApprovalAutoAllowsWithoutParking(t *testing.T) {
 	}
 }
 
-func TestApprovalAskParksThenReleasesOnDecision(t *testing.T) {
-	a := NewApprovals(ApprovalAsk, 0)
+func TestApprovalDelegateParksThenReleasesOnDecision(t *testing.T) {
+	a := NewApprovals(ApprovalDelegate, 0)
 	done := make(chan bool, 1)
 	go func() {
 		done <- a.Confirm(context.Background(), ApprovalRequest{
@@ -93,7 +94,7 @@ func TestApprovalArgsAreRedacted(t *testing.T) {
 	redact.ResetSecretsForTest()
 	t.Cleanup(redact.ResetSecretsForTest)
 
-	a := NewApprovals(ApprovalAsk, 0)
+	a := NewApprovals(ApprovalDelegate, 0)
 	go a.Confirm(context.Background(), ApprovalRequest{
 		Tool:    "terminal.run",
 		RawArgs: `{"cmd":"curl -H 'Authorization: Bearer sk-or-v1-fake-test-secret-value'"}`,
@@ -111,7 +112,7 @@ func TestUnansweredApprovalIsDeniedOnTheTimer(t *testing.T) {
 	// 300ms, not 50: under -race on a loaded machine a 50ms timer can fire before the
 	// polling goroutine observes the pending state, turning a real assertion into a
 	// three-second flake.
-	a := NewApprovals(ApprovalAsk, 300*time.Millisecond)
+	a := NewApprovals(ApprovalDelegate, 300*time.Millisecond)
 	done := make(chan bool, 1)
 	go func() { done <- a.Confirm(context.Background(), ApprovalRequest{Tool: "terminal.run"}) }()
 
@@ -131,7 +132,7 @@ func TestUnansweredApprovalIsDeniedOnTheTimer(t *testing.T) {
 // TestCancellationUnparksTheDispatch: teardown waits for the turn goroutine, so an
 // approval that survived cancellation would deadlock session close.
 func TestCancellationUnparksTheDispatch(t *testing.T) {
-	a := NewApprovals(ApprovalAsk, 0)
+	a := NewApprovals(ApprovalDelegate, 0)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan bool, 1)
 	go func() { done <- a.Confirm(ctx, ApprovalRequest{Tool: "terminal.run"}) }()
@@ -150,7 +151,7 @@ func TestCancellationUnparksTheDispatch(t *testing.T) {
 
 // TestRejectAllReleasesEveryParkedDispatch is what interrupt and close rely on.
 func TestRejectAllReleasesEveryParkedDispatch(t *testing.T) {
-	a := NewApprovals(ApprovalAsk, 0)
+	a := NewApprovals(ApprovalDelegate, 0)
 	var wg sync.WaitGroup
 	results := make(chan bool, 3)
 	for i := 0; i < 3; i++ {
@@ -181,7 +182,7 @@ func TestRejectAllReleasesEveryParkedDispatch(t *testing.T) {
 // TestSettledOutcomeIsRemembered: a caller that answers just after the timer fired must
 // learn WHY its approval vanished, or "not found" reads as a bug in its own bookkeeping.
 func TestSettledOutcomeIsRemembered(t *testing.T) {
-	a := NewApprovals(ApprovalAsk, 300*time.Millisecond)
+	a := NewApprovals(ApprovalDelegate, 300*time.Millisecond)
 	go a.Confirm(context.Background(), ApprovalRequest{Tool: "terminal.run"})
 	pa := waitForPending(t, a, 1)[0]
 
@@ -234,7 +235,7 @@ func TestApprovalTimeoutCannotBeDisabled(t *testing.T) {
 		"minimum int64":  time.Duration(-1 << 62),
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := NewApprovals(ApprovalAsk, given).Timeout()
+			got := NewApprovals(ApprovalDelegate, given).Timeout()
 			if got <= 0 {
 				t.Fatalf("timeout = %v — an unanswered approval would park forever", got)
 			}
@@ -276,7 +277,7 @@ func TestCancellationDominatesADecision(t *testing.T) {
 // scheduling, a call approved after the turn was cancelled must not run.
 func TestApprovalAfterCancellationIsDenied(t *testing.T) {
 	for i := 0; i < 50; i++ {
-		a := NewApprovals(ApprovalAsk, 0)
+		a := NewApprovals(ApprovalDelegate, 0)
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan bool, 1)
 		go func() { done <- a.Confirm(ctx, ApprovalRequest{Tool: "git.push"}) }()
@@ -299,7 +300,7 @@ func TestApprovalAfterCancellationIsDenied(t *testing.T) {
 // TestRejectRunLeavesOtherRunsAlone: a session is single-flight, but the run interrupt
 // captured can finish and a new one start before the rejection lands.
 func TestRejectRunLeavesOtherRunsAlone(t *testing.T) {
-	a := NewApprovals(ApprovalAsk, 0)
+	a := NewApprovals(ApprovalDelegate, 0)
 	mine := make(chan bool, 1)
 	theirs := make(chan bool, 1)
 	go func() { mine <- a.Confirm(context.Background(), ApprovalRequest{Tool: "git.push", RunID: "mrun_a"}) }()
@@ -327,4 +328,94 @@ func TestRejectRunLeavesOtherRunsAlone(t *testing.T) {
 		t.Errorf("pending = %d, want the other run's approval still there", len(a.Pending()))
 	}
 	a.RejectAll()
+}
+
+// A decision written while watching one turn can arrive after that turn ended. For
+// inject and interrupt the cost is steering or cancelling the wrong work; for an approval
+// it is RELEASING A MUTATING CALL on the strength of a judgement made about something
+// else. Correlation and settlement are one operation so there is no window between them.
+func TestApprovalRunCorrelationRejectsAStaleDecision(t *testing.T) {
+	a := NewApprovals(ApprovalDelegate, 2*time.Second)
+	done := make(chan bool, 1)
+	go func() {
+		done <- a.Confirm(context.Background(), ApprovalRequest{
+			Tool: "git.push", Risk: domain.RiskGit, RunID: "mrun_live",
+		})
+	}()
+	id := awaitOnePending(t, a).ID
+
+	// A decision aimed at a turn that is not the one this approval blocks. It must not
+	// settle, and must say what this approval is actually waiting on.
+	settled, mismatch := a.ResolveForRun(id, "mrun_previous", DecisionApproved)
+	if settled {
+		t.Fatal("a decision naming the wrong run settled the approval")
+	}
+	var mm *ApprovalRunMismatchError
+	if !errors.As(mismatch, &mm) {
+		t.Fatalf("wanted an ApprovalRunMismatchError, got %v", mismatch)
+	}
+	if mm.Actual != "mrun_live" {
+		t.Errorf("the mismatch named %q as the blocked run, want mrun_live", mm.Actual)
+	}
+	// Still parked: a refused correlation must not have settled it either way.
+	if len(a.Pending()) != 1 {
+		t.Fatal("a mismatched decision removed the approval anyway")
+	}
+
+	// An omitted runId skips correlation, and the right one passes it.
+	if _, err := a.ResolveForRun(id, "mrun_live", DecisionRejected); err != nil {
+		t.Errorf("the correct run was rejected: %v", err)
+	}
+	if <-done {
+		t.Error("a rejected approval let the dispatch through")
+	}
+}
+
+// A pending approval with no recorded run FAILS a correlation rather than passing it. The
+// caller asked for a check; answering "sure" when the provenance is simply missing is the
+// fail-open answer.
+func TestApprovalCorrelationFailsClosedWhenTheRunIsUnknown(t *testing.T) {
+	a := NewApprovals(ApprovalDelegate, 2*time.Second)
+	done := make(chan bool, 1)
+	go func() {
+		done <- a.Confirm(context.Background(), ApprovalRequest{Tool: "git.push", Risk: domain.RiskGit})
+	}()
+	id := awaitOnePending(t, a).ID
+
+	settled, mismatch := a.ResolveForRun(id, "mrun_anything", DecisionApproved)
+	if settled || mismatch == nil {
+		t.Fatalf("an approval with no recorded run passed correlation (settled=%v, err=%v)", settled, mismatch)
+	}
+	// Dropping the runId still works — the caller is then making the claim itself.
+	if ok, err := a.ResolveForRun(id, "", DecisionRejected); !ok || err != nil {
+		t.Errorf("an uncorrelated decision was refused: ok=%v err=%v", ok, err)
+	}
+	<-done
+}
+
+// An approval that is no longer pending has nothing to correlate: the caller's own
+// not-found handling (already settled versus never real) is more informative than a
+// correlation error about a ghost.
+func TestApprovalCorrelationIsSilentOnAnUnknownApproval(t *testing.T) {
+	a := NewApprovals(ApprovalDelegate, time.Second)
+	settled, mismatch := a.ResolveForRun("apr_gone", "mrun_x", DecisionApproved)
+	if settled {
+		t.Error("resolving an unknown approval reported success")
+	}
+	if mismatch != nil {
+		t.Errorf("resolving an unknown approval produced a correlation error: %v", mismatch)
+	}
+}
+
+// awaitOnePending waits for exactly one parked approval and returns it.
+func awaitOnePending(t *testing.T, a *Approvals) PendingApproval {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		if p := a.Pending(); len(p) == 1 {
+			return p[0]
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("no approval parked")
+	return PendingApproval{}
 }

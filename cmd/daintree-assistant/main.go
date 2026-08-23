@@ -128,7 +128,26 @@ type parsedArgs struct {
 // Go's stock FlagSet does not combine: options may be interspersed with a prompt,
 // and `--` permanently ends option/subcommand parsing. The latter matters for
 // prompts such as `-- "status"` and `-- "--summarize this"`.
+// parseArgs is a thin wrapper so the route-scoped flag checks have ONE enforcement
+// point. parseArgsInto returns from a dozen places; adding a guard to each of them is how
+// a route eventually gets missed.
 func parseArgs(args []string) (parsedArgs, error) {
+	parsed, fs, err := parseArgsInto(args)
+	if err != nil {
+		return parsedArgs{}, err
+	}
+	// --help and --version answer without running anything, so they have no route to
+	// scope a flag against. Refusing help because of a misplaced flag would withhold the
+	// one output that explains where the flag belongs.
+	if !parsed.Help && !parsed.Version {
+		if err := checkRouteScopedFlags(fs, parsed.Route); err != nil {
+			return parsedArgs{}, err
+		}
+	}
+	return parsed, nil
+}
+
+func parseArgsInto(args []string) (parsedArgs, *flag.FlagSet, error) {
 	fs := flag.NewFlagSet("daintree-assistant", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
@@ -170,8 +189,15 @@ func parseArgs(args []string) (parsedArgs, error) {
 		// against a synthetic project brief without writing one into the repo under test.
 		projectInstructionsFile = fs.String("project-instructions-file", "", "")
 		autoApprove             = fs.Bool("auto-approve", false, "")
-		debugLog                = fs.Bool("debug-log", false, "")
-		timeout                 = fs.Duration("timeout", 0, "")
+		// `mcp --stdio` only. Lets a session choose approvals:"delegate", where the
+		// CALLING AGENT settles each confirmation. Plain bool, not the *bool tri-state:
+		// it has no env counterpart, because the whole point is that a human at a shell
+		// decides whether the agent on the other end of the pipe is one they trust to
+		// approve mutations — an environment variable is exactly the wrong place for
+		// that, since it is inherited rather than chosen.
+		mcpAllowDelegatedApprovals = fs.Bool("allow-delegated-approvals", false, "")
+		debugLog                   = fs.Bool("debug-log", false, "")
+		timeout                    = fs.Duration("timeout", 0, "")
 		// Plain bool, not the *bool tri-state: that machinery exists only for flags that
 		// shadow a trusted env var and must be able to beat it. This one has no env
 		// counterpart — it is a per-invocation decision about what this run commits to.
@@ -194,25 +220,25 @@ func parseArgs(args []string) (parsedArgs, error) {
 
 	flagArgs, positionals, help, forcePrompt, err := splitInterspersedArgs(fs, args)
 	if err != nil {
-		return parsedArgs{}, err
+		return parsedArgs{}, nil, err
 	}
 	if err := fs.Parse(flagArgs); err != nil {
-		return parsedArgs{}, err
+		return parsedArgs{}, nil, err
 	}
 	if help {
-		return parsedArgs{Help: true}, nil
+		return parsedArgs{Help: true}, fs, nil
 	}
 	if *showVer {
-		return parsedArgs{Version: true}, nil
+		return parsedArgs{Version: true}, fs, nil
 	}
 
 	tierValue := strings.TrimSpace(*tier)
 	if flagWasSet(fs, "tier") && !domain.Tier(tierValue).IsValid() {
-		return parsedArgs{}, fmt.Errorf("invalid --tier %q (choose supervisor, operator, or system)", *tier)
+		return parsedArgs{}, nil, fmt.Errorf("invalid --tier %q (choose supervisor, operator, or system)", *tier)
 	}
 
 	if *timeout < 0 {
-		return parsedArgs{}, fmt.Errorf("invalid --timeout %s (must not be negative)", *timeout)
+		return parsedArgs{}, nil, fmt.Errorf("invalid --timeout %s (must not be negative)", *timeout)
 	}
 	// --run-scheduler REQUIRES a bound. The flag holds the run open until the async work
 	// it started settles, and settling is not guaranteed: an invocation whose terminals
@@ -220,7 +246,7 @@ func parseArgs(args []string) (parsedArgs, error) {
 	// wait forever. Demanding the duration explicitly is better than inventing a default,
 	// which would silently truncate a legitimately long job at a number nobody chose.
 	if *runScheduler && *timeout <= 0 {
-		return parsedArgs{}, fmt.Errorf("--run-scheduler requires a positive --timeout (e.g. --timeout 10m)")
+		return parsedArgs{}, nil, fmt.Errorf("--run-scheduler requires a positive --timeout (e.g. --timeout 10m)")
 	}
 	// --multi-turn is validated HERE, before the route is chosen, and that placement is
 	// the point. Every check below this line sits after a subcommand's early return, so
@@ -239,19 +265,19 @@ func parseArgs(args []string) (parsedArgs, error) {
 	// a positional too, so this is also what refuses `--multi-turn doctor`.
 	if *multiTurn {
 		if !*jsonOut {
-			return parsedArgs{}, fmt.Errorf("--multi-turn requires --json; for human-rendered multi-turn output pipe stdin to --classic")
+			return parsedArgs{}, nil, fmt.Errorf("--multi-turn requires --json; for human-rendered multi-turn output pipe stdin to --classic")
 		}
 		if *promptFile != "" || len(positionals) > 0 {
-			return parsedArgs{}, fmt.Errorf("--multi-turn reads its prompts from stdin, one per line; it cannot be combined with a prompt argument, a command, or --prompt-file")
+			return parsedArgs{}, nil, fmt.Errorf("--multi-turn reads its prompts from stdin, one per line; it cannot be combined with a prompt argument, a command, or --prompt-file")
 		}
 		if *stdio {
-			return parsedArgs{}, stdioRequiresHostError()
+			return parsedArgs{}, nil, stdioRequiresHostError()
 		}
 		// --list-skills names its route with a FLAG rather than a positional, so the
 		// check above cannot see it: it is a read-and-print that never runs a turn, and
 		// pairing it with --multi-turn silently discards the conversation.
 		if *listSkills {
-			return parsedArgs{}, fmt.Errorf("--multi-turn and --list-skills do not go together: --list-skills prints the catalog and exits without running a turn")
+			return parsedArgs{}, nil, fmt.Errorf("--multi-turn and --list-skills do not go together: --list-skills prints the catalog and exits without running a turn")
 		}
 	}
 	// An explicitly EMPTY value is a mistake, never a request to fall back. A harness
@@ -282,7 +308,7 @@ func parseArgs(args []string) (parsedArgs, error) {
 			if !ok {
 				advice = "omit the flag to fall back to the environment"
 			}
-			return parsedArgs{}, fmt.Errorf("--%s was given an empty value; %s", name, advice)
+			return parsedArgs{}, nil, fmt.Errorf("--%s was given an empty value; %s", name, advice)
 		}
 	}
 	// A boolean override is carried as a POINTER so an explicit --auto-approve=false can
@@ -316,6 +342,7 @@ func parseArgs(args []string) (parsedArgs, error) {
 		WindowID:                *windowID,
 		ProjectInstructionsFile: *projectInstructionsFile,
 		AutoApprove:             boolFlag("auto-approve", autoApprove),
+		AllowDelegatedApprovals: *mcpAllowDelegatedApprovals,
 		DebugLog:                boolFlag("debug-log", debugLog),
 		Timeout:                 *timeout,
 		RunScheduler:            *runScheduler,
@@ -332,16 +359,16 @@ func parseArgs(args []string) (parsedArgs, error) {
 	// so both are refused rather than silently ignored.
 	if *listSkills {
 		if len(positionals) > 0 {
-			return parsedArgs{}, fmt.Errorf("--list-skills does not take a prompt or a command: %s", strings.Join(positionals, " "))
+			return parsedArgs{}, nil, fmt.Errorf("--list-skills does not take a prompt or a command: %s", strings.Join(positionals, " "))
 		}
 		if len(skills) > 0 {
-			return parsedArgs{}, errors.New("--list-skills and --skill do not go together: list the catalog first, then pin an id from it")
+			return parsedArgs{}, nil, errors.New("--list-skills and --skill do not go together: list the catalog first, then pin an id from it")
 		}
 		if *stdio {
-			return parsedArgs{}, stdioRequiresHostError()
+			return parsedArgs{}, nil, stdioRequiresHostError()
 		}
 		parsed.Route = routeListSkills
-		return parsed, nil
+		return parsed, fs, nil
 	}
 	// `doctor --json` is a real thing: doctor is the release gate, and a gate that can
 	// only be read by a human is not one. It is carved out BEFORE the --json rule below
@@ -350,12 +377,12 @@ func parseArgs(args []string) (parsedArgs, error) {
 	if len(positionals) == 1 && positionals[0] == "doctor" && !forcePrompt {
 		parsed.Route = routeDoctor
 		if *stdio {
-			return parsedArgs{}, stdioRequiresHostError()
+			return parsedArgs{}, nil, stdioRequiresHostError()
 		}
 		if len(skills) > 0 {
-			return parsedArgs{}, errors.New("--skill has no effect on \"doctor\", which never runs a turn")
+			return parsedArgs{}, nil, errors.New("--skill has no effect on \"doctor\", which never runs a turn")
 		}
-		return parsed, nil
+		return parsed, fs, nil
 	}
 	// --json is otherwise unambiguously a one-shot request, so a prompt that happens to
 	// be named "status" remains a prompt. `--` provides the same escape for the
@@ -364,17 +391,17 @@ func parseArgs(args []string) (parsedArgs, error) {
 		switch positionals[0] {
 		case "doctor":
 			if err := rejectCommandArgs("doctor", positionals[1:]); err != nil {
-				return parsedArgs{}, err
+				return parsedArgs{}, nil, err
 			}
 			parsed.Route = routeDoctor
 		case "host":
 			if err := rejectCommandArgs("host", positionals[1:]); err != nil {
-				return parsedArgs{}, err
+				return parsedArgs{}, nil, err
 			}
 			parsed.Route = routeHost
 		case "mcp":
 			if err := rejectCommandArgs("mcp", positionals[1:]); err != nil {
-				return parsedArgs{}, err
+				return parsedArgs{}, nil, err
 			}
 			parsed.Route = routeMCP
 		case "daemon":
@@ -382,15 +409,15 @@ func parseArgs(args []string) (parsedArgs, error) {
 			case len(positionals) == 1:
 				parsed.Route = routeDaemon
 			case positionals[1] != "stop":
-				return parsedArgs{}, fmt.Errorf("unknown daemon action %q (only 'stop' is supported)", positionals[1])
+				return parsedArgs{}, nil, fmt.Errorf("unknown daemon action %q (only 'stop' is supported)", positionals[1])
 			case len(positionals) > 2:
-				return parsedArgs{}, fmt.Errorf("daemon stop does not accept arguments: %s", strings.Join(positionals[2:], " "))
+				return parsedArgs{}, nil, fmt.Errorf("daemon stop does not accept arguments: %s", strings.Join(positionals[2:], " "))
 			default:
 				parsed.Route = routeDaemonStop
 			}
 		case "status":
 			if err := rejectCommandArgs("status", positionals[1:]); err != nil {
-				return parsedArgs{}, err
+				return parsedArgs{}, nil, err
 			}
 			parsed.Route = routeStatus
 		case "reset":
@@ -398,49 +425,49 @@ func parseArgs(args []string) (parsedArgs, error) {
 			// picked one would be the most dangerous possible convenience: the scopes
 			// differ by how much of this project's state they destroy.
 			if len(positionals) < 2 {
-				return parsedArgs{}, fmt.Errorf("reset needs a scope:\n%s", cli.ResetUsage())
+				return parsedArgs{}, nil, fmt.Errorf("reset needs a scope:\n%s", cli.ResetUsage())
 			}
 			if len(positionals) > 2 {
-				return parsedArgs{}, fmt.Errorf("reset accepts one scope, got: %s", strings.Join(positionals[1:], " "))
+				return parsedArgs{}, nil, fmt.Errorf("reset accepts one scope, got: %s", strings.Join(positionals[1:], " "))
 			}
 			scope, ok := cli.ParseResetScope(positionals[1])
 			if !ok {
-				return parsedArgs{}, fmt.Errorf("unknown reset scope %q:\n%s", positionals[1], cli.ResetUsage())
+				return parsedArgs{}, nil, fmt.Errorf("unknown reset scope %q:\n%s", positionals[1], cli.ResetUsage())
 			}
 			parsed.Route = routeReset
 			parsed.ResetScope = scope
 			parsed.ResetOptions = cli.ResetOptions{Yes: *yes, NoBackup: *noBackup}
 		case "support-bundle":
 			if err := rejectCommandArgs("support-bundle", positionals[1:]); err != nil {
-				return parsedArgs{}, err
+				return parsedArgs{}, nil, err
 			}
 			parsed.Route = routeSupportBundle
 			parsed.SupportBundle = cli.SupportBundleOptions{Out: *bundleOut, Yes: *yes, IncludeAudit: *bundleAudit}
 		}
 		if parsed.Route != routeDefault {
 			if *stdio && parsed.Route != routeHost && parsed.Route != routeMCP {
-				return parsedArgs{}, stdioRequiresHostError()
+				return parsedArgs{}, nil, stdioRequiresHostError()
 			}
 			// A pin is meaningless on a route that never runs a turn, and --timeout's
 			// documented "silently ignored elsewhere" is the WRONG precedent to follow
 			// here: this whole flag exists because a --skill that does nothing looks
 			// exactly like one that worked. Say so at the argument boundary instead.
 			if len(skills) > 0 && !routeRunsTurns(parsed.Route) {
-				return parsedArgs{}, fmt.Errorf("--skill has no effect on %q, which never runs a turn", positionals[0])
+				return parsedArgs{}, nil, fmt.Errorf("--skill has no effect on %q, which never runs a turn", positionals[0])
 			}
-			return parsed, nil
+			return parsed, fs, nil
 		}
 	}
 
 	if *stdio {
-		return parsedArgs{}, stdioRequiresHostError()
+		return parsedArgs{}, nil, stdioRequiresHostError()
 	}
 	// Two prompt sources at once is a MISTAKE, not a precedence question. Picking one
 	// silently would run a prompt the caller can see they also passed the other way,
 	// which is the worst possible outcome for a harness whose whole job is reproducing
 	// an exact question.
 	if *promptFile != "" && len(positionals) > 0 {
-		return parsedArgs{}, fmt.Errorf("--prompt-file and a prompt argument cannot be combined; pass the prompt one way")
+		return parsedArgs{}, nil, fmt.Errorf("--prompt-file and a prompt argument cannot be combined; pass the prompt one way")
 	}
 	if len(positionals) > 0 {
 		// Join remaining tokens so an unquoted multi-word prompt still works; a single
@@ -456,10 +483,25 @@ func parseArgs(args []string) (parsedArgs, error) {
 		parsed.Options.HasPrompt = true
 	}
 	if *jsonOut && !parsed.Options.HasPrompt && !*multiTurn {
-		return parsedArgs{}, fmt.Errorf("--json requires a prompt (or --multi-turn to read one prompt per line from stdin)")
+		return parsedArgs{}, nil, fmt.Errorf("--json requires a prompt (or --multi-turn to read one prompt per line from stdin)")
 	}
 
-	return parsed, nil
+	return parsed, fs, nil
+}
+
+// checkRouteScopedFlags refuses a flag that only means something on one route.
+//
+// --timeout's "silently ignored elsewhere" is the wrong precedent for this one, for the
+// same reason --skill does not follow it: an operator types --allow-delegated-approvals
+// to make a deliberate decision about whether the agent on the other end of the pipe may
+// approve mutations, and a flag that quietly does nothing looks exactly like one that
+// worked. Say so at the argument boundary.
+func checkRouteScopedFlags(fs *flag.FlagSet, route route) error {
+	if flagWasSet(fs, "allow-delegated-approvals") && route != routeMCP {
+		return errors.New("--allow-delegated-approvals only applies to \"mcp --stdio\", " +
+			"where the caller is another agent; it has no meaning on any other route")
+	}
+	return nil
 }
 
 // splitInterspersedArgs separates registered options from positional tokens
@@ -621,6 +663,9 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "  --project-instructions-file PATH")
 	fmt.Fprintln(w, "                      read DAINTREE.md content from a file instead of the project")
 	fmt.Fprintln(w, "  --auto-approve      run mutating tools without confirmation")
+	fmt.Fprintln(w, "  --allow-delegated-approvals")
+	fmt.Fprintln(w, "                      mcp --stdio: let a session use approvals:\"delegate\",")
+	fmt.Fprintln(w, "                      where the CALLING AGENT answers each confirmation")
 	fmt.Fprintln(w, "  --debug-log         write the session trace to the log directory")
 	fmt.Fprintln(w, "  --timeout DURATION  cancel a one-shot run after this long (e.g. 10m; 0 = no limit)")
 	fmt.Fprintln(w, "  --run-scheduler     run the scheduler during a one-shot and await its async work")

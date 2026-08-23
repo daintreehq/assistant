@@ -1140,8 +1140,8 @@ func TestErrorsNameTheRemedy(t *testing.T) {
 // caller approves, and the call proceeds.
 func TestApprovalFlowThroughTheTools(t *testing.T) {
 	fake := newFakeRuntime("ses_test")
-	fake.approvals = NewApprovals(ApprovalAsk, 0)
-	fake.facts.ApprovalMode = string(ApprovalAsk)
+	fake.approvals = NewApprovals(ApprovalDelegate, 0)
+	fake.facts.ApprovalMode = string(ApprovalDelegate)
 	fake.confirmInSend = &ApprovalRequest{
 		Tool: "git.push", Risk: domain.RiskGit,
 		Consequence: "pushes 3 commits to origin/main",
@@ -1164,7 +1164,7 @@ func TestApprovalFlowThroughTheTools(t *testing.T) {
 	if err := call(t, cs, "daintree.approvals", SessionRefInput{SessionID: sess.SessionID}, &list); err != nil {
 		t.Fatalf("approvals: %v", err)
 	}
-	if list.Count != 1 || list.Mode != string(ApprovalAsk) {
+	if list.Count != 1 || list.Mode != string(ApprovalDelegate) {
 		t.Fatalf("approvals = %+v", list)
 	}
 	if list.Pending[0].Consequence == "" || list.Pending[0].Risk != string(domain.RiskGit) {
@@ -1208,7 +1208,7 @@ func TestApprovalFlowThroughTheTools(t *testing.T) {
 // timer fired must learn what happened, not get a bare "not found".
 func TestApprovingASettledApprovalExplainsItself(t *testing.T) {
 	fake := newFakeRuntime("ses_test")
-	fake.approvals = NewApprovals(ApprovalAsk, 0)
+	fake.approvals = NewApprovals(ApprovalDelegate, 0)
 	cs, _ := connectWithApprovals(t, fake)
 	sess := openSession(t, cs)
 	fake.letFinish()
@@ -1265,7 +1265,7 @@ func TestDeclineModeExplainsWhyNothingIsPending(t *testing.T) {
 // the wait, i.e. with the deadlock reintroduced.
 func TestSessionCloseWaitsForAParkedDispatch(t *testing.T) {
 	fake := newFakeRuntime("ses_test")
-	fake.approvals = NewApprovals(ApprovalAsk, 0)
+	fake.approvals = NewApprovals(ApprovalDelegate, 0)
 	fake.confirmInSend = &ApprovalRequest{Tool: "git.push", Risk: domain.RiskGit}
 
 	cs, _ := connectWithApprovals(t, fake)
@@ -1302,7 +1302,7 @@ func TestSessionCloseWaitsForAParkedDispatch(t *testing.T) {
 // run in the session as BLOCKED whenever any turn was parked.
 func TestPendingApprovalsAreScopedToTheirRun(t *testing.T) {
 	fake := newFakeRuntime("ses_test")
-	fake.approvals = NewApprovals(ApprovalAsk, 0)
+	fake.approvals = NewApprovals(ApprovalDelegate, 0)
 	cs, _ := connectWithApprovals(t, fake)
 	sess := openSession(t, cs)
 
@@ -1334,7 +1334,7 @@ func TestPendingApprovalsAreScopedToTheirRun(t *testing.T) {
 // id actually reaches the approval, which is the adapter's job.
 func TestProductionApprovalsCarryTheirRunID(t *testing.T) {
 	fake := newFakeRuntime("ses_test")
-	fake.approvals = NewApprovals(ApprovalAsk, 0)
+	fake.approvals = NewApprovals(ApprovalDelegate, 0)
 	fake.confirmInSend = &ApprovalRequest{Tool: "git.push"}
 	cs, _ := connectWithApprovals(t, fake)
 	sess := openSession(t, cs)

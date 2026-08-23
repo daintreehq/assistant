@@ -58,9 +58,9 @@ type OpenInput struct {
 	// both wrong on their own: always approving lets the assistant push and run
 	// commands unwatched, always declining means a session can never do the mutating
 	// work it exists for.
-	Approvals string `json:"approvals,omitempty" jsonschema:"How to answer a mutating tool. decline: skip it and carry on (the safe default). ask: park it for you to decide with daintree.approve. auto: never ask. Choose ask only if you will actually poll for approvals - a parked call blocks the whole turn until it is answered or times out."`
+	Approvals string `json:"approvals,omitempty" jsonschema:"How to answer a mutating tool. decline: skip it and carry on. delegate: park it for YOU - the calling agent - to settle with daintree.approve; this is delegation, not human authorization, and no human is guaranteed to see the request. auto: never ask. OMITTING this field INHERITS the launch configuration - it becomes auto on a server launched with auto-approve, and decline otherwise - so pass decline explicitly if you need fail-closed behaviour whatever the server was launched with. Choose delegate only if you will actually poll for approvals, since a parked call blocks the whole turn until it is answered or times out. The server's launch policy may refuse delegate or auto outright."`
 	// ApprovalTimeoutMs bounds a parked approval so a forgotten one cannot pin the turn.
-	ApprovalTimeoutMs int `json:"approvalTimeoutMs,omitempty" jsonschema:"How long a parked approval waits before it is denied, in milliseconds. Default 300000 (5 minutes). Only meaningful when approvals is ask."`
+	ApprovalTimeoutMs int `json:"approvalTimeoutMs,omitempty" jsonschema:"How long a parked approval waits before it is denied, in milliseconds. Default 300000 (5 minutes). Only meaningful when approvals is delegate."`
 	// Skills is the MCP twin of the CLI's repeatable --skill. The two headless surfaces
 	// must not drift: a runbook you can pin from argv you must be able to pin here.
 	//
@@ -139,9 +139,13 @@ type PollInput struct {
 
 // ApprovalsOutput lists what a session is parked on.
 type ApprovalsOutput struct {
-	Mode    string            `json:"mode" jsonschema:"decline, ask, or auto."`
-	Pending []PendingApproval `json:"pending"`
-	Count   int               `json:"count"`
+	Mode string `json:"mode" jsonschema:"decline, delegate, or auto."`
+	// DecisionAuthority repeats, at the list level, whose decision these are. A caller
+	// reading a pending list needs to know it is looking at its OWN queue, not a
+	// human's.
+	DecisionAuthority string            `json:"decisionAuthority" jsonschema:"Who settles these approvals. caller-agent means you do - this is not a human safety boundary."`
+	Pending           []PendingApproval `json:"pending"`
+	Count             int               `json:"count"`
 	// Note explains an empty list when the reason is the MODE rather than the absence
 	// of mutating work — otherwise "0 pending" reads as "nothing wanted approval".
 	Note string `json:"note,omitempty"`
@@ -151,7 +155,15 @@ type ApprovalsOutput struct {
 type ApproveInput struct {
 	SessionID  string `json:"sessionId"`
 	ApprovalID string `json:"approvalId" jsonschema:"The id from daintree.approvals or from a run's pendingApprovals."`
-	Approve    bool   `json:"approve" jsonschema:"true to allow the tool call, false to refuse it. Refusing lets the turn continue without that call."`
+	// RunID is the turn the caller believed it was approving for. Same reasoning as
+	// InjectInput.RunID and one step sharper: over a slow pipe a decision written while
+	// watching one turn can arrive after that turn ended, and releasing a mutating call
+	// on the strength of a judgement made about DIFFERENT work is the one approval
+	// outcome nobody wants. Approval ids are unique, so a stale one simply will not be
+	// pending — but a caller that names the run gets told which turn it was actually
+	// looking at instead of a bare "not found".
+	RunID   string `json:"runId,omitempty" jsonschema:"The runId you were watching when you decided, from daintree.ask. Recommended: a decision that arrives after its turn ended is rejected rather than applied to a successor."`
+	Approve bool   `json:"approve" jsonschema:"true to allow the tool call, false to refuse it. Refusing lets the turn continue without that call."`
 }
 
 // SessionRefInput is the shape of every tool that only needs a session.
@@ -259,13 +271,15 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 		Description: "Open an assistant session bound to a project. Returns a sessionId used by every other tool. " +
 			"Session arguments NARROW what the server was launched with and can never widen it: a request above the server's " +
 			"policy is refused rather than quietly downgraded, and endpoints and credentials are normally pinned at launch. " +
+			"An OMITTED argument inherits the launch value rather than a fixed default — approvals most importantly, which " +
+			"becomes auto on a server launched with auto-approve. Pass approvals:\"decline\" if you need that guaranteed. " +
 			"Without an MCP URL and token the assistant runs in degraded local mode where it cannot see or drive terminals; " +
 			"the token is inherited from the server process's environment, and is never passed inline.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in OpenInput) (*mcp.CallToolResult, SessionOutput, error) {
 		mode := ApprovalMode(strings.TrimSpace(in.Approvals))
 		if mode != "" && !mode.Valid() {
 			return nil, SessionOutput{}, fmt.Errorf(
-				"unknown approvals mode %q — use \"decline\", \"ask\" or \"auto\"", in.Approvals)
+				"unknown approvals mode %q — use \"decline\", \"delegate\" or \"auto\"", in.Approvals)
 		}
 		if in.ApprovalTimeoutMs < 0 {
 			return nil, SessionOutput{}, fmt.Errorf(
@@ -433,24 +447,28 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 		Name: "daintree.approvals",
 		Description: "List the confirmations this session is PARKED on. A mutating tool (a terminal command, a git operation) " +
 			"blocks the whole turn until it is answered, so a run that seems slow may simply be waiting here. " +
-			"Only sessions opened with approvals:\"ask\" ever park; the default declines and carries on.",
+			"Only sessions opened with approvals:\"delegate\" ever park; the default declines and carries on. " +
+			"These are YOUR decisions to make — no human sees them — so read risk, consequence and args before answering.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, in SessionRefInput) (*mcp.CallToolResult, ApprovalsOutput, error) {
 		sess, err := reg.Get(in.SessionID)
 		if err != nil {
 			return nil, ApprovalsOutput{}, err
 		}
+		mode := sess.Approvals().Mode()
 		pending := sess.Approvals().Pending()
 		out := ApprovalsOutput{
-			Mode:    string(sess.Approvals().Mode()),
-			Pending: pending,
-			Count:   len(pending),
+			Mode:              string(mode),
+			DecisionAuthority: mode.DecisionAuthority(),
+			Pending:           pending,
+			Count:             len(pending),
 		}
 		if out.Pending == nil {
 			out.Pending = []PendingApproval{}
 		}
-		if len(pending) == 0 && out.Mode != string(ApprovalAsk) {
+		if len(pending) == 0 && mode != ApprovalDelegate {
 			out.Note = "This session does not park approvals — mode is " + out.Mode +
-				". Open a session with approvals:\"ask\" if you want to decide each mutating call."
+				". Open a session with approvals:\"delegate\" if you want to settle each mutating call yourself, " +
+				"if this server's launch policy permits it."
 		}
 		return nil, out, nil
 	})
@@ -458,7 +476,9 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "daintree.approve",
 		Description: "Answer one parked confirmation, releasing (or refusing) the blocked tool call. " +
-			"Read its risk, consequence and args first — approving is how this assistant is allowed to change anything.",
+			"Read its risk, consequence and args first — approving is how this assistant is allowed to change anything, " +
+			"and YOU are the decision, not a human reviewing behind you. Pass the runId you were watching so a decision " +
+			"that arrives after its turn ended is rejected rather than applied to a successor.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, in ApproveInput) (*mcp.CallToolResult, ActedOutput, error) {
 		sess, err := reg.Get(in.SessionID)
 		if err != nil {
@@ -468,7 +488,17 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 		if in.Approve {
 			decision = DecisionApproved
 		}
-		if sess.Approvals().Resolve(in.ApprovalID, decision) {
+		// Correlation and settlement happen TOGETHER, under the broker's lock. Checking
+		// first and resolving after leaves a window in which the approval that passed
+		// the check settles and a different one is inserted — and ids are eight hex
+		// characters, so "that cannot be the same id" is an assumption rather than a
+		// guarantee. One operation removes the window instead of arguing about how
+		// unlikely it is.
+		settled, mismatch := sess.Approvals().ResolveForRun(in.ApprovalID, in.RunID, decision)
+		if mismatch != nil {
+			return nil, ActedOutput{}, mismatch
+		}
+		if settled {
 			return nil, ActedOutput{Acted: true, Message: "approval " + in.ApprovalID + " " + string(decision)}, nil
 		}
 		// Not pending: either already settled (very likely a timeout, if the caller was

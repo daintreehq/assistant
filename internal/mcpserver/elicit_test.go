@@ -67,7 +67,7 @@ func askAndPark(t *testing.T, cs *mcp.ClientSession, fake *fakeRuntime) PendingA
 // parkingRuntime is a fake whose turn parks one approval.
 func parkingRuntime() (*fakeRuntime, chan bool) {
 	fake := newFakeRuntime("ses_test")
-	fake.approvals = NewApprovals(ApprovalAsk, 2*time.Second)
+	fake.approvals = NewApprovals(ApprovalDelegate, 2*time.Second)
 	outcome := make(chan bool, 1)
 	fake.script = func(sink agent.EventSink) {
 		go func() {
@@ -194,7 +194,7 @@ func TestElicitationFailureFallsBackToPolling(t *testing.T) {
 
 // TestElicitNotifierIsNilWithoutASession guards the constructor's own precondition.
 func TestElicitNotifierIsNilWithoutASession(t *testing.T) {
-	if elicitNotifier(nil, NewApprovals(ApprovalAsk, 0), time.Second) != nil {
+	if elicitNotifier(nil, NewApprovals(ApprovalDelegate, 0), time.Second) != nil {
 		t.Error("a nil client session must produce no notifier")
 	}
 }

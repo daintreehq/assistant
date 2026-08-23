@@ -260,7 +260,7 @@ available on every surface, and the honest table is:
 | Surface | Approval | Multiple-choice question |
 | --- | --- | --- |
 | Native host (`host --stdio`) | `approval:requested` → `approval:decide` | `question:requested` → `question:answer` |
-| MCP (`mcp --stdio`) | `daintree.approvals` / `daintree.approve`, or MCP elicitation | **not implemented** — the tool reports `QUESTION_UNAVAILABLE` |
+| MCP (`mcp --stdio`) | `daintree.approvals` / `daintree.approve`, or MCP elicitation — **delegated to the calling agent, not a human**, and only when launched with `--allow-delegated-approvals` | **not implemented** — the tool reports `QUESTION_UNAVAILABLE` |
 | JSONL one-shot (`--json`) | none — the tool is declined and the turn continues | **not implemented** — `QUESTION_UNAVAILABLE` |
 | Line REPL | terminal prompt | terminal prompt |
 
@@ -274,6 +274,11 @@ render a yes/no sheet for a question with four answers.
 That asymmetry drives the rest of the contract: an unanswered approval times out to
 *rejected*, while an unanswered question times out to **cancelled**. An out-of-range
 `choiceIndex` cancels rather than clamping, for the same reason.
+
+The two rows above are also not the same KIND of decision, and the table should not be read
+as though they were. On the native host a person sees the sheet and answers it. On MCP the
+request goes to the model driving the session, which answers its own request — delegation,
+not authorization. See [HEADLESS.md](HEADLESS.md#delegate-is-delegation-not-human-authorization).
 
 `/backend`'s endpoint picker reuses this channel, marked local so Esc dismisses it instead of
 cancelling the turn.

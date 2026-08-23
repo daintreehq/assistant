@@ -30,8 +30,8 @@ func TestApprovalModeResolution(t *testing.T) {
 			name: "explicit ask never auto-approves",
 			// The dangerous combination: if this resolved auto=true, dispatch would skip
 			// the hook and every mutating call would run WITHOUT being asked about.
-			requested: mcpserver.ApprovalAsk, defaultAuto: true,
-			wantMode: mcpserver.ApprovalAsk, wantAuto: false,
+			requested: mcpserver.ApprovalDelegate, defaultAuto: true,
+			wantMode: mcpserver.ApprovalDelegate, wantAuto: false,
 		},
 		{
 			name:      "explicit decline beats an auto-approving environment",

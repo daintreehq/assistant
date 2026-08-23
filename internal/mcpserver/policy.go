@@ -53,6 +53,21 @@ type ServerPolicy struct {
 	// auto-approve is the setting that turns a read-mostly session into one that can
 	// push, run commands, and mutate a repository with nothing watching.
 	AllowAutoApprove bool
+	// AllowDelegatedApprovals permits approvals:"delegate", where the CALLER AGENT
+	// settles each confirmation.
+	//
+	// It is a separate switch from AllowAutoApprove because it is a separate question,
+	// and the honest framing matters: delegation is not a weaker form of asking a human,
+	// it is asking the same model that is driving the session. Whether that is
+	// acceptable depends on something only the operator knows — whether the caller agent
+	// is a person's terminal or an unattended loop over a repository that could steer
+	// it. Off by default under a policy: a session declines mutating tools and carries
+	// on, which is visible and recoverable, rather than approving them via a channel
+	// nobody outside the model ever sees.
+	//
+	// Separate, but not independent in one direction: AllowAutoApprove implies this,
+	// because auto is strictly the broader grant. See Check.
+	AllowDelegatedApprovals bool
 	// AllowedProjectRoots, when non-empty, confines a session's project path to these
 	// directories. Paths are cleaned and compared after symlink-free lexical
 	// normalization, and a prefix match must land on a path SEPARATOR so /srv/appfoo
@@ -247,7 +262,16 @@ func (p ServerPolicy) Check(in OpenParams, openSessions int) error {
 	}
 	if mode == ApprovalAuto && !p.AllowAutoApprove {
 		return &PolicyError{Field: "approvals:\"auto\"", Reason: "this server does not permit unattended approval of " +
-			"mutating tools; use \"ask\" and answer them, or \"decline\""}
+			"mutating tools; use \"decline\", or \"delegate\" if this server allows it"}
+	}
+	// AllowAutoApprove IMPLIES delegation. Auto runs every tier-permitted mutating call
+	// with nothing consulted; delegate runs the subset the caller agent chooses to
+	// release. An operator who granted the broader authority cannot coherently be
+	// refusing the narrower one, and refusing it would push a caller that wanted to
+	// review each call toward the mode that reviews none.
+	if mode == ApprovalDelegate && !p.AllowDelegatedApprovals && !p.AllowAutoApprove {
+		return &PolicyError{Field: "approvals:\"delegate\"", Reason: "this server does not let the calling agent " +
+			"settle its own approval requests; use \"decline\", which skips the mutating call and lets the turn carry on"}
 	}
 	if err := p.checkEndpoint("backendUrl", in.BackendURL, p.AllowBackendOverride, p.AllowedBackendOrigins); err != nil {
 		return err

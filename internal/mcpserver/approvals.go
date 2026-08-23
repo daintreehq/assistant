@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -21,6 +22,16 @@ import (
 // approval fails closed on a timer, cancellation unparks it, and teardown rejects every
 // outstanding one. A dispatch goroutine can therefore never be parked forever, which is
 // the failure that would otherwise wedge a session with no way out.
+//
+// WHAT THIS IS NOT. The middle mode used to be called "ask", and the name was a lie by
+// implication. Nobody is asked. The pending approval is handed to the SAME model that is
+// driving the session, which then calls daintree.approve — so a request the assistant
+// made is answered by the agent that prompted it, and any repository text able to steer
+// that agent can steer the answer too. That is workflow delegation, and it is genuinely
+// useful for a harness driving a controlled project; it is not human authorization, and
+// naming it "ask" invited exactly the wrong inference from a caller deciding whether it
+// was safe to enable. So the mode is DELEGATE and every pending approval says whose
+// decision it actually is (see PendingApproval.DecisionAuthority).
 
 // ApprovalMode is how a session answers a confirmation request.
 type ApprovalMode string
@@ -30,8 +41,11 @@ const (
 	// only sensible one for an unattended caller that is not watching for approvals:
 	// the turn continues, having skipped the call, and the refusal is in the timeline.
 	ApprovalDecline ApprovalMode = "decline"
-	// ApprovalAsk parks the call and surfaces it, for a caller that polls and decides.
-	ApprovalAsk ApprovalMode = "ask"
+	// ApprovalDelegate parks the call and hands it to the CALLER AGENT to decide. It is
+	// explicitly not a human safety boundary — see the file comment. Useful for a
+	// harness driving a controlled project; wrong for a session over a repository whose
+	// contents could steer the caller.
+	ApprovalDelegate ApprovalMode = "delegate"
 	// ApprovalAuto never asks — dispatch skips the confirm hook entirely because the
 	// session set the runtime's auto-approve. Reported, never inferred.
 	ApprovalAuto ApprovalMode = "auto"
@@ -40,10 +54,25 @@ const (
 // Valid reports whether m is a known mode.
 func (m ApprovalMode) Valid() bool {
 	switch m {
-	case ApprovalDecline, ApprovalAsk, ApprovalAuto:
+	case ApprovalDecline, ApprovalDelegate, ApprovalAuto:
 		return true
 	}
 	return false
+}
+
+// DecisionAuthority names who actually settles an approval in this mode. It is reported
+// on every pending approval so the answer is in the payload rather than in a caller's
+// assumption about what a mode name implies.
+func (m ApprovalMode) DecisionAuthority() string {
+	switch m {
+	case ApprovalDelegate:
+		// Not "human". The caller agent decides, and it is the same agent that asked.
+		return "caller-agent"
+	case ApprovalAuto:
+		return "none"
+	default:
+		return "none"
+	}
 }
 
 // Decision is the outcome of one approval.
@@ -87,7 +116,16 @@ type PendingApproval struct {
 	// action and an ordinary project mutation arrive as the same boolean with
 	// different prose, which is exactly the distinction a caller needs to apply its
 	// own friction. Reported, never enforced here.
-	NeedsTypedConfirm bool `json:"needsTypedConfirm,omitempty"`
+	// It is NOT omitempty. A caller distinguishing "this action does not need extra
+	// friction" from "the peer is too old to tell me" cannot do it from an absent field,
+	// and an approval whose friction requirement silently disappeared is the one an
+	// automated caller waves through.
+	NeedsTypedConfirm bool `json:"needsTypedConfirm"`
+	// DecisionAuthority says whose decision releases this call — "caller-agent" under
+	// delegate, "none" otherwise. Present so a caller reads the authority off the
+	// payload instead of inferring it from a mode name, which is how "ask" came to be
+	// read as human authorization.
+	DecisionAuthority string `json:"decisionAuthority"`
 
 	resolve chan Decision
 	timer   *time.Timer
@@ -196,7 +234,7 @@ func (a *Approvals) Confirm(ctx context.Context, req ApprovalRequest) bool {
 	if a.mode == ApprovalAuto {
 		return true
 	}
-	if a.mode != ApprovalAsk {
+	if a.mode != ApprovalDelegate {
 		return false
 	}
 
@@ -215,6 +253,7 @@ func (a *Approvals) Confirm(ctx context.Context, req ApprovalRequest) bool {
 		resolve:     make(chan Decision, 1),
 
 		NeedsTypedConfirm: req.NeedsTypedConfirm,
+		DecisionAuthority: a.mode.DecisionAuthority(),
 	}
 
 	a.mu.Lock()
@@ -234,6 +273,7 @@ func (a *Approvals) Confirm(ctx context.Context, req ApprovalRequest) bool {
 		ID: pa.ID, Tool: pa.Tool, Risk: pa.Risk, Consequence: pa.Consequence,
 		Summary: pa.Summary, Args: pa.Args, RequestedAt: pa.RequestedAt, RunID: pa.RunID,
 		NeedsTypedConfirm: pa.NeedsTypedConfirm,
+		DecisionAuthority: pa.DecisionAuthority,
 	}
 	a.mu.Unlock()
 
@@ -282,6 +322,14 @@ func (a *Approvals) Resolve(id string, d Decision) bool {
 		a.mu.Unlock()
 		return false
 	}
+	a.settleLocked(id, pa, d)
+	a.mu.Unlock()
+	a.deliver(pa, d)
+	return true
+}
+
+// settleLocked removes a pending approval and records its outcome. Callers hold a.mu.
+func (a *Approvals) settleLocked(id string, pa *PendingApproval, d Decision) {
 	delete(a.pending, id)
 	for i, existing := range a.order {
 		if existing == id {
@@ -293,15 +341,73 @@ func (a *Approvals) Resolve(id string, d Decision) bool {
 		pa.timer.Stop()
 	}
 	a.rememberLocked(id, d)
-	a.mu.Unlock()
+}
 
-	// Buffered(1) and written once, so this never blocks even if the Confirm caller
-	// has already left through the ctx branch.
+// deliver hands the decision to the parked Confirm. Buffered(1) and written once, so it
+// never blocks even if that caller has already left through the ctx branch.
+func (a *Approvals) deliver(pa *PendingApproval, d Decision) {
 	select {
 	case pa.resolve <- d:
 	default:
 	}
-	return true
+}
+
+// ApprovalRunMismatchError is a decision aimed at a turn the approval does not belong to.
+//
+// It is its own type rather than the session's RunMismatchError because the remedy
+// differs: that one tells a caller to poll the run it named for an outcome, while here
+// the caller is holding a decision about the wrong piece of work and needs to look at
+// what this approval is actually blocking.
+type ApprovalRunMismatchError struct {
+	ApprovalID string
+	Want       string
+	Actual     string
+}
+
+func (e *ApprovalRunMismatchError) Error() string {
+	if e.Actual == "" {
+		return fmt.Sprintf(
+			"approval %q does not record which run it blocks, so a decision naming run %q cannot be checked against it — "+
+				"call daintree.approvals and answer without runId if it is still the one you meant",
+			e.ApprovalID, e.Want)
+	}
+	return fmt.Sprintf(
+		"approval %q blocks run %q, not the run %q you named — you are holding a decision about different work; "+
+			"call daintree.approvals to see what this one is actually waiting on",
+		e.ApprovalID, e.Actual, e.Want)
+}
+
+// ResolveForRun settles an approval only if it belongs to the run the caller believed it
+// was deciding for. An empty expectRunID skips the correlation.
+//
+// Correlation and settlement are ONE operation, under one lock hold, because splitting
+// them leaves a window: the approval that passed the check can settle and another be
+// inserted before the resolve lands. Approval ids are eight hex characters, so treating
+// a collision as impossible is an assumption, and a mutating call released on the
+// strength of a judgement made about different work is the worst thing this surface can
+// get wrong.
+//
+// A pending approval with NO recorded run fails the correlation rather than passing it.
+// The caller asked for a check; answering "sure" when the provenance is simply missing
+// is the fail-open answer, and the caller can drop the runId if it still means it.
+func (a *Approvals) ResolveForRun(id, expectRunID string, d Decision) (settled bool, mismatch error) {
+	a.mu.Lock()
+	pa, ok := a.pending[id]
+	if !ok {
+		a.mu.Unlock()
+		// Nothing pending. The caller's own not-found handling (already settled versus
+		// never real) is more informative than a correlation error about a ghost.
+		return false, nil
+	}
+	if expectRunID != "" && pa.RunID != expectRunID {
+		actual := pa.RunID
+		a.mu.Unlock()
+		return false, &ApprovalRunMismatchError{ApprovalID: id, Want: expectRunID, Actual: actual}
+	}
+	a.settleLocked(id, pa, d)
+	a.mu.Unlock()
+	a.deliver(pa, d)
+	return true, nil
 }
 
 // maxDecidedHistory bounds the outcome memory. It exists so a caller that polls after a

@@ -68,6 +68,8 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 	// it on process-wide. Otherwise a session cannot grant itself unattended
 	// mutation.
 	policy.AllowAutoApprove = cfg.AutoApprove
+	// Delegation is a launch decision, not a session one. See Options.AllowDelegatedApprovals.
+	policy.AllowDelegatedApprovals = opts.AllowDelegatedApprovals
 	policy.MaxTier = domain.Tier(cfg.Tier)
 	policy.DefaultTier = domain.Tier(cfg.Tier)
 	policy.DefaultProject = cfg.ProjectPath
@@ -182,10 +184,11 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 
 		logPath := startProcessLog(a.Config)
 
-		// Confirmations go through the session's broker, which is what makes "ask" more
-		// than a slogan: it parks the dispatch, surfaces the call with its risk,
+		// Confirmations go through the session's broker, which is what makes "delegate"
+		// more than a slogan: it parks the dispatch, surfaces the call with its risk,
 		// consequence and redacted args, and fails closed on a timer so a forgotten
-		// approval can never pin the turn forever.
+		// approval can never pin the turn forever. What it is NOT is a human decision —
+		// see approvals.go.
 		//
 		// The event sink is NOT set here. It is per-TURN — each turn records into its own
 		// Run — and appRuntime.Send installs it. Wiring one here would be wrong twice

@@ -80,6 +80,7 @@ What `mcp --stdio` pins by default:
 | `project` / `stateDir` / `logDir` | confined to the directories the process was launched against | a prompt injection in one repository must not open a system-tier session on another one, or on `$HOME` |
 | `tier` | at most the process tier | a request *above* the ceiling is refused, never quietly downgraded — a caller told it has system tier would read every later refusal as a bug |
 | `approvals: "auto"` | refused unless the process itself was launched with auto-approve | a session cannot grant itself unattended mutation |
+| `approvals: "delegate"` | refused unless launched with `--allow-delegated-approvals` (or with `--auto-approve`, which is the broader grant and implies it) | the caller agent settling its own requests is delegation, not authorization — see below |
 
 Path confinement compares **resolved** paths: both the allowlisted root and the requested
 path go through `filepath.EvalSymlinks` first, so `/allowed/link -> /etc` is outside the
@@ -146,21 +147,71 @@ Things worth knowing before you drive it:
 - **Always close what you open.** A session holds the project's owner lease for its whole
   life, and a leaked one blocks every other process from opening that project.
 - **Mutating tools need approval,** and the mode is per session:
-  - `decline` (default) — refuse immediately and carry on. Safe for an unattended
-    caller, but the session can never actually change anything.
-  - `ask` — park the call and surface it with its risk, consequence and redacted args.
-    A parked call **blocks the whole turn**, so only choose this if you will poll. It
-    fails closed on a timer (`approvalTimeoutMs`, default 5 minutes), and interrupt or
-    close releases everything outstanding. Cancellation always wins: a call approved
-    after you interrupted the turn does not run. Each parked call carries
-    `needsTypedConfirm` — the safety layer's own verdict that the action is irreversible
-    and deserves more than a click. This server cannot impose friction on your UI, but it
-    tells you when the action warrants it rather than making you re-derive the rule.
-  - `auto` — never ask. Equivalent to `--auto-approve`.
+  - `decline` — refuse immediately and carry on. Safe for an unattended caller, but the
+    session can never actually change anything. This is what an omitted `approvals`
+    resolves to *unless* the process was launched with auto-approve; see below.
+  - `delegate` — park the call and hand it to **the calling agent** with its risk,
+    consequence and redacted args. A parked call **blocks the whole turn**, so only
+    choose this if you will poll. It fails closed on a timer (`approvalTimeoutMs`,
+    default 5 minutes), and interrupt or close releases everything outstanding.
+    Cancellation always wins: a call approved after you interrupted the turn does not
+    run. A decision may name the `runId` you were watching, and one that arrives after
+    that turn ended is rejected rather than applied to its successor. Each parked call
+    carries `needsTypedConfirm` — the safety layer's own verdict that the action is
+    irreversible and deserves more than a click — and `decisionAuthority`, which says
+    who is actually deciding. Requires `--allow-delegated-approvals` at launch — or
+    `--auto-approve`, which is strictly broader and therefore implies it.
+  - **An omitted `approvals` inherits the launch configuration**, not a fixed default: it
+    resolves to `auto` on a server launched with auto-approve, and `decline` otherwise.
+    Pass `decline` explicitly if you need fail-closed behaviour whatever the server was
+    launched with.
+  - `auto` — never ask. Equivalent to `--auto-approve`, and permitted only if the
+    process was launched with it.
 
   A blocked run is reported as blocked: pending approvals ride the run's `poll` response
   and its `nextAction` says so, because "still running" would send you polling harder at
   something that will never move on its own.
+
+#### `delegate` is delegation, not human authorization
+
+This mode used to be called `ask`, and the name was a lie by implication. **Nobody is
+guaranteed to be asked.** The pending approval is handed to the same model that is driving
+the session, which then calls `daintree.approve` — so a request the assistant made is
+answered by the agent that prompted it, and any repository text able to steer that agent
+can steer the answer too. Refusing `auto` while offering `ask` looked like a safety
+posture and was not one: the same model reached the same outcome by a longer route.
+
+(A client supporting MCP elicitation may put the request in front of a person instead —
+but the protocol carries no attestation either way, so the server cannot tell and does not
+claim to. `decisionAuthority` reports the guaranteed floor, not a hopeful reading.)
+
+So the mode is named for what it does, every pending approval reports
+`decisionAuthority: "caller-agent"`, and enabling it is a **launch** decision rather than
+a session argument — because whether the caller agent is a person's terminal or an
+unattended loop over an untrusted repository is something only the operator knows.
+
+Two launch settings enable it, and it is worth being exact about the second:
+
+- `--allow-delegated-approvals`, which enables it and nothing else. It has no dedicated
+  environment variable, deliberately: the point is that a human at a shell decides whether
+  the agent on the other end is one they trust, and an inherited variable is not that
+  decision.
+- `--auto-approve` (or `DAINTREE_ASSISTANT_AUTO_APPROVE=1`), which enables `auto` and
+  therefore `delegate` too. Auto runs every tier-permitted mutating call with nothing
+  consulted; delegate runs the subset the caller chooses to release. Refusing the narrower
+  grant to an operator who allowed the broader one would only push a caller toward the
+  mode that reviews nothing. So yes — the environment variable does indirectly permit
+  delegation, by permitting more than it.
+
+It is genuinely useful. A harness driving a controlled test project wants exactly this:
+real mutating work, decided by the driving agent, with every request visible in the
+timeline. What it is not is a boundary you can put an untrusted repository behind.
+
+A **human** mode — where only an out-of-band decision the model cannot forge releases a
+call — is not implemented. It needs a channel that does not exist on this surface yet:
+client-certified elicitation, a native-host decision, or a signed capability minted by a
+trusted host. Until one does, the honest answer is that this surface has no human
+authorization, which is why it does not claim any.
 - Unlike a one-shot's default, an MCP session **does** run the scheduler, so watchers,
   timers and async futures actually settle while it is open. A one-shot can opt into the
   same shape with `--run-scheduler`.
@@ -257,6 +308,7 @@ Every knob is a flag, and every flag shadows a trusted env var and wins over it.
 | `--log-dir PATH` | `DAINTREE_ASSISTANT_LOG_DIR` | |
 | `--debug-log` | `DAINTREE_ASSISTANT_DEBUG_LOG=1` | writes the session trace |
 | `--auto-approve` | `DAINTREE_ASSISTANT_AUTO_APPROVE=1` | see the warning below |
+| `--allow-delegated-approvals` | — | `mcp --stdio` only: lets a session choose `approvals:"delegate"`, where the CALLING AGENT settles each confirmation. No *dedicated* env counterpart, deliberately — a human at a shell should decide whether the agent on the other end is one they trust. `--auto-approve` (and its env var) permit delegation too, by permitting more than it. Rejected on any other subcommand rather than silently ignored |
 | `--tier TIER` | `DAINTREE_ASSISTANT_TIER` | `supervisor`\|`operator`\|`system` |
 | `--mcp-url` / `--mcp-token` | `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` | injected by Daintree |
 | `--project PATH` | — | default: the current directory |
