@@ -4,9 +4,12 @@ The CLI is a **thin local runtime**. It no longer acts as a model client; instea
 talks to the **Daintree Assistant backend** (a Daintree-native HTTP API — *not*
 OpenAI-compatible). The backend owns the system prompt, developer instructions, skill /
 runbook selection, model choice, prompt assembly, the utility-model prompts, and prompt
-caching. The CLI owns the terminal UI, the visible conversation, the local tool registry
-+ execution, permissions, runtime / project context collection, memory + scheduler state,
-stream rendering, and the opaque backend state token.
+caching. The CLI owns the visible conversation, the local tool registry + execution,
+permissions, runtime / project context collection, memory + scheduler state, and the
+opaque backend state token. It owns **no UI**: the runtime emits structured events, thin
+adapters serialize them (host NDJSON, JSONL, the console sink), Daintree renders the
+product, and the line REPL is a development convenience. "Terminal UI" and "stream
+rendering" were this document's description of a cockpit that no longer exists.
 
 ```
 User → Daintree CLI ──(structured startup + visible conversation + runtime/turn + tools)──► Daintree backend

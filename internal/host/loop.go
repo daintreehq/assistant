@@ -34,6 +34,11 @@ func (h *Host) handleCommand(cmd HostCommand) {
 		// Resolving an approval unblocks a parked dispatch goroutine. Off-loop-safe:
 		// the bridge guards its own state, so call directly (no blocking).
 		h.bridge.ResolveApproval(cmd.ApprovalID, ConfirmationDecision(cmd.Decision))
+	case CmdQuestionAnswer:
+		// Same shape as an approval decision, and unblocks a dispatch the same way. A
+		// negative index is the host saying the user dismissed the sheet, which cancels
+		// the tool call rather than answering it.
+		h.bridge.ResolveQuestion(cmd.QuestionID, cmd.ChoiceIndex)
 	case CmdInterrupt:
 		h.handleInterrupt()
 	case CmdHibernate:
@@ -221,6 +226,7 @@ func (h *Host) handleInterrupt() {
 		cancel()
 	}
 	h.bridge.SettlePendingApprovals(DecisionRejected)
+	h.bridge.SettlePendingQuestions()
 	h.bridge.Interrupt()
 }
 
@@ -421,6 +427,7 @@ func (h *Host) teardown(reason HostShutdownReason, resumeSessionID string) {
 		// Reject every outstanding approval so a parked dispatch unblocks (declined).
 		if h.bridge != nil {
 			h.bridge.SettlePendingApprovals(DecisionRejected)
+			h.bridge.SettlePendingQuestions()
 		}
 		// host:shutdown BEFORE app.Shutdown() — reason reaches Daintree regardless.
 		// Written SYNCHRONOUSLY (bypassing the queue) so the final frame can't be

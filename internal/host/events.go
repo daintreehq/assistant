@@ -269,6 +269,85 @@ func (e EvApprovalDecided) encode(sid string, seq uint64) ([]byte, error) {
 	})
 }
 
+// EvQuestionRequested — question:requested. The model needs a finite user decision
+// (user.askMultipleChoice) and the turn is BLOCKED until the host answers.
+//
+// It is a separate event from approval:requested because the two decisions are not the
+// same shape. An approval is "may I do this?" and has one safe default — no. A question
+// is "which of these did you mean?" and has no safe default at all: inventing one
+// answers on the user's behalf. A host that had only the approval frames would have to
+// render a yes/no sheet for a question with four answers, or the runtime would fall back
+// to prose and end the turn — which is exactly what the headless surfaces did before
+// this event existed.
+type EvQuestionRequested struct {
+	QuestionID  string
+	Question    string
+	Options     []QuestionOption
+	Default     int
+	RequestedAt int64
+	TurnID      string
+	ToolCallID  string
+}
+
+// QuestionOption is one labelled choice. The label (A, B, C…) is assigned by the CLI,
+// never by the model, so the model cannot collide with or misspell them.
+type QuestionOption struct {
+	Label string `json:"label"`
+	Text  string `json:"text"`
+}
+
+func (e EvQuestionRequested) encode(sid string, seq uint64) ([]byte, error) {
+	opts := make([]map[string]any, 0, len(e.Options))
+	for _, o := range e.Options {
+		opts = append(opts, map[string]any{"label": o.Label, "text": o.Text})
+	}
+	f := map[string]any{
+		"questionId":  e.QuestionID,
+		"question":    e.Question,
+		"options":     opts,
+		"default":     e.Default,
+		"requestedAt": e.RequestedAt,
+	}
+	if e.TurnID != "" {
+		f["turnId"] = e.TurnID
+	}
+	if e.ToolCallID != "" {
+		f["toolCallId"] = e.ToolCallID
+	}
+	return marshalEvent("question:requested", sid, seq, f)
+}
+
+// EvQuestionAnswered — question:answered. Mirrors approval:decided so a host can
+// reconcile its own sheet against what the runtime actually recorded.
+//
+// A negative choiceIndex means the question was dismissed without an answer — the tool
+// call is cancelled, not answered. Reported rather than inferred, so a host cannot
+// mistake "the user closed the sheet" for "the user picked the first option".
+type EvQuestionAnswered struct {
+	QuestionID  string
+	ChoiceIndex int
+	Label       string
+	Text        string
+	AnsweredAt  int64
+	Cancelled   bool
+}
+
+func (e EvQuestionAnswered) encode(sid string, seq uint64) ([]byte, error) {
+	f := map[string]any{
+		"questionId":  e.QuestionID,
+		"choiceIndex": e.ChoiceIndex,
+		"answeredAt":  e.AnsweredAt,
+		"cancelled":   e.Cancelled,
+	}
+	if e.Label != "" {
+		f["label"] = e.Label
+	}
+	if e.Text != "" {
+		f["text"] = e.Text
+	}
+	return marshalEvent("question:answered", sid, seq, f)
+}
+
 // EvError — host:error.
 type EvError struct {
 	Code    string

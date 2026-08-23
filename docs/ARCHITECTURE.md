@@ -59,7 +59,7 @@ internal/
   app/           App.Create — wires deps, ctx, session, scheduler; ToolContext factory
   commands/      slash-command catalog + handlers (structured results for the host + REPL)
   cli/           Run(Options) entry, repl.go (line REPL), host.go, mcpserve.go, render/, jsonout/
-  host/          embedded host (run.go) — stdio NDJSON, PROTOCOL_VERSION 2
+  host/          embedded host (host.go) — stdio NDJSON, PROTOCOL_VERSION 3
   terminal/      TTY-gated raw escapes (clear.go) — the only host-scrollback wipe
 ```
 

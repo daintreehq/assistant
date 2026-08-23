@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -42,6 +43,10 @@ type Runtime interface {
 	// events not yet delivered to this caller; acknowledge marks the batch delivered so
 	// the next call reports only what is NEW.
 	Attention(ctx context.Context, acknowledge bool) ([]domain.QueueEvent, error)
+	// AcknowledgeAttention marks the named inbox rows delivered, reporting how many
+	// matched and which ids did not. Separating it from the read is what makes delivery
+	// at-least-once: a response lost in transit costs a duplicate, not the item.
+	AcknowledgeAttention(ctx context.Context, ids []string) (acked int, unknown []string, err error)
 	// Approvals brokers this runtime's tool confirmations. Never nil.
 	Approvals() *Approvals
 	// Close tears the runtime down and releases the project lease.
@@ -82,12 +87,14 @@ type OpenParams struct {
 	APIKeyFile string
 	Tier       string
 	McpURL     string
-	McpToken   string
-	StateDir   string
-	LogDir     string
-	ProjectID  string
-	WindowID   string
-	DebugLog   *bool
+	// McpTokenFile is a PATH. The bearer itself never crosses this boundary as a value
+	// — see OpenInput.McpTokenFile for why.
+	McpTokenFile string
+	StateDir     string
+	LogDir       string
+	ProjectID    string
+	WindowID     string
+	DebugLog     *bool
 	// Approvals selects the confirmation mode. Empty inherits the process default
 	// (auto when --auto-approve/DAINTREE_ASSISTANT_AUTO_APPROVE is set, else decline).
 	Approvals ApprovalMode
@@ -122,6 +129,11 @@ var (
 	// ErrBusy is returned when a session already has a turn in flight. The assistant's
 	// Send is single-flight, and a second concurrent turn would corrupt the
 	// conversation — inject is the way to steer a running turn.
+	// ErrNoActiveRun is returned when a steering or cancelling call arrives with no
+	// turn in flight. It is not a failure of the session — it means the caller's model
+	// of what is running has gone stale.
+	ErrNoActiveRun = errors.New("no turn is running in this session — daintree.ask starts one; " +
+		"call daintree.poll on the last runId if you expected it to still be going")
 	ErrBusy = errors.New("this session already has a turn in flight — do not retry; " +
 		"use daintree.poll to watch it, daintree.inject to steer it, or daintree.interrupt to abandon it")
 )
@@ -150,6 +162,23 @@ type Session struct {
 // event list. Completed runs are dropped oldest-first; a live run is never pruned.
 const maxRunsPerSession = 32
 
+// RunMismatchError is returned when a run-correlated call names a run that is no longer
+// the live one. It carries BOTH ids because the only useful recovery is to look at what
+// is actually running: over a slow pipe an inject or interrupt written for one turn can
+// easily arrive after that turn ended and another began, and applying it anyway would
+// steer or cancel work the caller never meant to touch.
+type RunMismatchError struct {
+	Want    string
+	Current string
+}
+
+func (e *RunMismatchError) Error() string {
+	return fmt.Sprintf(
+		"run %q is no longer the active turn (the session is running %q) — poll %s for its outcome, "+
+			"and re-issue this against the live run if you still mean it",
+		e.Want, e.Current, e.Want)
+}
+
 // Registry owns every open session for this server process.
 type Registry struct {
 	factory RuntimeFactory
@@ -157,9 +186,27 @@ type Registry struct {
 	// Nothing that must outlive a single tool call may use anything else.
 	lifetime context.Context
 
+	// policy is the process-level ceiling, or NIL when none was installed.
+	//
+	// The nil-ness is load-bearing. Installing a policy is opting into a ceiling, and
+	// within one the defaults deny (auto-approve most of all). But the same registry
+	// backs the trusted embedding paths, where the operator IS the caller and a ceiling
+	// that switched itself on would break them — so "no policy" and "a policy whose
+	// fields are all zero" must not mean the same thing. See policy.go.
+	policy *ServerPolicy
+
 	mu       sync.Mutex
 	sessions map[string]*Session
 	closed   bool
+}
+
+// SetPolicy installs the process policy. Call it once, at launch, before any session is
+// opened; there is deliberately no tool that reaches it — a ceiling a session argument
+// could raise is not a ceiling.
+func (r *Registry) SetPolicy(p ServerPolicy) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.policy = &p
 }
 
 // NewRegistry builds an empty registry over a runtime factory. lifetime is the server's
@@ -178,7 +225,16 @@ func (r *Registry) Open(ctx context.Context, p OpenParams) (*Session, error) {
 		r.mu.Unlock()
 		return nil, errors.New("server is shutting down")
 	}
+	// Checked BEFORE the factory runs. A policy violation must not have already
+	// acquired a project lease, opened a database, or connected MCP by the time it is
+	// refused — the refusal would then be the only thing that was not a side effect.
+	policy, open := r.policy, len(r.sessions)
 	r.mu.Unlock()
+	if policy != nil {
+		if err := policy.Check(p, open); err != nil {
+			return nil, err
+		}
+	}
 
 	rt, err := r.factory(ctx, r.lifetime, p)
 	if err != nil {
@@ -190,6 +246,21 @@ func (r *Registry) Open(ctx context.Context, p OpenParams) (*Session, error) {
 		facts:   rt.Facts(),
 		runs:    map[string]*Run{},
 	}
+	// A run parked on an approval produces no further events of its own, so without
+	// this a long poll would sit through its entire budget while the turn was STOPPED
+	// rather than merely slow. Installed once, here, so it cannot race the per-ask
+	// rebinding of the elicitation hook.
+	rt.Approvals().SetOnChange(func(runID string) {
+		if runID == "" {
+			return
+		}
+		s.mu.Lock()
+		run := s.runs[runID]
+		s.mu.Unlock()
+		if run != nil {
+			run.Touch()
+		}
+	})
 
 	r.mu.Lock()
 	// Losing the shutdown race must not strand a live runtime holding the project
@@ -225,6 +296,9 @@ func (r *Registry) Get(id string) (*Session, error) {
 }
 
 // List returns every open session, for a client that lost track of its ids.
+// List returns the open sessions in a STABLE order — by session id, since ids are
+// generated per open and a caller diffing two listings must not see phantom churn from
+// Go's randomized map iteration.
 func (r *Registry) List() []*Session {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -232,6 +306,7 @@ func (r *Registry) List() []*Session {
 	for _, s := range r.sessions {
 		out = append(out, s)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
@@ -347,6 +422,15 @@ func (s *Session) Ask(parent context.Context, prompt string) (*Run, error) {
 	}
 	ctx, cancel := context.WithCancel(parent)
 	run := NewRun(domain.NewID("mrun_"), s.ID, prompt, cancel)
+	// Drop anything a previous turn buffered but never folded in, BEFORE the new run
+	// becomes visible. InjectPrompt only BUFFERS — a turn interrupted past its final
+	// fold check leaves the message sitting there, and without this it would surface
+	// inside THIS turn, after this prompt, as an instruction nobody issued for this
+	// work. The ORDER matters as much as the discard: done after publishing s.current,
+	// a concurrent inject could observe the new run, be told it succeeded, and then be
+	// thrown away as if it had belonged to the previous turn. Inject holds s.mu across
+	// its own buffer write for the same reason, so the two cannot interleave.
+	s.runtime.DiscardPendingInjections()
 	s.current = run
 	s.runs[run.ID] = run
 	s.order = append(s.order, run.ID)
@@ -354,45 +438,71 @@ func (s *Session) Ask(parent context.Context, prompt string) (*Run, error) {
 	s.turns.Add(1)
 	s.mu.Unlock()
 
-	// Drop anything a previous turn buffered but never folded in. InjectPrompt only
-	// BUFFERS — a turn that was interrupted past its final fold check leaves the message
-	// sitting there, and without this it would surface inside THIS turn, after this
-	// prompt, as an instruction nobody issued for this work.
-	s.runtime.DiscardPendingInjections()
-
+	rec := NewRecorder(run)
 	go func() {
 		defer s.turns.Done()
 		defer cancel()
-		defer func() {
-			// A panic in the turn must not take down the MCP server: it would drop the
-			// pipe and every other session with it. Record it and settle the run.
-			if p := recover(); p != nil {
-				run.append(Event{Type: "error", Text: fmt.Sprintf("assistant panicked: %v", p)})
-				run.settle(RunFailed, "", fmt.Sprintf("assistant panicked: %v", p))
+
+		// FINALIZATION IS OWNED HERE, not by the sink. The recorder can see that the
+		// agent emitted a terminal-looking event, but only this goroutine knows whether
+		// Send returned cleanly, whether cancellation won, whether a later error
+		// arrived, and whether the post-response bookkeeping is done. Settling from the
+		// sink left a window where poll reported `success` while Busy() was still true,
+		// so the caller's next ask raced ErrBusy against a run it had just been told
+		// had finished — and the recorded duration excluded the unwind.
+		var (
+			status  RunStatus
+			content string
+			errMsg  string
+		)
+		func() {
+			defer func() {
+				// A panic in the turn must not take down the MCP server: it would drop
+				// the pipe and every other session with it. Record it as the outcome.
+				if p := recover(); p != nil {
+					msg := fmt.Sprintf("assistant panicked: %v", p)
+					run.append(Event{Type: "error", Text: msg})
+					status, content, errMsg = RunFailed, "", msg
+				}
+			}()
+			reply, err := s.runtime.Send(ctx, prompt, run.ID, rec)
+			// The ORDER of these cases is the point: a cancelled context is a
+			// cancellation however the runtime chose to report it. Testing err first
+			// would relabel every interrupt as a failure, because a Send that honours
+			// cancellation returns context.Canceled.
+			switch {
+			case ctx.Err() != nil:
+				status, content, errMsg = RunCancelled, reply, ""
+			case err != nil:
+				run.append(Event{Type: "error", Text: err.Error()})
+				status, content, errMsg = RunFailed, reply, err.Error()
+			default:
+				// Prefer what the STREAM said over the bare return: a turn that failed
+				// reports its failure as an `error` event and still returns a sentinel
+				// reply with no error, so the return value alone would read as success.
+				if st, c, e, ok := rec.Candidate(); ok {
+					status, content, errMsg = st, c, e
+					if content == "" {
+						content = reply
+					}
+				} else {
+					// Backstop for a turn that returns without any terminal event.
+					status, content, errMsg = RunSucceeded, reply, ""
+				}
 			}
-			s.mu.Lock()
-			if s.current == run {
-				s.current = nil
-			}
-			s.mu.Unlock()
 		}()
-		reply, err := s.runtime.Send(ctx, prompt, run.ID, NewRecorder(run))
-		// settle is first-wins, so in the normal case the recorder has already
-		// classified this from the terminal event. These are the backstops, and their
-		// ORDER is the point: a cancelled context is a cancellation however the runtime
-		// chose to report it. Testing err first would relabel every interrupt as a
-		// failure, because a Send that honours cancellation returns context.Canceled.
-		switch {
-		case ctx.Err() != nil:
-			run.settle(RunCancelled, reply, "")
-		case err != nil:
-			run.append(Event{Type: "error", Text: err.Error()})
-			run.settle(RunFailed, reply, err.Error())
-		default:
-			// Normally the recorder already settled this on assistant:end. This is the
-			// backstop for a turn that returns without a terminal event.
-			run.settle(RunSucceeded, reply, "")
+
+		// Clear `current` BEFORE settling. A caller woken by Done() must find the
+		// session idle: the whole reason finalization moved here is that "this run
+		// finished" and "this session can take another ask" must become true in that
+		// order, never the reverse.
+		s.mu.Lock()
+		if s.current == run {
+			s.current = nil
 		}
+		s.mu.Unlock()
+
+		run.settle(status, content, errMsg)
 	}()
 	return run, nil
 }
@@ -411,26 +521,40 @@ func (s *Session) pruneLocked() {
 	}
 }
 
-// Inject folds a message into the running turn. Returns false when nothing is running,
-// so the caller can be told to use ask instead of silently losing the message.
-func (s *Session) Inject(text string) bool {
+// Inject folds a message into the running turn. expectRunID, when non-empty, is the run
+// the CALLER meant: a steering message written for one turn must never land in whatever
+// turn happens to be current by the time the request arrives, which over a slow pipe is
+// a different turn entirely. A mismatch returns ErrRunMismatch naming the live run
+// rather than silently steering the wrong work.
+//
+// The buffer write happens UNDER s.mu, so it cannot interleave with the discard Ask
+// performs while installing a new run — otherwise this could report success for a
+// message the very next turn throws away.
+func (s *Session) Inject(expectRunID, text string) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	current := s.current
-	s.mu.Unlock()
 	if current == nil {
-		return false
+		return ErrNoActiveRun
+	}
+	if expectRunID != "" && expectRunID != current.ID {
+		return &RunMismatchError{Want: expectRunID, Current: current.ID}
 	}
 	s.runtime.InjectPrompt(text)
-	return true
+	return nil
 }
 
-// Interrupt cancels the running turn. Returns false when nothing is running.
-func (s *Session) Interrupt() bool {
+// Interrupt cancels the running turn. expectRunID, when non-empty, must name it — a
+// cancel aimed at a turn that has already finished must not take down its successor.
+func (s *Session) Interrupt(expectRunID string) error {
 	s.mu.Lock()
 	current := s.current
 	s.mu.Unlock()
 	if current == nil {
-		return false
+		return ErrNoActiveRun
+	}
+	if expectRunID != "" && expectRunID != current.ID {
+		return &RunMismatchError{Want: expectRunID, Current: current.ID}
 	}
 	current.Cancel()
 	// Unpark this RUN's confirmations. Cancelling the context resolves them anyway, but
@@ -443,12 +567,17 @@ func (s *Session) Interrupt() bool {
 	// injection to miss its fold window, and leaving it buffered means the next turn
 	// silently inherits an instruction meant for the abandoned one.
 	s.runtime.DiscardPendingInjections()
-	return true
+	return nil
 }
 
 // Attention reads the project's attention inbox.
 func (s *Session) Attention(ctx context.Context, acknowledge bool) ([]domain.QueueEvent, error) {
 	return s.runtime.Attention(ctx, acknowledge)
+}
+
+// AcknowledgeAttention consumes the named inbox rows.
+func (s *Session) AcknowledgeAttention(ctx context.Context, ids []string) (int, []string, error) {
+	return s.runtime.AcknowledgeAttention(ctx, ids)
 }
 
 // appRuntime adapts the concrete *app.App onto the Runtime seam. It lives here rather
@@ -552,6 +681,51 @@ func (a *appRuntime) Attention(ctx context.Context, acknowledge bool) ([]domain.
 		}
 	}
 	return events, nil
+}
+
+// AcknowledgeAttention marks exactly the named rows delivered.
+//
+// It re-digests rather than acknowledging by bare id because MarkNotified is
+// VERSION-conditional: it compares the row's count and coalesce key against the event it
+// was handed, so a row a publisher updated between the caller's read and its ack stays
+// un-notified and re-surfaces. Acking by id alone would stamp away an update nobody had
+// seen — which is the same at-most-once loss that splitting read from ack exists to
+// prevent, just moved one call later.
+func (a *appRuntime) AcknowledgeAttention(ctx context.Context, ids []string) (int, []string, error) {
+	a.attentionMu.Lock()
+	defer a.attentionMu.Unlock()
+	wanted := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		wanted[id] = true
+	}
+	events, err := a.app.Queue.Digest(ctx, domain.QueueDigestOptions{NotifiedIsNull: true})
+	if err != nil {
+		return 0, nil, err
+	}
+	matched := make([]domain.QueueEvent, 0, len(ids))
+	for _, e := range events {
+		if wanted[e.ID] {
+			matched = append(matched, e)
+			delete(wanted, e.ID)
+		}
+	}
+	// Whatever is left never matched an un-notified row: already acknowledged, moved on
+	// by a publisher, or never real. Reported, not errored — a retry after an ambiguous
+	// transport failure lands here by design and must stay idempotent.
+	unknown := make([]string, 0, len(wanted))
+	for _, id := range ids {
+		if wanted[id] {
+			unknown = append(unknown, id)
+			delete(wanted, id)
+		}
+	}
+	if len(matched) == 0 {
+		return 0, unknown, nil
+	}
+	if err := a.app.Queue.MarkNotified(ctx, matched); err != nil {
+		return 0, unknown, err
+	}
+	return len(matched), unknown, nil
 }
 
 func (a *appRuntime) Close() error {

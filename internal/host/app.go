@@ -107,6 +107,35 @@ type ConfirmRequest struct {
 	NeedsTypedConfirm bool
 }
 
+// AskChoiceRequest is a multiple-choice question the model needs answered before it can
+// continue (user.askMultipleChoice). Mirrored locally rather than imported from
+// internal/tools for the same reason ConfirmRequest is: this package compiles in
+// isolation against agent/config/domain and must not reach into the tool layer.
+type AskChoiceRequest struct {
+	// ToolCallID ties the question to its tool call (informational).
+	ToolCallID string
+	// Question is the human-facing prompt, with no option labels baked in.
+	Question string
+	// Options are the labelled choices in order. Labels (A, B, C…) are assigned by the
+	// CLI, never by the model.
+	Options []AskChoiceOption
+	// Default is the 0-based index a host should highlight first.
+	Default int
+}
+
+// AskChoiceOption is one labelled choice.
+type AskChoiceOption struct {
+	Label string
+	Text  string
+}
+
+// AskChoiceAnswer is the host's selection. Index is 0-based.
+type AskChoiceAnswer struct {
+	Label string
+	Index int
+	Text  string
+}
+
 // AppHooks bundles the hooks the host installs on the App.
 type AppHooks struct {
 	// AgentEvents is the bridge sink (agent.EventSink). The session emits through it.
@@ -114,6 +143,17 @@ type AppHooks struct {
 	// Confirm is the tool-confirm hook: a mutating tool calls it and blocks until
 	// the approval is decided (true) / rejected / times out (false).
 	Confirm func(ctx context.Context, req ConfirmRequest) bool
+	// AskChoice is the question hook: the model asks a finite question and the
+	// dispatch blocks until the host answers or the question is cancelled.
+	//
+	// It exists because the HOST is the product surface, and without it the one thing
+	// a user actually runs was the one surface that could not be asked a question —
+	// user.askMultipleChoice returned QUESTION_UNAVAILABLE and the model had to guess
+	// or give up in prose, while the developer-only line REPL could ask freely.
+	//
+	// An error is a cancellation, never a default answer: an unanswered approval can
+	// safely resolve to "no", but an unanswered QUESTION has no safe answer at all.
+	AskChoice func(ctx context.Context, req AskChoiceRequest) (AskChoiceAnswer, error)
 }
 
 // AppFactory builds the App for a booted session. MCP url/token/tier/projectId

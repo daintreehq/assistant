@@ -137,6 +137,11 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 					Summary:     req.Summary,
 					RawArgs:     string(req.Args),
 					RunID:       runID,
+					// Forwarded, not enforced: this server delegates the decision to a
+					// caller with its own approval UX, but dropping the verdict made a
+					// system-risk action and an ordinary project mutation arrive as the
+					// same boolean with different prose.
+					NeedsTypedConfirm: req.NeedsTypedConfirm,
 				}), nil
 			},
 		})
@@ -237,7 +242,7 @@ func sessionOptions(base Options, p mcpserver.OpenParams) Options {
 	applyIfSet(&o.APIKeyFile, p.APIKeyFile)
 	applyIfSet(&o.Tier, p.Tier)
 	applyIfSet(&o.McpURL, p.McpURL)
-	applyIfSet(&o.McpToken, p.McpToken)
+	applyIfSet(&o.McpTokenFile, p.McpTokenFile)
 	applyIfSet(&o.StateDir, p.StateDir)
 	applyIfSet(&o.LogDir, p.LogDir)
 	applyIfSet(&o.ProjectID, p.ProjectID)

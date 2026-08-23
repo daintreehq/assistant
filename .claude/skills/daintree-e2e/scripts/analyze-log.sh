@@ -9,7 +9,11 @@ red() { sed -E 's/token=[^ ]+/token=<REDACTED>/g'; }
 echo "# $LOG"
 echo
 echo "## MCP (connected=false ⇒ token expired / Daintree down — the run can't spawn)"
-grep -m1 "mcp.credentials" "$LOG" | grep -oE "connected=[a-z]+|transport=[a-z-]+" | tr '\n' ' '; echo
+# NOT mcp.credentials: that line was removed from the runtime on purpose, because it
+# carried a live system-tier bearer into a file that outlives it. Connection state is
+# reported by the boot line instead, which says whether MCP came up without saying with
+# what.
+grep -m1 -E "mcp\.(connect|status)" "$LOG" | grep -oE "connected=[a-z]+|transport=[a-z-]+" | tr '\n' ' '; echo
 echo
 echo "## skills loaded  (0 ⇒ NO runbook injected → model stalls or improvises; check /clear + backend selector)"
 grep -ciE "SkillLoaded|Skill loaded" "$LOG"

@@ -285,6 +285,12 @@ type HostCommandType string
 const (
 	CmdPrompt         HostCommandType = "prompt"
 	CmdApprovalDecide HostCommandType = "approval:decide"
+	// CmdQuestionAnswer answers a multiple-choice question the model asked
+	// (user.askMultipleChoice). Approvals and questions are DIFFERENT decisions —
+	// "may I do this?" versus "which of these did you mean?" — and collapsing them
+	// onto the approval frames would force a host to render a yes/no sheet for a
+	// question that has four answers.
+	CmdQuestionAnswer HostCommandType = "question:answer"
 	CmdInterrupt      HostCommandType = "interrupt"
 	CmdHibernate      HostCommandType = "hibernate"
 	CmdShutdown       HostCommandType = "shutdown"
@@ -300,6 +306,13 @@ type HostCommand struct {
 	// approval:decide
 	ApprovalID string
 	Decision   string
+	// question:answer
+	QuestionID string
+	// ChoiceIndex is the 0-based option the user picked. Negative means the user
+	// dismissed the question without choosing, which is a CANCELLATION of the tool
+	// call, not a selection — a host must be able to express "I closed the sheet"
+	// without being forced to pick an answer on the user's behalf.
+	ChoiceIndex int
 }
 
 // errNotCommand signals a line that is not a recognizable command — the running
@@ -356,6 +369,19 @@ func ParseCommand(line []byte) (HostCommand, error) {
 		// approval:decided — collapse it to the safe default (rejected) so a parked
 		// dispatch unblocks declined rather than emitting an off-contract decision.
 		cmd.Decision = string(normalizeDecision(cmd.Decision))
+	case CmdQuestionAnswer:
+		if err := wantString(raw, "questionId", &cmd.QuestionID); err != nil {
+			return HostCommand{}, errNotCommand
+		}
+		// choiceIndex is REQUIRED and must be a number. A missing or non-numeric one
+		// would otherwise default to 0 — silently answering "the first option" for a
+		// user who never chose, which is the one wrong answer a decision channel must
+		// never invent.
+		var idx int64
+		if err := wantIntegralNumber(raw, "choiceIndex", &idx); err != nil {
+			return HostCommand{}, errNotCommand
+		}
+		cmd.ChoiceIndex = int(idx)
 	case CmdInterrupt, CmdHibernate, CmdShutdown:
 		// no extra fields
 	default:

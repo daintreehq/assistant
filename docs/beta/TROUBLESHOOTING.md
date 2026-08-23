@@ -118,11 +118,11 @@ Permissions, a full disk, or a read-only mount. Writability is proven by writing
 is not a mode-bit guess. Fix the permissions or point `DAINTREE_ASSISTANT_STATE_DIR`
 somewhere writable.
 
-## `state.dir` / `credentials.perms` — readable by other users
+## `state.dir` — readable by other users
 
-Run the `chmod` doctor prints. For the credentials file this is a **FAIL**, not a note:
-any other account on the machine can read a key that spends your money, and this CLI
-writes that file 0600 — so a wider mode means something else changed it.
+Run the `chmod` doctor prints. There is no credentials file to worry about — this CLI
+stores no key at all — but the state dir still holds your conversation database and
+artifacts, so a mode wider than the CLI wrote means something else changed it.
 
 ## `state.schema` — the database is from an older version
 

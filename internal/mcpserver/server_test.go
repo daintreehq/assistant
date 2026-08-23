@@ -51,6 +51,7 @@ type fakeRuntime struct {
 	closed           bool
 	attention        []domain.QueueEvent
 	acked            bool
+	ackedIDs         []string
 	attErr           error
 }
 
@@ -119,6 +120,29 @@ func (f *fakeRuntime) Attention(_ context.Context, acknowledge bool) ([]domain.Q
 	}
 	f.acked = acknowledge
 	return f.attention, nil
+}
+
+func (f *fakeRuntime) AcknowledgeAttention(_ context.Context, ids []string) (int, []string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.attErr != nil {
+		return 0, nil, f.attErr
+	}
+	live := map[string]bool{}
+	for _, e := range f.attention {
+		live[e.ID] = true
+	}
+	acked := 0
+	unknown := []string{}
+	for _, id := range ids {
+		if live[id] {
+			acked++
+			f.ackedIDs = append(f.ackedIDs, id)
+			continue
+		}
+		unknown = append(unknown, id)
+	}
+	return acked, unknown, nil
 }
 
 func (f *fakeRuntime) Close() error {
@@ -476,14 +500,29 @@ func TestAsyncHandlesSurfaceAsPendingNotAsResults(t *testing.T) {
 	if err := call(t, cs, "daintree.poll", PollInput{SessionID: sess.SessionID, RunID: run.RunID}, &polled); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
-	if len(polled.PendingAsync) != 1 || polled.PendingAsync[0] != "asy_abc123" {
-		t.Fatalf("pendingAsync = %v, want [asy_abc123]", polled.PendingAsync)
+	if len(polled.AsyncOperations) != 1 || polled.AsyncOperations[0].ID != "asy_abc123" {
+		t.Fatalf("asyncOperations = %+v, want one entry for asy_abc123", polled.AsyncOperations)
+	}
+	if got := polled.AsyncOperations[0].Status; got != "accepted" {
+		t.Fatalf("asyncOperations[0].status = %q, want accepted", got)
+	}
+	// The ledger must survive the caller advancing past the accepting event — deriving
+	// it from the poll window was the bug.
+	var advanced RunOutput
+	if err := call(t, cs, "daintree.poll", PollInput{SessionID: sess.SessionID, RunID: run.RunID, SinceSeq: polled.NextSeq}, &advanced); err != nil {
+		t.Fatalf("poll (advanced): %v", err)
+	}
+	if len(advanced.AsyncOperations) != 1 {
+		t.Fatalf("asyncOperations vanished once sinceSeq advanced: %+v", advanced.AsyncOperations)
 	}
 	fake.letFinish()
 }
 
-// TestAttentionReportsBackgroundWorkAndAcknowledgesByDefault.
-func TestAttentionReportsBackgroundWorkAndAcknowledgesByDefault(t *testing.T) {
+// TestAttentionPeeksByDefaultAndAcksExplicitly: acknowledging inside the read makes
+// delivery at-most-once — the rows are stamped before the response is known to have
+// arrived — and an attention row is the ONLY report background work ever makes. Peeking
+// by default plus an explicit ack turns a dropped response into a duplicate instead.
+func TestAttentionPeeksByDefaultAndAcksExplicitly(t *testing.T) {
 	fake := newFakeRuntime("ses_test")
 	fake.attention = []domain.QueueEvent{{
 		ID: "evt_1", Severity: domain.SeverityDone, Source: domain.SourceAsyncTool,
@@ -515,20 +554,42 @@ func TestAttentionReportsBackgroundWorkAndAcknowledgesByDefault(t *testing.T) {
 	fake.mu.Lock()
 	acked := fake.acked
 	fake.mu.Unlock()
-	if !acked {
-		t.Error("attention must acknowledge by default, or a polling agent re-reads the same items forever")
+	if acked {
+		t.Error("attention must PEEK by default; acknowledging inside the read loses items whose response never arrives")
+	}
+	if !strings.Contains(out.Note, "daintree.attention.ack") {
+		t.Errorf("a peek must say what the caller still owes, got note %q", out.Note)
 	}
 
-	// acknowledge:false peeks without consuming.
-	no := false
-	if err := call(t, cs, "daintree.attention", AttentionInput{SessionID: sess.SessionID, Acknowledge: &no}, &out); err != nil {
+	// acknowledge:true is still available for a caller that accepts the risk.
+	yes := true
+	if err := call(t, cs, "daintree.attention", AttentionInput{SessionID: sess.SessionID, Acknowledge: &yes}, &out); err != nil {
 		t.Fatalf("attention: %v", err)
 	}
 	fake.mu.Lock()
 	acked = fake.acked
 	fake.mu.Unlock()
-	if acked {
-		t.Error("acknowledge:false must not consume")
+	if !acked {
+		t.Error("acknowledge:true must consume")
+	}
+
+	// The explicit ack is the supported path, and it is idempotent: a retry after an
+	// ambiguous transport failure reports the id as unknown rather than failing.
+	var ackOut AttentionAckOutput
+	if err := call(t, cs, "daintree.attention.ack", AttentionAckInput{SessionID: sess.SessionID, EventIDs: []string{"evt_1", "evt_missing"}}, &ackOut); err != nil {
+		t.Fatalf("attention.ack: %v", err)
+	}
+	if ackOut.Acknowledged != 1 {
+		t.Errorf("acknowledged = %d, want 1", ackOut.Acknowledged)
+	}
+	if len(ackOut.Unknown) != 1 || ackOut.Unknown[0] != "evt_missing" {
+		t.Errorf("unknown = %v, want [evt_missing]", ackOut.Unknown)
+	}
+
+	// An acknowledge-everything call would re-introduce exactly the loss this split
+	// prevents, for rows the caller never read.
+	if err := call(t, cs, "daintree.attention.ack", AttentionAckInput{SessionID: sess.SessionID}, &ackOut); err == nil {
+		t.Error("attention.ack with no ids must be rejected, not treated as ack-everything")
 	}
 	fake.letFinish()
 }
@@ -880,13 +941,87 @@ func TestBlockingWaitHonoursCallerCancellation(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		waitFor(ctx, run, int(maxBlockWait/time.Millisecond))
+		waitForSettle(ctx, run, int(maxBlockWait/time.Millisecond))
 	}()
 	cancel()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("waitFor ignored caller cancellation; it would pin the server open for its whole budget")
+		t.Fatal("waitForSettle ignored caller cancellation; it would pin the server open for its whole budget")
+	}
+
+	// The long POLL wait must honour it too, and for the same reason.
+	pctx, pcancel := context.WithCancel(context.Background())
+	polled := make(chan struct{})
+	go func() {
+		defer close(polled)
+		waitForChange(pctx, run, 0, run.Revision(), int(maxBlockWait/time.Millisecond))
+	}()
+	pcancel()
+	select {
+	case <-polled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitForChange ignored caller cancellation")
+	}
+}
+
+// TestPollWaitWakesOnProgressNotOnlyCompletion: waiting for the run to FINISH made a
+// 60s poll sit through arriving content, tools starting and finishing, and — worst — the
+// turn becoming blocked on an approval, reporting none of it until the budget expired.
+func TestPollWaitWakesOnProgressNotOnlyCompletion(t *testing.T) {
+	run := NewRun("mrun_p", "ses_p", "prompt", func() {})
+
+	rev := run.Revision()
+	woke := make(chan struct{})
+	go func() {
+		defer close(woke)
+		run.WaitForChange(context.Background(), 0, rev, 10*time.Second)
+	}()
+	// An event, not a settlement. The run stays firmly in `running`.
+	run.append(Event{Type: "assistant:content", Text: "working on it"})
+	select {
+	case <-woke:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a long poll slept through a new event; waitMs still means 'wait for finish'")
+	}
+	if run.Status() != RunRunning {
+		t.Fatalf("status = %q, want the run still running", run.Status())
+	}
+
+	// A run PARKED on an approval emits no events of its own, so the change signal is
+	// the only thing that can report it before the budget expires.
+	// Revision captured before the goroutine starts, exactly as the poll handler does:
+	// the Touch below may well land before the waiter reaches its select, and a design
+	// that lost that wakeup would sleep out the whole budget.
+	parkedRev := run.Revision()
+	parked := make(chan struct{})
+	go func() {
+		defer close(parked)
+		run.WaitForChange(context.Background(), 99, parkedRev, 10*time.Second)
+	}()
+	run.Touch()
+	select {
+	case <-parked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a long poll slept through a parked approval")
+	}
+}
+
+// TestPollWaitReturnsImmediatelyWhenAlreadyFresh: a caller polling with a stale sinceSeq
+// must not be parked for its whole budget over events it has not read yet.
+func TestPollWaitReturnsImmediatelyWhenAlreadyFresh(t *testing.T) {
+	run := NewRun("mrun_f", "ses_f", "prompt", func() {})
+	run.append(Event{Type: "assistant:content", Text: "already said this"})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		run.WaitForChange(context.Background(), 0, run.Revision(), 10*time.Second)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waited for new events when unread ones were already buffered")
 	}
 }
 
@@ -960,7 +1095,7 @@ func TestEveryRunResponseSaysWhatToDoNext(t *testing.T) {
 	}
 	// A finished run that left background work behind must point at attention, or the
 	// caller reports the job done while agents are still running.
-	withAsync := nextAction(RunOutput{Status: string(RunSucceeded), PendingAsync: []string{"asy_1"}})
+	withAsync := nextAction(RunOutput{Status: string(RunSucceeded), AsyncOperations: []AsyncOperation{{ID: "asy_1", Status: "accepted"}}})
 	if !strings.Contains(withAsync, "daintree.attention") {
 		t.Errorf("a run with pending async work must point at attention, got %q", withAsync)
 	}

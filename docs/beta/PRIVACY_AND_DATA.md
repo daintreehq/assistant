@@ -167,9 +167,16 @@ maintainer-operated backend, so treat it as visible to whoever operates that ser
 them for their retention and access policy. What is true here: a **support bundle contains
 none of it**, and we will not ask for a debug log as a first step.
 
-**Is my key stored anywhere but my machine?** This client stores it in one 0600 file and
-sends it as a per-request bearer token. Whether the backend persists it is a property of
-the backend; its policy is the authority, not this page.
+**Is my key stored anywhere but my machine?** There is no key. This client holds **no
+model or provider credential at all** — there is no sign-in, nothing is written to disk,
+and a normal request carries no `Authorization` header. The backend funds every model
+call from a credential it holds itself.
+
+The one exception is opt-in and never stored: if you set `DAINTREE_API_KEY`, or point
+`--api-key-file` at a file you already own, that value is forwarded verbatim as a
+per-request bearer so the turn is billed to your account instead. This client neither
+persists it nor copies it anywhere; whether the backend does is a property of the
+backend, and its policy is the authority, not this page.
 
 **What if I think a secret leaked?** Rotate it first, then see
 [`../../SECURITY.md`](../../SECURITY.md). Rotating costs a minute; not rotating can cost a

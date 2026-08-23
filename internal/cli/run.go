@@ -30,8 +30,12 @@ import (
 type Options struct {
 	McpURL   string
 	McpToken string
-	Project  string
-	Tier     string
+	// McpTokenFile is a PATH to the Daintree MCP bearer, for a caller that must not put
+	// the token in an argument — the MCP server surface, where the argument would be
+	// chosen by a model. Read and validated on the same fatal path as --api-key-file.
+	McpTokenFile string
+	Project      string
+	Tier         string
 	// Offline/AutoApprove/DebugLog are POINTERS: nil means the flag was not passed and
 	// the environment decides, false means it was explicitly turned OFF and must beat
 	// the environment. Collapsing those two cases would let DAINTREE_ASSISTANT_AUTO_APPROVE=1
@@ -136,6 +140,13 @@ func overridesFromOptions(opts Options) (config.ConfigOverrides, error) {
 		}
 		o.APIKey = &key
 	}
+	if opts.McpTokenFile != "" {
+		token, err := readMcpTokenFile(opts.McpTokenFile)
+		if err != nil {
+			return config.ConfigOverrides{}, err
+		}
+		o.McpToken = &token
+	}
 	// A NON-NIL ProjectInstructions is the provenance signal every auto-load path below
 	// checks: it means a caller named the file explicitly, so no DAINTREE.md discovery
 	// may overwrite it. Setting it here (rather than in buildOverrides) is what makes
@@ -211,6 +222,62 @@ func readAPIKeyFile(path string) (string, error) {
 	// one, and a key that arrives by file must not be the one that leaks.
 	redact.RegisterSecret(key)
 	return key, nil
+}
+
+// osExit is os.Exit behind a seam so the watchdog can be tested without killing the
+// test binary.
+var osExit = os.Exit
+
+// startHardTimeoutWatchdog arms the second stage of --timeout and returns a function
+// that disarms it. See domain.HardTimeoutGrace for why one stage is not enough.
+//
+// It writes to stderr, never stdout: --json's whole contract is that stdout carries only
+// protocol frames, and a watchdog that violated it to announce itself would corrupt the
+// very stream a harness is parsing. The terminal `result` line is already lost in this
+// path — that is what makes it a failure worth a distinct exit code rather than a
+// cancellation.
+func startHardTimeoutWatchdog(timeout time.Duration, diag io.Writer, exit func(int)) func() {
+	timer := time.AfterFunc(timeout+domain.HardTimeoutGrace, func() {
+		fmt.Fprintf(diag,
+			"hard timeout: --timeout (%s) expired and the run did not unwind within %s; killing the process (exit %d). "+
+				"Something ignored cancellation — a tool, a wedged read, or a syscall in flight.\n",
+			timeout, domain.HardTimeoutGrace, domain.OneShotExitCode.HardTimeout)
+		exit(domain.OneShotExitCode.HardTimeout)
+	})
+	return func() { timer.Stop() }
+}
+
+// readMcpTokenFile reads the Daintree MCP bearer from a file.
+//
+// A path rather than a value, and for a sharper reason than the API key: this bearer
+// authorizes system-tier Daintree actions for its whole validity window, and its one
+// caller is the MCP server, where an inline argument would be chosen by a MODEL — and so
+// could be echoed by a prompt injection, logged by the MCP client, or captured by traces
+// outside this repository. The runtime already stopped writing it to its own debug log
+// on exactly that reasoning.
+//
+// Failure is FATAL, never a fall-through to the environment: a caller that named a token
+// file meant to bind this session to THAT token, and silently using another one would
+// point the assistant at a different Daintree window behind a successful-looking run.
+func readMcpTokenFile(path string) (string, error) {
+	// Same bounded read as the key file — a caller-supplied path need not be a regular
+	// file, and os.Open blocks on a FIFO before any LimitReader could apply.
+	token, err := readBoundedFile(path, backend.MaxKeyLength+1024, "--mcp-token-file", false)
+	if err != nil {
+		return "", err
+	}
+	// Not ValidateKeyShape: that check is about the BACKEND's key format. What matters
+	// here is that the value can be a header — a stray newline or control byte would
+	// otherwise surface as Go's opaque "invalid header field value" on every MCP call.
+	for _, r := range token {
+		if r < 0x21 || r == 0x7f {
+			return "", fmt.Errorf("--mcp-token-file %s: the token contains a space or control character; it must be a single line", path)
+		}
+	}
+	// Registered before it is used anywhere, so it is masked in the debug log from the
+	// first line written — app.Create does the same for the env-supplied one.
+	redact.RegisterSecret(token)
+	return token, nil
 }
 
 // maxPromptFileBytes bounds --prompt-file. A prompt is prose, not a payload: a megabyte
@@ -401,6 +468,16 @@ func RunOneShot(ctx context.Context, opts Options) int {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
 		defer cancel()
+		// STAGE TWO: a hard wall-clock bound. The context deadline above is
+		// cooperative, and a context only bounds code that watches it — a syscall
+		// already in flight, a tool that ignores cancellation, a wedged `-` stdin read.
+		// For a CI runner whose whole job is to finish deterministically, "usually
+		// stops" is not a bound. So if the process is still alive a grace period after
+		// its own deadline, kill it with a distinct exit code instead of hanging the
+		// job. The normal path never reaches this: a clean cancel has to flush the
+		// terminal result, release the lease and close the store, and the grace is sized
+		// so that killing mid-flush is not the outcome we trade a hang for.
+		defer startHardTimeoutWatchdog(opts.Timeout, os.Stderr, osExit)()
 	}
 
 	// reportError routes a setup failure to the active output contract. A failure that

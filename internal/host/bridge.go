@@ -50,6 +50,22 @@ type pendingApproval struct {
 	timer   *time.Timer
 }
 
+// pendingQuestion is one outstanding multiple-choice question: the channel the
+// AskChoice caller blocks on, the options it was offered (so an answer can be resolved
+// to a label/text without the host echoing them back), and the auto-timeout timer.
+type pendingQuestion struct {
+	resolve chan questionOutcome
+	options []QuestionOption
+	timer   *time.Timer
+}
+
+// questionOutcome is what the host said. Cancelled is explicit rather than encoded as a
+// sentinel index, because "no answer" and "option -1" must never be confusable.
+type questionOutcome struct {
+	index     int
+	cancelled bool
+}
+
 // Bridge adapts the in-process agent EventSink + tool-confirm hook into wire
 // HostEvents. It owns the single-turn lifecycle, approvals, redaction, and audit
 // mapping. The agent loop runs Send() on another goroutine and calls the sink
@@ -67,6 +83,7 @@ type Bridge struct {
 	activeTurnID     string
 	interrupted      bool // latched until next startExchange
 	pendingApprovals map[string]*pendingApproval
+	pendingQuestions map[string]*pendingQuestion
 	toolStartedAt    map[string]int64
 }
 
@@ -92,6 +109,7 @@ func NewBridge(opts BridgeOptions) *Bridge {
 		now:               opts.Now,
 		approvalTimeoutMs: opts.ApprovalTimeoutMs,
 		pendingApprovals:  make(map[string]*pendingApproval),
+		pendingQuestions:  make(map[string]*pendingQuestion),
 		toolStartedAt:     make(map[string]int64),
 	}
 }
@@ -502,6 +520,110 @@ func (b *Bridge) ResolveApproval(approvalID string, decision ConfirmationDecisio
 	select {
 	case pa.resolve <- decision:
 	default:
+	}
+}
+
+// AskChoice presents a multiple-choice question to the host and BLOCKS the dispatch
+// until it answers, the turn is cancelled, or the timeout fires.
+//
+// This is the counterpart to Confirm, and the host is the surface that most needed it:
+// without it the product path returned QUESTION_UNAVAILABLE, so a model that wanted to
+// ask "which of these three worktrees did you mean?" had to guess or give up and end the
+// turn in prose. The line REPL could ask; the thing the user actually runs could not.
+//
+// A timeout CANCELS rather than defaulting. An unanswered approval can safely resolve to
+// "no", but an unanswered question has no safe answer — picking one would put words in
+// the user's mouth and then act on them.
+func (b *Bridge) AskChoice(ctx context.Context, req AskChoiceRequest) (AskChoiceAnswer, error) {
+	questionID := genID("qst")
+	resolve := make(chan questionOutcome, 1)
+
+	opts := make([]QuestionOption, 0, len(req.Options))
+	for _, o := range req.Options {
+		opts = append(opts, QuestionOption{Label: o.Label, Text: o.Text})
+	}
+
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	now := b.now()
+	pq := &pendingQuestion{resolve: resolve, options: opts}
+	if b.approvalTimeoutMs > 0 {
+		pq.timer = time.AfterFunc(time.Duration(b.approvalTimeoutMs)*time.Millisecond, func() {
+			b.ResolveQuestion(questionID, -1)
+		})
+	}
+	b.pendingQuestions[questionID] = pq
+	b.mu.Unlock()
+
+	b.post(EvQuestionRequested{
+		QuestionID:  questionID,
+		Question:    req.Question,
+		Options:     opts,
+		Default:     req.Default,
+		RequestedAt: now,
+		TurnID:      turnID,
+		ToolCallID:  req.ToolCallID,
+	})
+
+	select {
+	case out := <-resolve:
+		if out.cancelled || out.index < 0 || out.index >= len(opts) {
+			// Out of range is treated as a cancellation, not clamped. Clamping would
+			// answer with an option the user never selected.
+			return AskChoiceAnswer{}, context.Canceled
+		}
+		chosen := opts[out.index]
+		return AskChoiceAnswer{Label: chosen.Label, Index: out.index, Text: chosen.Text}, nil
+	case <-ctx.Done():
+		b.ResolveQuestion(questionID, -1)
+		return AskChoiceAnswer{}, ctx.Err()
+	}
+}
+
+// ResolveQuestion settles an outstanding question. A negative index cancels it. No-op
+// when nothing is pending under that id, so a duplicate answer from a host that retried
+// is harmless.
+func (b *Bridge) ResolveQuestion(questionID string, index int) {
+	b.mu.Lock()
+	pq, ok := b.pendingQuestions[questionID]
+	if !ok {
+		b.mu.Unlock()
+		return
+	}
+	delete(b.pendingQuestions, questionID)
+	if pq.timer != nil {
+		pq.timer.Stop()
+	}
+	now := b.now()
+	opts := pq.options
+	b.mu.Unlock()
+
+	ev := EvQuestionAnswered{QuestionID: questionID, ChoiceIndex: index, AnsweredAt: now}
+	if index < 0 || index >= len(opts) {
+		ev.Cancelled = true
+		ev.ChoiceIndex = -1
+	} else {
+		ev.Label, ev.Text = opts[index].Label, opts[index].Text
+	}
+	b.post(ev)
+	select {
+	case pq.resolve <- questionOutcome{index: index, cancelled: ev.Cancelled}:
+	default:
+	}
+}
+
+// SettlePendingQuestions cancels every outstanding question. Used on interrupt and
+// teardown drain, for the same reason approvals are drained: a parked dispatch that
+// nobody will ever answer would strand the turn as busy forever.
+func (b *Bridge) SettlePendingQuestions() {
+	b.mu.Lock()
+	ids := make([]string, 0, len(b.pendingQuestions))
+	for id := range b.pendingQuestions {
+		ids = append(ids, id)
+	}
+	b.mu.Unlock()
+	for _, id := range ids {
+		b.ResolveQuestion(id, -1)
 	}
 }
 

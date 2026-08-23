@@ -15,7 +15,7 @@ agent, or a person at a shell.
 | `--json <prompt>` | one | JSONL on stdout | scripting, CI gates, one-shot queries |
 | `--json --multi-turn` | many | JSONL on stdout | **testing a runbook that needs a short conversation** |
 | the line REPL | many | plain lines | a person at a shell or over SSH (`--classic` is a deprecated no-op) |
-| `host --stdio` | many | NDJSON, protocol v2 | you are Daintree, or reimplementing it |
+| `host --stdio` | many | NDJSON, protocol v3 | you are Daintree, or reimplementing it |
 
 If the caller is itself an agent — Claude Code, most immediately — reach for
 `mcp --stdio` first. `host --stdio` is Daintree's own contract — the first stdin line must be a valid
@@ -46,6 +46,13 @@ locally-rebuilt backend. So project, endpoint, tier, MCP credentials and state d
 all arguments to `daintree.session.open`, and the process env supplies defaults only.
 Repointing is a close/open pair, never a reconnect.
 
+**No secret is a tool argument.** The backend key is named by `apiKeyFile` and the Daintree
+MCP bearer by `mcpTokenFile` — paths, never values. Both are chosen by a *model* on this
+surface, and that bearer authorises system-tier Daintree actions for its whole validity
+window: inline, it could be echoed back by a prompt injection, logged by your MCP client, or
+captured by traces outside this repository. Omit `mcpTokenFile` to inherit
+`DAINTREE_MCP_TOKEN` from the server process.
+
 ### The tools
 
 | Tool | What it does |
@@ -57,7 +64,8 @@ Repointing is a close/open pair, never a reconnect.
 | `daintree.poll` | read a run: status, event window, answer, stats |
 | `daintree.inject` | fold a message into the **running** turn |
 | `daintree.interrupt` | cancel the running turn, keep the session |
-| `daintree.attention` | read what settled in the background |
+| `daintree.attention` | read what settled in the background (peeks — does not consume) |
+| `daintree.attention.ack` | acknowledge the items you have processed |
 | `daintree.approvals` | list confirmations the session is **parked** on |
 | `daintree.approve` | answer one, releasing or refusing the blocked call |
 
@@ -72,10 +80,26 @@ Things worth knowing before you drive it:
 - **`poll` returns a window.** Pass the previous response's `nextSeq` as `sinceSeq` to
   read only what is new. When the window truncates, `withheldEvents` says by how much —
   it never silently hands you a partial timeline as a complete one.
+- **`poll`'s `waitMs` is a real long poll.** It wakes on any *change* — new content, a
+  tool starting or finishing, the turn becoming blocked on an approval — not only on the
+  run finishing. Waiting for completion alone meant a 60s poll could sit through all of
+  that and report a blocked decision only when the budget expired.
+- **`inject` and `interrupt` take the `runId` you meant.** It is optional but strongly
+  recommended: without it, a request written for one turn acts on whichever turn happens
+  to be current when it lands, which over a slow pipe is a different turn. A stale
+  `runId` is rejected with an error naming the live run, rather than silently steering
+  the wrong work.
 - **Background work reports through `attention`, never as a late run event.** A tool that
-  accepted async work shows up as `pendingAsync` on the run; the completion arrives in
-  the inbox, carrying `asyncId` so you can match the two. `attention` acknowledges by
-  default so a polling caller sees each item once; pass `acknowledge:false` to peek.
+  accepted async work is recorded in the run's `asyncOperations` ledger — from the run
+  itself, so the handles survive you advancing `sinceSeq` — and the completion arrives in
+  the inbox carrying `asyncId` so you can match the two. Their status is `accepted`, never
+  `finished`: the run saw the handle issued and will never see it settle.
+- **`attention` peeks; `attention.ack` consumes.** Acknowledging inside the read is
+  at-most-once delivery — the rows are marked before the response is known to have reached
+  you, so a dropped connection loses them permanently, and an attention row is the *only*
+  report background work ever makes. Read, act, then `attention.ack` the ids. A retry after
+  an ambiguous failure is idempotent: already-acknowledged ids come back under `unknown`
+  rather than erroring. (`acknowledge:true` is still available if you accept the risk.)
 - **Always close what you open.** A session holds the project's owner lease for its whole
   life, and a leaked one blocks every other process from opening that project.
 - **Mutating tools need approval,** and the mode is per session:
@@ -85,7 +109,10 @@ Things worth knowing before you drive it:
     A parked call **blocks the whole turn**, so only choose this if you will poll. It
     fails closed on a timer (`approvalTimeoutMs`, default 5 minutes), and interrupt or
     close releases everything outstanding. Cancellation always wins: a call approved
-    after you interrupted the turn does not run.
+    after you interrupted the turn does not run. Each parked call carries
+    `needsTypedConfirm` — the safety layer's own verdict that the action is irreversible
+    and deserves more than a click. This server cannot impose friction on your UI, but it
+    tells you when the action warrants it rather than making you re-derive the rule.
   - `auto` — never ask. Equivalent to `--auto-approve`.
 
   A blocked run is reported as blocked: pending approvals ride the run's `poll` response
@@ -149,8 +176,18 @@ daintree-assistant --json "which worktrees are ready?"
 skip notices — goes to stderr. That separation is the whole contract: a caller can
 capture stdout and parse it without filtering.
 
-Exit codes (`domain.OneShotExitCode`): `0` success, `1` error, `2` cancelled. `3` is
-reserved and never emitted.
+Exit codes (`domain.OneShotExitCode`): `0` success, `1` error, `2` cancelled, `4` hard
+timeout. `3` is reserved and never emitted.
+
+**`--timeout` is bounded in two stages.** The first cancels the run's context at the
+deadline; that is cooperative, and a context only bounds code that *watches* it — a
+syscall in flight, a tool that ignores cancellation, or a `-` stdin read that never sees
+EOF is not preempted by one. So a watchdog arms for `--timeout` + a 30s grace
+(`domain.HardTimeoutGrace`) and, if the process is still alive then, kills it with exit
+`4` and a stderr diagnostic. A clean run disarms it long before; the grace is sized so
+the process is never killed mid-flush, trading a hung job for a corrupted one. Exit `4`
+therefore means "nothing unwound", and unlike `2` it has **no terminal `result` line** —
+that is the signal that the stream ended abnormally.
 
 `--json` requires a prompt, or `--multi-turn` to read a whole conversation from stdin
 (see [Multi-turn](#multi-turn)) — there is no JSONL *interactive* mode. A prompt that begins

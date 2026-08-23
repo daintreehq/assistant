@@ -120,3 +120,42 @@ func TestParseCommandNormalizesUnknownDecision(t *testing.T) {
 		}
 	}
 }
+
+// A question:answer command must parse only when it is complete and well-typed. The
+// choiceIndex check matters most: a missing or non-numeric one would default to 0 and
+// silently answer "the first option" for a user who never chose.
+func TestParseQuestionAnswerCommand(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		ok   bool
+		idx  int
+	}{
+		{"valid", `{"sessionId":"s1","type":"question:answer","questionId":"qst_1","choiceIndex":2}`, true, 2},
+		{"dismissal", `{"sessionId":"s1","type":"question:answer","questionId":"qst_1","choiceIndex":-1}`, true, -1},
+		{"missing index", `{"sessionId":"s1","type":"question:answer","questionId":"qst_1"}`, false, 0},
+		{"quoted index", `{"sessionId":"s1","type":"question:answer","questionId":"qst_1","choiceIndex":"2"}`, false, 0},
+		{"fractional index", `{"sessionId":"s1","type":"question:answer","questionId":"qst_1","choiceIndex":1.5}`, false, 0},
+		{"missing questionId", `{"sessionId":"s1","type":"question:answer","choiceIndex":0}`, false, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cmd, err := ParseCommand([]byte(c.line))
+			if c.ok {
+				if err != nil {
+					t.Fatalf("ParseCommand: %v", err)
+				}
+				if cmd.Type != CmdQuestionAnswer {
+					t.Fatalf("type = %q, want question:answer", cmd.Type)
+				}
+				if cmd.ChoiceIndex != c.idx {
+					t.Fatalf("choiceIndex = %d, want %d", cmd.ChoiceIndex, c.idx)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("a malformed question:answer parsed as %+v; it must be dropped", cmd)
+			}
+		})
+	}
+}

@@ -135,6 +135,29 @@ func (h *hostAppAdapter) SetHooks(hooks host.AppHooks) {
 				NeedsTypedConfirm: req.NeedsTypedConfirm,
 			}), nil
 		},
+		// The host CAN answer a question now (question:requested / question:answer), so
+		// this is no longer nil on the product path — which is what stops
+		// user.askMultipleChoice reporting QUESTION_UNAVAILABLE to the one surface a
+		// user actually runs.
+		AskChoice: func(cctx context.Context, req tools.AskChoiceRequest) (tools.AskChoiceAnswer, error) {
+			if hooks.AskChoice == nil {
+				return tools.AskChoiceAnswer{}, tools.ErrNoAskChoiceHook
+			}
+			opts := make([]host.AskChoiceOption, 0, len(req.Options))
+			for _, o := range req.Options {
+				opts = append(opts, host.AskChoiceOption{Label: o.Label, Text: o.Text})
+			}
+			ans, err := hooks.AskChoice(cctx, host.AskChoiceRequest{
+				ToolCallID: req.ToolCallID,
+				Question:   req.Question,
+				Options:    opts,
+				Default:    req.Default,
+			})
+			if err != nil {
+				return tools.AskChoiceAnswer{}, err
+			}
+			return tools.AskChoiceAnswer{Label: ans.Label, Index: ans.Index, Text: ans.Text}, nil
+		},
 	})
 }
 

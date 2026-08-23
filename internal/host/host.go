@@ -293,6 +293,9 @@ func (h *Host) boot(desc SessionDescriptor) {
 		Confirm: func(ctx context.Context, req ConfirmRequest) bool {
 			return h.bridge.Confirm(ctx, req)
 		},
+		AskChoice: func(ctx context.Context, req AskChoiceRequest) (AskChoiceAnswer, error) {
+			return h.bridge.AskChoice(ctx, req)
+		},
 	})
 
 	// Best-effort MCP — a degraded MCP is NOT a boot failure.

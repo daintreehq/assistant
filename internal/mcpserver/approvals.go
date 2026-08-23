@@ -81,6 +81,13 @@ type PendingApproval struct {
 	RequestedAt int64  `json:"requestedAt"`
 	// RunID ties the approval to the turn that is blocked on it.
 	RunID string `json:"runId,omitempty"`
+	// NeedsTypedConfirm is the safety layer's own verdict that this action deserves
+	// more friction than a yes. The caller renders its own approval UX and this server
+	// cannot impose a keystroke on it — but dropping the flag made a system-risk
+	// action and an ordinary project mutation arrive as the same boolean with
+	// different prose, which is exactly the distinction a caller needs to apply its
+	// own friction. Reported, never enforced here.
+	NeedsTypedConfirm bool `json:"needsTypedConfirm,omitempty"`
 
 	resolve chan Decision
 	timer   *time.Timer
@@ -88,18 +95,20 @@ type PendingApproval struct {
 
 // ApprovalRequest is what a tool dispatch asks about.
 //
-// It deliberately drops the dispatch's NeedsTypedConfirm flag, matching the embedded
-// host's boundary: typed-confirm friction is enforced on the surfaces that RENDER an
-// approval sheet — the host and the line REPL — not on one that delegates the
-// decision to an external caller which owns its own approval UX. The risk class travels
-// on Risk so that caller can still apply its own friction.
+// It carries the dispatch's NeedsTypedConfirm verdict verbatim, matching the embedded
+// host. Typed-confirm friction is ENFORCED only on the surfaces that render an approval
+// sheet — the host and the line REPL — never on one that delegates the decision to an
+// external caller owning its own approval UX. But forwarding the verdict costs nothing
+// and is the only way that caller can tell a system-risk action from an ordinary
+// project mutation without re-deriving the safety layer's rules from the risk class.
 type ApprovalRequest struct {
-	Tool        string
-	Risk        domain.RiskClass
-	Consequence string
-	Summary     string
-	RawArgs     string
-	RunID       string
+	Tool              string
+	Risk              domain.RiskClass
+	Consequence       string
+	Summary           string
+	RawArgs           string
+	RunID             string
+	NeedsTypedConfirm bool
 }
 
 // Approvals brokers confirmations for one session.
@@ -110,6 +119,12 @@ type Approvals struct {
 	// (MCP elicitation) may ask the client directly instead of waiting to be polled.
 	// It must not block; it is invoked on its own goroutine.
 	notify func(PendingApproval)
+	// onChange, when set, is called with the affected run id whenever the pending set
+	// changes. A run parked on an approval emits no further events of its own, so
+	// without this a long poll would sit through the whole wait budget without ever
+	// reporting that the turn had STOPPED rather than merely being slow. Set once at
+	// construction, so it cannot race the per-ask SetNotify rebinding.
+	onChange func(runID string)
 
 	mu      sync.Mutex
 	pending map[string]*PendingApproval
@@ -158,6 +173,13 @@ func (a *Approvals) Mode() ApprovalMode { return a.mode }
 // Timeout is how long an unanswered approval parks before it is denied.
 func (a *Approvals) Timeout() time.Duration { return a.timeout }
 
+// SetOnChange installs the pending-set change hook. Set once, at construction.
+func (a *Approvals) SetOnChange(fn func(runID string)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.onChange = fn
+}
+
 // SetNotify installs the push hook (elicitation). Safe to call before any request.
 func (a *Approvals) SetNotify(fn func(PendingApproval)) {
 	a.mu.Lock()
@@ -191,6 +213,8 @@ func (a *Approvals) Confirm(ctx context.Context, req ApprovalRequest) bool {
 		RequestedAt: domain.NowMS(),
 		RunID:       req.RunID,
 		resolve:     make(chan Decision, 1),
+
+		NeedsTypedConfirm: req.NeedsTypedConfirm,
 	}
 
 	a.mu.Lock()
@@ -202,15 +226,20 @@ func (a *Approvals) Confirm(ctx context.Context, req ApprovalRequest) bool {
 	a.pending[pa.ID] = pa
 	a.order = append(a.order, pa.ID)
 	notify := a.notify
+	onChange := a.onChange
 	// Copy only the REPORTABLE fields: the resolve channel and the timer are this
 	// broker's business, and handing them to an external hook would let it settle an
 	// approval behind Resolve's back, skipping the bookkeeping entirely.
 	snapshot := PendingApproval{
 		ID: pa.ID, Tool: pa.Tool, Risk: pa.Risk, Consequence: pa.Consequence,
 		Summary: pa.Summary, Args: pa.Args, RequestedAt: pa.RequestedAt, RunID: pa.RunID,
+		NeedsTypedConfirm: pa.NeedsTypedConfirm,
 	}
 	a.mu.Unlock()
 
+	if onChange != nil {
+		onChange(pa.RunID)
+	}
 	if notify != nil {
 		go notify(snapshot)
 	}

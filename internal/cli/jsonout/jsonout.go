@@ -225,6 +225,9 @@ func (s *Sink) Session(info SessionInfo) {
 		return
 	}
 	s.sessionEmitted = true
+	// Stamped here rather than left to every caller: the point of putting the version
+	// on the first frame is that a consumer can ALWAYS rely on it being there.
+	info.SchemaVersion = domain.JSONOutputSchemaVersion
 	s.emitStruct("session", info)
 }
 

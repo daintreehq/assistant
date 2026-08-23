@@ -1,441 +1,320 @@
-# Daintree host — how the app embeds this CLI
+# Daintree host — the `host --stdio` embedding contract (protocol v3)
 
 This is the **host-side companion** to [`DAINTREE_MCP.md`](DAINTREE_MCP.md). That doc
-describes the *protocol* the CLI speaks to Daintree (the tool catalog, tiers, call/response
-shapes). This doc describes the *embedding* — how the Daintree desktop app (an Electron
-IDE) actually launches this binary, wires it to the MCP server, shows its terminal, hides
-it, restarts it, and tears it down. If you have ever wondered "who set `DAINTREE_MCP_URL`?",
-"why did my session get a `SESSION_BINDING_GONE`?", or "what happens to my process when the
-user switches projects?", this is the reference.
+describes the protocol this CLI speaks *to* Daintree (the tool catalog, tiers, call shapes).
+This one describes the protocol Daintree speaks *to* the CLI: how the desktop app launches
+the binary, hands it a session, drives turns, answers approvals, and tears it down.
 
-> **Source of truth.** This describes Daintree's behavior as observed from the CLI's side of
-> the boundary plus a read of Daintree's host code (`daintreehq/daintree`). The env contract
-> the CLI actually consumes lives in [`internal/config/config.go`](../internal/config/config.go)
-> — that file wins for what the CLI *reads*. The Daintree internals named here can drift; the
-> **observable contract** (env var names, error codes, tier semantics) is what to rely on. A
-> pointer list for cross-repo maintenance is at the end.
+> **The binary is headless.** There is no terminal UI package and none may be added. Daintree
+> owns rendering and draws the conversation in React; this process emits structured events and
+> nothing else. If a turn needs to *say* something new, that is a new **event on this
+> protocol** — never a new thing drawn here. The retired PTY/cockpit embedding is archived at
+> [`history/PTY_HOST_V1.md`](history/PTY_HOST_V1.md); nothing in it is a live contract.
+
+> **Source of truth.** The wire contract is
+> [`internal/host/wire.go`](../internal/host/wire.go) (version, vocabularies, command
+> parsing) and [`internal/host/events.go`](../internal/host/events.go) (every event's exact
+> JSON shape). Those files win over this document. The env contract the CLI actually consumes
+> is [`internal/config/config.go`](../internal/config/config.go). Daintree internals named
+> here can drift; the **observable contract** — frame shapes, event names, env var names,
+> error codes — is what to rely on.
+
+---
 
 ## TL;DR
 
-- The assistant is **one ordinary terminal panel** inside Daintree's "Assistant area" (the
-  **HelpPanel**), not a special window. Daintree runs `daintree-assistant` in an interactive
-  shell PTY and shows its TUI with the same xterm pipeline every agent terminal uses.
-- Daintree gives the CLI the MCP connection **entirely through environment variables** —
-  `DAINTREE_MCP_URL`, `DAINTREE_MCP_TOKEN`, `DAINTREE_WINDOW_ID`, `DAINTREE_PROJECT_ID`. No
-  `.mcp.json`, no CLI flags (`supports.mcpInjection: "env-only"`).
-- There is **one live assistant backend per project**, pinned to the window/view that
-  launched it. Launching again for the same project **displaces** the old one.
-- The token is **per-session** and is bound to a **worktree/terminal context snapshot taken
-  at launch**. Daintree grants the assistant the **`system`** tier — the CLI's own safety
-  layer, not Daintree's tier gate, is what stops dangerous calls.
-- **Hiding** the panel never kills the process; the panel slides off-canvas and keeps
-  running (throttled). **Restart / New session** mints a fresh token and **drops the
-  transcript**. **Eviction / window-close / crash** kill the PTY but capture a resume
-  handle; **app restart** does not auto-resume.
+- Daintree spawns `daintree-assistant host --stdio` and talks **NDJSON over stdio**: one JSON
+  object per line.
+- **stdin** carries the inbound stream: the first line is a `SessionDescriptor`, every
+  subsequent line is a `HostCommand`. **stdout** carries `HostEvent` frames and *nothing*
+  else. **stderr** carries human diagnostics and *never* protocol JSON.
+- Every outbound event carries `type`, `sessionId`, and a **monotonic `seq` starting at 1**.
+- `PROTOCOL_VERSION` is **3**, exported as `host.ProtocolVersion`. It is the single source of
+  truth: `docs/generated/COMPATIBILITY.md` is projected from it, and a test
+  (`TestDocsNameTheCurrentHostProtocolVersion`) fails the build if prose disagrees.
+- **No secret crosses stdin.** The MCP bearer and endpoint arrive via environment only, so a
+  leaked descriptor line cannot re-bind the session or carry the token.
 
 ---
 
-## 1. What the assistant *is*, from the host's side
+## 1. Why v3 is a break, not an increment
 
-Daintree is a multi-window, multi-project IDE. Each open project runs in its own renderer
-(a `WebContentsView` with its own V8 context). Inside that renderer, a React component
-called the **HelpPanel** (the "Daintree Assistant" area, a right-hand slide-in panel) hosts
-the assistant.
+v2 described a **terminal session** for a parent that drew a thin activity strip beside an
+xterm. v3 describes a **conversation** for a parent that renders the whole thing. Three
+changes make it breaking:
 
-The assistant is launched as a normal **PTY-backed terminal panel** — internally a panel of
-`kind: "terminal", location: "overlay"`. Daintree does **not** `exec` the binary directly;
-it starts an interactive login shell, then *types the command into it* (roughly
-`daintree-assistant\r`) so that when the CLI exits the shell is still there. Consequences:
-
-- The CLI runs under a **real TTY** in an interactive shell — the attached session's raw-mode /
-  alt-screen assumptions hold.
-- `os.Getenv("SHELL")`, the user's shell rc, and PATH are the user's normal login
-  environment (see the env-hygiene note in §2).
-- Daintree reuses the exact same xterm rendering, resize, focus, and scrollback machinery it
-  uses for agent terminals — the assistant is not a bespoke widget, it is "a terminal that
-  happens to be pinned in the HelpPanel."
-
-The binary is discovered **by name on `PATH`** (`command: "daintree-assistant"`): Daintree
-tries `DAINTREE_CLI_PATH_PREPEND` dirs, then `which daintree-assistant`, then the npm-global
-prefix shim (`<npm prefix>/bin/daintree-assistant`). It is installed **independently of
-Daintree** (global npm / a PATH shim), which is why Daintree resolves it by name rather than
-bundling it.
-
-> The `daintree-assistant` agent id is deliberately excluded from Daintree's normal
-> "launchable agents" list — it is **not** offered as a standalone coding agent in the
-> toolbar, launcher, or keybindings. The only way to start it is through the Assistant area.
-
-**Not the transport you might expect.** The CLI also ships a `host --stdio` NDJSON transport
-(`internal/host`). Daintree has a *contract* for driving the assistant as a
-`utilityProcess.fork()` structured host, but that path is **deferred and not wired** in the
-shipping app. Today's integration is 100% the **interactive PTY attached session + env-injected MCP
-over HTTP** described here. Don't assume Daintree is talking to `host --stdio`.
+1. **Every event carries `seq`.** v2 silently dropped frames when the writer queue filled,
+   with no way for a consumer to notice — unusable once the transcript *is* the product. v3
+   applies backpressure to stream traffic instead, and `seq` makes any residual gap
+   detectable rather than invisible.
+2. **`turn:end` carries the authoritative final `content`.** v2 carried only an outcome
+   class, so a lost token frame corrupted the conversation forever with no way to repair it.
+3. **The event set covers what the runtime actually produces** — phase, reasoning,
+   interjections, the whole tool batch, tool state and progress, usage, cost, notices —
+   instead of the subset a status strip needed.
 
 ---
 
-## 2. The launch handshake — how the CLI receives its MCP connection
+## 2. Launch and handshake
 
-Everything the CLI needs to reach Daintree arrives as **process environment**, injected at
-spawn time. The CLI reads these in [`internal/config/config.go`](../internal/config/config.go)
-(the "trusted-env boundary"): `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` /
-`DAINTREE_PROJECT_ID` / `DAINTREE_WINDOW_ID` are `trustedOrOwn` — taken from the real process
-env (or the assistant's *own* `.env`), **never** from the bound project's `.env`, so a
-checked-out repo can't spoof the link or the identity.
+### The command line
+
+```
+daintree-assistant host --stdio
+```
+
+cwd is the **project root**. Connection wiring is entirely environment; there are no
+connection flags on the launch line.
 
 ### Environment Daintree injects
 
-| Variable | Value | CLI reads it? |
+These are read at the **trusted-env boundary** in `internal/config/config.go`: taken from the
+real process environment (or the assistant's own `.env`), **never** from the bound project's
+`.env`, so a checked-out repository cannot spoof the link or the identity.
+
+| Variable | Value | Read? |
 | --- | --- | --- |
-| `DAINTREE_MCP_URL` | `http://127.0.0.1:<port>/mcp` (Streamable HTTP; `<port>` is the *actually bound* MCP port, default 45454) | **Yes** — `cfg.McpURL` |
-| `DAINTREE_MCP_TOKEN` | Per-session bearer (32 random bytes, hex). Sent as `Authorization: Bearer <token>` | **Yes** — `cfg.McpToken` |
-| `DAINTREE_PROJECT_ID` | The bound project's id. Scopes the CLI's `StateDir` (`~/.daintree/assistant-cli/<project>/state.db`) | **Yes** — `cfg.ProjectID` |
-| `DAINTREE_WINDOW_ID` | The launching window's numeric id. **Informational** to the CLI (identity / per-window state); the enforceable binding is server-side, not this value | **Yes** — `cfg.WindowID` |
-| `DAINTREE_ASSISTANT_AUTO_APPROVE` | `"1"` when the user enabled "bypass permission prompts" for the session | **Yes** — `cfg.AutoApprove` (trusted-only) |
-| `DAINTREE_ASSISTANT_DEBUG_LOG` | `"1"` when the user enabled debug logging in settings | **Yes** — `cfg.DebugLog` (trusted-only) |
-| `DAINTREE_ASSISTANT_SCRATCH_DIR` | A per-session scratch path Daintree provisions | **No** — host-set but not currently consumed (reserved) |
-| `DAINTREE_PANE_ID` / `DAINTREE_CWD` / `DAINTREE_WORKTREE_ID` | Universal Daintree terminal metadata stamped on *every* PTY | **No** — the CLI ignores these; see §6 on why worktree identity is server-side |
+| `DAINTREE_MCP_URL` | `http://127.0.0.1:<port>/mcp` — Streamable HTTP. `<port>` is the *actually bound* port (default 45454, walks up to 10 on conflict). **Never hard-code the port.** | **Yes** → `cfg.McpURL` |
+| `DAINTREE_MCP_TOKEN` | Per-session bearer, sent as `Authorization: Bearer <token>`. Expires ~12 minutes after minting. | **Yes** → `cfg.McpToken` |
+| `DAINTREE_PROJECT_ID` | The bound project's id. Scopes `StateDir` to `~/.daintree/assistant-cli/<project>/state.db`, and is stable across launches — safe to key per-project memory on. | **Yes** → `cfg.ProjectID` |
+| `DAINTREE_WINDOW_ID` | Launching window id. **Informational**; the enforceable binding is server-side. | **Yes** → `cfg.WindowID` |
+| `DAINTREE_ASSISTANT_AUTO_APPROVE` | `"1"` when the user turned off permission prompts. Reported back on `host:ready`. | **Yes** → `cfg.AutoApprove` |
+| `DAINTREE_ASSISTANT_DEBUG_LOG` | `"1"` when the user enabled debug logging. | **Yes** → `cfg.DebugLog` |
+| `DAINTREE_ASSISTANT_SCRATCH_DIR`, `DAINTREE_PANE_ID`, `DAINTREE_CWD`, `DAINTREE_WORKTREE_ID` | Host-provided metadata. | **No** — injected but not consumed. |
 
-Notes that matter for the CLI:
+Daintree strips inherited `DAINTREE_*` variables from the shell environment before injecting
+its own, so a stale token in the user's OS environment cannot leak in.
 
-- **Env-only, always fresh.** Because injection is env-only, there is no config file to read
-  and no flag to parse for the connection. Daintree strips all inherited `DAINTREE_*` (and
-  known-sensitive vars) from the shell's environment before injecting its own, so a
-  `DAINTREE_MCP_TOKEN` sitting in the user's OS environment can't leak in — the values you
-  get are the ones Daintree minted for *this* launch.
-- **The URL is `/mcp` (Streamable HTTP).** The CLI's client tries Streamable HTTP first and
-  falls back to legacy SSE by rewriting `/mcp → /sse`; Daintree serves both, but for the
-  assistant it hands you the `/mcp` endpoint directly.
-- **The port can move.** Default is `127.0.0.1:45454`, but on a bind conflict Daintree walks
-  up to 10 ports. Always use the port embedded in `DAINTREE_MCP_URL`; never hard-code 45454.
-- **`SCRATCH_DIR`, `PANE_ID`, `WORKTREE_ID`, `CWD` are not read today.** If the CLI ever
-  wants a Daintree-provided scratch dir or its own pane/worktree id from env, the host
-  already provides them — but as of now `config.go` doesn't consume them.
-- The CLI also accepts `--mcp-url` / `--mcp-token` flags as overrides, but Daintree does
-  **not** use them; it always goes through the env.
+### The first line: `SessionDescriptor`
 
-### The command line Daintree runs
+```json
+{"sessionId":"ses_…","windowId":7,"projectId":"proj_…","cwd":"/path","tier":"system","protocolVersion":3,"resumeSessionId":"ses_prev"}
+```
 
-The launch command is the bare `daintree-assistant`, plus any user-configured `--model <id>`
-and free-form custom args from the Assistant settings tab. There are **no** connection flags
-— all wiring is the env above.
+`sessionId`, `projectId`, `cwd` and `tier` must be strings; `windowId` and `protocolVersion`
+must be **numbers**. A quoted number is a string and is rejected. `protocolVersion` must be
+integral — a fractional `2.9` is refused rather than truncated past the `== ProtocolVersion`
+check. `resumeSessionId` is optional and not type-checked.
 
-### Working directory
+**The descriptor carries no secret, deliberately.** `windowId` / `projectId` / `tier` are
+validated here, but the *live* binding values come from the environment: a leaked or forged
+descriptor line cannot re-point the session at another project or hand it a token.
 
-The assistant is launched with **cwd = the project root** (not the active worktree, not a
-per-session dir). Daintree's rationale: the assistant is env-only and ships its own skills,
-so it reads nothing meaningful from cwd — running it at the project root makes its own file
-tools and the terminal's file-link resolution operate on the real project tree. (Other
-help-panel agents like Claude/Codex run in a per-session dir that owns their `.mcp.json`;
-the Daintree Assistant does not.) See §6 for why cwd is *not* how worktree scope is decided.
+A malformed descriptor yields `host:error` with code `bad-descriptor`, followed by teardown.
+A version mismatch yields code `protocol-mismatch` naming both versions, then teardown. Both
+are emitted **synchronously and flushed**, so the specific error reaches the parent before the
+`host:shutdown` reason does.
 
-### Version gating and a missing binary
+### The reply: `host:ready`
 
-- Daintree probes the installed version by running `daintree-assistant --version` (parsed as
-  semver, cached ~12h; "Check again" forces a refresh).
-- The `daintree-assistant` agent declares **no minimum version**, so the version gate
-  **never blocks it** — the block screen exists for other help agents (Claude/Copilot) that
-  do declare a floor. Practically: Daintree will launch whatever `daintree-assistant` is on
-  PATH.
-- If the binary is **absent**, Daintree shows a "missing CLI" state with a **Run anyway**
-  affordance (the launch still attempts, so a shim that resolves late still works).
+```json
+{"type":"host:ready","sessionId":"ses_…","seq":1,"protocolVersion":3,"autoApprove":false,"version":"1.4.2","resumedSessionId":"ses_prev"}
+```
+
+`version` is the engine build string, so a host no longer has to shell out to `--version`
+separately. `autoApprove` reports that this session runs mutating tools with **no**
+confirmation — previously that state was mentioned only on stderr, which a protocol-only
+consumer never reads, leaving a user unable to see that approvals were switched off.
 
 ---
 
-## 3. The MCP server the host stands up
+## 3. Inbound commands
 
-The endpoint in `DAINTREE_MCP_URL` is Daintree's **local MCP server** (in-process in the
-Electron main process), not the assistant backend. Key facts the CLI can rely on:
+Every command is an object with a string `sessionId` and a string `type`.
 
-- **Bind + transport.** `127.0.0.1` only (localhost-gated: requests with a non-local `Host`,
-  or a mismatched `Origin`, are rejected with 403 before auth). Streamable HTTP at `/mcp`
-  plus legacy SSE at `/sse` on the same server.
-- **The assistant's token is per-session.** Minted when Daintree *provisions* the session,
-  registered with the server's validator, and **rotated on every re-provision**. It is not
-  the same as the persistent "API key" shown in the MCP server settings tab — that key is
-  for *external* third-party clients (Cursor, Claude Code, scripts) and maps to a separate
-  `external` tier. The assistant is never `external`.
-- **The assistant runs at the `system` tier.** Daintree forces the Daintree Assistant's
-  session tier to `system` ("the workspace's first-class conductor"), the top of the
-  workbench ⊂ action ⊂ system ladder. So the host tier gate does **not** block the assistant
-  from any tool — `git.commit`, `git.push`, `worktree.delete`, `forge.mergePR`, etc. are all
-  reachable. **Confirmation for dangerous operations is therefore the CLI's own
-  responsibility** (its `safety` layer + user confirm), exactly as
-  [`DAINTREE_MCP.md`](DAINTREE_MCP.md) says: the tier is advisory to the CLI.
-- **Two different "tiers" — don't conflate them.** (a) The *server-enforced* tier is bound
-  to your token and forced to `system`. (b) The CLI's *own* advisory `cfg.Tier`
-  (`DAINTREE_ASSISTANT_TIER`, defaulted locally) drives its local safety gating. Daintree
-  does **not** inject `DAINTREE_ASSISTANT_TIER`, so the CLI's local tier is whatever the CLI
-  defaults to — independent of the `system` grant on the wire.
-- **Idempotency + confirmation** behave as documented in `DAINTREE_MCP.md` (`requestKey`
-  dedup; `danger:"confirm"` may elicit). Because the assistant is `system`-tier, the host's
-  tier-mismatch / grant-elevation machinery is largely dormant for it — that flow mainly
-  serves lower-tier help agents and external clients.
-
----
-
-## 4. Identity, window & session binding
-
-Daintree pins each assistant session to the exact renderer that launched it, so tool calls
-can never be routed to the wrong window or worktree.
-
-- **The bearer is pinned to a WebContents + an `ActionContext` snapshot** taken at launch.
-  Every tool dispatch replays that snapshot as the acting context. `DAINTREE_WINDOW_ID` is
-  handed to the CLI for identity/telemetry, but the *enforceable* binding is this server-side
-  pin, not the env value — so don't build anything security-sensitive on `WINDOW_ID`.
-- **One backend per project.** Daintree keys the live assistant by `projectId`. Provisioning
-  a new session for a project **displaces** any prior one (revokes its token, kills its PTY).
-  Across N windows you can have up to one assistant per distinct project; a second window
-  opening the assistant for an already-active project takes it over (last-writer-wins).
-
-### The two "stop retrying" errors
-
-These are the host telling the CLI its binding is permanently gone. Both are non-retriable
-"business" errors and their messages literally end with **"Do not retry."** The CLI should
-stop using that session and tell the user (this is the behavior `DAINTREE_MCP.md` prescribes).
-
-| Error code | Raised when | Meaning for the CLI |
+| `type` | Extra fields | Meaning |
 | --- | --- | --- |
-| `SESSION_BINDING_GONE` | The pinned WebContents is gone/destroyed (window closed, view evicted, renderer crashed) | The Daintree window this session was bound to no longer exists. Dead session. |
-| `BINDING_STALE` | A pinned dispatch targets a `projectId` that is no longer the active project in that view (user switched projects in the same window) | The session was bound to a project that isn't active anymore. Dead session. |
+| `prompt` | `text` | Start a user turn. Sent while a turn is running, it is **folded into** the in-flight turn as an interjection rather than rejected. |
+| `approval:decide` | `approvalId`, `decision` | Answer a parked confirmation. |
+| `question:answer` | `questionId`, `choiceIndex` | Answer a multiple-choice question. `choiceIndex` is 0-based; **negative means dismissed**, which cancels the tool call rather than answering it. Required and must be a number — a missing one would default to 0 and silently answer "the first option" for a user who never chose. |
+| `interrupt` | — | Cancel the running turn. Leaves autonomous wake work alone. |
+| `hibernate` | — | Graceful teardown, reason `hibernate`. |
+| `shutdown` | — | Graceful teardown, reason `exit`. |
 
-What invalidates a binding (all revoke the token; some also capture a resume handle — see §7):
+`decision` is coerced to the closed vocabulary `approved | rejected | timeout`. **An
+unrecognized value becomes `rejected`** — an unparseable decision must never be treated as an
+approval, and the parked dispatch unblocks declined rather than emitting an off-contract
+decision.
 
-- Window closed → revoked (capture).
-- Project-view LRU-evicted / under memory pressure → revoked (capture).
-- Renderer/view crash → revoked (capture).
-- Project switched away inside the same view → `BINDING_STALE` on next call.
-- A sibling re-provision for the same project (the one-backend rule) → prior session revoked,
-  in-flight calls 401, PTY killed.
-
-Repeated auth failures or tier-mismatches trip an **abuse policy** that revokes the session
-outright — another reason to treat a `401`/binding error as terminal rather than hammering.
-
----
-
-## 5. How the CLI's activity is displayed
-
-The HelpPanel renders the CLI's TUI in the terminal pane, and adds a thin **status/activity
-row** underneath it fed by the MCP server (targeted IPC to the pinned renderer, never
-broadcast). None of this changes what the CLI does — but it's why your tool calls become
-visible chrome:
-
-- **MCP activity strip.** Every tool call the CLI makes emits `tool-call-started` /
-  `tool-call-settled` events (args redacted host-side). The strip coalesces same-turn bursts
-  into "N calls · <tool>", holds sub-400ms calls to avoid flashing, decays a success after
-  ~5s, and keeps errors sticky. Clicking it opens a **recent calls** popover backed by the
-  MCP **audit log**, filtered to this help session.
-- **Turn-outcome pip.** The host can surface a small warning dot for `agent-stuck`
-  ("Stopped early") or `reasoning-loop` ("Repeating steps"), derived from turn-outcome
-  telemetry.
-- **Images / figures.** If the CLI calls the host's image-display tool, Daintree shows the
-  figure in a **figure rail** beneath the terminal (`help.displayImage` → a targeted
-  `help-display-image` event). This is the host-side render path for CLI-produced figures.
-- **Tier / grant banners.** For lower-tier help agents the host shows tier-mismatch and
-  grant ("Approve once" / "Always allow", with a live countdown) banners. For the
-  `system`-tier assistant these rarely fire.
-
-Everything here is faithful surfacing of what the CLI *did* — Daintree reads the audit trail
-and the tool-call events, it does not re-interpret the conversation.
+A line that is not a recognizable command — unknown `type`, missing required field, garbled
+JSON — is **silently dropped**, never turned into an error. A foreign writer on the pipe
+cannot make the session emit protocol errors.
 
 ---
 
-## 6. Worktree & project scope
+## 4. Outbound events
 
-**Project scope** is carried by `DAINTREE_PROJECT_ID` (env) and, more importantly, by the
-per-session bearer bound to that project. The CLI uses `DAINTREE_PROJECT_ID` to scope its own
-`StateDir` (so each project gets its own `state.db`, timers, watchers, memory).
+Every frame carries `type`, `sessionId` and `seq`. `seq` is monotonic from 1 across the whole
+session; a consumer that sees a gap knows it lost something.
 
-**Worktree scope is server-side, not env, and is pinned at launch:**
+| Event | Payload |
+| --- | --- |
+| `host:ready` | `protocolVersion`, `autoApprove`, `version?`, `resumedSessionId?` |
+| `host:error` | `code`, `message` |
+| `host:shutdown` | `reason` (`hibernate`/`revoke`/`error`/`exit`), `resumeSessionId?` |
+| `turn:start` | `turnId`, `role` (`user`/`assistant`), `startedAt` |
+| `turn:phase` | `phase` — the canonical `domain.RunPhase` |
+| `turn:token` | `turnId`, `chunk` — streamed prose, for liveness only |
+| `turn:reasoning` | `turnId`, the round's thinking |
+| `turn:interjection` | `text` — a message typed *while* the turn ran |
+| `turn:end` | `turnId`, `endedAt`, `outcome?`, `content?` |
+| `tool:batch` | `calls` — the whole batch announced as queued, before sequential dispatch |
+| `tool:started` | `toolCallId`, `toolId`, `argsSummary`, `startedAt`, `danger`, `turnId?` |
+| `tool:state` | `toolCallId`, `state` — promotes one announced call through its lifecycle |
+| `tool:progress` | `toolCallId`, `message` — an in-tool substep |
+| `tool:settled` | result classification, severity, `turnId?`, `asyncId?` |
+| `approval:requested` | `approvalId`, `toolId`, `summary`, `requestedAt`, `needsTypedConfirm`, `riskClass?`, `consequence?`, `argsSummary?`, `turnId?` |
+| `approval:decided` | `approvalId`, `decision`, `decidedAt` |
+| `question:requested` | `questionId`, `question`, `options[{label,text}]`, `default`, `requestedAt`, `turnId?`, `toolCallId?` |
+| `question:answered` | `questionId`, `choiceIndex`, `cancelled`, `answeredAt`, `label?`, `text?` |
+| `usage` | per-round token accounting |
+| `cost` | `total`, `complete` |
+| `notice` | `level`, `message` |
+| `model:rate-limited` | emitted when the provider throttled us after the retry budget |
 
-- At launch Daintree snapshots the *focused context* (active worktree id/path/branch,
-  focused terminal) into the `ActionContext` bound to the token. Tool dispatches replay that
-  snapshot, so a focus change between the model deciding to call a tool and the call landing
-  can't retarget it.
-- The **worktree is frozen** at the launch snapshot; the **target terminal** is re-resolved
-  live at dispatch. Changing the active worktree in the UI does **not** relaunch the
-  assistant, does **not** re-point it, and does **not** notify it — the assistant stays
-  pinned to the worktree it was launched against. Daintree's UI shows a "pinned worktree
-  diverged" chip that lets the *user* jump back to the pinned worktree; it never moves the
-  assistant.
-- **The CLI can't read its worktree from env.** `DAINTREE_WORKTREE_ID` is stamped on the PTY
-  but `config.go` doesn't consume it, and the assistant's cwd is the *project root*, not the
-  worktree. So to know "which worktree am I acting in," the CLI must **ask over MCP** —
-  `actions.getContext` (returns the active project/worktree/focused-terminal snapshot) or
-  `worktree.getCurrent` — not inspect its environment or cwd.
-- To act in a *different* worktree, the model uses the worktree-targeting tool arguments
-  (`worktreeId` on the relevant tools), not a process relaunch.
+### `turn:end` is the authority, not the token stream
+
+A consumer accumulates `turn:token` for liveness, then **replaces its buffer** with
+`turn:end.content`. That is what makes the transcript repairable: a token frame lost to a
+wedged stdout, a mid-stream reconnect, or the consumer's own dropped update self-heals rather
+than leaving mangled prose on screen forever.
+
+`content` is **omitted**, not empty, when the turn produced no visible text — a cancel before
+the first token, or a tool-only round — so a host can tell "nothing was said" from "the answer
+was empty".
+
+### `needsTypedConfirm` is always present
+
+It is the safety layer's own verdict that an action is irreversible and must not be
+approvable by a single click. It is carried explicitly rather than left for the host to
+re-derive from `riskClass`: a host that reimplements "which risk classes are irreversible"
+has forked a security rule into a second codebase, where it can drift silently and in the
+permissive direction. It is emitted even when false, so a host can tell "does not need typed
+confirmation" from "this peer is too old to say".
 
 ---
 
-## 7. Lifecycle — hiding, restarting, hibernation, crash
+## 5. Framing, backpressure and ordering
 
-This is the part with the most surprising behavior, so here it is in full.
+- **One serialized writer.** A single dedicated goroutine drains the outbound queue, so
+  frames can never interleave.
+- **Frame cap: 4 MiB** inbound and outbound (`maxFrameBytes`). An oversize inbound line is
+  refused rather than buffered without bound.
+- **Backpressure, not silent drops.** Stream events (tokens, tool progress) *wait* when the
+  queue is above the high-water mark. Terminal and decision frames — `turn:end`,
+  `approval:requested`, `host:shutdown`, command acks — **never wait and never drop**: they
+  take the whole queue. This is the reserve that stops progress traffic from starving a
+  result.
+- **`seq` is assigned during encode, under the same lock as the enqueue.** Assigning it
+  outside would let two producers interleave — A takes N, is descheduled, B takes N+1 and
+  enqueues first — so a consumer would see frames out of order and reasonably conclude one
+  was lost.
+- A broken stdout means the parent is gone: the host cancels and tears down.
 
-### Hiding (the panel toggle / focus mode)
+---
 
-Hiding the Assistant area **never touches the process**. Daintree keeps the panel mounted and
-slides it off-canvas with a CSS transform (so the terminal box keeps a constant size and the
-CLI doesn't get a resize storm on show/hide). While hidden the terminal's render rate drops
-to a background tier, but the PTY keeps running and buffering. Re-showing repaints and
-re-focuses. The CLI cannot distinguish hidden from visible except via normal TTY signals —
-there is no "you are hidden" message.
+## 6. Lifecycle, EOF and shutdown
 
-### Restart / New session
+| Trigger | Reason on `host:shutdown` |
+| --- | --- |
+| `shutdown` command | `exit` |
+| `hibernate` command | `hibernate` |
+| stdin EOF / read failure / oversize line | `exit` |
+| fatal protocol error | `error` |
 
-The "**+ New session**" and "**Run anyway**" affordances are a **hard restart**:
+**`host:shutdown` is emitted FIRST**, before the app tears down, so Daintree learns the reason
+even if teardown itself hangs. Teardown then drains pending approvals (rejecting them so no
+dispatch is left parked), cancels in-flight turns, and **joins them under a bounded timeout**
+(`defaultTurnJoinTimeout`, 5s). A tool that ignores cancellation cannot wedge shutdown — the
+host proceeds. An unexpected EOF is therefore *not* ambiguous: it cancels interactive waits,
+persists what it safely can, and exits under a deadline.
 
-- Daintree removes the panel, revokes the old session, and **provisions a fresh session** —
-  new `sessionId`, **new bearer token**, new scratch dir, new `DAINTREE_MCP_URL` — then
-  spawns a **brand-new PTY**. Env is re-injected fresh; nothing is reused from the old
-  process.
-- **The transcript is intentionally dropped.** "New session" means the user wants a clean
-  slate; Daintree does not carry the old conversation forward at the host level. (The CLI's
-  own `state.db` still exists under the same `DAINTREE_PROJECT_ID`, so any continuity is up
-  to the CLI — Daintree passes no resume handle on this path.)
-- The version gate is skipped on this path; "Run anyway" additionally forces past the
-  missing-CLI guard.
+Ownership then passes to the persistent supervisor where one is available — see
+[`SUPERVISOR.md`](SUPERVISOR.md). Watchers, async futures, timers and the attention inbox are
+project-scoped and survive; they are adopted by the next owner rather than torn down.
 
-There is also a generic "restart the terminal backend" path (restarting Daintree's whole
-PTY host process); it is not assistant-specific and just respawns PTYs.
+---
 
-### Hibernation, eviction & the resume story
+## 7. Identity, binding and the two terminal errors
 
-Daintree treats the assistant asymmetrically from grid terminals. Grid agent PTYs live in a
-separate PTY-host process and **survive** view eviction; the **assistant PTY is deliberately
-killed** when its owning renderer goes away. But this is *not* a silent death — Daintree
-`gracefulKill`s to capture a resume handle and persists it. The full matrix:
+Project scope is carried by `DAINTREE_PROJECT_ID` and, more importantly, by the per-session
+bearer bound to that project. **Worktree identity is not in env or cwd** — query it over MCP
+(`actions.getContext` / `worktree.getCurrent`); it is pinned at launch.
 
-| Event | Assistant PTY | Resume handle captured? |
+`SESSION_BINDING_GONE` and `BINDING_STALE` from the MCP side are **terminal**: the bound
+window or project is gone. Stop retrying that session and surface it. They are not transient
+and no amount of reconnecting fixes them.
+
+The session tier on the wire is **`system`** — Daintree will not tier-block the assistant, so
+**this CLI owns confirmation of dangerous operations**. That is what the approval events above
+are for.
+
+---
+
+## 8. Decisions: who answers what, on which surface
+
+The runtime has two decision kinds — an **approval** (allow or decline an action) and a
+**question** (`user.askMultipleChoice`, choose an answer needed for planning). They are not
+available on every surface, and the honest table is:
+
+| Surface | Approval | Multiple-choice question |
 | --- | --- | --- |
-| Panel hidden / focus mode | **Survives** (off-canvas, throttled) | n/a |
-| Project switch, view stays cached | **Survives** (renderer throttled/frozen, PTY runs) | n/a |
-| Window minimize / app background / system sleep | **Survives** (PTY pause/resume) | n/a |
-| Project-view **LRU / memory-pressure eviction** | **Killed** (graceful) | **Yes** — per-project pending-hibernation store |
-| **Window close** | **Killed** (graceful) | **Yes** |
-| Renderer / **view crash** | **Killed** (graceful) | **Yes** |
-| **App shutdown** | **Killed** | **No** (no time to capture) |
-| **Main-process (host) crash** | Dies with the app | Only if a capture was already on disk |
-| PTY-host crash | Dies like any PTY; host shows a crash banner | Generic PTY recovery |
+| Native host (`host --stdio`) | `approval:requested` → `approval:decide` | `question:requested` → `question:answer` |
+| MCP (`mcp --stdio`) | `daintree.approvals` / `daintree.approve`, or MCP elicitation | **not implemented** — the tool reports `QUESTION_UNAVAILABLE` |
+| JSONL one-shot (`--json`) | none — the tool is declined and the turn continues | **not implemented** — `QUESTION_UNAVAILABLE` |
+| Line REPL | terminal prompt | terminal prompt |
 
-Resume behavior after a capture:
+### Why they are separate frames
 
-- **Same-session** eviction/crash where the panel was open: Daintree auto-reopens and resumes
-  (for agents that support resume).
-- **Otherwise / after a full app restart:** the "panel was open" flag is in-memory only, so a
-  cold restart never auto-resumes — Daintree offers a manual **"Resume assistant"**
-  affordance instead.
-- **Important for this CLI specifically:** `daintree-assistant` declares **no resume
-  command**, so Daintree's resume affordance is **suppressed for it** — a "resume" of the
-  Daintree Assistant is really a **fresh launch** in the same project (fresh token/session).
-  Daintree does not pass a resume handle to `daintree-assistant`. **Any conversation
-  continuity must come from the CLI's own per-project `state.db`** (keyed by the stable
-  `DAINTREE_PROJECT_ID` → `StateDir`). If seamless resume matters, that's a CLI-side feature
-  to build on top of persisted state, not something Daintree drives.
+An approval is *"may I do this?"* and has one safe default — no. A question is *"which of
+these did you mean?"* and has **no safe default at all**: inventing one puts words in the
+user's mouth and then acts on them. A host given only the approval frames would have to
+render a yes/no sheet for a question with four answers.
 
-The assistant is also **excluded from Daintree's crash/session snapshot restore** (it's an
-ephemeral panel), which is why the pending-hibernation store — not the normal panel-restore
-path — is its only recovery channel.
+That asymmetry drives the rest of the contract: an unanswered approval times out to
+*rejected*, while an unanswered question times out to **cancelled**. An out-of-range
+`choiceIndex` cancels rather than clamping, for the same reason.
 
-### State survival — the CLI's own answer
-
-The table above is what happens to the **process**. This is what happens to the **state**,
-which is the question a tester actually asks ("if I close this, does my agent keep being
-watched?"). Four distinct things survive independently, so keep the words apart — do not use
-"session", "conversation", "project state", and "supervision state" interchangeably:
-
-| | **Terminal transcript** (host scrollback) | **Conversation** (`state.db` history) | **Project state** (memory, workflows, audit, inbox) | **Background supervision** (watchers, async, timers) |
-| --- | --- | --- | --- | --- |
-| Panel hidden / project switch | survives | survives | survives | runs (attached session owns the lease) |
-| Cockpit exits normally (`^C`, `/quit`) | cleared by the host | survives | survives | **continues** — the daemon re-acquires the lease and adopts the live rows |
-| Cockpit crashes / PTY killed | cleared by the host | survives | survives | **continues** — flock is kernel-released, so handover needs no cleanup |
-| Host **"+ New session"** | dropped deliberately | new conversation; the old one stays in `state.db` | survives | **continues**, and completions land in the attention inbox |
-| Daintree app quits | gone | survives | survives | **stops** — the daemon loses the MCP token, so supervision *pauses* with a blocked inbox item rather than fabricating outcomes; it resumes on the next launch |
-| Machine sleeps | survives | survives | survives | pauses, then does timer catch-up on wake |
-| Machine restarts | gone | survives | survives | **stops**; the next launch adopts the persisted rows |
-| `/clear` | wiped (the only scrollback wipe path) | cleared | survives | **cancelled** — `/clear` is the one wholesale teardown |
-| `reset project-state` | untouched | cleared | cleared | cancelled |
-| CLI upgrade with a schema bump | untouched | moved aside to a timestamped backup, then recreated | same | cancelled with the old DB |
-| **Windows** | as above | as above | as above | **never survives attached session exit** — no supervisor on this platform |
-
-The one-time **"While you were away"** notice (`App.AttachSummaryLines`, consumed on read)
-is how the second and third rows become visible: a fresh attached session starts with a clean
-transcript, but it tells you what the supervisor did while you were detached. It never
-repeats.
-
-So the honest promise to a tester is: **"this survives closing the Assistant panel"** — not
-"this survives closing Daintree", and never "this runs overnight" unless Daintree stays up
-on a Unix machine.
+`/backend`'s endpoint picker reuses this channel, marked local so Esc dismisses it instead of
+cancelling the turn.
 
 ---
 
-## 8. What the user can configure
+## 9. Contract summary — what each side may rely on
 
-Two settings surfaces touch the assistant; both change what Daintree injects/enforces:
+**Daintree may rely on:**
 
-- **Assistant settings tab** — chooses the agent (including `daintree-assistant`), custom
-  args and `--model`, **debug logging** (`DAINTREE_ASSISTANT_DEBUG_LOG=1`), a "Daintree
-  control" master switch for the MCP wiring, hibernation timeout, a **capability tier**
-  picker (honored for other help agents; the Daintree Assistant is force-promoted to
-  `system` regardless), a "bypass permission prompts" toggle
-  (`DAINTREE_ASSISTANT_AUTO_APPROVE=1`), and audit-log capture/retention.
-- **MCP server settings tab** — enable/disable the server, port, rotate the *external* API
-  key, disconnect external clients, and view the audit log. This governs the server the CLI
-  connects to (port/enabled), but the assistant's own bearer is managed automatically, not
-  here.
+- stdout is machine-pure NDJSON; diagnostics only ever go to stderr.
+- `seq` is monotonic from 1; a gap means a real loss, and stream frames apply backpressure
+  rather than dropping.
+- `turn:end.content` is authoritative and repairs the token stream.
+- `approval:requested.needsTypedConfirm` is always present.
+- `host:shutdown` is emitted before teardown work begins, and teardown is bounded.
+- An unparseable approval decision fails **closed**; an unanswered question **cancels**
+  rather than picking an answer.
 
----
+**This CLI may rely on:**
 
-## 9. What the CLI can rely on (contract summary)
-
-- The MCP connection arrives **only** via `DAINTREE_MCP_URL` + `DAINTREE_MCP_TOKEN` env,
-  fresh per launch, `/mcp` Streamable HTTP, localhost-only. Use the URL's port verbatim.
-- `DAINTREE_PROJECT_ID` is a **stable identity** across launches/resumes for a given project
-  — safe to key `StateDir` and per-project memory on.
-- `DAINTREE_WINDOW_ID` is informational; the real binding is server-side.
-- The session tier on the wire is **`system`**; the host will not tier-block the assistant,
-  so **the CLI owns confirmation of dangerous operations.**
-- `SESSION_BINDING_GONE` / `BINDING_STALE` are **terminal** — stop retrying that session and
-  surface it to the user; they mean the bound window/project is gone.
-- Worktree identity is **not** in env or cwd — query it over MCP (`actions.getContext` /
-  `worktree.getCurrent`); it's pinned at launch.
-- Hiding keeps the CLI alive; **New session** kills it and drops the host-side transcript;
-  eviction/close/crash kill it (with a resume capture that, for this CLI, currently
-  translates to a fresh launch because there's no resume command).
-
-### Known gaps / rough edges
-
-- **No host-driven resume for `daintree-assistant`.** Continuity across
-  eviction/close/restart is CLI-side only (`state.db`); Daintree provides the stable
-  `DAINTREE_PROJECT_ID` but no resume handle. Worth building CLI-side conversation restore
-  on it.
-- **`SCRATCH_DIR` / `PANE_ID` / `WORKTREE_ID` / `CWD` are injected but unread.** If the CLI
-  wants a host-provided scratch dir or its own worktree id from env instead of an MCP call,
-  the plumbing already exists on the host — it just needs `config.go` to read it.
-- **`DAINTREE_ASSISTANT_TIER` is not injected**, so the CLI's local advisory tier is its own
-  default and doesn't mirror the `system` grant on the wire. That's fine today (the CLI adds
-  its own safety layer) but is a place the two "tiers" can be confusing.
+- The MCP connection arrives **only** via `DAINTREE_MCP_URL` + `DAINTREE_MCP_TOKEN`, fresh per
+  launch, localhost-only. Use the URL's port verbatim.
+- `DAINTREE_PROJECT_ID` is stable across launches for a given project.
+- The descriptor is the first line and carries no secret.
+- The wire tier is `system`; the host will not gate dangerous calls on our behalf.
 
 ---
 
-## Daintree-side source pointers (drift warning)
+## Cross-repo maintenance
 
-For cross-repo maintainers only — these are `daintreehq/daintree` internals and **will
-drift**; trust the observable contract above, not these paths.
+The wire contract must stay byte-for-byte with Daintree's
+`ASSISTANT_HOST_PROTOCOL_VERSION` and its Zod schemas — Daintree validates stdout
+line-by-line and rejects unknown shapes. A change here is a change in both repositories and a
+bump of `host.ProtocolVersion`, which regenerates
+[`generated/COMPATIBILITY.md`](generated/COMPATIBILITY.md):
 
-- **Launch + env injection:** `electron/ipc/handlers/terminal/lifecycle.ts` (the help-launch
-  branch), `electron/services/HelpSessionService.ts` (provision, token mint, one-per-project,
-  revoke/capture), `electron/services/pty/EnvironmentFilter.ts` (metadata injection + env
-  hygiene).
-- **Agent definition:** `shared/config/agents/daintree-assistant.ts` (command, `env-only`
-  MCP, no min version), `shared/config/agentIds.ts` (excluded from launchable agents).
-- **MCP server + tiers + binding errors:** `electron/services/mcp-server/*`
-  (`httpLifecycle.ts`, `sessionServer.ts`, `tierAuth.ts`, `rendererBridge.ts`),
-  `shared/config/helpAssistantTierAllowlists.ts`, `src/services/ActionService.ts`
-  (`BINDING_STALE`).
-- **UI + lifecycle:** `src/components/HelpPanel/*` (panel, activity strip, banners),
-  `src/controllers/HelpSessionController.ts` (launch/resume/hibernate FSM),
-  `electron/window/ProjectViewManager.ts` (eviction), `electron/services/PendingHelpHibernationStore.ts`.
+```bash
+go test ./internal/app -run TestGeneratedDocsAreCurrent -update
+```
 
-Keep this doc and [`DAINTREE_MCP.md`](DAINTREE_MCP.md) in sync when the Daintree side changes
-the env contract, the tier the assistant gets, or the binding-error semantics — those three
-are the load-bearing parts of the contract.
+Protocol behaviour is tested by driving NDJSON frames through `internal/host` and asserting on
+the emitted event stream — see `host_test.go`, `wire_test.go`, `transport_test.go`,
+`bridge_test.go`, `interrupt_test.go`, `wake_shutdown_test.go`.

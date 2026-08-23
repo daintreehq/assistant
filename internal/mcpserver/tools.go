@@ -37,9 +37,16 @@ type OpenInput struct {
 	APIKeyFile string `json:"apiKeyFile,omitempty" jsonschema:"Path to a file containing the API key. There is deliberately no way to pass the key inline."`
 	Tier       string `json:"tier,omitempty" jsonschema:"Permission tier: supervisor, operator, or system."`
 	McpURL     string `json:"mcpUrl,omitempty" jsonschema:"Daintree MCP endpoint. Without it the assistant runs in degraded local mode and every orchestration tool reports 'not connected'."`
-	McpToken   string `json:"mcpToken,omitempty" jsonschema:"Daintree MCP bearer token. These expire roughly 12 minutes after minting."`
-	StateDir   string `json:"stateDir,omitempty" jsonschema:"State root - the conversation database, artifacts and the owner lease. Use a scratch path to isolate from the developer's real state."`
-	LogDir     string `json:"logDir,omitempty" jsonschema:"Directory for the debug log."`
+	// A PATH, never the token itself — exactly the rule apiKeyFile already follows, and
+	// for a stronger reason. This bearer authorizes system-tier Daintree actions for its
+	// whole validity window, and an inline argument is chosen by a model that may be
+	// steered by repository text, echoed back by a prompt injection, logged by the MCP
+	// client, and captured by traces outside this repository. The runtime already
+	// stopped writing this token to its own debug log for the same reason; accepting it
+	// as a model-callable string would put it right back in circulation.
+	McpTokenFile string `json:"mcpTokenFile,omitempty" jsonschema:"Path to a file containing the Daintree MCP bearer token. There is deliberately no way to pass the token inline - it authorizes system-tier Daintree actions and must not travel through a model-callable argument. Omit it to inherit DAINTREE_MCP_TOKEN from the server process. These tokens expire roughly 12 minutes after minting."`
+	StateDir     string `json:"stateDir,omitempty" jsonschema:"State root - the conversation database, artifacts and the owner lease. Use a scratch path to isolate from the developer's real state."`
+	LogDir       string `json:"logDir,omitempty" jsonschema:"Directory for the debug log."`
 	// Project identity. This surface exists so a client that cannot restart the process
 	// can repoint it, and identity is exactly the thing worth repointing: projectId
 	// scopes the state directory into a per-project subdirectory, so it isolates a
@@ -91,7 +98,7 @@ type RunOutput struct {
 	RunID     string  `json:"runId"`
 	SessionID string  `json:"sessionId"`
 	Status    string  `json:"status" jsonschema:"running, success, error, or cancelled."`
-	Events    []Event `json:"events,omitempty"`
+	Events    []Event `json:"events"`
 	// NextSeq is what to pass as sinceSeq on the next poll to get only new events.
 	NextSeq int `json:"nextSeq"`
 	// WithheldEvents is how many events past the window were dropped from this
@@ -102,13 +109,17 @@ type RunOutput struct {
 	Error          string              `json:"error,omitempty"`
 	Stats          domain.JsonRunStats `json:"stats"`
 	DurationMs     int                 `json:"durationMs"`
-	// PendingAsync lists async handles this run accepted. They settle OUTSIDE the run
+	// AsyncOperations is this run's ledger of background handles it accepted. It comes
+	// from the run itself, not from the events in this poll window: the old field was
+	// derived by scanning the window, so the handles vanished the moment the caller
+	// advanced sinceSeq and were missed entirely when the accepting event fell outside
+	// maxEvents. Status is "accepted", never "finished" — these settle OUTSIDE the run
 	// and are reported through daintree.attention, never as a late event here.
-	PendingAsync []string `json:"pendingAsync,omitempty"`
+	AsyncOperations []AsyncOperation `json:"asyncOperations"`
 	// PendingApprovals are confirmations this session is PARKED on. A run showing these
 	// is not merely slow — it is stopped until they are answered, which is invisible
 	// from `status` alone.
-	PendingApprovals []PendingApproval `json:"pendingApprovals,omitempty"`
+	PendingApprovals []PendingApproval `json:"pendingApprovals"`
 	// NextAction spells out what to do with this response. It exists because the two
 	// pathologies a polling surface invites — hammering poll in a tight loop, and
 	// treating a still-running turn as a finished one — are both prevented by saying
@@ -151,15 +162,51 @@ type SessionRefInput struct {
 // InjectInput steers a running turn.
 type InjectInput struct {
 	SessionID string `json:"sessionId"`
-	Text      string `json:"text" jsonschema:"A message to fold into the RUNNING turn. The assistant picks it up at its next tool boundary."`
+	// RunID is the turn the caller MEANT to steer. Optional but strongly recommended:
+	// without it a message written for one turn lands in whichever turn happens to be
+	// current when the request arrives, which over a slow pipe is a different turn.
+	RunID string `json:"runId,omitempty" jsonschema:"The runId this message is meant for, from daintree.ask. Strongly recommended - without it the message folds into whatever turn is running when it arrives, which may not be the one you were watching. A stale runId is rejected and names the live run."`
+	Text  string `json:"text" jsonschema:"A message to fold into the RUNNING turn. The assistant picks it up at its next tool boundary."`
+}
+
+// RunRefInput addresses one run of a session, for calls that must not act on a turn the
+// caller did not mean.
+type RunRefInput struct {
+	SessionID string `json:"sessionId"`
+	RunID     string `json:"runId,omitempty" jsonschema:"The runId to act on, from daintree.ask. Strongly recommended - omitting it acts on whatever turn is running now. A stale runId is rejected and names the live run."`
 }
 
 // AttentionInput reads the project inbox.
 type AttentionInput struct {
 	SessionID string `json:"sessionId"`
-	// Acknowledge defaults to true via the handler, not the schema: a pointer keeps
-	// "not supplied" distinguishable from an explicit false.
-	Acknowledge *bool `json:"acknowledge,omitempty" jsonschema:"Mark the returned items delivered so the next call reports only new ones. Default true. Pass false to peek without consuming."`
+	// Acknowledge defaults to FALSE. Acknowledging inside the read makes delivery
+	// at-most-once: the rows are marked notified before this response is known to have
+	// reached the caller, so a dropped connection loses them permanently — and an
+	// attention row is precisely the report of background work that arrives nowhere
+	// else. Peeking by default plus an explicit daintree.attention.ack makes it
+	// at-least-once instead, and a duplicate is trivial for a caller to drop by id.
+	//
+	// It stays a pointer so "not supplied" remains distinguishable from an explicit
+	// false, which keeps the field free to change meaning without silently flipping.
+	Acknowledge *bool `json:"acknowledge,omitempty" jsonschema:"Mark the returned items delivered in the same call. Default false. Prefer leaving this unset and calling daintree.attention.ack once you have acted on the items - acknowledging inside the read loses them if this response never arrives."`
+}
+
+// AttentionAckInput acknowledges inbox items the caller has actually processed.
+type AttentionAckInput struct {
+	SessionID string `json:"sessionId"`
+	// EventIDs is deliberately required. An "ack everything" call would re-introduce
+	// exactly the loss this split exists to prevent, for rows the caller never saw.
+	EventIDs []string `json:"eventIds" jsonschema:"The ids of the attention items you have processed, from daintree.attention. Acknowledged items are not reported again."`
+}
+
+// AttentionAckOutput reports what an acknowledgement actually consumed.
+type AttentionAckOutput struct {
+	Acknowledged int `json:"acknowledged"`
+	// Unknown lists ids that matched nothing - already acknowledged, or never real.
+	// Reported rather than errored: a retry after an ambiguous transport failure is the
+	// EXPECTED path here, and it must be idempotent.
+	Unknown []string `json:"unknown,omitempty"`
+	Message string   `json:"message,omitempty"`
 }
 
 // AttentionItem is one inbox entry, flattened for a reader. Evidence and the recommended
@@ -187,6 +234,8 @@ type AttentionItem struct {
 type AttentionOutput struct {
 	Items []AttentionItem `json:"items"`
 	Count int             `json:"count"`
+	// Note says what the caller still owes: unacknowledged items are reported again.
+	Note string `json:"note,omitempty"`
 }
 
 // ListOutput enumerates open sessions.
@@ -209,7 +258,8 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 		Name: "daintree.session.open",
 		Description: "Open an assistant session bound to a project. Returns a sessionId used by every other tool. " +
 			"All configuration is per-session, so repointing at a different backend or project is a close/open pair rather than a server restart. " +
-			"Without mcpUrl/mcpToken the assistant runs in degraded local mode where it cannot see or drive terminals.",
+			"Without an MCP URL and token the assistant runs in degraded local mode where it cannot see or drive terminals; " +
+			"the token is inherited from the server process's environment, or named as a FILE via mcpTokenFile — never passed inline.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in OpenInput) (*mcp.CallToolResult, SessionOutput, error) {
 		mode := ApprovalMode(strings.TrimSpace(in.Approvals))
 		if mode != "" && !mode.Valid() {
@@ -232,7 +282,7 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 		}
 		sess, err := reg.Open(ctx, OpenParams{
 			Project: in.Project, BackendURL: in.BackendURL, APIKeyFile: in.APIKeyFile,
-			Tier: in.Tier, McpURL: in.McpURL, McpToken: in.McpToken,
+			Tier: in.Tier, McpURL: in.McpURL, McpTokenFile: in.McpTokenFile,
 			StateDir: in.StateDir, LogDir: in.LogDir, DebugLog: in.DebugLog,
 			ProjectID: in.ProjectID, WindowID: in.WindowID,
 			Approvals:       mode,
@@ -292,7 +342,7 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 			return nil, RunOutput{}, err
 		}
 		if in.Wait {
-			waitFor(ctx, run, in.WaitMs)
+			waitForSettle(ctx, run, in.WaitMs)
 		}
 		return nil, renderRun(run, 0, defaultPollEvents, sess.Approvals()), nil
 	})
@@ -311,7 +361,9 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 			return nil, RunOutput{}, err
 		}
 		if in.WaitMs > 0 {
-			waitFor(ctx, run, in.WaitMs)
+			// Revision captured BEFORE the wait: a change that lands between here and
+			// the select must not be slept through.
+			waitForChange(ctx, run, in.SinceSeq, run.Revision(), in.WaitMs)
 		}
 		max := in.MaxEvents
 		if max <= 0 {
@@ -323,7 +375,8 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "daintree.inject",
 		Description: "Steer the RUNNING turn by folding a message into it; the assistant picks it up at its next tool boundary. " +
-			"Use this rather than a second ask, which would be rejected — a session runs one turn at a time.",
+			"Use this rather than a second ask, which would be rejected — a session runs one turn at a time. " +
+			"Pass the runId you meant to steer: without it the message lands in whatever turn is running when the call arrives.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, in InjectInput) (*mcp.CallToolResult, ActedOutput, error) {
 		sess, err := reg.Get(in.SessionID)
 		if err != nil {
@@ -332,24 +385,37 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 		if strings.TrimSpace(in.Text) == "" {
 			return nil, ActedOutput{}, errors.New("text is required")
 		}
-		if !sess.Inject(in.Text) {
+		switch err := sess.Inject(in.RunID, in.Text); {
+		case err == nil:
+			return nil, ActedOutput{Acted: true, Message: "folded into the running turn"}, nil
+		case errors.Is(err, ErrNoActiveRun):
 			return nil, ActedOutput{Acted: false, Message: "no turn is running; use daintree.ask instead"}, nil
+		default:
+			// A run mismatch is an ERROR, not an acted:false. Steering the wrong turn is
+			// the failure this argument exists to prevent, so it must not read as a
+			// benign no-op the caller can ignore.
+			return nil, ActedOutput{}, err
 		}
-		return nil, ActedOutput{Acted: true, Message: "folded into the running turn"}, nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "daintree.interrupt",
-		Description: "Cancel the running turn. The session stays open and the conversation is kept, so you can ask again.",
-	}, func(_ context.Context, _ *mcp.CallToolRequest, in SessionRefInput) (*mcp.CallToolResult, ActedOutput, error) {
+		Name: "daintree.interrupt",
+		Description: "Cancel the running turn. The session stays open and the conversation is kept, so you can ask again. " +
+			"Pass the runId you meant to stop: without it this cancels whatever is running when the call lands.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, in RunRefInput) (*mcp.CallToolResult, ActedOutput, error) {
 		sess, err := reg.Get(in.SessionID)
 		if err != nil {
 			return nil, ActedOutput{}, err
 		}
-		if !sess.Interrupt() {
+		switch err := sess.Interrupt(in.RunID); {
+		case err == nil:
+			return nil, ActedOutput{Acted: true, Message: "cancelling the running turn"}, nil
+		case errors.Is(err, ErrNoActiveRun):
+			// Idempotent: nothing to cancel is the state the caller wanted.
 			return nil, ActedOutput{Acted: false, Message: "no turn is running"}, nil
+		default:
+			return nil, ActedOutput{}, err
 		}
-		return nil, ActedOutput{Acted: true, Message: "cancelling the running turn"}, nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -413,7 +479,10 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 		if err != nil {
 			return nil, AttentionOutput{}, err
 		}
-		ack := in.Acknowledge == nil || *in.Acknowledge
+		// Default is PEEK. See AttentionInput.Acknowledge: acknowledging inside the read
+		// is at-most-once delivery, and these rows are the only report background work
+		// ever makes.
+		ack := in.Acknowledge != nil && *in.Acknowledge
 		events, err := sess.Attention(ctx, ack)
 		if err != nil {
 			return nil, AttentionOutput{}, err
@@ -433,6 +502,40 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 				item.AsyncID = e.Target.AsyncInvocationID
 			}
 			out.Items = append(out.Items, item)
+		}
+		if !ack && len(out.Items) > 0 {
+			out.Note = "These items are still unacknowledged and WILL be reported again. Call daintree.attention.ack with their ids once you have acted on them."
+		}
+		return nil, out, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "daintree.attention.ack",
+		Description: "Acknowledge attention items you have acted on, so they stop being reported. " +
+			"Read them with daintree.attention first — acknowledging is what makes delivery reliable: " +
+			"an item stays pending until you say you have it, so a dropped response costs you a duplicate rather than the item.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in AttentionAckInput) (*mcp.CallToolResult, AttentionAckOutput, error) {
+		sess, err := reg.Get(in.SessionID)
+		if err != nil {
+			return nil, AttentionAckOutput{}, err
+		}
+		if len(in.EventIDs) == 0 {
+			return nil, AttentionAckOutput{}, errors.New(
+				"eventIds is required — there is deliberately no acknowledge-everything, because it would consume rows you never read")
+		}
+		acked, unknown, err := sess.AcknowledgeAttention(ctx, in.EventIDs)
+		if err != nil {
+			return nil, AttentionAckOutput{}, err
+		}
+		out := AttentionAckOutput{Acknowledged: acked, Unknown: unknown}
+		switch {
+		case len(unknown) == 0:
+			out.Message = fmt.Sprintf("acknowledged %d item(s)", acked)
+		default:
+			// Not an error: retrying an ack after an ambiguous transport failure is the
+			// expected path, and the second attempt finds them already gone.
+			out.Message = fmt.Sprintf(
+				"acknowledged %d item(s); %d id(s) matched nothing (already acknowledged, or never real)", acked, len(unknown))
 		}
 		return nil, out, nil
 	})
@@ -464,25 +567,41 @@ func describe(s *Session, info *BinaryInfo) SessionOutput {
 	return out
 }
 
-// waitFor blocks until the run settles, the caller gives up, or the (capped) budget
-// expires. A run that is still going is NOT an error — the caller polls it.
+// waitBudget clamps a caller's wait to something this server is willing to hold a
+// request open for.
+func waitBudget(waitMs int) time.Duration {
+	budget := time.Duration(waitMs) * time.Millisecond
+	if budget <= 0 || budget > maxBlockWait {
+		budget = maxBlockWait
+	}
+	return budget
+}
+
+// waitForSettle blocks until the run finishes, the caller gives up, or the (capped)
+// budget expires. This is `ask`'s block mode, where the caller has said it wants the
+// ANSWER and progress is of no use to it.
 //
 // It selects on the REQUEST context, which matters for shutdown: the SDK waits for
 // in-flight handlers before Run returns, so a wait that ignored cancellation would hold
 // the server open — and every session's project lease with it — for up to the full
 // budget after the client had already dropped the pipe.
-func waitFor(ctx context.Context, run *Run, waitMs int) {
-	budget := time.Duration(waitMs) * time.Millisecond
-	if budget <= 0 || budget > maxBlockWait {
-		budget = maxBlockWait
-	}
-	timer := time.NewTimer(budget)
+func waitForSettle(ctx context.Context, run *Run, waitMs int) {
+	timer := time.NewTimer(waitBudget(waitMs))
 	defer timer.Stop()
 	select {
 	case <-run.Done():
 	case <-timer.C:
 	case <-ctx.Done():
 	}
+}
+
+// waitForChange is `poll`'s long wait: it returns as soon as the run has something NEW
+// to say past sinceSeq, not only when it finishes. Waiting for completion alone made a
+// 60s poll sit through arriving content, a tool starting and finishing, and — worst —
+// the turn becoming BLOCKED on an approval, reporting none of it until the budget
+// expired. A caller that wants the whole run should block on ask instead.
+func waitForChange(ctx context.Context, run *Run, sinceSeq int, sinceRev uint64, waitMs int) {
+	run.WaitForChange(ctx, sinceSeq, sinceRev, waitBudget(waitMs))
 }
 
 // renderRun projects a run into its tool response. approvals may be nil (tests).
@@ -505,11 +624,7 @@ func renderRun(run *Run, sinceSeq, maxEvents int, approvals *Approvals) RunOutpu
 	if len(evs) > 0 {
 		out.NextSeq = evs[len(evs)-1].Seq + 1
 	}
-	for _, e := range evs {
-		if e.Async != "" {
-			out.PendingAsync = append(out.PendingAsync, e.Async)
-		}
-	}
+	out.AsyncOperations = run.AsyncOperations()
 	if endedAt > 0 {
 		out.DurationMs = int(endedAt - startedAt)
 	} else {
@@ -525,6 +640,14 @@ func renderRun(run *Run, sinceSeq, maxEvents int, approvals *Approvals) RunOutpu
 				out.PendingApprovals = append(out.PendingApprovals, pa)
 			}
 		}
+	}
+	// Stable empty arrays, never null. A caller loops over these; `omitempty` turning
+	// an empty list into a missing key is a needless special case in every consumer.
+	if out.Events == nil {
+		out.Events = []Event{}
+	}
+	if out.PendingApprovals == nil {
+		out.PendingApprovals = []PendingApproval{}
 	}
 	out.NextAction = nextAction(out)
 	return out
@@ -551,8 +674,12 @@ func nextAction(out RunOutput) string {
 			"Still running after %ds. Call daintree.poll with sinceSeq:%d and waitMs (e.g. 60000) to wait for progress rather than polling repeatedly.",
 			out.DurationMs/1000, out.NextSeq)
 	case RunSucceeded:
-		if len(out.PendingAsync) > 0 {
-			return "Finished. It started background work that has NOT completed — poll daintree.attention for those completions; they never arrive on this run."
+		if n := len(out.AsyncOperations); n > 0 {
+			// Deliberately "accepted", not "has not completed": this run saw the handles
+			// issued and will never see them settle, so it cannot honestly claim they
+			// are still outstanding. The inbox is the only place that knows.
+			return fmt.Sprintf(
+				"Finished. It accepted %d background operation(s) whose outcome this run will never carry — read daintree.attention for their completions, then acknowledge them with daintree.attention.ack.", n)
 		}
 		return "Finished. `content` is the answer; nothing further is needed for this run."
 	case RunCancelled:
