@@ -142,14 +142,26 @@ type EvTurnStart struct {
 	TurnID    string
 	Role      TurnRole
 	StartedAt int64
+	// Wake marks a turn the assistant started on its OWN, from an attention burst
+	// rather than from something the user sent.
+	//
+	// A host needs it because such a turn is not interruptible: `interrupt` aborts
+	// command turns only, since a wake has already claimed its attention events and
+	// aborting would strand them. Without this the host offers a Stop control that
+	// cannot do anything.
+	Wake bool
 }
 
 func (e EvTurnStart) encode(sid string, seq uint64) ([]byte, error) {
-	return marshalEvent("turn:start", sid, seq, map[string]any{
+	f := map[string]any{
 		"turnId":    e.TurnID,
 		"role":      string(e.Role),
 		"startedAt": e.StartedAt,
-	})
+	}
+	if e.Wake {
+		f["wake"] = true
+	}
+	return marshalEvent("turn:start", sid, seq, f)
 }
 
 // EvTurnToken — turn:token.

@@ -92,6 +92,9 @@ type Bridge struct {
 	// was never told anything else.
 	liveTools     map[string]string
 	toolStartedAt map[string]int64
+	// wakeTurn marks the current exchange as one the assistant started ITSELF, so the
+	// assistant turn can carry it and a host can tell that Stop will not reach it.
+	wakeTurn bool
 }
 
 // NewBridge builds a Bridge with defaults filled.
@@ -156,8 +159,9 @@ func (b *Bridge) AssistantStart() {
 	turnID := genID("turn")
 	b.activeTurnID = turnID
 	now := b.now()
+	wake := b.wakeTurn
 	b.mu.Unlock()
-	b.post(EvTurnStart{TurnID: turnID, Role: RoleAssistant, StartedAt: now})
+	b.post(EvTurnStart{TurnID: turnID, Role: RoleAssistant, StartedAt: now, Wake: wake})
 }
 
 func (b *Bridge) AssistantToken(chunk string) {
@@ -455,15 +459,28 @@ func (b *Bridge) ModelRateLimited() {
 
 // StartExchange resets per-turn state and emits a zero-duration user turn
 // (start+end at the same ts). Prompt text is NOT carried — Daintree originated it.
-func (b *Bridge) StartExchange() {
+// StartWakeExchange is StartExchange for a turn the assistant started on its own.
+// The wake flag rides the assistant turn, since that is the one a host would offer a
+// Stop control for.
+func (b *Bridge) StartWakeExchange() { b.startExchange(true) }
+
+func (b *Bridge) StartExchange() { b.startExchange(false) }
+
+func (b *Bridge) startExchange(wake bool) {
 	b.mu.Lock()
 	b.interrupted = false
 	b.activeTurnID = ""
 	b.mu.Unlock()
 	turnID := genID("turn")
 	now := b.now()
-	b.post(EvTurnStart{TurnID: turnID, Role: RoleUser, StartedAt: now})
-	b.post(EvTurnEnd{TurnID: turnID, EndedAt: now})
+	if !wake {
+		// A wake has no user turn to open: nobody said anything.
+		b.post(EvTurnStart{TurnID: turnID, Role: RoleUser, StartedAt: now})
+		b.post(EvTurnEnd{TurnID: turnID, EndedAt: now})
+	}
+	b.mu.Lock()
+	b.wakeTurn = wake
+	b.mu.Unlock()
 }
 
 // SettleTurn closes any dangling assistant turn (no-op if already closed). Called
