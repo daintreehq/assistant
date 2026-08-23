@@ -228,6 +228,14 @@ func (h *Host) handleInterrupt() {
 		cancel()
 	}
 	h.bridge.SettlePendingApprovals(DecisionRejected)
+	if cancel == nil {
+		// A WAKE turn, which this interrupt deliberately does not abort (see above).
+		// Closing its visible turn as cancelled would report work as stopped while it
+		// carries on invisibly, so say what actually happened instead.
+		h.bridge.Info("That was background work the assistant started on its own. " +
+			"Stopping does not abort it — it will finish on its own.")
+		return
+	}
 	h.bridge.Interrupt()
 }
 

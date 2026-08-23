@@ -136,14 +136,15 @@ func genID(prefix string) string { return domain.NewID(prefix + "_") }
 // vocabulary"; under v3 the host IS the UI, and liveness inferred from "has any
 // token arrived" is exactly the heuristic domain.RunPhase exists to replace.
 func (b *Bridge) Phase(p domain.RunPhase) {
+	// Checked and enqueued under one hold, like every other lifecycle event: a phase
+	// that slipped through after an interrupt put the status line back to "Working"
+	// for a turn the user had just stopped.
 	b.mu.Lock()
-	turnID := b.activeTurnID
-	interrupted := b.interrupted
-	b.mu.Unlock()
-	if interrupted {
+	defer b.mu.Unlock()
+	if b.interrupted {
 		return
 	}
-	b.postStream(EvTurnPhase{TurnID: turnID, Phase: p.String()})
+	b.postStream(EvTurnPhase{TurnID: b.activeTurnID, Phase: p.String()})
 }
 
 func (b *Bridge) AssistantStart() {
