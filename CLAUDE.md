@@ -538,6 +538,6 @@ server, the flags, the `--json` event schema, exit codes, isolation**),
 `README.md` (full overview), `docs/DAINTREE_HOST.md` (host embedding),
 `docs/ARCHITECTURE.md`, `docs/DAINTREE_MCP.md` (Daintree's MCP protocol),
 `docs/DAINTREE_HOST.md` (how Daintree launches / displays / hides / restarts this CLI),
-`docs/LOGGING.md` (the debug-log event reference), `docs/RUNTIME.md` (auto-compaction +
+`docs/LOGGING.md` (the debug-log event reference), `docs/RUNTIME.md` (turn convergence, auto-compaction +
 model error behavior), `docs/TOOLS.md` (adding a tool). Skill authoring + the model live in `../assistant-backend`
 (its `skills/files/*.md` + `docs/DAINTREE_API.md`).

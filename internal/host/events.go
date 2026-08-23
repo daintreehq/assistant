@@ -334,11 +334,21 @@ type EvCommandResult struct {
 	// Unknown reports that the line looked like a command but names none that exists,
 	// so the host can say so instead of silently doing nothing.
 	Unknown bool
-	TurnID  string
+	// ConversationCleared is the AUTHORITATIVE outcome of /clear: true only when the
+	// engine actually cleared. A host must gate its transcript reset on this and never
+	// on the command text — see CommandOutcome.ConversationCleared for what happens
+	// when it does not. Same name and JSON key as the --multi-turn surface's
+	// domain.JsonCommandResultPayload, so the two protocols cannot drift.
+	ConversationCleared bool
+	TurnID              string
 }
 
 func (e EvCommandResult) encode(sid string, seq uint64) ([]byte, error) {
-	f := map[string]any{"command": e.Command, "text": e.Text}
+	// ALWAYS present, unlike the omit-when-false booleans below. This one gates a
+	// destructive UI action, so an absent field has to mean "an engine too old to know"
+	// and nothing else; leaving it out on the false path would make the safe answer and
+	// the unknown answer identical on the wire.
+	f := map[string]any{"command": e.Command, "text": e.Text, "conversationCleared": e.ConversationCleared}
 	if e.Quit {
 		f["quit"] = true
 	}
@@ -578,6 +588,29 @@ func (e EvTurnReasoning) encode(sid string, seq uint64) ([]byte, error) {
 		"turnId": e.TurnID,
 		"text":   e.Text,
 	})
+}
+
+// EvInterjectRetracted — interject:retracted. Answers an interject:retract command
+// with the text taken back, so the host can put it where the user can edit it.
+//
+// The cockpit bound this to Escape on an empty composer: a follow-up typed mid-turn is
+// BUFFERED, not sent, until the running turn folds it in at its next tool boundary, so
+// there is a real window in which it can still be pulled back. `retracted` is false when
+// that window has closed — already folded in, or nothing was typed — and the host must
+// then leave the running turn alone rather than pretending it took something back.
+type EvInterjectRetracted struct {
+	Retracted bool
+	Text      string
+}
+
+func (e EvInterjectRetracted) encode(sid string, seq uint64) ([]byte, error) {
+	f := map[string]any{"retracted": e.Retracted}
+	if e.Retracted {
+		// Echoed verbatim: it is the user's own text coming back to their composer, and
+		// redacting it would hand them a masked version of what they just typed.
+		f["text"] = e.Text
+	}
+	return marshalEvent("interject:retracted", sid, seq, f)
 }
 
 // EvTurnInterjection — turn:interjection. A message the user typed WHILE the turn

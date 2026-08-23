@@ -38,6 +38,8 @@ func (h *Host) handleCommand(cmd HostCommand) {
 		h.handleSlashCommand(cmd.CommandLine)
 	case CmdOperations:
 		h.postOperations()
+	case CmdInterjectRetract:
+		h.retractInjection()
 	case CmdQuestionAnswer:
 		// Same shape as approval:decide — unblocks a parked dispatch, bridge-guarded.
 		h.bridge.ResolveQuestion(cmd.QuestionID, cmd.Index)
@@ -545,10 +547,11 @@ func flushExit(code int) {
 func (h *Host) handleSlashCommand(line string) {
 	out := h.app.RunCommand(h.runCtx, line)
 	h.post(EvCommandResult{
-		Command: line,
-		Text:    out.Text,
-		Quit:    out.Quit,
-		Unknown: out.Unknown,
+		Command:             line,
+		Text:                out.Text,
+		Quit:                out.Quit,
+		Unknown:             out.Unknown,
+		ConversationCleared: out.ConversationCleared,
 	})
 	// A command may have reconnected (or lost) the control plane — /reconnect exists
 	// precisely to change this — so re-report rather than leaving a stale status.
@@ -584,4 +587,17 @@ func (h *Host) postOperations() {
 		return
 	}
 	h.bridge.post(EvOperations{Snapshot: h.app.Operations(h.runCtx)})
+}
+
+// retractInjection takes back the most recently buffered follow-up (LIFO) and hands the
+// text to the host, which puts it back in the composer for editing.
+//
+// This is Escape on an empty composer in the cockpit. It is only ever a window: the
+// message is buffered rather than sent, and the running turn folds the buffer in at its
+// next tool-iteration boundary. Once that has happened the model has seen it and there is
+// nothing to reclaim — which is what `retracted: false` says, so the host can leave the
+// draft alone instead of blanking it over a retract that did not happen.
+func (h *Host) retractInjection() {
+	text, ok := h.session.RetractPendingInjection()
+	h.bridge.PostInterjectRetracted(ok, text)
 }

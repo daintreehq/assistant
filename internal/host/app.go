@@ -146,6 +146,16 @@ type CommandOutcome struct {
 	Text    string
 	Quit    bool
 	Unknown bool
+	// ConversationCleared reports that the command ACTUALLY cleared the conversation.
+	//
+	// It is not inferable from the command line, and a host that infers it corrupts
+	// itself: /clear is refused while a turn is in flight (Session.Clear returns
+	// ErrTurnInProgress, because clearing would corrupt the streaming snapshot), so a
+	// surface that resets on seeing the word "clear" wipes its transcript, tool rows
+	// and live state while the engine keeps the conversation and goes on working in it.
+	// The user is then talking to a model whose context they can no longer see, and the
+	// two disagree about what was said — strictly worse than the refusal it misread.
+	ConversationCleared bool
 }
 
 // AskChoiceRequest is the host-side view of a user.askMultipleChoice dispatch.

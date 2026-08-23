@@ -120,15 +120,25 @@ func TestCanonicalJSON_NormalizesKeyOrderAndWhitespace(t *testing.T) {
 	if a != b || a != c {
 		t.Fatalf("key order / whitespace must canonicalize to one form: %q %q %q", a, b, c)
 	}
-	// Non-JSON and empty pass through unchanged.
+	// Non-JSON passes through unchanged.
 	if got := canonicalJSON("not json"); got != "not json" {
 		t.Fatalf("non-JSON must pass through: %q", got)
 	}
-	if got := canonicalJSON(""); got != "" {
-		t.Fatalf("empty must stay empty: %q", got)
+	// The three ways the model can express "no arguments" are ONE call. The rest of the
+	// batch path already treats them alike (callBatchable, argsEmpty), so hashing them
+	// apart made a repeated no-arg poll look like new work every round.
+	blank, empty, spaced := canonicalJSON(""), canonicalJSON("{}"), canonicalJSON("  ")
+	if blank != empty || blank != spaced {
+		t.Fatalf("no-arg forms must canonicalize together: %q %q %q", blank, empty, spaced)
 	}
 	// Distinct content must NOT collide.
 	if canonicalJSON(`{"path":"x"}`) == canonicalJSON(`{"path":"y"}`) {
 		t.Fatal("distinct args must not canonicalize to the same form")
+	}
+	// Large integers keep their identity. Decoded through `any` they would both land in
+	// float64 and round to the same value — two different ids hashing alike, which for a
+	// repeat signature is a false MATCH and costs a turn.
+	if canonicalJSON(`{"id":9007199254740993}`) == canonicalJSON(`{"id":9007199254740995}`) {
+		t.Fatal("integers past 2^53 must not collide")
 	}
 }

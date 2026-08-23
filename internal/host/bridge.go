@@ -544,6 +544,18 @@ func (b *Bridge) PostCost(total float64, complete bool) {
 	b.post(EvCost{TurnID: turnID, Total: total, Complete: complete})
 }
 
+// PostInterjectRetracted answers an interject:retract command.
+//
+// Posted unconditionally, including the "nothing to take back" answer: the host asked a
+// question and a silent non-answer would leave its composer waiting on a reply that
+// never comes. Not gated on `interrupted` either — a retract during teardown still has a
+// true answer, and it is the last chance to hand the text back before the session ends.
+func (b *Bridge) PostInterjectRetracted(retracted bool, text string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.post(EvInterjectRetracted{Retracted: retracted, Text: text})
+}
+
 // Interrupt is the display side of an interrupt: latch interrupted, terminalize every
 // outstanding call, and close the turn as CANCELLED.
 //

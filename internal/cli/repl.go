@@ -132,9 +132,11 @@ func startRepl(ctx context.Context, a *app.App) int {
 			if res.Quit {
 				break
 			}
-			// /clear additionally wipes the host terminal in the REPL.
-			cmd, _, args := splitCmd(line)
-			if cmd == "clear" && len(args) == 0 {
+			// /clear additionally wipes the host terminal in the REPL — but only when
+			// the engine actually cleared. Matching the command text instead would
+			// wipe the scrollback on a clear the engine REFUSED, leaving the user
+			// staring at a blank screen with the conversation still live behind it.
+			if res.ConversationCleared {
 				clearHostTerminal()
 			}
 			continue
@@ -295,17 +297,6 @@ func runCancellable(base context.Context, sigCh <-chan os.Signal, fn func(contex
 	case err := <-done:
 		return err
 	}
-}
-
-// splitCmd extracts the canonical command word from a slash line (for the /clear
-// host-wipe branch).
-func splitCmd(line string) (string, string, []string) {
-	trimmed := strings.TrimSpace(strings.TrimPrefix(line, "/"))
-	fields := strings.Fields(trimmed)
-	if len(fields) == 0 {
-		return "", "", nil
-	}
-	return fields[0], strings.Join(fields[1:], " "), fields[1:]
 }
 
 // printBanner prints the REPL banner.

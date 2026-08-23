@@ -24,6 +24,9 @@ import (
 type fakeApp struct {
 	hooks   AppHooks
 	session *agent.Session
+	// command, when set, is what RunCommand returns — the seam for asserting that the
+	// host carries an engine outcome onto the wire rather than inventing one.
+	command CommandOutcome
 
 	mu      sync.Mutex
 	rearmed []string
@@ -32,7 +35,7 @@ type fakeApp struct {
 func (f *fakeApp) SetHooks(h AppHooks)              { f.hooks = h }
 func (f *fakeApp) ConnectMCP(context.Context) error { return nil }
 func (f *fakeApp) RunCommand(context.Context, string) CommandOutcome {
-	return CommandOutcome{}
+	return f.command
 }
 func (f *fakeApp) CostSnapshot() (float64, bool)                   { return 0, false }
 func (f *fakeApp) McpStatus() (bool, *int, string)                 { return false, nil, "" }

@@ -39,7 +39,17 @@ func TestPresentToolTargetShapes(t *testing.T) {
 		{"plain string arg", "fs.search", `{"query":"needle"}`, "needle"},
 		{"literal mode", "context.snapshot", `{}`, "workspace context"},
 		{"id array joins", "terminal.extract", `{"terminalIds":["a","b"]}`, "a, b"},
-		{"numeric arg has no trailing zero", "forge.getIssue", `{"issueNumber":42}`, "42"},
+		{"numeric arg has no trailing zero", "forge.getPR", `{"prNumber":42}`, "42"},
+		// The mcpwrap opaque-args wrappers carry NO top-level target: their whole
+		// payload is one `arguments` object. Keying only on the top level rendered
+		// every one of these blank.
+		{"arguments envelope, string", "git.getProjectPulse", `{"arguments":{"worktreeId":"wt_9"}}`, "wt_9"},
+		{"arguments envelope, number", "forge.getIssue", `{"arguments":{"issueNumber":42}}`, "42"},
+		{"empty envelope has no target", "git.getProjectPulse", `{"arguments":{}}`, ""},
+		{"omitted envelope has no target", "git.getProjectPulse", `{}`, ""},
+		// project.runCheck's target is the runner it was told to run; the schema is
+		// projectId/runnerId/cwd/timeoutMs and has no `command`, `name` or `id`.
+		{"runCheck names its runner", "project.runCheck", `{"projectId":"p1","runnerId":"test"}`, "test"},
 		{"missing key falls through to the next", "terminal.rename", `{"terminalId":"t1"}`, "t1"},
 		{"no target keys", "watcher.list", `{"anything":1}`, ""},
 		{"unknown tool", "totally.unknown", `{"path":"x"}`, ""},

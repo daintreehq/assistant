@@ -389,10 +389,30 @@ watched?"). Four distinct things survive independently, so keep the words apart 
 | Daintree app quits | gone | survives | survives | **stops** — the daemon loses the MCP token, so supervision *pauses* with a blocked inbox item rather than fabricating outcomes; it resumes on the next launch |
 | Machine sleeps | survives | survives | survives | pauses, then does timer catch-up on wake |
 | Machine restarts | gone | survives | survives | **stops**; the next launch adopts the persisted rows |
-| `/clear` | wiped (the only scrollback wipe path) | cleared | survives | **cancelled** — `/clear` is the one wholesale teardown |
+| `/clear` | wiped (the only scrollback wipe path) — **but only when it actually cleared**, see below | cleared | survives | **cancelled** — `/clear` is the one wholesale teardown |
 | `reset project-state` | untouched | cleared | cleared | cancelled |
 | CLI upgrade with a schema bump | untouched | moved aside to a timestamped backup, then recreated | same | cancelled with the old DB |
 | **Windows** | as above | as above | as above | **never survives attached session exit** — no supervisor on this platform |
+
+#### A host must never infer the clear from the command text
+
+`/clear` is REFUSED while a turn is in flight — clearing history mid-stream would corrupt
+the snapshot the turn is still writing into — so the engine answers with a note and keeps
+the conversation. The `command:result` event therefore carries the authoritative outcome:
+
+```json
+{"type":"command:result","command":"/clear","text":"…","conversationCleared":false}
+```
+
+**`conversationCleared` is the only trustworthy signal, and it is always present** (unlike
+`quit` and `unknown`, which are omitted when false — an absent field here means an engine
+older than this contract, and nothing else). Gate the scrollback wipe on it being `true`.
+
+A host that instead matches the command line wipes its transcript, tool rows and live
+state on a clear the engine refused, while the engine goes on working in the conversation
+it kept — leaving the user talking to a model whose context they can no longer see, with
+the two sides disagreeing about what was said. That is worse than the refusal it misread.
+It is the same field and the same JSON key the `--multi-turn` surface uses (`docs/HEADLESS.md`).
 
 The one-time **"While you were away"** notice (`App.AttachSummaryLines`, consumed on read)
 is how the second and third rows become visible: a fresh attached session starts with a clean
@@ -435,6 +455,8 @@ Two settings surfaces touch the assistant; both change what Daintree injects/enf
   surface it to the user; they mean the bound window/project is gone.
 - Worktree identity is **not** in env or cwd — query it over MCP (`actions.getContext` /
   `worktree.getCurrent`); it's pinned at launch.
+- `/clear` can be **refused** (a turn in flight). Gate any transcript wipe on
+  `command:result.conversationCleared === true`, never on the command text.
 - Hiding keeps the CLI alive; **New session** kills it and drops the host-side transcript;
   eviction/close/crash kill it (with a resume capture that, for this CLI, currently
   translates to a fresh launch because there's no resume command).

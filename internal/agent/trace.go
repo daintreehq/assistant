@@ -543,6 +543,21 @@ func (s *Session) traceToolRepeat(event, runID, name string, count int, errCode,
 	})
 }
 
+// traceTurnStall records the convergence guard firing (nudge or close) with the round
+// it fired on and the barren run behind it. A turn that fails to converge is otherwise
+// indistinguishable in the log from a turn that is legitimately long — the round count
+// alone does not say whether the model was making progress.
+func (s *Session) traceTurnStall(event, runID, turnID string, round, barren int) {
+	s.safeTrace(event, func() map[string]any {
+		return map[string]any{
+			"runId":  runID,
+			"turnId": turnID,
+			"round":  round,
+			"barren": barren,
+		}
+	})
+}
+
 // errCodeOf returns a tool result's error code, or "" when the result has none.
 func errCodeOf(res domain.ToolResult) string {
 	if res.Error != nil {

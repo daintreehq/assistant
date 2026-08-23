@@ -117,15 +117,22 @@ func TestInjectPrompt_AtFinalAnswerBoundaryKeepsTurnAlive(t *testing.T) {
 	}
 }
 
-// A turn has NO per-turn round ceiling: a long-running autonomous workflow must be
-// able to drive far more rounds than any old cap and still reach its final answer.
-// The only runaway guard is the same-call failure breaker — and these calls all
-// succeed, so nothing trips it no matter how many rounds run.
-func TestLongTurn_HasNoIterationCeiling(t *testing.T) {
-	const rounds = 40 // far beyond the old 12-round cap
+// A long-running autonomous workflow must be able to drive far more rounds than any
+// old cap and still reach its own final answer. Each round here asks for something new
+// and every call succeeds, so the failure breakers and the repetition signal have
+// nothing to fire on. It deliberately runs PAST domain.TurnRoundWarn — so the budget
+// warning does fire — and stops one round short of the budget itself: a productive turn
+// must be nudged at most, never closed out from under its own answer.
+func TestLongTurn_RunsToTheEdgeOfTheBudget(t *testing.T) {
+	rounds := domain.TurnRoundBudget - 1
+	if rounds <= domain.TurnRoundWarn {
+		t.Fatalf("budget %d leaves no room past the warn at %d", domain.TurnRoundBudget, domain.TurnRoundWarn)
+	}
 	results := make([]models.ChatResult, rounds+1)
 	for i := 0; i < rounds; i++ {
-		results[i] = models.ChatResult{ToolCalls: []models.ToolCallRequest{toolCall("c", "fs__read", `{}`)}}
+		results[i] = models.ChatResult{ToolCalls: []models.ToolCallRequest{
+			toolCall("c", "fs__read", `{"path":"f`+itoa(i)+`"}`),
+		}}
 	}
 	results[rounds] = models.ChatResult{Content: "final"}
 	r := &injectRouter{results: results}
@@ -137,7 +144,17 @@ func TestLongTurn_HasNoIterationCeiling(t *testing.T) {
 		t.Fatal(err)
 	}
 	if reply != "final" {
-		t.Fatalf("reply = %q after %d rounds, want final — a long turn must not be capped", reply, rounds)
+		t.Fatalf("reply = %q after %d rounds, want final — a productive long turn must not be capped", reply, rounds)
+	}
+	// It was warned on the way, and the warning did not end it.
+	warned := false
+	for _, m := range s.Messages() {
+		if m.Role == "user" && strings.Contains(m.StringContent, "closed automatically at") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("a turn running past round %d must be warned that the budget is approaching", domain.TurnRoundWarn)
 	}
 }
 

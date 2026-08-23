@@ -40,6 +40,18 @@ func presentTool(name string) string {
 // presentToolVerb returns the verb label for a known tool plus the args KEY whose
 // value is the target/detail (or one of several, tried in order). A known tool with
 // no target key returns ("Verb", nil). An unknown tool returns ("", nil).
+// HasPresentation reports whether the table knows a human verb for a tool.
+//
+// Exported for ONE reason: the completeness contract in internal/app, which is the
+// only package where the real registry is assembled and can therefore ask "does every
+// tool we actually register have a verb?". A tool that does not renders in a host's
+// activity tree as a raw dotted identifier — a deliberate fallback, and therefore a
+// gap that fails nothing and looks like the feature working.
+func HasPresentation(name string) bool {
+	verb, _ := presentToolVerb(name)
+	return verb != ""
+}
+
 func presentToolVerb(name string) (label string, keys []string) {
 	switch name {
 	case "fs.read":
@@ -50,6 +62,8 @@ func presentToolVerb(name string) (label string, keys []string) {
 		return "Searched", []string{"query"}
 	case "tool.search":
 		return "Searched tools", []string{"query"}
+	case "tool.schema":
+		return "Read tool schema", []string{"name"}
 	case "context.snapshot":
 		return "Snapshotted", []string{"workspace context:lit"}
 	case "context.summarize":
@@ -60,6 +74,22 @@ func presentToolVerb(name string) (label string, keys []string) {
 		return "Watching", []string{"goal", "title", "terminalIds:ids"}
 	case "watcher.list":
 		return "Listed watchers", nil
+	case "agentSessionHistory.list":
+		return "Listed past sessions", nil
+	case "browser.getConsoleMessages":
+		return "Read console", []string{"terminalId"}
+	case "errors.recent":
+		// "Diagnostics", not "errors": the tool reads Daintree's own diagnostics log,
+		// and a row saying "Read errors" reads as though the run had failed.
+		return "Read diagnostics", nil
+	case "notifications.recent":
+		return "Read notifications", nil
+	case "project.detectRunners":
+		return "Listed commands", nil
+	case "project.runCheck":
+		// Matches terminal.sendCommand's "Ran": from the reader's side these are the
+		// same event, and the difference is which surface it happened on.
+		return "Ran", []string{"runnerId", "cwd:rel"}
 	case "watcher.cancel":
 		return "Stopped watcher", []string{"id"}
 	case "timer.schedule":
@@ -156,6 +186,18 @@ func presentToolVerb(name string) (label string, keys []string) {
 		return "Checked skill progress", []string{"skillId"}
 	case "worktree.createWithRecipe":
 		return "Created worktree", []string{"recipeId"}
+	case "worktree.list":
+		return "Listed worktrees", nil
+	case "worktree.getCurrent":
+		return "Read worktree", nil
+	case "worktree.resource.status":
+		// "Load", not "resource status": the row has to say what the reader learns,
+		// and what this answers is how hard the machine is working.
+		return "Read load", []string{"worktreeId"}
+	case "git.getProjectPulse":
+		// The tool's own words are "branch, uncommitted/staged changes and recent
+		// commits" — which is the git state, so that is what the row says.
+		return "Read git state", []string{"worktreeId"}
 	case "forge.getIssue":
 		return "Read issue", []string{"issueNumber"}
 	case "forge.listIssues":
@@ -163,9 +205,13 @@ func presentToolVerb(name string) (label string, keys []string) {
 	case "forge.listPRs":
 		return "Listed PRs", nil
 	case "forge.getPR":
-		return "Read PR", []string{"prNumber", "number"}
+		return "Read PR", []string{"prNumber"}
+	case "forge.getChecks":
+		return "Read CI", []string{"prNumber"}
+	case "forge.listIssueComments":
+		return "Read comments", []string{"issueNumber"}
 	case "watcher.watchPR":
-		return "Watching PR", []string{"prNumber", "number"}
+		return "Watching PR", []string{"prNumber"}
 	case "workflow.startWorkOnIssue":
 		return "Started work", []string{"issueNumber", "title"}
 	case "workflow.prepBranchForReview":
@@ -206,7 +252,11 @@ func presentToolVerb(name string) (label string, keys []string) {
 	case "daintree.listTools":
 		return "Listed tools", nil
 	case "daintree.call":
-		return "Called", []string{"toolName", "name"}
+		return "Called", []string{"name"}
+	case "daintree.invoke":
+		// Same shape as daintree.call — one untyped action, named by its argument —
+		// so it reads the same way rather than inventing a second word for it.
+		return "Called", []string{"action"}
 	case "agentTask.status":
 		return "Checked spawn", []string{"launchId", "id"}
 	case "agentTask.list":
@@ -256,9 +306,26 @@ func presentToolTarget(name, args string) string {
 	if args != "" {
 		_ = json.Unmarshal([]byte(args), &obj)
 	}
+	if v := resolveTargetKeys(obj, keys); v != "" {
+		return v
+	}
+	// The mcpwrap opaque-args wrappers (forgeRead: git.getProjectPulse, forge.getIssue,
+	// forge.list*, worktree.list/getCurrent) take NO top-level target at all — their
+	// whole payload is one `arguments` object forwarded verbatim, so the id the row
+	// wants to name is one level down. Unwrapping here rather than per-tool keeps the
+	// table describing what the row SHOWS while the envelope stays a transport detail;
+	// a tool that has the key at the top level never reaches this line.
+	if nested, ok := obj["arguments"].(map[string]any); ok {
+		return resolveTargetKeys(nested, keys)
+	}
+	return ""
+}
+
+// resolveTargetKeys returns the first key in keys that resolves against obj, "" if none
+// does. A "key:mode" entry resolves specially: ":lit" is a literal string (e.g.
+// "workspace context"), ":rel" relativizes a path, ":ids" joins an array.
+func resolveTargetKeys(obj map[string]any, keys []string) string {
 	for _, k := range keys {
-		// A "key:mode" entry resolves specially: ":lit" is a literal string (e.g.
-		// "workspace context"), ":rel" relativizes a path, ":ids" joins an array.
 		key, mode, _ := strings.Cut(k, ":")
 		switch mode {
 		case "lit":

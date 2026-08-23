@@ -177,7 +177,7 @@ func (h *hostAppAdapter) RunCommand(ctx context.Context, line string) host.Comma
 	if !res.Handled {
 		return host.CommandOutcome{Unknown: true}
 	}
-	return host.CommandOutcome{Text: buf.String(), Quit: res.Quit}
+	return host.CommandOutcome{Text: buf.String(), Quit: res.Quit, ConversationCleared: res.ConversationCleared}
 }
 
 // CommandCatalog mirrors the CLI's own registry, so the two surfaces cannot offer

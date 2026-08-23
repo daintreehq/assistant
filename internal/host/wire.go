@@ -283,14 +283,15 @@ func wantIntegralNumber(raw map[string]json.RawMessage, key string, dst *int64) 
 type HostCommandType string
 
 const (
-	CmdPrompt         HostCommandType = "prompt"
-	CmdApprovalDecide HostCommandType = "approval:decide"
-	CmdQuestionAnswer HostCommandType = "question:answer"
-	CmdCommand        HostCommandType = "command"
-	CmdOperations     HostCommandType = "operations"
-	CmdInterrupt      HostCommandType = "interrupt"
-	CmdHibernate      HostCommandType = "hibernate"
-	CmdShutdown       HostCommandType = "shutdown"
+	CmdPrompt           HostCommandType = "prompt"
+	CmdApprovalDecide   HostCommandType = "approval:decide"
+	CmdQuestionAnswer   HostCommandType = "question:answer"
+	CmdCommand          HostCommandType = "command"
+	CmdOperations       HostCommandType = "operations"
+	CmdInterjectRetract HostCommandType = "interject:retract"
+	CmdInterrupt        HostCommandType = "interrupt"
+	CmdHibernate        HostCommandType = "hibernate"
+	CmdShutdown         HostCommandType = "shutdown"
 )
 
 // HostCommand is a decoded inbound command. Only the fields relevant to the arm
@@ -385,6 +386,8 @@ func ParseCommand(line []byte) (HostCommand, error) {
 		}
 	case CmdOperations:
 		// No fields: it is a request for the current reading.
+	case CmdInterjectRetract:
+		// No fields: it always takes the most recent buffered injection (LIFO).
 	case CmdInterrupt, CmdHibernate, CmdShutdown:
 		// no extra fields
 	default:

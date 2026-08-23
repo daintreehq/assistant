@@ -86,6 +86,10 @@ A turn runs through `agent.Session.Send()`:
    - Otherwise announce the whole tool batch (`ToolBatch`, all `queued`), then
      `registry.Dispatch()` each in the safe sequence, promoting and resolving each, feed
      the results back as `tool` messages, and re-`RespondStream` (replaying the state token).
+   - Fold the settled batch into the **convergence guard** (`stall.go`). A turn that stops
+     making progress, or runs past its round budget, is closed by spending one final round
+     with `tool_choice: "none"` asking for a plan-and-status report — see
+     [`RUNTIME.md`](RUNTIME.md#turn-convergence).
 
 `Dispatch` = parse/validate args → tier gate (`safety.Decide`) → confirmation (interactive
 `main` actor) or scoped automation grant (watcher/timer/workflow actors) → run the handler

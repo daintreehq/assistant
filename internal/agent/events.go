@@ -2,7 +2,8 @@
 // user (or autonomous) turn to completion: optional auto-compact → skill
 // re-selection → assemble the three control messages → stream the large model →
 // dispatch tool calls → feed results back (looping until the model stops calling
-// tools; no per-turn round cap). It owns conversation
+// tools, or the convergence guard in stall.go closes a turn that has stopped making
+// progress). It owns conversation
 // persistence/rehydration, the repeated-failure circuit breaker, oversized-tool-
 // result truncation into session artifacts, and a liveness-rich structured event
 // stream.
