@@ -191,6 +191,67 @@ func (h *hostAppAdapter) CommandCatalog() []host.CommandMeta {
 	return out
 }
 
+// Operations builds the deck from the SAME stores the cockpit read, so the two surfaces
+// cannot disagree about what is running. Every read is best-effort: a deck that fails to
+// open because one table errored is worse than a deck missing one section.
+func (h *hostAppAdapter) Operations(ctx context.Context) host.OperationsSnapshot {
+	snap := host.OperationsSnapshot{}
+	if h.app == nil {
+		return snap
+	}
+	if st := h.app.Store; st != nil {
+		if timers, err := st.ListTimers("scheduled"); err == nil {
+			for _, t := range timers {
+				snap.Timers = append(snap.Timers, host.TimerRow{ID: t.ID, Label: t.Title, DueAt: t.FireAt})
+			}
+		}
+		if ws, err := st.ListLiveWatchers(); err == nil {
+			for _, w := range ws {
+				state := ""
+				if w.LastClassification != nil {
+					state = *w.LastClassification
+				}
+				snap.Agents = append(snap.Agents, host.AgentRow{
+					ID: w.ID, Title: w.Title, Goal: w.Goal, AgentState: state,
+					StartedAt: w.CreatedAt,
+					// The cockpit merged a watcher with its terminal's preview; the
+					// preview needs a live MCP read, so it is left to the host, which
+					// already has the terminal on screen.
+					NeedsAttention: w.Status == "condition_met",
+				})
+			}
+		}
+		if async, err := st.ListLiveAsyncInvocations(); err == nil {
+			for _, a := range async {
+				snap.Async = append(snap.Async, host.AsyncRow{
+					ID: a.ID, Title: a.Title, Tool: a.ToolName, StartedAt: a.CreatedAt,
+				})
+			}
+		}
+		if audit, err := st.ListAudit(8); err == nil {
+			for _, a := range audit {
+				snap.Audit = append(snap.Audit, host.AuditRow{
+					Tool: a.ToolName, Outcome: a.Outcome, DurationMs: a.DurationMs, At: a.Ts,
+				})
+			}
+		}
+	}
+	if h.app.Queue != nil {
+		atLeast := domain.SeverityAttention
+		if inbox, err := h.app.Queue.Digest(ctx, domain.QueueDigestOptions{
+			SeverityAtLeast: &atLeast,
+		}); err == nil {
+			for _, e := range inbox {
+				snap.Inbox = append(snap.Inbox, host.InboxRow{
+					ID: e.ID, Severity: string(e.Severity), Source: string(e.Source),
+					Summary: e.Summary, At: e.CreatedAt,
+				})
+			}
+		}
+	}
+	return snap
+}
+
 func (h *hostAppAdapter) McpStatus() (bool, *int, string) {
 	if h.app == nil {
 		return false, nil, ""

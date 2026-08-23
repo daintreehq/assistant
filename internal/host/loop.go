@@ -36,6 +36,8 @@ func (h *Host) handleCommand(cmd HostCommand) {
 		h.bridge.ResolveApproval(cmd.ApprovalID, ConfirmationDecision(cmd.Decision))
 	case CmdCommand:
 		h.handleSlashCommand(cmd.CommandLine)
+	case CmdOperations:
+		h.postOperations()
 	case CmdQuestionAnswer:
 		// Same shape as approval:decide — unblocks a parked dispatch, bridge-guarded.
 		h.bridge.ResolveQuestion(cmd.QuestionID, cmd.Index)
@@ -574,4 +576,12 @@ func (h *Host) postMcpStatus() {
 	}
 	connected, toolCount, errMsg := h.app.McpStatus()
 	h.bridge.post(EvMcpStatus{Connected: connected, ToolCount: toolCount, Error: errMsg})
+}
+
+// postOperations answers an operations request with the current deck.
+func (h *Host) postOperations() {
+	if h.app == nil || h.bridge == nil {
+		return
+	}
+	h.bridge.post(EvOperations{Snapshot: h.app.Operations(h.runCtx)})
 }

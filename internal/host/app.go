@@ -30,6 +30,14 @@ type App interface {
 	// clearing and leaves the conversation intact.
 	RunCommand(ctx context.Context, line string) CommandOutcome
 
+	// Operations returns one reading of the operations deck — what the assistant is
+	// watching, running and has recently done.
+	//
+	// Built on demand, as the cockpit built it: pushing every store change to a host
+	// that may not be showing the deck is a great deal of traffic for a view nobody is
+	// looking at.
+	Operations(ctx context.Context) OperationsSnapshot
+
 	// CommandCatalog is the command set this engine will accept.
 	CommandCatalog() []CommandMeta
 

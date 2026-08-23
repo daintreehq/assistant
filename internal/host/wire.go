@@ -287,6 +287,7 @@ const (
 	CmdApprovalDecide HostCommandType = "approval:decide"
 	CmdQuestionAnswer HostCommandType = "question:answer"
 	CmdCommand        HostCommandType = "command"
+	CmdOperations     HostCommandType = "operations"
 	CmdInterrupt      HostCommandType = "interrupt"
 	CmdHibernate      HostCommandType = "hibernate"
 	CmdShutdown       HostCommandType = "shutdown"
@@ -382,6 +383,8 @@ func ParseCommand(line []byte) (HostCommand, error) {
 				cmd.Index = idx
 			}
 		}
+	case CmdOperations:
+		// No fields: it is a request for the current reading.
 	case CmdInterrupt, CmdHibernate, CmdShutdown:
 		// no extra fields
 	default:
