@@ -324,7 +324,7 @@ func debugLogInventory(logDir string) map[string]any {
 func auditSupportSlice(cfg config.AppConfig) (any, error) {
 	// READ-ONLY. storage.Open applies WAL/schema settings and runs retention GC, so
 	// calling it here would MUTATE a database whose owner lease we are not holding —
-	// racing a live cockpit or the daemon to collect a diagnostic. A diagnostic that
+	// racing a live attached session or the daemon to collect a diagnostic. A diagnostic that
 	// changes the thing it is diagnosing is not one.
 	store, err := storage.OpenReadOnly(cfg.DBPath)
 	if err != nil {

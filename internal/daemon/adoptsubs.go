@@ -22,7 +22,7 @@ var liveWatcherStatuses = map[string]bool{"active": true, "created": true, "paus
 // in-memory state. It starts empty in every new process, and resubscribe replays
 // only from that map, so a subscription never survives a process boundary.
 //
-// The mismatch is invisible but costly. After a cockpit→daemon handover (or the
+// The mismatch is invisible but costly. After an attached session→daemon handover (or the
 // reverse) an adopted watcher reads Subscribed=true, ensureSubscribed early-returns,
 // and no Subscribe is ever issued — yet the quiet-subscribed path still widens the
 // poll cadence to SubscribedReconcileMS (30s) on the strength of a push channel that

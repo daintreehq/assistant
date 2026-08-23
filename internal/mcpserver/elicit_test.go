@@ -22,7 +22,7 @@ import (
 func connectElicit(t *testing.T, fake *fakeRuntime, handler func(context.Context, *mcp.ElicitRequest) (*mcp.ElicitResult, error)) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
-	reg := NewRegistry(ctx, func(_, _ context.Context, _ OpenParams) (Runtime, error) { return fake, nil })
+	reg := NewUnconfinedRegistry(ctx, func(_, _ context.Context, _ OpenParams) (Runtime, error) { return fake, nil })
 	srv := mcp.NewServer(&mcp.Implementation{Name: ServerName, Version: "test"}, nil)
 	Register(srv, reg, NewBinaryInfo("test"), ctx)
 
@@ -67,7 +67,7 @@ func askAndPark(t *testing.T, cs *mcp.ClientSession, fake *fakeRuntime) PendingA
 // parkingRuntime is a fake whose turn parks one approval.
 func parkingRuntime() (*fakeRuntime, chan bool) {
 	fake := newFakeRuntime("ses_test")
-	fake.approvals = NewApprovals(ApprovalAsk, 2*time.Second)
+	fake.approvals = NewApprovals(ApprovalDelegate, 2*time.Second)
 	outcome := make(chan bool, 1)
 	fake.script = func(sink agent.EventSink) {
 		go func() {
@@ -194,7 +194,7 @@ func TestElicitationFailureFallsBackToPolling(t *testing.T) {
 
 // TestElicitNotifierIsNilWithoutASession guards the constructor's own precondition.
 func TestElicitNotifierIsNilWithoutASession(t *testing.T) {
-	if elicitNotifier(nil, NewApprovals(ApprovalAsk, 0), time.Second) != nil {
+	if elicitNotifier(context.Background(), nil, NewApprovals(ApprovalDelegate, 0), time.Second) != nil {
 		t.Error("a nil client session must produce no notifier")
 	}
 }

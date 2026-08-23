@@ -32,9 +32,90 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 	// decides", so inspecting the pointer would silently report false for a process
 	// launched with DAINTREE_ASSISTANT_AUTO_APPROVE=1 and then suppress it.
 	var defaultAutoApprove bool
-	if cfg, err := loadConfigFromOptions(opts); err == nil {
-		defaultAutoApprove = cfg.AutoApprove
+	// policy is the process-level authority ceiling. On THIS surface the caller is a
+	// model whose arguments can be steered by repository text or tool output, so the
+	// ceiling is not optional — an unconfined registry here would let a prompt
+	// injection choose its own tier and approval mode. It is derived from what the
+	// OPERATOR launched this process with, which makes the rule precise: a session may
+	// narrow what the operator already chose, and can never widen it.
+	policy := mcpserver.ServerPolicy{
+		// Endpoints and credentials are PINNED to what the operator launched this
+		// process with. They are the two arguments that decide where a session's data
+		// goes and whose credential pays for it, and neither is a thing a model reading
+		// a repository is entitled to choose. A harness that genuinely needs to repoint
+		// launches a second server against the other endpoint — which is a decision
+		// made at the shell, by a human, exactly once.
+		AllowBackendOverride:         false,
+		AllowMCPOverride:             false,
+		AllowCredentialOverride:      false,
+		RequireTLSForRemoteEndpoints: true,
 	}
+	// FATAL, not best-effort. The ceiling is DERIVED from this config: without it the
+	// policy keeps empty root allowlists and no MaxTier, which is precisely the
+	// unconfined server the policy exists to prevent — and a session argument can then
+	// repair the very config error that produced it (name a writable stateDir, an
+	// arbitrary project, tier "system") and run under no ceiling at all. A
+	// model-facing process cannot safely synthesize its own ceiling from a failure.
+	cfg, err := loadConfigFromOptions(opts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mcp server: cannot resolve the launch configuration this server's "+
+			"authority ceiling is derived from:", err)
+		return domain.OneShotExitCode.Error
+	}
+	defaultAutoApprove = cfg.AutoApprove
+	policy.DefaultAutoApprove = cfg.AutoApprove
+	// Auto-approve is permitted for a session only if the operator already turned
+	// it on process-wide. Otherwise a session cannot grant itself unattended
+	// mutation.
+	policy.AllowAutoApprove = cfg.AutoApprove
+	// Delegation is a launch decision, not a session one. See Options.AllowDelegatedApprovals.
+	policy.AllowDelegatedApprovals = opts.AllowDelegatedApprovals
+	// QUESTIONS are permitted by default, unlike approvals, and the asymmetry is the
+	// point. An approval releases an action the assistant wants to take; a question picks
+	// among options the assistant itself proposed, and answering one authorises nothing
+	// that declining would have prevented — the turn proceeds with a choice instead of a
+	// cancelled call. Gating it would only mean the surface built to test the product
+	// still could not reach the branches the product reaches.
+	policy.AllowDelegatedQuestions = true
+	policy.MaxTier = domain.Tier(cfg.Tier)
+	policy.DefaultTier = domain.Tier(cfg.Tier)
+	policy.DefaultProject = cfg.ProjectPath
+	policy.DefaultStateDir = cfg.StateDir
+	policy.DefaultLogDir = cfg.LogDir
+	// CONFINE the filesystem too, and to the directories this process was launched
+	// against rather than to nothing.
+	//
+	// An empty allowlist means unconfined, which is the wrong default here for the
+	// same reason an unpinned endpoint is: a prompt injection in one repository
+	// should not be able to open a system-tier session on another one, or on the
+	// user's home directory. The operator picks the project by launching the server
+	// in it (or with --project); a session may still name a path INSIDE that
+	// project, which is what a monorepo harness actually needs.
+	policy.AllowedProjectRoots = confineRoots(cfg.ProjectPath)
+	// The state ROOT, not the resolved state DIR. A session may legitimately name a
+	// different projectId, which config scopes into a SIBLING directory under the
+	// same root — so an allowlist holding only this launch's resolved dir would be
+	// checked against a path the factory then declines to use, and the confinement
+	// would be a string comparison rather than a boundary. The root is the honest
+	// set of directories this process can produce. An explicitly-named state dir has
+	// no scoping, so root and dir are the same path there.
+	policy.AllowedStateRoots = confineRoots(cfg.StateRoot)
+	policy.AllowedLogRoots = confineRoots(cfg.LogDir)
+
+	// PIN THE RESOLVED ENDPOINT ONTO EVERY SESSION.
+	//
+	// Refusing an explicit `backendUrl` is not enough on its own, because the endpoint
+	// has a second, indirect source: an explicit state directory makes config read
+	// `endpoint.json` from THAT directory rather than the per-user root (it is how a
+	// harness keeps its own `/backend` choice off the developer's). A session that names
+	// only a stateDir — perfectly legal, confined, no endpoint argument in sight —
+	// would therefore pick up whatever endpoint that directory's file names, and the
+	// inherited API key would follow it, since nothing looked like a redirect.
+	//
+	// Resolving the endpoint once here and handing it to every session closes that: an
+	// explicit override outranks the stored file, so the launch endpoint is the endpoint
+	// whatever a session does with its state directory.
+	opts.BackendURL = cfg.BackendURL
 
 	// One debug log for the PROCESS, not one per session. debuglog keeps a single
 	// package-global active path, so a per-session start would silently redirect every
@@ -110,21 +191,45 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 
 		logPath := startProcessLog(a.Config)
 
-		// Confirmations go through the session's broker, which is what makes "ask" more
-		// than a slogan: it parks the dispatch, surfaces the call with its risk,
+		// Confirmations go through the session's broker, which is what makes "delegate"
+		// more than a slogan: it parks the dispatch, surfaces the call with its risk,
 		// consequence and redacted args, and fails closed on a timer so a forgotten
-		// approval can never pin the turn forever.
+		// approval can never pin the turn forever. What it is NOT is a human decision —
+		// see approvals.go.
 		//
 		// The event sink is NOT set here. It is per-TURN — each turn records into its own
 		// Run — and appRuntime.Send installs it. Wiring one here would be wrong twice
 		// over: it would mix turns together, and it would look like the recording is
 		// handled when it is not.
 		approvals := mcpserver.NewApprovals(mode, p.ApprovalTimeout)
+		// Questions are INDEPENDENT of approvals. Deriving one from the other defeated the
+		// case they were added for: a harness that wants planning questions while keeping
+		// mutations declined could not have them without also granting approval authority
+		// it did not want. There is no auto-answer either — bypassing a confirmation is a
+		// decision an operator can make, but answering "which of these did you mean?" on
+		// someone's behalf is not.
+		questionMode := p.Questions
+		if questionMode == "" {
+			questionMode = mcpserver.QuestionDecline
+		}
+		questions := mcpserver.NewQuestions(questionMode, p.QuestionTimeout)
 		// runtime is captured by the hook so an approval can name the run it blocks.
 		// Assigned below, after the facts are built; the hook only ever reads it on a
 		// dispatch, which cannot happen before the runtime exists.
 		var runtime interface{ CurrentRunID() string }
 		a.SetHooks(app.AppHooks{
+			// AskChoice is wired HERE, which is what closes the parity gap: without it
+			// the runtime has no question surface, user.askMultipleChoice reports
+			// QUESTION_UNAVAILABLE, and a turn that needed a planning decision took a
+			// different path on this surface than it takes in the product — so an
+			// end-to-end run could not reach the branch it was written to test.
+			AskChoice: func(cctx context.Context, req tools.AskChoiceRequest) (tools.AskChoiceAnswer, error) {
+				runID := ""
+				if runtime != nil {
+					runID = runtime.CurrentRunID()
+				}
+				return questions.Ask(cctx, req, runID)
+			},
 			Confirm: func(cctx context.Context, req tools.ConfirmRequest) (bool, error) {
 				runID := ""
 				if runtime != nil {
@@ -137,6 +242,11 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 					Summary:     req.Summary,
 					RawArgs:     string(req.Args),
 					RunID:       runID,
+					// Forwarded, not enforced: this server delegates the decision to a
+					// caller with its own approval UX, but dropping the verdict made a
+					// system-risk action and an ordinary project mutation arrive as the
+					// same boolean with different prose.
+					NeedsTypedConfirm: req.NeedsTypedConfirm,
 				}), nil
 			},
 		})
@@ -170,17 +280,18 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 			PinnedSkills:        a.PinnedSkillIDs(),
 			PinPreflightWarning: pinNotice,
 		}
-		rt := mcpserver.NewAppRuntime(a, facts, approvals, own.Release)
+		rt := mcpserver.NewAppRuntime(a, facts, approvals, questions, own.Release)
 		if withRun, ok := rt.(interface{ CurrentRunID() string }); ok {
 			runtime = withRun
 		}
 		return rt, nil
 	}
 
-	err := mcpserver.Serve(ctx, mcpserver.Options{
+	err = mcpserver.ServeModelFacing(ctx, mcpserver.Options{
 		Version:     buildVersion,
 		Factory:     factory,
 		Diagnostics: os.Stderr,
+		Policy:      policy,
 	})
 	if err != nil && ctx.Err() == nil {
 		fmt.Fprintln(os.Stderr, "mcp server:", err)
@@ -237,7 +348,28 @@ func sessionOptions(base Options, p mcpserver.OpenParams) Options {
 	applyIfSet(&o.APIKeyFile, p.APIKeyFile)
 	applyIfSet(&o.Tier, p.Tier)
 	applyIfSet(&o.McpURL, p.McpURL)
-	applyIfSet(&o.McpToken, p.McpToken)
+	applyIfSet(&o.McpTokenFile, p.McpTokenFile)
+	// AN INHERITED CREDENTIAL MUST NEVER FOLLOW A SESSION-CHOSEN URL.
+	//
+	// Both endpoints are session arguments by design — an MCP client cannot restart this
+	// process, so repointing has to be possible. But on this surface the caller is a
+	// MODEL whose context can be steered by repository text or tool output, and the
+	// process may hold credentials it inherited from ITS launch. Combining the two gives
+	// a clean exfiltration primitive: name `mcpUrl: http://attacker/`, say nothing about
+	// the token, and the server posts its own Daintree bearer — which authorises
+	// system-tier actions — straight to that host. `backendUrl` plus an inherited
+	// DAINTREE_API_KEY is the same trick against a spendable key.
+	//
+	// So redirecting an endpoint forfeits the inherited secret for it. A session that
+	// genuinely needs a different endpoint supplies its own credential file for that
+	// endpoint; one that supplies neither simply runs degraded, which is a visible,
+	// recoverable state rather than a silent leak.
+	// Clearing the field is NOT enough — config's FirstString skips a blank value and
+	// falls straight through to the environment, so an assignment of "" here would have
+	// left the inherited token in place and the leak wide open. The suppression has to
+	// be an explicit signal that survives resolution.
+	o.NoInheritedMcpToken = strings.TrimSpace(p.McpURL) != "" && strings.TrimSpace(p.McpTokenFile) == ""
+	o.NoInheritedAPIKey = strings.TrimSpace(p.BackendURL) != "" && strings.TrimSpace(p.APIKeyFile) == ""
 	applyIfSet(&o.StateDir, p.StateDir)
 	applyIfSet(&o.LogDir, p.LogDir)
 	applyIfSet(&o.ProjectID, p.ProjectID)
@@ -278,4 +410,18 @@ func applySliceIfSet(dst *[]string, v []string) {
 	if v != nil {
 		*dst = append([]string(nil), v...)
 	}
+}
+
+// confineRoots turns one resolved process-level directory into an allowlist.
+//
+// A blank one yields NIL, not a one-element list holding "" — an empty string would
+// resolve to the process working directory and quietly confine every session there,
+// which is a different (and unannounced) policy from the one the operator chose. Nil
+// means the same thing the policy has always meant by an empty allowlist: this
+// dimension is unconfined, because the process itself never bound it.
+func confineRoots(dir string) []string {
+	if strings.TrimSpace(dir) == "" {
+		return nil
+	}
+	return []string{dir}
 }

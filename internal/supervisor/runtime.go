@@ -1,15 +1,15 @@
 // Package supervisor is the persistent per-project daemon: the process that
-// keeps supervising Daintree work after the interactive cockpit closes.
+// keeps supervising Daintree work after the attached session closes.
 //
 // Ownership model (docs/SUPERVISOR.md): exactly one process at a time owns the
 // project DB and its supervision engines, serialized by the flock owner lease
 // (internal/ipc). The daemon is a persistent contender for that lease — while
-// a cockpit is attached (an open attach connection on the control socket) it
-// stands down; the moment the cockpit exits or crashes (connection drops, and
-// the kernel releases the cockpit's flock) the daemon re-acquires, builds a
+// an attached session is attached (an open attach connection on the control socket) it
+// stands down; the moment the attached session exits or crashes (connection drops, and
+// the kernel releases the attached session's flock) the daemon re-acquires, builds a
 // headless App, ADOPTS the persisted watchers/async futures/timers, and runs
 // the scheduler + async coordinator + autonomous wake turns exactly where the
-// cockpit left off — same conversation (runtime_state session pointer), same
+// attached session left off — same conversation (runtime_state session pointer), same
 // backend state token.
 //
 // A daemon wake turn dispatches tools as domain.ActorWake: reads run freely
@@ -40,7 +40,7 @@ import (
 // Timing defaults. Test seams override via Options.
 const (
 	// acquireRetryEvery is the owner-lease contention poll. Cheap (one flock
-	// syscall), so a cockpit exit hands supervision back within a second.
+	// syscall), so an attached session exit hands supervision back within a second.
 	acquireRetryEvery = 1 * time.Second
 	// monitorEvery drives the supervise-side housekeeping tick (MCP health,
 	// idle-exit accounting).
@@ -53,7 +53,7 @@ const (
 	// defaultIdleExit: with NOTHING to supervise (no live watchers/async, no
 	// scheduled timers, no open inbox, no wake activity) the daemon exits so a
 	// machine doesn't accumulate idle per-project daemons. Any new work simply
-	// respawns one on the next cockpit start.
+	// respawns one on the next attached session start.
 	defaultIdleExit = 15 * time.Minute
 	// handoverTimeout bounds an attach handover (cancel wake turn → drain →
 	// close store → release lease).
@@ -211,7 +211,7 @@ func Run(ctx context.Context, opts Options) int {
 	defer ipc.RemoveDaemonDescriptor(cfg.StateDir)
 
 	// The daemon owns its own debug-log identity (one long-lived per-process
-	// file, distinct from any cockpit session log).
+	// file, distinct from any attached session session log).
 	if cfg.DebugLog {
 		path := debuglog.StartDebugLog(debuglog.Config{DebugLog: cfg.DebugLog, LogDir: cfg.LogDir}, map[string]any{
 			"sessionId": fmt.Sprintf("daemon-%d", os.Getpid()),
@@ -256,7 +256,7 @@ func (r *Runtime) runLoop(ctx context.Context) int {
 			return 1
 		}
 		if !got {
-			// Another process (an attached cockpit, or one that predates this
+			// Another process (an attached session, or one that predates this
 			// daemon) owns the DB. Stand by and retry — the kernel releases the
 			// flock the instant that process exits, crash included.
 			r.setState(ipc.StateStandby)
@@ -285,7 +285,7 @@ func (r *Runtime) runLoop(ctx context.Context) int {
 		r.mu.Unlock()
 		if attachedNow {
 			// An attach landed between the top-of-loop check and the acquire; yield
-			// immediately rather than fight the arriving cockpit.
+			// immediately rather than fight the arriving attached session.
 			cancel()
 			r.ownerLock.Release()
 			r.clearSpan()
@@ -325,7 +325,7 @@ func (r *Runtime) runLoop(ctx context.Context) int {
 func (r *Runtime) supervise(sctx context.Context) superviseReason {
 	// Rebuild the App from the daemon's own overrides each span — config stays
 	// identical across spans except the credentials, where the freshest values
-	// pushed by the last cockpit win over whatever this process inherited at
+	// pushed by the last attached session win over whatever this process inherited at
 	// spawn (Daintree rotates MCP tokens).
 	overrides := r.opts.Overrides
 	r.mu.Lock()
@@ -335,7 +335,7 @@ func (r *Runtime) supervise(sctx context.Context) superviseReason {
 	if r.creds.McpToken != "" {
 		overrides.McpToken = strPtr(r.creds.McpToken)
 	}
-	// The attaching cockpit's endpoint wins too. ipc.Credentials has carried BackendURL
+	// The attaching attached session's endpoint wins too. ipc.Credentials has carried BackendURL
 	// since the field was added, but nothing ever applied it — so a launch pointed at a
 	// local backend handed the daemon that URL and the daemon went on waking against the
 	// deployed one. Same rule as the MCP pair: freshest value from the last attach.
@@ -600,7 +600,7 @@ func (r *Runtime) HandleRequest(ctx context.Context, req ipc.Request, conn *ipc.
 		if r.storeCreds(c) {
 			// Fresh credentials while a span runs on the OLD (likely revoked)
 			// token: rebuild the span. The runLoop re-acquires immediately and
-			// the new App connects with the new token — the displaced-cockpit
+			// the new App connects with the new token — the displaced-attached session
 			// race (docs/DAINTREE_HOST.md one-backend rule) heals here.
 			r.interruptSupervision()
 		}
@@ -687,7 +687,7 @@ func (r *Runtime) handleAttach(a ipc.AttachRequest, conn *ipc.ServerConn) ipc.Re
 			break // lease is genuinely free
 		}
 		if !r.daemonHoldsLease() {
-			// Held by another PROCESS (a second cockpit) — report busy right away.
+			// Held by another PROCESS (a second attached session) — report busy right away.
 			reply.OwnerBusy = true
 			reply.OwnerPid = ipc.ReadLockHolderPid(r.ownerLock.Path())
 			break
@@ -711,7 +711,7 @@ func (r *Runtime) handleAttach(a ipc.AttachRequest, conn *ipc.ServerConn) ipc.Re
 func (r *Runtime) daemonHoldsLease() bool { return r.ownerLock.Held() }
 
 // ConnClosed ends an attach lease: the daemon resumes contending for the
-// owner lock. Exactly the path a cockpit CRASH takes (its flock is released by
+// owner lock. Exactly the path an attached session CRASH takes (its flock is released by
 // the kernel; its socket connection drops here).
 func (r *Runtime) ConnClosed(conn *ipc.ServerConn) {
 	if !conn.Attached() {

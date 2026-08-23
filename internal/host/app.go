@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/config"
@@ -9,7 +10,7 @@ import (
 )
 
 // App is the SEAM to the full assistant runtime. The host depends on this
-// interface and the cockpit/cli wave fills it with the concrete App. The surface
+// interface and the host/cli wave fills it with the concrete App. The surface
 // it needs: wire the agent event sink + confirm hook, connect MCP best-effort,
 // start the daemon, drive the session, and shut down.
 //
@@ -82,19 +83,18 @@ type turnSession interface {
 // adapts its tool-context ConfirmRequest (tools.ConfirmRequest) into this when
 // calling the installed hook. Beyond the tool name + summary, it carries the
 // display context the approval:requested wire event surfaces so Daintree's
-// timeline matches a local cockpit approval: the risk class, the human-readable
+// timeline matches a local host approval: the risk class, the human-readable
 // consequence, and the raw args (redacted by the bridge before they cross the
 // wire). RiskClass is passed through (not re-derived from the registry) so a
 // tool's explicit per-confirm override — e.g. grant.create electing RiskSystem —
 // reaches the UI verbatim.
 //
-// Intentional scope boundary: this bridge deliberately drops NeedsTypedConfirm.
 // The embedded host does not render its own approval sheet — it delegates the
-// decision to its external caller (Daintree's orchestration UI), which owns the
-// approval UX. The typed-confirm friction (issue #210) is enforced on the surfaces
-// that DO render the sheet — the cockpit and the classic REPL — not here. The
-// risk-class label travels on RiskClass above so the external timeline can still
-// display it.
+// decision to its external caller (Daintree), which owns the approval UX. But the
+// VERDICT is not delegated: NeedsTypedConfirm is forwarded verbatim on the wire
+// (see EvApprovalRequested) so the caller enforces the friction without re-deriving
+// which risk classes are irreversible. Leaving it to be inferred from RiskClass
+// would fork a security rule into a second codebase, free to drift permissively.
 type ConfirmRequest struct {
 	ToolName    string
 	Summary     string
@@ -103,6 +103,38 @@ type ConfirmRequest struct {
 	// RawArgs is the raw JSON args string the model emitted. The bridge redacts it
 	// (redactArgs) before emitting the wire event — it never crosses verbatim.
 	RawArgs string
+	// NeedsTypedConfirm is safety.NeedsTypedConfirm's verdict for this dispatch,
+	// forwarded verbatim so the host never re-derives the rule. See EvApprovalRequested.
+	NeedsTypedConfirm bool
+}
+
+// AskChoiceRequest is a multiple-choice question the model needs answered before it can
+// continue (user.askMultipleChoice). Mirrored locally rather than imported from
+// internal/tools for the same reason ConfirmRequest is: this package compiles in
+// isolation against agent/config/domain and must not reach into the tool layer.
+type AskChoiceRequest struct {
+	// ToolCallID ties the question to its tool call (informational).
+	ToolCallID string
+	// Question is the human-facing prompt, with no option labels baked in.
+	Question string
+	// Options are the labelled choices in order. Labels (A, B, C…) are assigned by the
+	// CLI, never by the model.
+	Options []AskChoiceOption
+	// Default is the 0-based index a host should highlight first.
+	Default int
+}
+
+// AskChoiceOption is one labelled choice.
+type AskChoiceOption struct {
+	Label string
+	Text  string
+}
+
+// AskChoiceAnswer is the host's selection. Index is 0-based.
+type AskChoiceAnswer struct {
+	Label string
+	Index int
+	Text  string
 }
 
 // AppHooks bundles the hooks the host installs on the App.
@@ -112,10 +144,21 @@ type AppHooks struct {
 	// Confirm is the tool-confirm hook: a mutating tool calls it and blocks until
 	// the approval is decided (true) / rejected / times out (false).
 	Confirm func(ctx context.Context, req ConfirmRequest) bool
+	// AskChoice is the question hook: the model asks a finite question and the
+	// dispatch blocks until the host answers or the question is cancelled.
+	//
+	// It exists because the HOST is the product surface, and without it the one thing
+	// a user actually runs was the one surface that could not be asked a question —
+	// user.askMultipleChoice returned QUESTION_UNAVAILABLE and the model had to guess
+	// or give up in prose, while the developer-only line REPL could ask freely.
+	//
+	// An error is a cancellation, never a default answer: an unanswered approval can
+	// safely resolve to "no", but an unanswered QUESTION has no safe answer at all.
+	AskChoice func(ctx context.Context, req AskChoiceRequest) (AskChoiceAnswer, error)
 }
 
 // AppFactory builds the App for a booted session. MCP url/token/tier/projectId
-// come from env via loadConfig, NOT the descriptor. The cockpit/cli wave provides
+// come from env via loadConfig, NOT the descriptor. The host/cli wave provides
 // the concrete factory; the host stores it so it can be tested with a fake.
 type AppFactory func(ctx context.Context, params AppParams) (App, error)
 
@@ -125,4 +168,45 @@ type AppParams struct {
 	SessionID           string // appSessionId: resume id when resuming, else session id
 	ProjectPath         string // descriptor.cwd → overrides.projectPath
 	ProjectInstructions string // loaded DAINTREE.md content → overrides
+
+	// Declared is what the DESCRIPTOR claimed this session is bound to. The live
+	// binding comes from the environment, so these are the host's opportunity to check
+	// that the two agree — see Binding.
+	Declared Binding
+}
+
+// Binding is the identity a session is bound to: which project, which window, at what
+// permission tier, in which directory.
+//
+// It exists because the descriptor and the environment are two independent statements
+// of the same fact, and nothing compared them. The descriptor is what Daintree BELIEVES
+// it opened; the environment is what the runtime actually USES — so a mismatch means the
+// two processes disagree about which project this session can act on, while both report
+// success. Redundant identity is only worth carrying if it is cross-checked; otherwise
+// it is two truths and no way to tell which one is live.
+type Binding struct {
+	ProjectID string
+	WindowID  string
+	Tier      string
+	Cwd       string
+}
+
+// BindingMismatchError is a descriptor that disagrees with the effective environment.
+//
+// It is FATAL rather than a warning. The alternative is a session that runs under a
+// binding its host does not know about: Daintree renders the conversation as belonging
+// to one project while the runtime spawns agents in another, and every terminal that
+// appears is attributed to the wrong window. There is no safe way to guess which of the
+// two was meant.
+type BindingMismatchError struct {
+	Field    string
+	Declared string
+	Actual   string
+}
+
+func (e *BindingMismatchError) Error() string {
+	return fmt.Sprintf(
+		"session descriptor %s is %q but this process is bound to %q — the host and the runtime disagree "+
+			"about which session this is, so neither can be trusted to act on it",
+		e.Field, e.Declared, e.Actual)
 }

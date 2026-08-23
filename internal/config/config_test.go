@@ -614,3 +614,91 @@ func TestInvalidRoutingFailsAtStartup(t *testing.T) {
 		t.Errorf("error %q does not name the valid choices", err)
 	}
 }
+
+// An empty override cannot express "no credential": FirstString skips blank values and
+// falls through to the environment. The MCP server needs to DROP an inherited bearer
+// when a session redirects the endpoint, so the suppression has to survive resolution.
+func TestNoInheritedCredentialsDropsEnvValues(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("DAINTREE_MCP_TOKEN", "fake-inherited-mcp-token")
+	t.Setenv("DAINTREE_API_KEY", "sk-test-fakeinheritedkey1234567890")
+
+	// Baseline: without the flags the environment is inherited, which is the behaviour
+	// every normal launch depends on.
+	base := mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir)})
+	if base.McpToken == "" || base.APIKey == "" {
+		t.Fatalf("baseline lost the inherited credentials: mcp=%q api=%q", base.McpToken, base.APIKey)
+	}
+
+	got := mustLoad(t, ConfigOverrides{
+		StateDir:            strptr(stateDir),
+		NoInheritedMcpToken: true,
+		NoInheritedAPIKey:   true,
+	})
+	if got.McpToken != "" {
+		t.Errorf("McpToken = %q, want it dropped — an inherited bearer must not follow a redirected endpoint", got.McpToken)
+	}
+	if got.APIKey != "" {
+		t.Errorf("APIKey = %q, want it dropped", got.APIKey)
+	}
+}
+
+// The suppression must not clobber a credential the caller supplied explicitly: it drops
+// what was INHERITED, not what was chosen.
+func TestNoInheritedCredentialsKeepsAnExplicitOverride(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("DAINTREE_MCP_TOKEN", "fake-inherited-mcp-token")
+
+	explicit := "fake-session-supplied-token"
+	got := mustLoad(t, ConfigOverrides{
+		StateDir:            strptr(stateDir),
+		McpToken:            strptr(explicit),
+		NoInheritedMcpToken: true,
+	})
+	if got.McpToken != explicit {
+		t.Errorf("McpToken = %q, want the explicitly supplied %q", got.McpToken, explicit)
+	}
+}
+
+// StateRoot names the directory every project's state dir hangs off, which is not the
+// same thing as the state dir this launch resolved. A caller confining state to an
+// allowlist needs the ROOT: a session naming a different project id lands in a sibling
+// under it, and an allowlist holding only the resolved dir would refuse a path the
+// process legitimately produces.
+func TestStateRootIsTheParentOfAProjectScopedStateDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", "")
+	t.Setenv("DAINTREE_PROJECT_ID", "proj_alpha")
+
+	cfg, err := LoadConfig(ConfigOverrides{ProjectPath: strptr(t.TempDir())})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	wantRoot := filepath.Join(home, ".daintree", "assistant-cli")
+	if cfg.StateRoot != wantRoot {
+		t.Errorf("StateRoot = %q, want %q", cfg.StateRoot, wantRoot)
+	}
+	if cfg.StateDir == cfg.StateRoot {
+		t.Errorf("a project id should scope StateDir out of the root; both are %q", cfg.StateDir)
+	}
+	if filepath.Dir(cfg.StateDir) != cfg.StateRoot {
+		t.Errorf("StateDir %q is not directly under StateRoot %q", cfg.StateDir, cfg.StateRoot)
+	}
+}
+
+// An EXPLICIT state dir has no per-project scoping, so the root and the dir are the same
+// path — confining to the root must not silently widen it to the parent directory.
+func TestStateRootEqualsAnExplicitStateDir(t *testing.T) {
+	explicit := t.TempDir()
+	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", explicit)
+	t.Setenv("DAINTREE_PROJECT_ID", "proj_alpha")
+
+	cfg, err := LoadConfig(ConfigOverrides{ProjectPath: strptr(t.TempDir())})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.StateRoot != cfg.StateDir {
+		t.Errorf("StateRoot %q != StateDir %q for an explicit state dir", cfg.StateRoot, cfg.StateDir)
+	}
+}

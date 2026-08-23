@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/daintreehq/assistant/internal/redact"
@@ -13,14 +15,28 @@ import (
 )
 
 // resources.go exposes the two things a driving agent needs when a run goes wrong and
-// the poll digest is not enough: the FULL run transcript (poll returns a bounded
-// window) and the session's debug log (the ground truth for what the model and tools
-// actually did).
+// the poll digest is not enough: the run transcript in PAGES larger than poll's window,
+// and the process debug log (the ground truth for what the model and tools actually did).
+//
+// Neither is unbounded, and the transcript's page is the more interesting of the two. It
+// used to return every retained event, which made it the largest single response this
+// server could produce — reachable by a caller with no idea how long the run was, and
+// built and encoded in full before anyone could decide it was too big. "Larger than a
+// poll window" is the useful property; "unbounded" was never one.
 //
 // They are resources rather than tools deliberately. A tool result is something the
 // caller asked to happen; these are references it may follow, and only when it needs
 // them — which is the difference between paying for a megabyte of trace on every poll
 // and paying for it once, when diagnosing.
+
+// runTranscriptURITemplate is the run-transcript resource template.
+//
+// The {?fromSeq,limit} expression is REQUIRED, not decoration. The SDK matches a read
+// against this template with a regexp, so without it a paged URI matched nothing and the
+// whole paging feature was unreachable — the base resource answered, its `remaining`
+// pointed at a continuation URI, and that URI reached no handler at all. Pinned by
+// TestTranscriptTemplateMatchesBothPagedAndUnpagedURIs.
+const runTranscriptURITemplate = "daintree://session/{sessionId}/run/{runId}{?fromSeq,limit}"
 
 const (
 	// LogURIScheme namespaces this server's resources.
@@ -34,14 +50,19 @@ const (
 // RegisterResources wires the resource templates onto a server.
 func RegisterResources(s *mcp.Server, reg *Registry) {
 	s.AddResourceTemplate(&mcp.ResourceTemplate{
-		Name:        "run-transcript",
-		Title:       "Run transcript",
-		URITemplate: "daintree://session/{sessionId}/run/{runId}",
+		Name:  "run-transcript",
+		Title: "Run transcript",
+		// The {?fromSeq,limit} expression is REQUIRED, not decoration. The SDK matches a
+		// read against this template with a regexp, so without it a paged URI matched
+		// nothing and the whole paging feature was unreachable — the base resource
+		// answered, its `remaining` pointed at a continuation URI, and that URI 404'd.
+		URITemplate: runTranscriptURITemplate,
 		MIMEType:    "application/json",
-		Description: "The COMPLETE event timeline of one run, unbounded by the window daintree.poll returns. " +
-			"Read this when a poll's withheldEvents was non-zero and you need the part it dropped.",
+		Description: "The retained event timeline of one run, in pages larger than the window daintree.poll returns. " +
+			"Read this when a poll's withheldEvents was non-zero and you need the part it dropped. " +
+			"Append ?fromSeq=N&limit=M to page; the response reports nextSeq, remaining and complete.",
 	}, func(_ context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-		sessionID, runID, err := parseRunURI(req.Params.URI)
+		sessionID, runID, page, err := parseRunURI(req.Params.URI)
 		if err != nil {
 			return nil, err
 		}
@@ -53,9 +74,21 @@ func RegisterResources(s *mcp.Server, reg *Registry) {
 		if err != nil {
 			return nil, err
 		}
-		// maxEvents 0 = the whole timeline; that is the entire point of this resource.
-		out := renderRun(run, 0, 0, sess.Approvals())
-		body, err := json.MarshalIndent(out, "", "  ")
+		// PAGED, not "the whole thing". A resource that returned every retained event
+		// was the largest single response this server could produce, it was reachable
+		// by a caller that had no idea how long the run was, and it had to be built and
+		// encoded in full before anyone could decide it was too big. The page is larger
+		// than poll's window, which is the useful distinction; unbounded is not.
+		out := renderRunWith(run, page.fromSeq, page.limit, sess.Approvals(), sess.Questions())
+		// Every paging field is DERIVED from the one response, which came from one lock
+		// hold. Taking the total separately let a page report complete:true beside a
+		// total that had already grown past it, and a caller stopping on `complete`
+		// silently missed the tail.
+		body, err := json.MarshalIndent(transcriptPage{
+			RunOutput: out,
+			Remaining: out.WithheldEvents,
+			Complete:  out.WithheldEvents == 0,
+		}, "", "  ")
 		if err != nil {
 			return nil, fmt.Errorf("encode transcript: %w", err)
 		}
@@ -67,13 +100,14 @@ func RegisterResources(s *mcp.Server, reg *Registry) {
 	})
 
 	s.AddResourceTemplate(&mcp.ResourceTemplate{
-		Name:        "session-log",
-		Title:       "Session debug log",
+		Name:        "server-log",
+		Title:       "Server debug log",
 		URITemplate: "daintree://session/{sessionId}/log",
 		MIMEType:    "text/plain",
-		Description: "The tail of this session's structured debug trace — every backend request, tool call with arguments " +
-			"and result, and MCP call. The ground truth for what actually happened, as opposed to what the answer claims. " +
-			"Requires the session to have been opened with debugLog:true. Grep it by runId, turnId or round.",
+		Description: "The tail of this SERVER PROCESS's structured debug trace — every backend request, tool call with " +
+			"arguments and result, and MCP call, for every session this process is running. The ground truth for what " +
+			"actually happened, as opposed to what the answer claims. Requires a session opened with debugLog:true. " +
+			"NOT isolated per session: filter by the sessionId, runId or turnId fields on each line.",
 	}, func(_ context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 		sessionID, err := parseLogURI(req.Params.URI)
 		if err != nil {
@@ -83,6 +117,16 @@ func RegisterResources(s *mcp.Server, reg *Registry) {
 		if err != nil {
 			return nil, err
 		}
+		// The URI is addressed by session because that is how a caller reaches it, but
+		// the FILE is process-global: debuglog keeps a single active path, so every
+		// session in this process writes to it. Saying "this session's log" made the
+		// resource sound isolated when it is not — a second session's conversation and
+		// tool activity are in the same file, and a caller treating grep as a boundary
+		// would be trusting a convention rather than a mechanism.
+		//
+		// The honest near-term answer is to name the scope and default MaxSessions to 1.
+		// Real isolation needs a per-runtime logger rather than a package-global
+		// singleton, which is a change to internal/debuglog, not to this file.
 		path := sess.Facts().LogPath
 		if path == "" {
 			return nil, fmt.Errorf(
@@ -101,17 +145,64 @@ func RegisterResources(s *mcp.Server, reg *Registry) {
 	})
 }
 
-// parseRunURI extracts the ids from daintree://session/{s}/run/{r}.
-func parseRunURI(uri string) (sessionID, runID string, err error) {
+// transcriptPage is one page of a run's timeline. It embeds the ordinary run shape so a
+// caller that already parses a poll response can parse this too, and adds the three
+// fields that make paging usable: where to continue, how much is left, and whether this
+// page is the end.
+type transcriptPage struct {
+	RunOutput
+	// Remaining is events past this page. It duplicates withheldEvents deliberately —
+	// the name a paging caller looks for is "remaining", and the name a polling caller
+	// looks for is "withheld".
+	Remaining int `json:"remaining"`
+	// Complete says this page reached the end of the retained timeline AS OF the read.
+	// RETAINED, not produced: a run pruned from the session's history is gone
+	// regardless, and a live run can grow after the page was taken — which is why a
+	// caller polling a running run should re-read from nextSeq rather than stopping on
+	// complete once.
+	Complete bool `json:"complete"`
+}
+
+// runPage is the paging request parsed off a transcript URI.
+type runPage struct {
+	fromSeq int
+	limit   int
+}
+
+// parseRunURI extracts the ids and any paging query from
+// daintree://session/{s}/run/{r}[?fromSeq=N&limit=M].
+func parseRunURI(uri string) (sessionID, runID string, page runPage, err error) {
+	page = runPage{limit: MaxPollEvents}
+	if raw, query, found := strings.Cut(uri, "?"); found {
+		uri = raw
+		values, perr := url.ParseQuery(query)
+		if perr != nil {
+			return "", "", page, fmt.Errorf("transcript URI has an unparseable query: %w", perr)
+		}
+		if v := values.Get("fromSeq"); v != "" {
+			n, cerr := strconv.Atoi(v)
+			if cerr != nil || n < 0 {
+				return "", "", page, fmt.Errorf("fromSeq must be a non-negative integer, got %q", v)
+			}
+			page.fromSeq = n
+		}
+		if v := values.Get("limit"); v != "" {
+			n, cerr := strconv.Atoi(v)
+			if cerr != nil || n < 0 {
+				return "", "", page, fmt.Errorf("limit must be a non-negative integer, got %q", v)
+			}
+			page.limit = clampPageSize(n, MaxPollEvents, MaxPollEvents)
+		}
+	}
 	rest, ok := strings.CutPrefix(uri, "daintree://session/")
 	if !ok {
-		return "", "", fmt.Errorf("not a daintree run URI: %q", uri)
+		return "", "", page, fmt.Errorf("not a daintree run URI: %q", uri)
 	}
 	sessionID, rest, ok = strings.Cut(rest, "/run/")
 	if !ok || sessionID == "" || rest == "" {
-		return "", "", fmt.Errorf("expected daintree://session/{sessionId}/run/{runId}, got %q", uri)
+		return "", "", page, fmt.Errorf("expected daintree://session/{sessionId}/run/{runId}, got %q", uri)
 	}
-	return sessionID, rest, nil
+	return sessionID, rest, page, nil
 }
 
 // parseLogURI extracts the id from daintree://session/{s}/log.

@@ -4,7 +4,7 @@ package mcp
 //
 // Every subsystem in the assistant talks to Daintree through ONE *mcp.Client
 // (the daemon watcher ticks, the async coordinator's 1s poll, in-turn tool
-// dispatch including awaitAll/extract poll loops, the cockpit's preview poller,
+// dispatch including awaitAll/extract poll loops, the attached session's preview poller,
 // boot reconcile, doctor). None of those callers coordinate with each other, so
 // their independent "cheap" reads can align into a burst — e.g. ten due
 // watchers fanning out on the same 3s tick while the async coordinator and the

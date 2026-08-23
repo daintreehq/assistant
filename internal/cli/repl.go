@@ -14,6 +14,7 @@ import (
 	"github.com/daintreehq/assistant/internal/commands"
 	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/mcp"
+	"github.com/daintreehq/assistant/internal/redact"
 	"github.com/daintreehq/assistant/internal/tools"
 )
 
@@ -104,7 +105,7 @@ func startRepl(ctx context.Context, a *app.App) int {
 		r.Line(r.Gray("· " + line))
 	}
 	if !st.Connected {
-		// Same split the cockpit makes (internal/ui/view.go mcpDegradedView): /reconnect
+		// Same split the attached session makes (internal/ui/view.go mcpDegradedView): /reconnect
 		// retries a dropped link, a session Daintree closed or replaced needs a fresh token
 		// that only reopening the panel supplies, and with no endpoint configured at all
 		// there is nothing for /reconnect to retry.
@@ -162,25 +163,29 @@ func startRepl(ctx context.Context, a *app.App) int {
 }
 
 // replConfirmPhrase is the word the human must type to approve a typed-confirm
-// action in the classic REPL. It matches internal/ui's confirmPhrase so git/
+// action in the line REPL. It matches internal/ui's confirmPhrase so git/
 // system actions are equally hard to approve on either surface — keep in sync.
 const replConfirmPhrase = "confirm"
 
 // buildConfirmFunc builds the classic-REPL approval handler. It mirrors the
-// cockpit's two-tier friction off the safety gate's verdict (req.NeedsTypedConfirm):
+// attached session's two-tier friction off the safety gate's verdict (req.NeedsTypedConfirm):
 // the riskiest git/system actions demand the human type "confirm" (not a bare y),
 // while everything else keeps the single-key [y/N] prompt. Extracted from the
 // inline closure so the typed-confirm branch is unit-testable without a real stdin.
 //
 // Known limitation: a Ctrl-C WHILE this prompt is waiting for input does NOT cancel
-// the turn — the classic REPL runs in cooked mode, so the blocking line read can't
-// be interrupted by a signal (no raw-mode key handling here, unlike the cockpit).
+// the turn — the line REPL runs in cooked mode, so the blocking line read can't
+// be interrupted by a signal (no raw-mode key handling here, unlike the attached session).
 // The decision is reached by typing n / Enter (declines, the safe default); Ctrl-C
 // takes effect once control returns to the main prompt loop.
 func buildConfirmFunc(r *render.Renderer, ask func(string) string) func(context.Context, tools.ConfirmRequest) (bool, error) {
 	return func(_ context.Context, req tools.ConfirmRequest) (bool, error) {
+		// Same confirm-boundary invariant the host applies: mask credentials BEFORE
+		// truncating. A confirm request is built from the dispatch arguments and never
+		// passes through the EventSink's source-side sanitization, so without this a
+		// secret in the args is printed verbatim to the terminal (and its scrollback).
 		r.Warn(r.Bold(req.ToolName) + " (" + string(req.Risk) + ") wants to run:\n     " +
-			req.Summary + "\n     args: " + render.Truncate(string(req.Args), 200))
+			req.Summary + "\n     args: " + render.Truncate(redact.String(string(req.Args)), 200))
 		if req.NeedsTypedConfirm {
 			// Irreversible (git/system): require the typed phrase, never a single key.
 			r.Warn(`This action is irreversible.`)
@@ -310,7 +315,7 @@ func printBanner(r *render.Renderer, a *app.App, connected bool, transport strin
 		mcpLine = "connected (" + transport + ")"
 	}
 	tierLine := "tier      " + string(a.Tier())
-	// The cockpit raises a persistent AUTO-APPROVE badge; the classic REPL has no live
+	// The attached session raises a persistent AUTO-APPROVE badge; the line REPL has no live
 	// footer to put one in, so it goes on the tier line — which is where it belongs
 	// anyway, since it is a statement ABOUT the tier: the gate is unchanged, but nothing
 	// inside it will ask first. Without this, `--classic` was the one surface where a

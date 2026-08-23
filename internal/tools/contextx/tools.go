@@ -310,7 +310,7 @@ func newReadTool(deps Deps) tools.Tool {
 			// Summary is a concise descriptor, NOT the scrollback itself. The raw
 			// content lives in result.content (what the model reads when it wants the
 			// verbatim text); echoing it into the summary too both doubled the model's
-			// context and let the cockpit render a slice of garbled terminal bytes as
+			// context and let the attached session render a slice of garbled terminal bytes as
 			// the activity-row detail. Keep the summary clean and bounded.
 			summary := fmt.Sprintf("Read %d line(s) (%d chars) from terminal.", lineCount, len([]rune(content)))
 			if content == "" {

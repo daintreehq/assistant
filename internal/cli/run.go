@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"runtime"
 	"strings"
@@ -26,28 +27,30 @@ import (
 	"github.com/mattn/go-isatty"
 )
 
-// CockpitRunner is the SEAM the (future) Bubble Tea cockpit registers. main.go
-// installs the real runner; until then DefaultCockpitRunner errors so the
-// interactive path falls back to the classic REPL. Signature: build the cockpit
-// over an already-constructed App and block until it exits.
-type CockpitRunner func(ctx context.Context, a *app.App) error
-
-// DefaultCockpitRunner is the stub: the cockpit wave is not built yet.
-func DefaultCockpitRunner(context.Context, *app.App) error {
-	return errors.New("cockpit not built")
-}
-
 // Options are the parsed CLI flags + the one-shot prompt.
 type Options struct {
 	McpURL   string
 	McpToken string
-	Project  string
-	Tier     string
+	// McpTokenFile is a PATH to the Daintree MCP bearer, for a caller that must not put
+	// the token in an argument — the MCP server surface, where the argument would be
+	// chosen by a model. Read and validated on the same fatal path as --api-key-file.
+	McpTokenFile string
+	// NoInheritedMcpToken / NoInheritedAPIKey drop a credential inherited from this
+	// process's own environment. Set by the MCP server when a session redirects an
+	// endpoint without supplying its own credential for it — an inherited bearer must
+	// never follow a URL a model chose.
+	NoInheritedMcpToken bool
+	NoInheritedAPIKey   bool
+	Project             string
+	Tier                string
 	// Offline/AutoApprove/DebugLog are POINTERS: nil means the flag was not passed and
 	// the environment decides, false means it was explicitly turned OFF and must beat
 	// the environment. Collapsing those two cases would let DAINTREE_ASSISTANT_AUTO_APPROVE=1
 	// survive an explicit --auto-approve=false.
-	Offline   *bool
+	Offline *bool
+	// Classic is a DEPRECATED NO-OP — accepted and ignored. The line REPL it used to
+	// select is now the only interactive front end (the Bubble Tean attached session was removed
+	// when Daintree took over rendering), so the flag no longer chooses anything.
 	Classic   bool
 	JSON      bool
 	Inline    bool // DEPRECATED NO-OP — accepted and ignored
@@ -60,6 +63,12 @@ type Options struct {
 	// carry the SAME trust as the env vars they shadow (argv is as trusted as env) and
 	// win over them, per the FirstString order in config.LoadConfig.
 	BackendURL string
+	// AllowDelegatedApprovals is the `mcp --stdio` opt-in for approvals:"delegate",
+	// where the CALLING AGENT settles each confirmation rather than a human. It is a
+	// launch decision because only the operator knows whether the agent on the other
+	// end of the pipe is a person's terminal or an unattended loop over a repository
+	// that could steer it. Ignored by every other entry point.
+	AllowDelegatedApprovals bool
 	// APIKeyFile is a path, never the key itself: argv is world-readable through `ps`,
 	// so there is deliberately no --api-key. Read once, in overridesFromOptions.
 	APIKeyFile string
@@ -69,7 +78,7 @@ type Options struct {
 	PromptFile string
 	// MultiTurn runs a whole CONVERSATION in one process: one prompt per stdin line,
 	// each its own turn against the same session, all of it one JSONL transcript. It
-	// requires --json (without it the classic REPL on piped stdin is already exactly
+	// requires --json (without it the line REPL on piped stdin is already exactly
 	// this) and refuses to share a run with either single-prompt source, since two
 	// prompt spellings at once is a mistake rather than a precedence question.
 	MultiTurn bool
@@ -100,15 +109,12 @@ type Options struct {
 	Timeout time.Duration
 
 	// RunScheduler opts a one-shot into running the scheduler + async coordinator for
-	// the life of the run, matching what `mcp --stdio` and the cockpit already do. It
+	// the life of the run, matching what `mcp --stdio` and `host --stdio` already do. It
 	// is off by default because taking the lease and ticking is a bigger commitment
 	// than a scripted query should make by accident; the flag path requires a positive
 	// Timeout so an unsettleable job cannot hang a harness forever. Routing-only, like
 	// Timeout — never carried into config.
 	RunScheduler bool
-
-	// Cockpit is the runner seam (defaults to DefaultCockpitRunner when nil).
-	Cockpit CockpitRunner
 }
 
 // overridesFromOptions maps routing-irrelevant flags to config overrides. classic/
@@ -146,6 +152,15 @@ func overridesFromOptions(opts Options) (config.ConfigOverrides, error) {
 			return config.ConfigOverrides{}, err
 		}
 		o.APIKey = &key
+	}
+	o.NoInheritedMcpToken = opts.NoInheritedMcpToken
+	o.NoInheritedAPIKey = opts.NoInheritedAPIKey
+	if opts.McpTokenFile != "" {
+		token, err := readMcpTokenFile(opts.McpTokenFile)
+		if err != nil {
+			return config.ConfigOverrides{}, err
+		}
+		o.McpToken = &token
 	}
 	// A NON-NIL ProjectInstructions is the provenance signal every auto-load path below
 	// checks: it means a caller named the file explicitly, so no DAINTREE.md discovery
@@ -222,6 +237,87 @@ func readAPIKeyFile(path string) (string, error) {
 	// one, and a key that arrives by file must not be the one that leaks.
 	redact.RegisterSecret(key)
 	return key, nil
+}
+
+// osExit is os.Exit behind a seam so the watchdog can be tested without killing the
+// test binary.
+var osExit = os.Exit
+
+// startHardTimeoutWatchdog arms the second stage of --timeout and returns a function
+// that disarms it. See domain.HardTimeoutGrace for why one stage is not enough.
+//
+// It writes to stderr, never stdout: --json's whole contract is that stdout carries only
+// protocol frames, and a watchdog that violated it to announce itself would corrupt the
+// very stream a harness is parsing. The terminal `result` line is already lost in this
+// path — that is what makes it a failure worth a distinct exit code rather than a
+// cancellation.
+func startHardTimeoutWatchdog(timeout time.Duration, diag io.Writer, exit func(int)) func() {
+	// Saturate rather than wrap. A timeout within the grace of MaxInt64 would overflow
+	// into a negative deadline and fire the watchdog IMMEDIATELY — killing a run that
+	// had just asked for effectively no limit, which is the exact opposite of what was
+	// requested.
+	fireAfter := timeout + domain.HardTimeoutGrace
+	if timeout > 0 && fireAfter < timeout {
+		fireAfter = time.Duration(math.MaxInt64)
+	}
+	timer := time.AfterFunc(fireAfter, func() {
+		// The diagnostic is BEST-EFFORT and must not gate the exit. stderr can be a
+		// pipe nobody is draining, and a blocking Fprintf there would leave the process
+		// alive forever — the watchdog would have become another way to hang, which is
+		// precisely the failure it exists to end. Write on a separate goroutine, give it
+		// a moment, then exit regardless of whether it got through.
+		written := make(chan struct{})
+		go func() {
+			defer close(written)
+			fmt.Fprintf(diag,
+				"hard timeout: --timeout (%s) expired and the run did not unwind within %s; killing the process (exit %d). "+
+					"Something ignored cancellation — a tool, a wedged read, or a syscall in flight.\n",
+				timeout, domain.HardTimeoutGrace, domain.OneShotExitCode.HardTimeout)
+		}()
+		select {
+		case <-written:
+		case <-time.After(hardTimeoutDiagnosticGrace):
+		}
+		exit(domain.OneShotExitCode.HardTimeout)
+	})
+	return func() { timer.Stop() }
+}
+
+// hardTimeoutDiagnosticGrace bounds the watchdog's own diagnostic write. Short on
+// purpose: the message is a courtesy, the exit is the contract.
+const hardTimeoutDiagnosticGrace = 2 * time.Second
+
+// readMcpTokenFile reads the Daintree MCP bearer from a file.
+//
+// A path rather than a value, and for a sharper reason than the API key: this bearer
+// authorizes system-tier Daintree actions for its whole validity window, and its one
+// caller is the MCP server, where an inline argument would be chosen by a MODEL — and so
+// could be echoed by a prompt injection, logged by the MCP client, or captured by traces
+// outside this repository. The runtime already stopped writing it to its own debug log
+// on exactly that reasoning.
+//
+// Failure is FATAL, never a fall-through to the environment: a caller that named a token
+// file meant to bind this session to THAT token, and silently using another one would
+// point the assistant at a different Daintree window behind a successful-looking run.
+func readMcpTokenFile(path string) (string, error) {
+	// Same bounded read as the key file — a caller-supplied path need not be a regular
+	// file, and os.Open blocks on a FIFO before any LimitReader could apply.
+	token, err := readBoundedFile(path, backend.MaxKeyLength+1024, "--mcp-token-file", false)
+	if err != nil {
+		return "", err
+	}
+	// Not ValidateKeyShape: that check is about the BACKEND's key format. What matters
+	// here is that the value can be a header — a stray newline or control byte would
+	// otherwise surface as Go's opaque "invalid header field value" on every MCP call.
+	for _, r := range token {
+		if r < 0x21 || r == 0x7f {
+			return "", fmt.Errorf("--mcp-token-file %s: the token contains a space or control character; it must be a single line", path)
+		}
+	}
+	// Registered before it is used anywhere, so it is masked in the debug log from the
+	// first line written — app.Create does the same for the env-supplied one.
+	redact.RegisterSecret(token)
+	return token, nil
 }
 
 // maxPromptFileBytes bounds --prompt-file. A prompt is prose, not a payload: a megabyte
@@ -412,6 +508,16 @@ func RunOneShot(ctx context.Context, opts Options) int {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
 		defer cancel()
+		// STAGE TWO: a hard wall-clock bound. The context deadline above is
+		// cooperative, and a context only bounds code that watches it — a syscall
+		// already in flight, a tool that ignores cancellation, a wedged `-` stdin read.
+		// For a CI runner whose whole job is to finish deterministically, "usually
+		// stops" is not a bound. So if the process is still alive a grace period after
+		// its own deadline, kill it with a distinct exit code instead of hanging the
+		// job. The normal path never reaches this: a clean cancel has to flush the
+		// terminal result, release the lease and close the store, and the grace is sized
+		// so that killing mid-flush is not the outcome we trade a hang for.
+		defer startHardTimeoutWatchdog(opts.Timeout, os.Stderr, osExit)()
 	}
 
 	// reportError routes a setup failure to the active output contract. A failure that
@@ -548,7 +654,7 @@ func RunOneShot(ctx context.Context, opts Options) int {
 	// skips the hook entirely when AutoApprove is set, because a one-shot run is still
 	// the `main` actor. The net effect is that an inherited
 	// DAINTREE_ASSISTANT_AUTO_APPROVE=1 makes a scripted run perform tier-allowed
-	// mutations with nothing on screen to say so. The cockpit has a persistent badge for
+	// mutations with nothing on screen to say so. The attached session has a persistent badge for
 	// exactly this; a scripted run has no footer, so it gets a loud line instead —
 	// on stderr, and as a structured event in JSON mode, so neither output contract
 	// breaks.
@@ -746,17 +852,17 @@ func RunOneShot(ctx context.Context, opts Options) int {
 	return domain.OneShotExitCode.Success
 }
 
-// RunInteractive routes to the cockpit (TTY + !classic) or the classic REPL.
+// RunInteractive runs the line REPL — the only interactive front end. Daintree
+// renders the assistant natively over `host --stdio`; this path exists for headless
+// operators (a shell, an SSH session, a piped script), not as a product surface.
 func RunInteractive(ctx context.Context, opts Options) int {
 	return runInteractive(ctx, opts, stdinIsTTY() && stdoutIsTTY())
 }
 
 // runInteractive is the testable core of RunInteractive. ttyOK is measured at the
-// process boundary by RunInteractive; keeping it explicit here lets the cockpit seam
-// be exercised without requiring a pseudoterminal in unit tests.
+// process boundary by RunInteractive; keeping it explicit here lets the TTY-only
+// behaviors (schema auto-reset) be exercised without a pseudoterminal in unit tests.
 func runInteractive(ctx context.Context, opts Options, ttyOK bool) int {
-	wantsCockpit := !opts.Classic && ttyOK
-
 	r := render.Stdout()
 	overrides, err := buildOverrides(opts, r)
 	if err != nil {
@@ -796,7 +902,7 @@ func runInteractive(ctx context.Context, opts Options, ttyOK bool) int {
 	debuglog.BootTrace("boot.app.created")
 	// Negotiate `--skill` BEFORE adopting, and before either front end opens. A no-op
 	// without pins; with them, a failure aborts the launch rather than dropping the
-	// operator into a cockpit whose every turn silently ignores the runbook they named.
+	// operator into an attached session whose every turn silently ignores the runbook they named.
 	//
 	// Ordered ahead of AdoptAsCurrentSession deliberately. Adoption writes the project's
 	// durable current-session pointer and shutdown does not put back what was there, so
@@ -816,32 +922,6 @@ func runInteractive(ctx context.Context, opts Options, ttyOK bool) int {
 	// This conversation is now the project's current session — the one the
 	// daemon's detached wake turns continue after we exit.
 	a.AdoptAsCurrentSession()
-
-	if wantsCockpit {
-		// Cockpit: open the debug log (header badge shows it, print nothing).
-		debuglog.StartDebugLog(debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir},
-			map[string]any{"sessionId": a.SessionID, "project": a.Config.ProjectPath})
-		runner := opts.Cockpit
-		if runner == nil {
-			runner = DefaultCockpitRunner
-		}
-		if cerr := runner(ctx, a); cerr != nil {
-			// A cancelled launch context is a process shutdown request (SIGTERM on the
-			// cockpit path). Bubble Tea reports that cancellation as a runner error; it
-			// must not be mistaken for an unavailable cockpit and resurrect the process
-			// in a classic REPL detached from the cancelled context.
-			if ctx.Err() != nil {
-				_ = a.Shutdown()
-				return domain.OneShotExitCode.Cancelled
-			}
-			// Cockpit unavailable → fall back to the classic REPL.
-			render.Stdout().Warn("cockpit unavailable (" + cerr.Error() + ") — falling back to the classic REPL")
-			announceDebugLog(a)
-			return startRepl(ctx, a)
-		}
-		_ = a.Shutdown()
-		return 0
-	}
 
 	announceDebugLog(a)
 	return startRepl(ctx, a)

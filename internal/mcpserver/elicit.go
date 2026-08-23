@@ -17,6 +17,13 @@ import (
 // would have made approvals unusable for everyone else. So every failure — unsupported,
 // errored, declined, cancelled, timed out — simply leaves the approval parked for
 // daintree.approvals/daintree.approve to handle, exactly as if this file did not exist.
+//
+// WHO ANSWERS IS UNKNOWN HERE. A client may render an elicitation to a person, or hand it
+// straight back to the model. The protocol carries no attestation either way, so a
+// decision arriving through this path cannot be claimed as human authorization — nor
+// assumed to be the caller agent. That is why the session's DecisionAuthority reports
+// "caller-agent" rather than anything stronger: it describes the guaranteed floor, not a
+// hopeful reading of what some client might have done.
 
 // approvalElicitSchema is the form the client renders: one boolean. Deliberately
 // minimal — MCP allows only top-level properties, and anything richer would be a
@@ -37,15 +44,28 @@ var approvalElicitSchema = &jsonschema.Schema{
 // parent is the server lifetime; each ask is additionally bounded by the approval's own
 // timeout, so a client that accepts the request and never answers costs one goroutine
 // for at most that long rather than for the session's life.
-func elicitNotifier(ss *mcp.ServerSession, approvals *Approvals, timeout time.Duration) func(PendingApproval) {
+func elicitNotifier(parent context.Context, ss *mcp.ServerSession, approvals *Approvals, timeout time.Duration) func(PendingApproval) {
 	if ss == nil {
 		return nil
+	}
+	if parent == nil {
+		parent = context.Background()
 	}
 	if timeout <= 0 {
 		timeout = DefaultApprovalTimeout
 	}
 	return func(pa PendingApproval) {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		// Bounded HERE as well as on the tool surfaces. The elicitation message
+		// interpolates the argument preview, so an unbounded one reached the client
+		// through this path regardless of what the listing and run projections capped —
+		// a bound that only some exits honour is not a bound.
+		pa = boundedApproval(pa)
+		// Derived from the SERVER lifetime, not Background. Background meant a close or
+		// a server shutdown left this goroutine alive until its timer expired — bounded,
+		// so not catastrophic, but it outlived the thing it was asking on behalf of and
+		// contradicted the lifetime this function's own comment claims. Shutdown now
+		// collapses every outstanding elicitation instead of waiting minutes for timers.
+		ctx, cancel := context.WithTimeout(parent, timeout)
 		defer cancel()
 
 		res, err := ss.Elicit(ctx, &mcp.ElicitParams{
@@ -78,13 +98,31 @@ func elicitNotifier(ss *mcp.ServerSession, approvals *Approvals, timeout time.Du
 
 // elicitMessage is what the client shows. It leads with the consequence, because that is
 // what a decision is actually made on; the tool name alone is not enough to judge.
+//
+// It also carries the typed-confirm verdict. Whoever the client puts in front of this
+// form — the driving model, or a person, the server cannot tell which — is answering a
+// single boolean, and MCP allows only top-level properties so there is nowhere richer to
+// put it. Leaving it out made an irreversible action and an ordinary one arrive as
+// exactly the same one-click question, which is the distinction the verdict exists to
+// preserve.
 func elicitMessage(pa PendingApproval) string {
 	msg := fmt.Sprintf("The Daintree assistant wants to run %s (%s risk).", pa.Tool, pa.Risk)
+	if pa.NeedsTypedConfirm {
+		msg += "\n\nTHIS ACTION IS IRREVERSIBLE and the safety layer flagged it as needing more " +
+			"than a click. Approve it only if you are certain."
+	}
 	if pa.Consequence != "" {
 		msg += "\n\nWhat it will do: " + pa.Consequence
 	}
 	if pa.Args != "" {
 		msg += "\n\nArguments: " + pa.Args
 	}
-	return msg
+	// The WHOLE message is bounded, not just the fields that went into it. This is a
+	// dialog a client renders — three separately-capped fields still concatenate into
+	// something no one can read, and the elicitation schema gives the answerer one
+	// boolean regardless of how much prose precedes it.
+	return truncateBytes(msg, maxElicitMessageBytes)
 }
+
+// maxElicitMessageBytes bounds the rendered approval prompt.
+const maxElicitMessageBytes = 4 << 10

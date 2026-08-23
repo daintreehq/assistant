@@ -198,7 +198,7 @@ func TestParseArgsCarriesMultiTurn(t *testing.T) {
 
 // TestParseArgsRejectsMultiTurnMisuse: --multi-turn is a third prompt source, so it
 // obeys the same "name one source" rule as the other two — and it insists on --json,
-// without which it would just be a worse spelling of the classic REPL on piped stdin.
+// without which it would just be a worse spelling of the line REPL on piped stdin.
 func TestParseArgsRejectsMultiTurnMisuse(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -667,5 +667,39 @@ func TestUsageDocumentsSkillFlags(t *testing.T) {
 		if !strings.Contains(buf.String(), want) {
 			t.Fatalf("usage does not mention %q:\n%s", want, buf.String())
 		}
+	}
+}
+
+// --allow-delegated-approvals decides whether the agent on the other end of an MCP pipe
+// may approve mutations. A flag that quietly does nothing on the route it was typed
+// against looks exactly like one that worked — which is the whole reason --skill does not
+// follow --timeout's "silently ignored elsewhere" precedent either.
+func TestAllowDelegatedApprovalsIsMCPOnly(t *testing.T) {
+	parsed, err := parseArgs([]string{"--allow-delegated-approvals", "mcp", "--stdio"})
+	if err != nil {
+		t.Fatalf("the flag was refused on its own route: %v", err)
+	}
+	if parsed.Route != routeMCP {
+		t.Fatalf("route = %v, want routeMCP", parsed.Route)
+	}
+	if !parsed.Options.AllowDelegatedApprovals {
+		t.Error("the flag did not reach Options")
+	}
+
+	for _, args := range [][]string{
+		{"--allow-delegated-approvals", "host", "--stdio"},
+		{"--allow-delegated-approvals", "doctor"},
+		{"--allow-delegated-approvals", "--json", "what is ready?"},
+		{"--allow-delegated-approvals"},
+	} {
+		if _, err := parseArgs(args); err == nil {
+			t.Errorf("%v silently accepted an MCP-only flag", args)
+		}
+	}
+
+	// Help still answers: refusing it because of a misplaced flag would withhold the one
+	// output that says where the flag belongs.
+	if _, err := parseArgs([]string{"--allow-delegated-approvals", "--help"}); err != nil {
+		t.Errorf("--help was refused: %v", err)
 	}
 }

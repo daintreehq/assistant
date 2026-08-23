@@ -165,7 +165,7 @@ func TestTerminalRenameWrapper(t *testing.T) {
 }
 
 // A disconnected MCP must point the model at /reconnect — the recovery command
-// that works in both the REPL and the cockpit (issue #211). Covers the shared
+// that works in both the REPL and the host (issue #211). Covers the shared
 // passthrough plus the three discovery tools that report disconnection.
 func TestMCPUnavailableErrorsNameReconnect(t *testing.T) {
 	disc := &fakeMCP{connected: false}

@@ -4,25 +4,51 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // HostEvent is the outbound (host → Daintree) wire union. Every event carries a
-// "type" discriminator + "sessionId"; the Go encoder writes each as one NDJSON
-// line on stdout. Concrete event structs implement encode() which injects "type"
-// and "sessionId" so callers never repeat them. Field names are verbatim wire.
+// "type" discriminator, a "sessionId", and a monotonic "seq"; the Go encoder writes
+// each as one NDJSON line on stdout. Concrete event structs implement encode(),
+// which injects all three so callers never repeat them. Field names are verbatim wire.
 type HostEvent interface {
-	// encode returns the full NDJSON object (with type + sessionId) for stdout.
-	encode(sessionID string) ([]byte, error)
+	// encode returns the full NDJSON object (type + sessionId + seq) for stdout.
+	encode(sessionID string, seq uint64) ([]byte, error)
+}
+
+// shrinkable is implemented by an event whose payload can be reduced to fit the frame
+// cap. See transport.stampAndEnqueue: without it, an oversize frame is simply not sent.
+//
+// Only events with an unbounded field need it, and only turn:end genuinely matters —
+// it is the TERMINAL frame, so a host that never receives it never learns the turn
+// ended and waits forever on a turn that is over.
+type shrinkable interface {
+	// shrink returns a copy whose payload fits within budget bytes of content, and
+	// whether shrinking was possible at all.
+	shrink(budget int) (HostEvent, bool)
+}
+
+// encodeSeq is the transport's entry point: it stamps seq onto ev. Kept as a free
+// function so the transport does not need to know the concrete event type.
+func encodeSeq(ev HostEvent, sessionID string, seq uint64) ([]byte, error) {
+	return ev.encode(sessionID, seq)
 }
 
 // marshalEvent serializes a flat map as one JSON object. Centralizes the "+type
-// +sessionId" injection so every event encodes identically.
-func marshalEvent(typ, sessionID string, fields map[string]any) ([]byte, error) {
-	obj := make(map[string]any, len(fields)+2)
+// +sessionId +seq" injection so every event encodes identically.
+//
+// seq is monotonic from 1 across the whole session and is the v3 contract that makes
+// a lost frame DETECTABLE: v2 dropped frames silently under load with no way for a
+// consumer to notice, which is unusable for a rendered transcript. A consumer that
+// sees a gap knows its transcript is incomplete and can say so instead of showing
+// corrupted prose as if it were the answer.
+func marshalEvent(typ, sessionID string, seq uint64, fields map[string]any) ([]byte, error) {
+	obj := make(map[string]any, len(fields)+3)
 	obj["type"] = typ
 	obj["sessionId"] = sessionID
+	obj["seq"] = seq
 	for k, v := range fields {
 		obj[k] = v
 	}
@@ -40,17 +66,37 @@ func marshalEvent(typ, sessionID string, fields map[string]any) ([]byte, error) 
 
 // EvReady — host:ready. resumedSessionId only set when the descriptor carried a
 // resumeSessionId.
+//
+// Version is the ENGINE build (`daintree-assistant --version`), distinct from
+// ProtocolVersion. A host needs both and they answer different questions: the
+// protocol version decides whether the two peers can talk at all, while the build
+// version is what a "your assistant is out of date" prompt, a bug report, and any
+// feature gate finer-grained than a protocol bump have to key on. Daintree previously
+// had to shell out to `--version` separately to learn it.
+//
+// AutoApprove reports that this session runs mutating tools with no confirmation
+// (DAINTREE_ASSISTANT_AUTO_APPROVE). It was previously mentioned only on stderr, which
+// a protocol-only consumer never reads — so a host had no way to show that approvals
+// are switched off, which is exactly the state a user most needs to see.
 type EvReady struct {
 	ProtocolVersion  int
 	ResumedSessionID string
+	Version          string
+	AutoApprove      bool
 }
 
-func (e EvReady) encode(sid string) ([]byte, error) {
-	f := map[string]any{"protocolVersion": e.ProtocolVersion}
+func (e EvReady) encode(sid string, seq uint64) ([]byte, error) {
+	f := map[string]any{
+		"protocolVersion": e.ProtocolVersion,
+		"autoApprove":     e.AutoApprove,
+	}
 	if e.ResumedSessionID != "" {
 		f["resumedSessionId"] = e.ResumedSessionID
 	}
-	return marshalEvent("host:ready", sid, f)
+	if e.Version != "" {
+		f["version"] = e.Version
+	}
+	return marshalEvent("host:ready", sid, seq, f)
 }
 
 // EvTurnStart — turn:start.
@@ -60,8 +106,8 @@ type EvTurnStart struct {
 	StartedAt int64
 }
 
-func (e EvTurnStart) encode(sid string) ([]byte, error) {
-	return marshalEvent("turn:start", sid, map[string]any{
+func (e EvTurnStart) encode(sid string, seq uint64) ([]byte, error) {
+	return marshalEvent("turn:start", sid, seq, map[string]any{
 		"turnId":    e.TurnID,
 		"role":      string(e.Role),
 		"startedAt": e.StartedAt,
@@ -74,27 +120,91 @@ type EvTurnToken struct {
 	Chunk  string
 }
 
-func (e EvTurnToken) encode(sid string) ([]byte, error) {
-	return marshalEvent("turn:token", sid, map[string]any{
+func (e EvTurnToken) encode(sid string, seq uint64) ([]byte, error) {
+	return marshalEvent("turn:token", sid, seq, map[string]any{
 		"turnId": e.TurnID,
 		"chunk":  e.Chunk,
 	})
 }
 
 // EvTurnEnd — turn:end. Outcome optional.
+//
+// Content is the AUTHORITATIVE final text of the turn, and it is what makes the
+// transcript repairable. A consumer accumulates turn:token for liveness, then
+// REPLACES its buffer with this on turn:end — so a token frame lost to a wedged
+// stdout, a mid-stream reconnect, or a consumer's own dropped update self-heals
+// instead of leaving mangled prose on screen forever. v2 had no such field: its
+// only authority was the token stream it could not guarantee.
+//
+// It is omitted (not "") when the turn produced no visible text at all — a cancel
+// before first token, or a tool-only round — so a host can tell "nothing was said"
+// from "the answer was empty".
 type EvTurnEnd struct {
-	TurnID  string
-	EndedAt int64
-	Outcome TurnOutcomeClass
+	TurnID     string
+	EndedAt    int64
+	Outcome    TurnOutcomeClass
+	Content    string
+	HasContent bool
 }
 
-func (e EvTurnEnd) encode(sid string) ([]byte, error) {
+func (e EvTurnEnd) encode(sid string, seq uint64) ([]byte, error) {
 	f := map[string]any{"turnId": e.TurnID, "endedAt": e.EndedAt}
 	if e.Outcome != "" {
 		f["outcome"] = string(e.Outcome)
 	}
-	return marshalEvent("turn:end", sid, f)
+	if e.HasContent {
+		f["content"] = e.Content
+	}
+	return marshalEvent("turn:end", sid, seq, f)
 }
+
+// shrink cuts the authoritative content down so the terminal frame still FITS.
+//
+// The alternative, which is what happened before, is that the frame is refused for being
+// oversize and never sent at all — and turn:end is the frame that says the turn is over.
+// A host that does not receive it shows a turn running forever, over a conversation that
+// finished. Losing the tail of a very long answer is bad; losing the fact that the answer
+// exists is worse, and it is unrecoverable without restarting the session.
+//
+// The loss is NOT silent: the marker is inside the rendered content, where the person
+// reading the answer sees it. It goes in the content rather than a new field because the
+// frame shape is a cross-repository contract — Daintree validates these lines and a field
+// it does not know is a rejected frame, which would put us back to not delivering it.
+func (e EvTurnEnd) shrink(budget int) (HostEvent, bool) {
+	if !e.HasContent || len(e.Content) <= budget {
+		return e, false
+	}
+	// budget 0 is the last resort: emit the frame with the content REMOVED rather than
+	// not at all. HasContent stays true so the field is still present as an empty
+	// string — a host can then tell "the answer did not fit" from "the turn said
+	// nothing", which is the distinction HasContent exists to carry.
+	if budget <= 0 {
+		e.Content = truncationNote
+		return e, true
+	}
+	room := budget - len(truncationNote)
+	if room < 0 {
+		room = 0
+	}
+	cut := room
+	if cut > len(e.Content) {
+		cut = len(e.Content)
+	}
+	// Land on a rune boundary: a byte-exact cut through a multi-byte character is
+	// invalid UTF-8, and the JSON encoder would replace it rather than carry it.
+	for cut > 0 && !utf8.RuneStart(e.Content[cut]) {
+		cut--
+	}
+	e.Content = e.Content[:cut] + truncationNote
+	return e, true
+}
+
+// truncationNote is what a reader sees where the rest of an over-large answer would be.
+// It goes in the CONTENT rather than a new field because the frame shape is a
+// cross-repository contract, and a field Daintree does not know is a rejected frame —
+// which would put us back to not delivering the terminal frame at all.
+const truncationNote = "\n\n[This answer was too large for one protocol frame and has been cut here. " +
+	"The full text is in the run transcript.]"
 
 // EvToolStarted — tool:started. turnId optional.
 type EvToolStarted struct {
@@ -106,7 +216,7 @@ type EvToolStarted struct {
 	Danger      bool
 }
 
-func (e EvToolStarted) encode(sid string) ([]byte, error) {
+func (e EvToolStarted) encode(sid string, seq uint64) ([]byte, error) {
 	f := map[string]any{
 		"toolCallId":  e.ToolCallID,
 		"toolId":      e.ToolID,
@@ -117,7 +227,7 @@ func (e EvToolStarted) encode(sid string) ([]byte, error) {
 	if e.TurnID != "" {
 		f["turnId"] = e.TurnID
 	}
-	return marshalEvent("tool:started", sid, f)
+	return marshalEvent("tool:started", sid, seq, f)
 }
 
 // EvToolSettled — tool:settled. errorCode + turnId + asyncId optional.
@@ -131,12 +241,12 @@ type EvToolSettled struct {
 	TurnID     string
 	// AsyncID marks an ACCEPTED-but-still-running async operation (asy_…): the
 	// call settled but the work continues in the background, so a host must NOT
-	// render it as a finished success (the cockpit shows it as a distinct yellow
+	// render it as a finished success (the host shows it as a distinct yellow
 	// pending state). Empty for every ordinary synchronous result.
 	AsyncID string
 }
 
-func (e EvToolSettled) encode(sid string) ([]byte, error) {
+func (e EvToolSettled) encode(sid string, seq uint64) ([]byte, error) {
 	f := map[string]any{
 		"toolCallId": e.ToolCallID,
 		"toolId":     e.ToolID,
@@ -153,12 +263,12 @@ func (e EvToolSettled) encode(sid string) ([]byte, error) {
 	if e.AsyncID != "" {
 		f["asyncId"] = e.AsyncID
 	}
-	return marshalEvent("tool:settled", sid, f)
+	return marshalEvent("tool:settled", sid, seq, f)
 }
 
 // EvApprovalRequested — approval:requested. turnId optional. riskClass,
 // consequence, and argsSummary are optional display context (parity with a local
-// cockpit approval); each is omitted from the wire object when empty.
+// host approval); each is omitted from the wire object when empty.
 type EvApprovalRequested struct {
 	ApprovalID  string
 	ToolID      string
@@ -168,9 +278,19 @@ type EvApprovalRequested struct {
 	RiskClass   domain.RiskClass
 	Consequence string
 	ArgsSummary string
+	// NeedsTypedConfirm is the safety layer's OWN verdict that this action is
+	// irreversible and must not be approvable by a single click — the host is expected
+	// to demand a typed phrase instead.
+	//
+	// It is carried explicitly rather than left for the host to re-derive from
+	// RiskClass. A host that reimplements "which risk classes are irreversible" has
+	// forked a security rule into a second codebase, where it can drift silently and
+	// in the permissive direction. safety.NeedsTypedConfirm stays the single source of
+	// truth; this field is its answer.
+	NeedsTypedConfirm bool
 }
 
-func (e EvApprovalRequested) encode(sid string) ([]byte, error) {
+func (e EvApprovalRequested) encode(sid string, seq uint64) ([]byte, error) {
 	f := map[string]any{
 		"approvalId":  e.ApprovalID,
 		"toolId":      e.ToolID,
@@ -189,7 +309,10 @@ func (e EvApprovalRequested) encode(sid string) ([]byte, error) {
 	if e.ArgsSummary != "" {
 		f["argsSummary"] = e.ArgsSummary
 	}
-	return marshalEvent("approval:requested", sid, f)
+	// Always present, never omitted-when-false: a host must be able to tell "this
+	// action does not need typed confirmation" from "this peer is too old to say".
+	f["needsTypedConfirm"] = e.NeedsTypedConfirm
+	return marshalEvent("approval:requested", sid, seq, f)
 }
 
 // EvApprovalDecided — approval:decided.
@@ -199,12 +322,91 @@ type EvApprovalDecided struct {
 	DecidedAt  int64
 }
 
-func (e EvApprovalDecided) encode(sid string) ([]byte, error) {
-	return marshalEvent("approval:decided", sid, map[string]any{
+func (e EvApprovalDecided) encode(sid string, seq uint64) ([]byte, error) {
+	return marshalEvent("approval:decided", sid, seq, map[string]any{
 		"approvalId": e.ApprovalID,
 		"decision":   string(e.Decision),
 		"decidedAt":  e.DecidedAt,
 	})
+}
+
+// EvQuestionRequested — question:requested. The model needs a finite user decision
+// (user.askMultipleChoice) and the turn is BLOCKED until the host answers.
+//
+// It is a separate event from approval:requested because the two decisions are not the
+// same shape. An approval is "may I do this?" and has one safe default — no. A question
+// is "which of these did you mean?" and has no safe default at all: inventing one
+// answers on the user's behalf. A host that had only the approval frames would have to
+// render a yes/no sheet for a question with four answers, or the runtime would fall back
+// to prose and end the turn — which is exactly what the headless surfaces did before
+// this event existed.
+type EvQuestionRequested struct {
+	QuestionID  string
+	Question    string
+	Options     []QuestionOption
+	Default     int
+	RequestedAt int64
+	TurnID      string
+	ToolCallID  string
+}
+
+// QuestionOption is one labelled choice. The label (A, B, C…) is assigned by the CLI,
+// never by the model, so the model cannot collide with or misspell them.
+type QuestionOption struct {
+	Label string `json:"label"`
+	Text  string `json:"text"`
+}
+
+func (e EvQuestionRequested) encode(sid string, seq uint64) ([]byte, error) {
+	opts := make([]map[string]any, 0, len(e.Options))
+	for _, o := range e.Options {
+		opts = append(opts, map[string]any{"label": o.Label, "text": o.Text})
+	}
+	f := map[string]any{
+		"questionId":  e.QuestionID,
+		"question":    e.Question,
+		"options":     opts,
+		"default":     e.Default,
+		"requestedAt": e.RequestedAt,
+	}
+	if e.TurnID != "" {
+		f["turnId"] = e.TurnID
+	}
+	if e.ToolCallID != "" {
+		f["toolCallId"] = e.ToolCallID
+	}
+	return marshalEvent("question:requested", sid, seq, f)
+}
+
+// EvQuestionAnswered — question:answered. Mirrors approval:decided so a host can
+// reconcile its own sheet against what the runtime actually recorded.
+//
+// A negative choiceIndex means the question was dismissed without an answer — the tool
+// call is cancelled, not answered. Reported rather than inferred, so a host cannot
+// mistake "the user closed the sheet" for "the user picked the first option".
+type EvQuestionAnswered struct {
+	QuestionID  string
+	ChoiceIndex int
+	Label       string
+	Text        string
+	AnsweredAt  int64
+	Cancelled   bool
+}
+
+func (e EvQuestionAnswered) encode(sid string, seq uint64) ([]byte, error) {
+	f := map[string]any{
+		"questionId":  e.QuestionID,
+		"choiceIndex": e.ChoiceIndex,
+		"answeredAt":  e.AnsweredAt,
+		"cancelled":   e.Cancelled,
+	}
+	if e.Label != "" {
+		f["label"] = e.Label
+	}
+	if e.Text != "" {
+		f["text"] = e.Text
+	}
+	return marshalEvent("question:answered", sid, seq, f)
 }
 
 // EvError — host:error.
@@ -213,8 +415,8 @@ type EvError struct {
 	Message string
 }
 
-func (e EvError) encode(sid string) ([]byte, error) {
-	return marshalEvent("host:error", sid, map[string]any{
+func (e EvError) encode(sid string, seq uint64) ([]byte, error) {
+	return marshalEvent("host:error", sid, seq, map[string]any{
 		"code":    e.Code,
 		"message": e.Message,
 	})
@@ -226,10 +428,220 @@ type EvShutdown struct {
 	ResumeSessionID string
 }
 
-func (e EvShutdown) encode(sid string) ([]byte, error) {
+func (e EvShutdown) encode(sid string, seq uint64) ([]byte, error) {
 	f := map[string]any{"reason": string(e.Reason)}
 	if e.ResumeSessionID != "" {
 		f["resumeSessionId"] = e.ResumeSessionID
 	}
-	return marshalEvent("host:shutdown", sid, f)
+	return marshalEvent("host:shutdown", sid, seq, f)
+}
+
+// ---------------------------------------------------------------------------
+// Protocol v3 additions.
+//
+// Every event below carries information the RUNTIME already produced and the v2
+// bridge threw away, because a Bubble Tea cockpit rendered it locally and the
+// parent only needed enough to draw an activity strip. Daintree now renders the
+// whole conversation, so anything the runtime knows and a reader would want has to
+// reach the wire. None of this is new instrumentation — it is forwarding.
+// ---------------------------------------------------------------------------
+
+// EvTurnPhase — turn:phase. The explicit run lifecycle (domain.RunPhase), which is
+// how a consumer shows liveness WITHOUT inferring it from "is the text still empty".
+// v2 dropped this outright ("live-only UI vocabulary with no host-protocol channel").
+type EvTurnPhase struct {
+	TurnID string
+	Phase  string
+}
+
+func (e EvTurnPhase) encode(sid string, seq uint64) ([]byte, error) {
+	f := map[string]any{"phase": e.Phase}
+	if e.TurnID != "" {
+		f["turnId"] = e.TurnID
+	}
+	return marshalEvent("turn:phase", sid, seq, f)
+}
+
+// EvTurnReasoning — turn:reasoning. The model's thinking for the round, forwarded
+// once at turn end (the runtime receives it as a whole, not as a stream). Separate
+// from turn:token so a host can collapse it behind a disclosure rather than mixing
+// it into the answer.
+type EvTurnReasoning struct {
+	TurnID string
+	Text   string
+}
+
+func (e EvTurnReasoning) encode(sid string, seq uint64) ([]byte, error) {
+	return marshalEvent("turn:reasoning", sid, seq, map[string]any{
+		"turnId": e.TurnID,
+		"text":   e.Text,
+	})
+}
+
+// EvTurnInterjection — turn:interjection. A message the user typed WHILE the turn
+// was running, emitted at the moment the loop folds it into history. The host sent
+// the text, but only the runtime knows WHEN it landed, and a transcript that shows
+// the steer in the wrong place misrepresents what the model actually saw.
+type EvTurnInterjection struct {
+	TurnID string
+	Text   string
+}
+
+func (e EvTurnInterjection) encode(sid string, seq uint64) ([]byte, error) {
+	f := map[string]any{"text": e.Text}
+	if e.TurnID != "" {
+		f["turnId"] = e.TurnID
+	}
+	return marshalEvent("turn:interjection", sid, seq, f)
+}
+
+// BatchedCall is one entry of a tool:batch announcement.
+type BatchedCall struct {
+	ToolCallID  string `json:"toolCallId"`
+	ToolID      string `json:"toolId"`
+	ArgsSummary string `json:"argsSummary"`
+	Danger      bool   `json:"danger"`
+}
+
+// EvToolBatch — tool:batch. The WHOLE batch announced as queued before sequential
+// dispatch begins. Without it a host can only reveal calls one at a time as each
+// starts, which reads as "the assistant keeps thinking of new things to do" instead
+// of "it planned five steps and is on the second".
+type EvToolBatch struct {
+	TurnID string
+	Calls  []BatchedCall
+}
+
+func (e EvToolBatch) encode(sid string, seq uint64) ([]byte, error) {
+	calls := e.Calls
+	if calls == nil {
+		calls = []BatchedCall{}
+	}
+	f := map[string]any{"calls": calls}
+	if e.TurnID != "" {
+		f["turnId"] = e.TurnID
+	}
+	return marshalEvent("tool:batch", sid, seq, f)
+}
+
+// EvToolState — tool:state. Promotes one announced call through
+// queued → active → waiting → done/failed. "waiting" means awaiting approval and is
+// the one a host must render distinctly: it is blocked on the USER, not on the tool.
+type EvToolState struct {
+	ToolCallID string
+	State      string
+	TurnID     string
+}
+
+func (e EvToolState) encode(sid string, seq uint64) ([]byte, error) {
+	f := map[string]any{"toolCallId": e.ToolCallID, "state": e.State}
+	if e.TurnID != "" {
+		f["turnId"] = e.TurnID
+	}
+	return marshalEvent("tool:state", sid, seq, f)
+}
+
+// EvToolProgress — tool:progress. An in-tool substep ("launching terminal") so a
+// long call does not look frozen. Message is "" when a beat carries only liveness;
+// a host keeps the prior message in that case rather than blanking the row.
+type EvToolProgress struct {
+	ToolCallID string
+	Message    string
+	TurnID     string
+}
+
+func (e EvToolProgress) encode(sid string, seq uint64) ([]byte, error) {
+	f := map[string]any{"toolCallId": e.ToolCallID, "message": e.Message}
+	if e.TurnID != "" {
+		f["turnId"] = e.TurnID
+	}
+	return marshalEvent("tool:progress", sid, seq, f)
+}
+
+// EvUsage — usage. Per-round token accounting, including the two fields that drive a
+// context meter: ContextTokens against ContextWindow, and ContextThreshold (the
+// auto-compact trigger). Pointer fields are omitted when the provider reported
+// nothing, so a host shows "no data" rather than a misleading zero.
+type EvUsage struct {
+	TurnID           string
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+	CachedTokens     *int
+	CacheHitRatio    *float64
+	ContextTokens    int
+	ContextThreshold int
+	ContextWindow    int
+}
+
+func (e EvUsage) encode(sid string, seq uint64) ([]byte, error) {
+	f := map[string]any{
+		"promptTokens":     e.PromptTokens,
+		"completionTokens": e.CompletionTokens,
+		"totalTokens":      e.TotalTokens,
+		"contextTokens":    e.ContextTokens,
+		"contextThreshold": e.ContextThreshold,
+		"contextWindow":    e.ContextWindow,
+	}
+	if e.TurnID != "" {
+		f["turnId"] = e.TurnID
+	}
+	if e.CachedTokens != nil {
+		f["cachedTokens"] = *e.CachedTokens
+	}
+	if e.CacheHitRatio != nil {
+		f["cacheHitRatio"] = *e.CacheHitRatio
+	}
+	return marshalEvent("usage", sid, seq, f)
+}
+
+// EvCost — cost. What the session has spent, in the provider's own figures.
+//
+// Two rules the wire preserves rather than flattening, because getting either wrong
+// under-reports spend while looking like a receipt: `complete:false` means Total is a
+// FLOOR (a call ran whose cost could not be measured), and an ABSENT cost event means
+// unknown, never free. A host renders an incomplete total as "≥ $x".
+type EvCost struct {
+	TurnID   string
+	Total    float64
+	Complete bool
+}
+
+func (e EvCost) encode(sid string, seq uint64) ([]byte, error) {
+	f := map[string]any{"total": e.Total, "complete": e.Complete}
+	if e.TurnID != "" {
+		f["turnId"] = e.TurnID
+	}
+	return marshalEvent("cost", sid, seq, f)
+}
+
+// EvNotice — notice. Non-fatal info/warning the runtime surfaces (a repeating tool
+// failure, a pinned skill the backend could not honour, a degraded MCP). v2 had no
+// channel for these at all, so they reached nobody once the local renderer was gone.
+type EvNotice struct {
+	Level   string // "info" | "warning"
+	Message string
+	TurnID  string
+}
+
+func (e EvNotice) encode(sid string, seq uint64) ([]byte, error) {
+	f := map[string]any{"level": e.Level, "message": e.Message}
+	if e.TurnID != "" {
+		f["turnId"] = e.TurnID
+	}
+	return marshalEvent("notice", sid, seq, f)
+}
+
+// EvModelRateLimited — model:rate-limited. The provider throttled us after the retry
+// budget was exhausted. A health cue, not a turn failure: it clears on the next usage.
+type EvModelRateLimited struct {
+	TurnID string
+}
+
+func (e EvModelRateLimited) encode(sid string, seq uint64) ([]byte, error) {
+	f := map[string]any{}
+	if e.TurnID != "" {
+		f["turnId"] = e.TurnID
+	}
+	return marshalEvent("model:rate-limited", sid, seq, f)
 }

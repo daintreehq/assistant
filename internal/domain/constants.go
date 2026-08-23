@@ -1,6 +1,9 @@
 package domain
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // Schema constants.
 const (
@@ -22,12 +25,29 @@ var OneShotExitCode = struct {
 	Error       int
 	Cancelled   int
 	ToolFailure int
+	HardTimeout int
 }{
 	Success:     0,
 	Error:       1,
 	Cancelled:   2,
 	ToolFailure: 3,
+	HardTimeout: 4,
 }
+
+// HardTimeoutGrace is how long the cooperative --timeout gets to unwind before the
+// process is killed outright.
+//
+// --timeout cancels a context, and a context only bounds code that watches it. A syscall
+// already in flight, a tool that ignores cancellation, or a wedged pipe read is not
+// preempted by one — so for a CI runner, whose entire purpose is to finish
+// deterministically, a cooperative deadline is not a bound at all. The watchdog is the
+// second stage: cancel at the deadline, and if the process is STILL alive this much
+// later, exit with HardTimeout rather than hang the job.
+//
+// The grace is generous because the normal path must never reach it: a run that
+// cancels cleanly has to flush its terminal result, release the project lease, and close
+// the store, and killing it mid-flush would trade a hung job for a corrupted one.
+const HardTimeoutGrace = 30 * time.Second
 
 // Agent-loop magic constants.
 const (
@@ -115,7 +135,7 @@ const (
 
 	// LargeContextWindowTokens is the main (large) model's context window. It is reported
 	// on each UsageEvent and persisted to the durable run-event log for /explain; it is NOT
-	// "% toward auto-compaction". (The cockpit previously rendered a live CTX% gauge off this
+	// "% toward auto-compaction". (The attached session previously rendered a live CTX% gauge off this
 	// denominator; that gauge was removed as noise — context is managed for the operator.)
 	// The large tier is sized to a ~1M-token window.
 	LargeContextWindowTokens = 1_000_000

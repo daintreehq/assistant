@@ -19,8 +19,10 @@
 package mcpserver
 
 import (
+	"context"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/domain"
@@ -36,9 +38,18 @@ const (
 	RunCancelled RunStatus = "cancelled"
 )
 
-// Event is one recorded step of a run, in the vocabulary the --json stream already
-// uses. Keeping the two vocabularies identical is deliberate: a consumer that learned
-// one can read the other, and docs/HEADLESS.md documents both.
+// Event is one recorded step of a run: a DIGEST of what the runtime emitted, in
+// vocabulary borrowed from the --json stream.
+//
+// It is a projection, not the same schema, and the difference is worth stating because
+// the comment here used to claim they were identical. This shape uses generic `text`,
+// `tool` and `callId` fields; it drops tool ARGUMENTS, the run phase, tool batch/state/
+// progress, and model rate-limit events; and it reduces a skill decision to titles plus
+// a degraded flag. That is the right projection for a polling agent — those are the
+// live-footer events a human watches and a poller pays context for — but a caller told
+// the vocabularies were identical would go looking for fields that are not coming.
+//
+// The full-fidelity record is the debug log, which is what the log resource is for.
 type Event struct {
 	Seq  int    `json:"seq"`
 	Ts   int64  `json:"ts"`
@@ -84,6 +95,39 @@ type Run struct {
 	cancel func()
 	// done closes when the run settles, so a blocking ask can wait without polling.
 	done chan struct{}
+	// changed is a broadcast channel replaced on every observable change (a new event,
+	// a parked approval, settlement). A long poll waits on it so `waitMs` means "wake
+	// me when something HAPPENS", not "wake me when the turn finishes" — the latter
+	// made a 60s wait sit through new content, a started tool and a blocking approval
+	// before reporting any of them.
+	changed chan struct{}
+	// revision counts observable changes. A waiter captures it BEFORE it starts waiting
+	// and hands it back, which closes the lost-wakeup window: without it, a change
+	// landing between the caller reading state and reaching the select would be missed
+	// and the poll would sleep out its whole budget over news that had already arrived.
+	revision uint64
+	// asyncOps is the run's ledger of background handles it accepted, keyed by id and
+	// in acceptance order. It exists because the old surface derived "pending async"
+	// by scanning the events in the CURRENT poll window: the handles vanished as soon
+	// as the caller advanced sinceSeq, and were missed entirely when the accepting
+	// event fell outside maxEvents.
+	asyncOps   map[string]*AsyncOperation
+	asyncOrder []string
+}
+
+// AsyncOperation is one background handle this run accepted. The run itself never
+// learns the outcome — an async tool settles through the attention queue, deliberately
+// not as a late event on a closed run — so `status` is what this run can honestly say.
+type AsyncOperation struct {
+	ID string `json:"id"`
+	// Tool is the tool call that accepted the work, so a caller can tell a spawned
+	// agent from a terminal wait without correlating call ids by hand.
+	Tool string `json:"tool,omitempty"`
+	// Status is "accepted": this run saw the handle issued and will never see it
+	// settle. Completion is reported through daintree.attention.
+	Status      string `json:"status"`
+	AcceptedAt  int64  `json:"acceptedAt"`
+	AcceptedSeq int    `json:"acceptedSeq"`
 }
 
 // NewRun starts a run record in the running state.
@@ -96,11 +140,87 @@ func NewRun(id, sessionID, prompt string, cancel func()) *Run {
 		startedAt: domain.NowMS(),
 		cancel:    cancel,
 		done:      make(chan struct{}),
+		changed:   make(chan struct{}),
+		asyncOps:  map[string]*AsyncOperation{},
 	}
 }
 
 // Done returns a channel closed when the run settles.
 func (r *Run) Done() <-chan struct{} { return r.done }
+
+// signalChangeLocked wakes every waiter by closing the current broadcast channel and
+// installing a fresh one. Callers hold r.mu.
+func (r *Run) signalChangeLocked() {
+	r.revision++
+	close(r.changed)
+	r.changed = make(chan struct{})
+}
+
+// Revision is the run's change counter. Capture it before waiting and pass it to
+// WaitForChange, which then cannot miss a change that lands in between.
+func (r *Run) Revision() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.revision
+}
+
+// Touch reports an observable change that is not an event of this run's own — a parked
+// approval is the one that matters, since a run blocked on a confirmation produces no
+// further events at all and would otherwise be invisible until the wait expired.
+func (r *Run) Touch() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.signalChangeLocked()
+}
+
+// WaitForChange blocks until this run has something new to say past sinceSeq, its
+// revision moves off sinceRev, it settles, the budget expires, or the caller gives up.
+// It returns as soon as any of those is true, which is what turns `waitMs` into a real
+// long poll rather than "wait for finish".
+func (r *Run) WaitForChange(ctx context.Context, sinceSeq int, sinceRev uint64, budget time.Duration) {
+	r.mu.Lock()
+	settled := r.status != RunRunning
+	fresh := len(r.events) > 0 && r.events[len(r.events)-1].Seq >= sinceSeq
+	moved := r.revision != sinceRev
+	changed := r.changed
+	r.mu.Unlock()
+	// Already something to report: never park a caller over news that has landed —
+	// unread events, a settled run, or any change since it took its revision.
+	if settled || fresh || moved {
+		return
+	}
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	// ONE wake, not a loop back to the freshness test. A change that produces no event
+	// is exactly the case worth reporting — a run parked on an approval is stopped, not
+	// slow, and it emits nothing further of its own — so any signal returns and lets the
+	// caller re-read the state for itself.
+	select {
+	case <-changed:
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+}
+
+// AsyncOperations returns the run's background-handle ledger in acceptance order.
+func (r *Run) AsyncOperations() []AsyncOperation {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.asyncOperationsLocked()
+}
+
+// asyncOperationsLocked copies the ledger. Callers hold r.mu — SnapshotFull uses it to
+// take the ledger in the SAME hold as the events, so a response cannot describe a run
+// state that never existed.
+func (r *Run) asyncOperationsLocked() []AsyncOperation {
+	out := make([]AsyncOperation, 0, len(r.asyncOrder))
+	for _, id := range r.asyncOrder {
+		if op, ok := r.asyncOps[id]; ok {
+			out = append(out, *op)
+		}
+	}
+	return out
+}
 
 // Cancel aborts the run's context if it is still live. Safe to call repeatedly.
 func (r *Run) Cancel() {
@@ -123,19 +243,98 @@ func (r *Run) Status() RunStatus {
 // maxEvents. The cap matters: a long orchestration turn produces hundreds of events and
 // the caller is an LLM paying context for every one of them, so poll returns a WINDOW
 // and reports how much it withheld rather than dumping the lot.
+//
+// The window is SLICED, not scanned. Event.Seq is assigned as the index it is appended
+// at (see append), so the events at or after sinceSeq are exactly events[sinceSeq:] —
+// walking the whole list to rediscover that made every poll of a long run O(events) for
+// a window of forty, and a caller polling every second pays it every second.
 func (r *Run) Snapshot(sinceSeq, maxEvents int) (evs []Event, remaining int, st RunStatus, content, errMsg string, stats domain.JsonRunStats, startedAt, endedAt int64) {
+	snap := r.SnapshotFull(sinceSeq, maxEvents)
+	return snap.Events, snap.Remaining, snap.Status, snap.Content, snap.Error,
+		snap.Stats, snap.StartedAt, snap.EndedAt
+}
+
+// RunSnapshot is everything a response needs about a run, read under ONE lock hold.
+//
+// The single hold is the point. Taking the events, then the total count, then the async
+// ledger as three separate reads produced responses describing a run that never existed:
+// a page could report `complete:true, remaining:0` alongside a `totalEvents` that had
+// already grown past it, and a caller stopping on `complete` would silently miss the
+// tail.
+type RunSnapshot struct {
+	Events []Event
+	// Remaining is events past this window.
+	Remaining int
+	// NextSeq is the cursor to continue from — the seq after the last event returned,
+	// NORMALIZED to the tail. An out-of-range cursor used to be echoed straight back, so
+	// a caller that asked for fromSeq 9999 on a ten-event run was told to continue at
+	// 9999 and would then skip every event the run went on to produce.
+	NextSeq int
+	// TotalEvents is the run's full retained length, from the same hold as Events.
+	TotalEvents int
+	Status      RunStatus
+	Content     string
+	Error       string
+	Stats       domain.JsonRunStats
+	StartedAt   int64
+	EndedAt     int64
+	Async       []AsyncOperation
+}
+
+// SnapshotFull reads the whole consistent picture of a run in one lock hold.
+func (r *Run) SnapshotFull(sinceSeq, maxEvents int) RunSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, e := range r.events {
-		if e.Seq >= sinceSeq {
-			evs = append(evs, e)
-		}
+
+	// A negative sinceSeq is "from the start", not an index to subtract from the end.
+	from := sinceSeq
+	if from < 0 {
+		from = 0
 	}
-	if maxEvents > 0 && len(evs) > maxEvents {
-		remaining = len(evs) - maxEvents
-		evs = evs[:maxEvents]
+	if from > len(r.events) {
+		from = len(r.events)
 	}
-	return evs, remaining, r.status, r.content, r.errMsg, r.stats, r.startedAt, r.endedAt
+	window := r.events[from:]
+	remaining := 0
+	if maxEvents > 0 && len(window) > maxEvents {
+		remaining = len(window) - maxEvents
+		window = window[:maxEvents]
+	}
+	// COPIED, not aliased — the returned slice outlives this lock, and r.events grows by
+	// append, which can write into the same backing array a caller is still reading. The
+	// per-event clone covers Event.Skills, which a shallow slice copy leaves shared.
+	evs := make([]Event, 0, len(window))
+	for _, e := range window {
+		evs = append(evs, e.clone())
+	}
+
+	// The cursor is `from` plus what was returned — never the caller's raw sinceSeq, so
+	// a cursor past the tail comes back as the tail rather than as itself.
+	next := from + len(evs)
+
+	return RunSnapshot{
+		Events:      evs,
+		Remaining:   remaining,
+		NextSeq:     next,
+		TotalEvents: len(r.events),
+		Status:      r.status,
+		Content:     r.content,
+		Error:       r.errMsg,
+		Stats:       r.stats,
+		StartedAt:   r.startedAt,
+		EndedAt:     r.endedAt,
+		Async:       r.asyncOperationsLocked(),
+	}
+}
+
+// clone deep-copies the reference fields on an Event. Skills is a slice, so a plain
+// struct copy leaves it aliased to the retained event — a caller could mutate the run's
+// own history, and a JSON encode could race an append.
+func (e Event) clone() Event {
+	if e.Skills != nil {
+		e.Skills = append([]string(nil), e.Skills...)
+	}
+	return e
 }
 
 // settle records the terminal state exactly once and releases anyone waiting on Done.
@@ -158,20 +357,37 @@ func (r *Run) settle(st RunStatus, content, errMsg string) {
 	}
 	r.cancel = nil
 	close(r.done)
+	r.signalChangeLocked()
 	r.mu.Unlock()
 }
 
 // append records one event under the lock, stamping the next seq.
+//
+// Seq IS the index. Snapshot slices on that identity rather than scanning, so anything
+// that inserted, removed or reordered events would silently return the wrong window.
 func (r *Run) append(e Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	e.Seq = len(r.events)
 	e.Ts = domain.NowMS()
 	r.events = append(r.events, e)
+	// Record the handle the instant it is issued, not when a poll window happens to
+	// contain the event — the ledger is what makes "this run started background work"
+	// survive the caller advancing sinceSeq.
+	if e.Async != "" {
+		if _, seen := r.asyncOps[e.Async]; !seen {
+			r.asyncOps[e.Async] = &AsyncOperation{
+				ID: e.Async, Tool: e.Tool, Status: "accepted",
+				AcceptedAt: e.Ts, AcceptedSeq: e.Seq,
+			}
+			r.asyncOrder = append(r.asyncOrder, e.Async)
+		}
+	}
+	r.signalChangeLocked()
 }
 
 // Recorder is the agent.EventSink that writes a turn into its Run. It is the MCP
-// server's equivalent of the cockpit's event pump and the --json sink.
+// server's equivalent of the attached session's event pump and the --json sink.
 //
 // Streamed TOKENS are deliberately dropped: the caller is another agent reading a
 // digest, not a human watching prose appear, and re-emitting every token would make a
@@ -183,10 +399,53 @@ type Recorder struct {
 	// assistant:end still reports what it had said. Guarded by the run's lock via the
 	// append path, but written only from the turn goroutine.
 	buffer string
+
+	// candidate is the terminal outcome the STREAM implies, recorded but not committed.
+	// A sink can see that the agent emitted a terminal-looking event; only the turn
+	// goroutine knows whether Send returned cleanly, whether cancellation won, and
+	// whether the post-response bookkeeping finished. Settling from here would open a
+	// window where poll answers "success" while Busy() is still true and the very next
+	// ask gets ErrBusy — so the sink records evidence and Session.Ask commits it.
+	//
+	// mu guards it because the commit read happens on the turn goroutine after Send
+	// returns while the writes happen on whatever goroutine the agent fanned the sink
+	// out on; in practice that is the same goroutine, but the contract does not say so.
+	mu        sync.Mutex
+	candidate *terminalCandidate
+}
+
+// terminalCandidate is the outcome a terminal event implies.
+type terminalCandidate struct {
+	status  RunStatus
+	content string
+	errMsg  string
 }
 
 // NewRecorder binds a sink to a run.
 func NewRecorder(run *Run) *Recorder { return &Recorder{run: run} }
+
+// propose records the first terminal-looking event of the turn. FIRST wins, matching
+// the old settle semantics: a cancelled turn that then reports an error keeps the
+// earlier, more specific classification.
+func (rec *Recorder) propose(st RunStatus, content, errMsg string) {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.candidate != nil {
+		return
+	}
+	rec.candidate = &terminalCandidate{status: st, content: content, errMsg: errMsg}
+}
+
+// Candidate returns the terminal outcome the stream implied, or nil when the turn
+// produced no terminal event at all.
+func (rec *Recorder) Candidate() (RunStatus, string, string, bool) {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.candidate == nil {
+		return "", "", "", false
+	}
+	return rec.candidate.status, rec.candidate.content, rec.candidate.errMsg, true
+}
 
 func (rec *Recorder) flush() {
 	if rec.buffer == "" {
@@ -197,10 +456,32 @@ func (rec *Recorder) flush() {
 	rec.run.append(Event{Type: "assistant:content", Text: text})
 }
 
+// FinalizePartial drains whatever prose was streamed but never terminated, and returns
+// it. Called by the turn goroutine on an exit path that produced NO terminal event.
+//
+// Without it the buffer was simply dropped. The comment on `buffer` promised that a round
+// interrupted before assistant:end "still reports what it had said", and that was true
+// only for the paths that happened to call flush() — a new AssistantStart, an
+// interjection, a skill load. A turn cancelled or errored mid-sentence hit none of them,
+// so the one case the buffer exists for was the one it did not cover.
+//
+// It runs on the turn goroutine after Send has returned, which is the same goroutine the
+// sink callbacks ran on, so the unsynchronized buffer read is safe here in a way it would
+// not be from a poll handler.
+func (rec *Recorder) FinalizePartial() string {
+	if rec.buffer == "" {
+		return ""
+	}
+	text := rec.buffer
+	rec.buffer = ""
+	rec.run.append(Event{Type: "assistant:partial", Text: text})
+	return text
+}
+
 // --- agent.EventSink ---
 
 // Phase, ToolBatch, ToolState and ToolProgress are live-footer vocabulary for a human
-// watching a cockpit. A polling agent gets nothing from them.
+// watching an attached session. A polling agent gets nothing from them.
 func (rec *Recorder) Phase(domain.RunPhase)             {}
 func (rec *Recorder) ToolBatch([]agent.BatchedToolCall) {}
 func (rec *Recorder) ToolState(string, agent.ToolState) {}
@@ -221,13 +502,23 @@ func (rec *Recorder) AssistantToken(token string) { rec.buffer += token }
 func (rec *Recorder) AssistantEnd(content, _ string) {
 	rec.buffer = "" // the authoritative content supersedes the streamed duplicate
 	rec.run.append(Event{Type: "assistant:end", Text: content})
-	rec.run.settle(RunSucceeded, content, "")
+	rec.propose(RunSucceeded, content, "")
 }
 
+// AssistantCancelled records an interrupted turn.
+//
+// The buffer is dropped ONLY when the cancellation carried content of its own. The real
+// agent emits AssistantCancelled("") — it has no final answer to give — and clearing the
+// buffer there threw away the one account of what the turn had been saying, which is
+// precisely what the buffer exists to keep. The partial is promoted to the cancellation's
+// content instead, so a caller reading the run sees the prose rather than a sentinel.
 func (rec *Recorder) AssistantCancelled(content string) {
+	if content == "" {
+		content = rec.buffer
+	}
 	rec.buffer = ""
 	rec.run.append(Event{Type: "assistant:cancelled", Text: content})
-	rec.run.settle(RunCancelled, content, "")
+	rec.propose(RunCancelled, content, "")
 }
 
 func (rec *Recorder) Interjection(text string) {
@@ -291,12 +582,25 @@ func (rec *Recorder) ToolResult(ev agent.ToolResultEvent) {
 }
 
 func (rec *Recorder) Error(message string) {
+	// Whatever was streamed before the failure is the account of what the turn was
+	// doing. It is flushed as its own event AND carried as the candidate's content, so a
+	// caller polling the run gets the prose rather than only the error sentinel.
+	partial := rec.buffer
 	rec.flush()
 	rec.run.append(Event{Type: "error", Text: message})
+	if partial != "" {
+		rec.mu.Lock()
+		if rec.candidate == nil {
+			rec.candidate = &terminalCandidate{status: RunFailed, content: partial, errMsg: message}
+			rec.mu.Unlock()
+			return
+		}
+		rec.mu.Unlock()
+	}
 	// An Error event is fatal for the turn but Send still returns normally (turn
-	// failures are sentinel replies, not errors), so settle here or the run would sit
-	// in `running` until the caller gave up.
-	rec.run.settle(RunFailed, "", message)
+	// failures are sentinel replies, not errors), so record it as the terminal
+	// candidate or the run would settle `success` off the backstop.
+	rec.propose(RunFailed, "", message)
 }
 
 func (rec *Recorder) Warn(message string) {

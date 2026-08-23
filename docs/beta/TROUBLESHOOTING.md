@@ -118,11 +118,11 @@ Permissions, a full disk, or a read-only mount. Writability is proven by writing
 is not a mode-bit guess. Fix the permissions or point `DAINTREE_ASSISTANT_STATE_DIR`
 somewhere writable.
 
-## `state.dir` / `credentials.perms` — readable by other users
+## `state.dir` — readable by other users
 
-Run the `chmod` doctor prints. For the credentials file this is a **FAIL**, not a note:
-any other account on the machine can read a key that spends your money, and this CLI
-writes that file 0600 — so a wider mode means something else changed it.
+Run the `chmod` doctor prints. There is no credentials file to worry about — this CLI
+stores no key at all — but the state dir still holds your conversation database and
+artifacts, so a mode wider than the CLI wrote means something else changed it.
 
 ## `state.schema` — the database is from an older version
 
@@ -152,7 +152,7 @@ stateful mode takes is an `flock`, which has no Windows port. See
 
 ## `safety.autoApprove` — ON
 
-Mutating actions run without asking, **on every surface** — the cockpit, the classic REPL,
+Mutating actions run without asking, **on every surface** — the attached session, the line REPL,
 one-shot, `--json`, and the host — because all of them are the same `main` actor. It does
 not widen the tier gate, and unattended actors (watchers, timers, wake turns) still need a
 scoped grant. Unset `DAINTREE_ASSISTANT_AUTO_APPROVE` unless this is an automated harness.
@@ -169,7 +169,7 @@ determines who can fix it:
 | **Selector / skill** | wrong or missing runbook, bad plan, stops early, dumps a speculative 60-step plan | the backend's prompts/skills |
 | **Tool contract** | invalid arguments, a tool used for the wrong job, an unclear schema | this repo's tool definitions |
 | **Runtime** | backend, MCP, state, daemon, retries, lifecycle | this repo's runtime |
-| **UI / support** | rendering, cancellation, install, confusing messaging | this repo's cockpit and CLI |
+| **UI / support** | rendering, cancellation, install, confusing messaging | this repo's attached session and CLI |
 
 Then:
 
@@ -196,7 +196,7 @@ you what happened while you were gone.
 reaches your terminals through Daintree. It pauses rather than fabricating an outcome, and
 resumes on the next launch. (If `daintree-assistant status` says no daemon is running, the
 supervisor never started — spawning it is deliberately non-fatal — and background work will
-not survive the cockpit exiting at all.)
+not survive the attached session exiting at all.)
 
 **A long wait became background work.** Foreground waits have a shared budget so a chain of
 them cannot block a turn indefinitely. Past it, the work moves to async.

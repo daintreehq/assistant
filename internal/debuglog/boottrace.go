@@ -11,7 +11,7 @@ import (
 // DAINTREE_ASSISTANT_BOOT_TRACE names a file, each BootTrace call appends one
 // "<msSinceProcessStart>\t<phase>\n" line to it. Unlike the session debug log it
 // needs no config (it must cover the window BEFORE config/StartDebugLog exist),
-// works in cockpit mode without touching the terminal, and is a strict no-op when
+// works in attached mode without touching the terminal, and is a strict no-op when
 // the env var is unset. Used by the boot/one-shot latency benchmarks; cheap enough
 // to leave compiled in.
 //

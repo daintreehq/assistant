@@ -1,19 +1,21 @@
 # Headless operation
 
 How to drive the assistant from a script, a test harness, or another agent — without
-a terminal, without the cockpit, and without rewriting the process environment to say
-what argv says perfectly well.
+a terminal, and without rewriting the process environment to say what argv says
+perfectly well.
 
-There are five headless surfaces. Pick by how many turns you need, and by whether the
-caller is a script or another agent.
+**The whole binary is headless now.** There is no terminal UI: Daintree embeds it over
+`host --stdio` and renders the conversation natively. What follows is the full list of
+ways in; pick by how many turns you need, and by whether the caller is a script, an
+agent, or a person at a shell.
 
 | Surface | Turns | Output | Use it when |
 |---|---|---|---|
 | `mcp --stdio` | many | MCP tools | **another agent drives the assistant as a sub-agent** |
 | `--json <prompt>` | one | JSONL on stdout | scripting, CI gates, one-shot queries |
 | `--json --multi-turn` | many | JSONL on stdout | **testing a runbook that needs a short conversation** |
-| `--classic` + piped stdin | many | human-rendered | a multi-turn exchange you intend to read yourself |
-| `host --stdio` | many | NDJSON, protocol v2 | you are Daintree, or reimplementing it |
+| the line REPL | many | plain lines | a person at a shell or over SSH (`--classic` is a deprecated no-op) |
+| `host --stdio` | many | NDJSON, protocol v3 | you are Daintree, or reimplementing it |
 
 If the caller is itself an agent — Claude Code, most immediately — reach for
 `mcp --stdio` first. `host --stdio` is Daintree's own contract — the first stdin line must be a valid
@@ -38,11 +40,63 @@ unusable for exactly the work this assistant exists to do — spawning a cohort 
 and supervising them. It is the same shape the assistant already uses internally for its
 own long work (`terminal.run.async` returns a handle a coordinator settles later).
 
-**The server holds no configuration.** A client launches this process once and keeps the
-pipe for its whole session; it cannot restart it when you want a different project or a
-locally-rebuilt backend. So project, endpoint, tier, MCP credentials and state dir are
-all arguments to `daintree.session.open`, and the process env supplies defaults only.
-Repointing is a close/open pair, never a reconnect.
+**The server holds no configuration of its own.** A client launches this process once
+and keeps the pipe for its whole session; it cannot restart it when you want a different
+project. So project, tier, state dir and identity are all arguments to
+`daintree.session.open`, and the process env supplies defaults only — repointing those is
+a close/open pair, never a reconnect.
+
+Endpoints and credentials are the exception, and they are **pinned at launch**. See
+[the process policy](#the-process-policy-is-the-authority-ceiling) below: they decide
+where the conversation goes and whose credential pays for it, which makes them the
+operator's call rather than an argument the caller can reach.
+
+**No secret is a tool argument.** The backend key is named by `apiKeyFile` and the Daintree
+MCP bearer by `mcpTokenFile` — paths, never values. Both are chosen by a *model* on this
+surface, and that bearer authorises system-tier Daintree actions for its whole validity
+window: inline, it could be echoed back by a prompt injection, logged by your MCP client, or
+captured by traces outside this repository. Omit `mcpTokenFile` to inherit
+`DAINTREE_MCP_TOKEN` from the server process.
+
+### The process policy is the authority ceiling
+
+Every field above is chosen by a **model** whose context can be steered by repository
+text, tool output, or anything else it reads. A session argument that changes a
+filesystem root, a network origin, a credential, a permission tier, or approval
+behaviour is therefore part of the security boundary — and prose in a prompt saying
+"don't do that" is not a control. `internal/mcpserver/policy.go` is.
+
+The rule is one-directional: **a session may narrow what the operator launched this
+process with, and can never widen it.** The policy is fixed at launch, where the operator
+decides it, and there is deliberately no tool that reaches it.
+
+What `mcp --stdio` pins by default:
+
+| Dimension | Default | Why |
+|---|---|---|
+| `backendUrl` | **pinned** — an override is refused | it decides where the whole conversation, project context and every tool result are posted; an unbounded one is both an SSRF primitive and an exfiltration route |
+| `mcpUrl` | **pinned** | it decides which server advertises the tools the assistant believes and calls |
+| `apiKeyFile` / `mcpTokenFile` | **pinned** | a path keeps the *value* out of model context but still lets a model *select* a credential — spending another account, or acquiring a system-tier Daintree bearer |
+| `project` / `stateDir` / `logDir` | confined to the directories the process was launched against | a prompt injection in one repository must not open a system-tier session on another one, or on `$HOME` |
+| `tier` | at most the process tier | a request *above* the ceiling is refused, never quietly downgraded — a caller told it has system tier would read every later refusal as a bug |
+| `approvals: "auto"` | refused unless the process itself was launched with auto-approve | a session cannot grant itself unattended mutation |
+| `approvals: "delegate"` | refused unless launched with `--allow-delegated-approvals` (or with `--auto-approve`, which is the broader grant and implies it) | the caller agent settling its own requests is delegation, not authorization — see below |
+| `questions: "delegate"` | **permitted** by default | answering a question authorises nothing the assistant could not already do; it picks among options the assistant proposed, so gating it would only stop this surface reaching the branches the product reaches |
+
+Path confinement compares **resolved** paths: both the allowlisted root and the requested
+path go through `filepath.EvalSymlinks` first, so `/allowed/link -> /etc` is outside the
+root even though it reads as inside it. A path that does not exist yet — the usual case
+for a state directory the open is about to create — resolves through its nearest existing
+ancestor, which is where any escaping symlink would have to live.
+
+A harness that genuinely needs a different endpoint or credential launches a **second
+server** against it. That is a decision made at a shell, by a human, once — not an
+argument a model can reach.
+
+Embedding the server in a trusted host, where the operator *is* the caller, is the one
+case with no ceiling. It requires naming `Serve` with `TrustedUnconfined` explicitly:
+`ServeModelFacing` refuses that marker outright, so the unconfined configuration takes
+more code than the safe one rather than less.
 
 ### The tools
 
@@ -55,9 +109,12 @@ Repointing is a close/open pair, never a reconnect.
 | `daintree.poll` | read a run: status, event window, answer, stats |
 | `daintree.inject` | fold a message into the **running** turn |
 | `daintree.interrupt` | cancel the running turn, keep the session |
-| `daintree.attention` | read what settled in the background |
+| `daintree.attention` | read what settled in the background (peeks — does not consume) |
+| `daintree.attention.ack` | acknowledge the items you have processed |
 | `daintree.approvals` | list confirmations the session is **parked** on |
 | `daintree.approve` | answer one, releasing or refusing the blocked call |
+| `daintree.questions` | list multiple-choice questions the session is **parked** on |
+| `daintree.question.answer` | answer one by the index of the option you choose |
 
 Every tool has a generated input *and* output schema, so a caller discovers the exact
 argument shape rather than guessing it.
@@ -70,25 +127,159 @@ Things worth knowing before you drive it:
 - **`poll` returns a window.** Pass the previous response's `nextSeq` as `sinceSeq` to
   read only what is new. When the window truncates, `withheldEvents` says by how much —
   it never silently hands you a partial timeline as a complete one.
+- **`poll`'s `waitMs` is a real long poll.** It wakes on any *change* — new content, a
+  tool starting or finishing, the turn becoming blocked on an approval — not only on the
+  run finishing. Waiting for completion alone meant a 60s poll could sit through all of
+  that and report a blocked decision only when the budget expired.
+- **`inject` and `interrupt` take the `runId` you meant.** It is optional but strongly
+  recommended: without it, a request written for one turn acts on whichever turn happens
+  to be current when it lands, which over a slow pipe is a different turn. A stale
+  `runId` is rejected with an error naming the live run, rather than silently steering
+  the wrong work.
 - **Background work reports through `attention`, never as a late run event.** A tool that
-  accepted async work shows up as `pendingAsync` on the run; the completion arrives in
-  the inbox, carrying `asyncId` so you can match the two. `attention` acknowledges by
-  default so a polling caller sees each item once; pass `acknowledge:false` to peek.
+  accepted async work is recorded in the run's `asyncOperations` ledger — from the run
+  itself, so the handles survive you advancing `sinceSeq` — and the completion arrives in
+  the inbox carrying `asyncId` so you can match the two. Their status is `accepted`, never
+  `finished`: the run saw the handle issued and will never see it settle.
+- **`attention` peeks; `attention.ack` consumes.** Acknowledging inside the read is
+  at-most-once delivery — the rows are marked before the response is known to have reached
+  you, so a dropped connection loses them permanently, and an attention row is the *only*
+  report background work ever makes. Read, act, then `attention.ack` the ids. A retry after
+  an ambiguous failure is idempotent: already-acknowledged ids come back under `unknown`
+  rather than erroring. (`acknowledge:true` is still available if you accept the risk.)
 - **Always close what you open.** A session holds the project's owner lease for its whole
-  life, and a leaked one blocks every other process from opening that project.
+  life, and a leaked one blocks every other process from opening that project. Close is
+  **safe to retry**: an already-closed session reports `acted:false, state:"already-closed"`
+  rather than erroring, so a lost response costs a duplicate call and not a stuck lease.
+
+  Teardown runs on the server, not inside your call. A close that takes longer than ten
+  seconds returns `state:"closing"` and keeps going — the session stays **listed** in that
+  state until it finishes, and its lease is released then. A teardown that genuinely
+  **fails** is terminal: the session stays listed as `state:"close-failed"` with its lease
+  believed still held, and retrying does not tear it down again, because running
+  `Runtime.Close` over a half-closed App is not a retry. Restarting the MCP server is what
+  releases it; the OS drops the flock on exit.
+
+  Both states count against `MaxSessions`, since their runtime may still hold the lease —
+  which is exactly why they are listed rather than hidden.
+- **Recovering from a lost response.** Every session reports `currentRunId` *and*
+  `recentRuns` (newest first, each with a short echo of its prompt), and `ask`'s busy
+  refusal names the live run. So an `ask` whose response never arrived is recoverable
+  either way: while the turn is still going, `currentRunId` hands the handle back; once it
+  has finished — the case a fast run lands in — `recentRuns` does. That second half
+  matters more than it sounds, because a retried `ask` on an idle session is *accepted*,
+  and simply does the work twice.
+- **A run is bounded.** `timeoutMs` on `ask` caps the RUN (default 30 minutes, server
+  capped); `waitMs` only caps how long the *call* blocks. Letting a wait expire leaves the
+  turn going; letting the deadline expire cancels it, and the outcome says
+  `RUN_DEADLINE_EXCEEDED` rather than the bare `cancelled` you would get from your own
+  interrupt. There is no unbounded option: a run holds the session, and the session holds
+  the project lease. The bound is cooperative — a tool that ignores cancellation is
+  reclaimed at shutdown, not by this.
+- **A turn that records no terminal event FAILS.** It does not report an empty success.
+  That shape is what a runtime with an unwired event sink produces — a bug this server has
+  shipped once — and calling it success is exactly why it went unnoticed: the caller was
+  told the run completed, so nothing looked wrong except that nothing had happened. The
+  outcome is `error` with `RUN_EVENT_STREAM_INCOMPLETE`, and any content is diagnostic
+  rather than an answer.
+- **Interrupted prose is kept.** A turn cancelled or failed mid-sentence reports what it
+  had streamed rather than only a sentinel — including the shape the runtime actually
+  produces, where the cancellation itself carries no content.
 - **Mutating tools need approval,** and the mode is per session:
-  - `decline` (default) — refuse immediately and carry on. Safe for an unattended
-    caller, but the session can never actually change anything.
-  - `ask` — park the call and surface it with its risk, consequence and redacted args.
-    A parked call **blocks the whole turn**, so only choose this if you will poll. It
-    fails closed on a timer (`approvalTimeoutMs`, default 5 minutes), and interrupt or
-    close releases everything outstanding. Cancellation always wins: a call approved
-    after you interrupted the turn does not run.
-  - `auto` — never ask. Equivalent to `--auto-approve`.
+  - `decline` — refuse immediately and carry on. Safe for an unattended caller, but the
+    session can never actually change anything. This is what an omitted `approvals`
+    resolves to *unless* the process was launched with auto-approve; see below.
+  - `delegate` — park the call and hand it to **the calling agent** with its risk,
+    consequence and redacted args. A parked call **blocks the whole turn**, so only
+    choose this if you will poll. It fails closed on a timer (`approvalTimeoutMs`,
+    default 5 minutes), and interrupt or close releases everything outstanding.
+    Cancellation always wins: a call approved after you interrupted the turn does not
+    run. A decision may name the `runId` you were watching, and one that arrives after
+    that turn ended is rejected rather than applied to its successor. Each parked call
+    carries `needsTypedConfirm` — the safety layer's own verdict that the action is
+    irreversible and deserves more than a click — and `decisionAuthority`, which says
+    who is actually deciding. Requires `--allow-delegated-approvals` at launch — or
+    `--auto-approve`, which is strictly broader and therefore implies it.
+  - **An omitted `approvals` inherits the launch configuration**, not a fixed default: it
+    resolves to `auto` on a server launched with auto-approve, and `decline` otherwise.
+    Pass `decline` explicitly if you need fail-closed behaviour whatever the server was
+    launched with.
+  - `auto` — never ask. Equivalent to `--auto-approve`, and permitted only if the
+    process was launched with it.
 
   A blocked run is reported as blocked: pending approvals ride the run's `poll` response
   and its `nextAction` says so, because "still running" would send you polling harder at
   something that will never move on its own.
+
+- **Multiple-choice questions are answerable too,** and that is what makes this surface
+  able to test the product rather than a variation on it. The assistant sometimes needs a
+  planning decision — which worktree, which of three approaches — and MCP used to report
+  `QUESTION_UNAVAILABLE`, so a turn that hit one took a *different path here than it takes
+  in Daintree*. An end-to-end run that cannot reach the same branch is not testing the
+  thing it claims to test. `daintree.questions` lists what is parked;
+  `daintree.question.answer` answers one by the **index** of the option you choose.
+
+  A question is not an approval, and the difference decides the defaults. An approval asks
+  "may I do this?", which has one safe answer — no — so an unanswered one times out to
+  *rejected* and the turn carries on having skipped the call. A question asks "which of
+  these did you mean?", which has **no safe answer at all**: inventing one puts words in
+  your mouth and then acts on them. So an unanswered question times out to **cancelled**,
+  an out-of-range index **cancels rather than clamping** to the nearest option, and there
+  is no default anywhere in the path. A parked question blocks the turn and wakes a long
+  poll exactly as a parked approval does, and it rides the run's `pendingQuestions`.
+
+  Questions are their **own** setting — `questions: "decline" | "delegate"`, defaulting to
+  `decline`, with its own `questionTimeoutMs`. They were derived from the approval mode at
+  first, and that defeated the case they were added for: a harness that wants planning
+  questions while keeping mutations declined could not have them without also granting
+  approval authority it did not want. Answering a question authorises nothing — it picks
+  among options the assistant itself proposed — so `approvals:"decline"` with
+  `questions:"delegate"` is a perfectly coherent session, and the common one for a
+  read-mostly test.
+
+  There is deliberately no auto-*answer*. Bypassing a confirmation is a decision an
+  operator can make; answering "which of these did you mean?" on someone's behalf is not.
+
+#### `delegate` is delegation, not human authorization
+
+This mode used to be called `ask`, and the name was a lie by implication. **Nobody is
+guaranteed to be asked.** The pending approval is handed to the same model that is driving
+the session, which then calls `daintree.approve` — so a request the assistant made is
+answered by the agent that prompted it, and any repository text able to steer that agent
+can steer the answer too. Refusing `auto` while offering `ask` looked like a safety
+posture and was not one: the same model reached the same outcome by a longer route.
+
+(A client supporting MCP elicitation may put the request in front of a person instead —
+but the protocol carries no attestation either way, so the server cannot tell and does not
+claim to. `decisionAuthority` reports the guaranteed floor, not a hopeful reading.)
+
+So the mode is named for what it does, every pending approval reports
+`decisionAuthority: "caller-agent"`, and enabling it is a **launch** decision rather than
+a session argument — because whether the caller agent is a person's terminal or an
+unattended loop over an untrusted repository is something only the operator knows.
+
+Two launch settings enable it, and it is worth being exact about the second:
+
+- `--allow-delegated-approvals`, which enables it and nothing else. It has no dedicated
+  environment variable, deliberately: the point is that a human at a shell decides whether
+  the agent on the other end is one they trust, and an inherited variable is not that
+  decision.
+- `--auto-approve` (or `DAINTREE_ASSISTANT_AUTO_APPROVE=1`), which enables `auto` and
+  therefore `delegate` too. Auto runs every tier-permitted mutating call with nothing
+  consulted; delegate runs the subset the caller chooses to release. Refusing the narrower
+  grant to an operator who allowed the broader one would only push a caller toward the
+  mode that reviews nothing. So yes — the environment variable does indirectly permit
+  delegation, by permitting more than it.
+
+It is genuinely useful. A harness driving a controlled test project wants exactly this:
+real mutating work, decided by the driving agent, with every request visible in the
+timeline. What it is not is a boundary you can put an untrusted repository behind.
+
+A **human** mode — where only an out-of-band decision the model cannot forge releases a
+call — is not implemented. It needs a channel that does not exist on this surface yet:
+client-certified elicitation, a native-host decision, or a signed capability minted by a
+trusted host. Until one does, the honest answer is that this surface has no human
+authorization, which is why it does not claim any.
 - Unlike a one-shot's default, an MCP session **does** run the scheduler, so watchers,
   timers and async futures actually settle while it is open. A one-shot can opt into the
   same shape with `--run-scheduler`.
@@ -112,18 +303,61 @@ than tool results so their cost is paid once, when diagnosing, instead of on eve
 
 | URI | What it is |
 |---|---|
-| `daintree://session/{sessionId}/run/{runId}` | the **complete** event timeline `poll` truncates |
-| `daintree://session/{sessionId}/log` | the tail of the structured debug trace |
+| `daintree://session/{sessionId}/run/{runId}[?fromSeq=N&limit=M]` | the run's event timeline, in pages larger than `poll`'s window |
+| `daintree://session/{sessionId}/log` | the tail of the **server process's** structured debug trace |
 
-The log is **per process, not per session** — `debuglog` keeps one active file, so a
-per-session log would silently redirect earlier sessions' writes into the newest
-session's file. Every session in this server therefore reports the same path; grep it by
-`sessionId` to separate them.
+Read the transcript when a poll reported a non-zero `withheldEvents`. It is **paged**,
+not unbounded — a resource that returned every retained event was the largest single
+response this server could produce, reachable by a caller with no idea how long the run
+was, and it had to be built and encoded in full before anyone could decide it was too
+big. Pass `fromSeq` and `limit`; the response carries `nextSeq`, `remaining`, `complete`
+and `totalEvents`, so you can size the job before you start and know when you have
+reached the end. "Larger than a poll window" is the useful property here; "unbounded"
+never was.
 
-Read the transcript when a poll reported a non-zero `withheldEvents`. Read the log when
-you need what actually happened rather than what the answer claims — it is bounded to
-the last 256 KB (the tail, because that is where a failure is), passed through the
-redactor, and only exists if the session was opened with `debugLog:true`.
+The log is **per process, not per session**, and the URI's session id addresses the
+server rather than isolating anything. `debuglog` keeps one active file — a per-session
+log would silently redirect earlier sessions' writes into the newest session's file — so
+every session in this server reports the same path, and that file contains every
+session's conversation and tool activity. Filter by the `sessionId` field on each line.
+Treat that as a convention, not a boundary: if isolation matters, run one session per
+server process, which is what the default `MaxSessions` is for. Real per-session logs
+need an injected logger rather than a package-global singleton, and that has not been
+built. The read is bounded to the last 256 KB (the tail, because that is where a failure
+is), passed through the redactor, and only exists if the session was opened with
+`debugLog:true`.
+
+### Everything a caller can ask for by the page has a ceiling
+
+A default is not a bound: it protects the caller that does not think about the size, not
+the server from the caller that does. Every model-visible collection therefore has a
+server maximum as well, and asking for more gets you the maximum plus the count you did
+not receive — never an error, and never a silent truncation.
+
+| Surface | Default | Server maximum |
+|---|---|---|
+| `poll` / `ask` events (`maxEvents`) | 40 | 500 |
+| transcript resource page (`limit`) | 500 | 500 |
+| `attention` items (`limit`) | 50 | 200 |
+| pending approvals (per run, and per `approvals` listing) | — | 50 |
+| approval argument preview | — | 4 KB |
+| async operations on a run | — | 100 |
+| text on one event (and one run error, attention title/summary) | — | 8 KB |
+| all event text in one response | — | 256 KB |
+| run content in a poll response | — | 64 KB |
+| debug-log tail | — | 256 KB |
+
+A page *count* is not a size bound — 500 events whose text is unbounded is unbounded — so
+the per-field and aggregate byte budgets above matter as much as the item counts. A
+truncation marker is counted *inside* the stated maximum rather than appended past it.
+
+`attention` pages **inside the runtime**, not after the fetch, and that is load-bearing
+rather than an optimisation: acknowledgement is version-conditional on the exact rows
+read, so a handler that fetched everything and then acknowledged a page would either mark
+rows it never delivered or consume a *newer* version than the one it showed. Because the
+page and the acknowledgement now cover the same rows, `limit` and `acknowledge:true`
+combine safely — only what the page actually carried is marked delivered. `more` says
+another page is waiting.
 
 ### When the binary changes underneath it
 
@@ -147,8 +381,22 @@ daintree-assistant --json "which worktrees are ready?"
 skip notices — goes to stderr. That separation is the whole contract: a caller can
 capture stdout and parse it without filtering.
 
-Exit codes (`domain.OneShotExitCode`): `0` success, `1` error, `2` cancelled. `3` is
-reserved and never emitted.
+Exit codes (`domain.OneShotExitCode`): `0` success, `1` error, `2` cancelled, `4` hard
+timeout. `3` is reserved and never emitted.
+
+Every JSONL frame carries `schemaVersion`, not just the session header and the terminal
+`result` — a streaming consumer can reject an incompatible schema on the first line it
+sees, including a setup `error` emitted before any session frame exists.
+
+**`--timeout` is bounded in two stages.** The first cancels the run's context at the
+deadline; that is cooperative, and a context only bounds code that *watches* it — a
+syscall in flight, a tool that ignores cancellation, or a `-` stdin read that never sees
+EOF is not preempted by one. So a watchdog arms for `--timeout` + a 30s grace
+(`domain.HardTimeoutGrace`) and, if the process is still alive then, kills it with exit
+`4` and a stderr diagnostic. A clean run disarms it long before; the grace is sized so
+the process is never killed mid-flush, trading a hung job for a corrupted one. Exit `4`
+therefore means "nothing unwound", and unlike `2` it has **no terminal `result` line** —
+that is the signal that the stream ended abnormally.
 
 `--json` requires a prompt, or `--multi-turn` to read a whole conversation from stdin
 (see [Multi-turn](#multi-turn)) — there is no JSONL *interactive* mode. A prompt that begins
@@ -171,6 +419,7 @@ Every knob is a flag, and every flag shadows a trusted env var and wins over it.
 | `--log-dir PATH` | `DAINTREE_ASSISTANT_LOG_DIR` | |
 | `--debug-log` | `DAINTREE_ASSISTANT_DEBUG_LOG=1` | writes the session trace |
 | `--auto-approve` | `DAINTREE_ASSISTANT_AUTO_APPROVE=1` | see the warning below |
+| `--allow-delegated-approvals` | — | `mcp --stdio` only: lets a session choose `approvals:"delegate"`, where the CALLING AGENT settles each confirmation. No *dedicated* env counterpart, deliberately — a human at a shell should decide whether the agent on the other end is one they trust. `--auto-approve` (and its env var) permit delegation too, by permitting more than it. Rejected on any other subcommand rather than silently ignored |
 | `--tier TIER` | `DAINTREE_ASSISTANT_TIER` | `supervisor`\|`operator`\|`system` |
 | `--mcp-url` / `--mcp-token` | `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` | injected by Daintree |
 | `--project PATH` | — | default: the current directory |
@@ -303,7 +552,7 @@ Four rules worth knowing before you script against them:
 
 A harness should never touch the developer's real state. `--state-dir` relocates the
 database, the artifacts and the owner lease, so an isolated run shares nothing with a
-cockpit the developer has open. Nothing else needs supplying — there is no credential to
+attached session the developer has open. Nothing else needs supplying — there is no credential to
 carry across:
 
 ```bash
@@ -317,7 +566,7 @@ daintree-assistant \
 
 Exactly one process may own a project's `state.db` at a time. A one-shot run takes the
 lease briefly and never spawns a supervisor daemon, so it cannot litter the machine —
-but it will fail rather than double-open if a cockpit already owns that project. A
+but it will fail rather than double-open if an attached session already owns that project. A
 distinct `--state-dir` is the way to run alongside one.
 
 `--auto-approve` makes tier-allowed mutating tools run with nothing on screen to say
@@ -381,7 +630,7 @@ the committed round did not repeat. Never reconstruct the active set from it.
 
 `session` answers "where do I look when this goes wrong". It is emitted once the
 runtime exists, so it precedes every assistant and tool event — but a failure *before*
-that point (bad flags, signed out, the project lease held by a live cockpit) produces
+that point (bad flags, signed out, the project lease held by a live attached session) produces
 only `error` + `result` and **no session line at all**. Handle its absence.
 
 ```json
@@ -458,11 +707,24 @@ with the answer still in `result.content`. A run that already **failed** keeps i
 `error` status and exit `1` — an expired wait never downgrades a real failure into a
 cancellation.
 
-The bound is cooperative, not a hard kill, and it has no second deadline behind it.
-Teardown joins any in-flight scheduler tick before closing the database, so a transport
-that ignored cancellation entirely could hold the exit open indefinitely. That is the
-deliberate trade — returning while a tick still held the store would be a data race — but
-do not read `--timeout` as a guaranteed upper bound on process lifetime.
+The *first* stage of the bound is cooperative: teardown joins any in-flight scheduler
+tick before closing the database, so a transport that ignored cancellation could hold the
+graceful exit open. That is the deliberate trade — returning while a tick still held the
+store would be a data race.
+
+The second stage is not cooperative. The same watchdog described above applies here:
+`--timeout` plus `domain.HardTimeoutGrace` (30s), armed before any setup and still armed
+through teardown, kills the process with exit `4`. So `--timeout` **is** a guaranteed
+upper bound on process lifetime, and the graceful path is what decides whether you exit
+`0`/`1`/`2` with a terminal `result` line or exit `4` with none.
+
+The precise ceiling is `timeout + 30s + 2s`: the watchdog gives its own stderr diagnostic
+up to two seconds to write before calling `os.Exit`, because stderr can be a pipe nobody
+is draining and a blocking write there would have turned the watchdog into one more way
+to hang.
+
+Durable async rows may remain live for the next owner in either case; the invocation
+itself always ends.
 
 Four things are worth knowing before you reach for it:
 
@@ -576,7 +838,7 @@ on stdout, which is worth knowing before piping a prompt file into a CI log.
 ### Failure, cancellation and the exit code
 
 **A run where turn two failed is a failed run.** A failed turn does not stop the script —
-the next prompt still runs, as it would in the classic REPL — but the failure is latched:
+the next prompt still runs, as it would in the line REPL — but the failure is latched:
 a later success cannot clear it. The outcome is worst-wins across turns, `error` >
 `cancelled` > `success`, and `result` reports the run's, while each `turn:end` reports
 its own turn's. Gate on `result`; it remains the only authority for the process.

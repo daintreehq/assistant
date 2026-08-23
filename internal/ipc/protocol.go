@@ -23,11 +23,11 @@ const (
 	// take it. The daemon suspends supervision (finishing any in-flight wake
 	// turn first) and stays suspended until THIS CONNECTION CLOSES — the open
 	// attach connection is the client's lease on the daemon's restraint, so a
-	// crashed cockpit (connection drops) resumes the daemon automatically.
+	// crashed attached session (connection drops) resumes the daemon automatically.
 	ReqAttach = "attach"
 	// ReqCredentials refreshes the daemon's MCP credentials (and optionally the
 	// backend URL) so a later detached run uses the newest token the last
-	// cockpit saw. Carried separately from attach so a cockpit can push a
+	// attached session saw. Carried separately from attach so an attached session can push a
 	// mid-session token refresh without re-attaching.
 	ReqCredentials = "credentials"
 	// ReqShutdown asks the daemon process to exit cleanly.
@@ -58,7 +58,7 @@ const (
 	// StateSupervising: the daemon holds the owner lock and its engines run.
 	StateSupervising DaemonState = "supervising"
 	// StateStandby: the daemon wants the owner lock but another process (an
-	// attached cockpit) holds it.
+	// attached session) holds it.
 	StateStandby DaemonState = "standby"
 	// StateYielded: an attach connection is open; the daemon will not contend
 	// for the owner lock until that connection closes.
@@ -91,7 +91,7 @@ type StatusReply struct {
 }
 
 // AttachRequest is the ReqAttach payload. Credentials ride along so every
-// attach doubles as a freshness push (the cockpit always has the newest
+// attach doubles as a freshness push (the attached session always has the newest
 // Daintree-injected MCP token).
 type AttachRequest struct {
 	ClientPid   int          `json:"clientPid"`
@@ -103,7 +103,7 @@ type AttachRequest struct {
 type AttachReply struct {
 	// OwnerReleased is true when the daemon held the lock and released it; false
 	// when it wasn't holding it (some OTHER process owns the DB — most likely a
-	// second cockpit).
+	// second attached session).
 	OwnerReleased bool `json:"ownerReleased"`
 	// OwnerBusy is set when the daemon believes a non-daemon process holds the
 	// owner lock, with the stamped pid when known.

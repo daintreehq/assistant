@@ -198,7 +198,7 @@ func TestHandle_NoRunnerFailsCleanly(t *testing.T) {
 	}
 }
 
-// Progress must reach the registry's beat, or the cockpit shows one frozen row for
+// Progress must reach the registry's beat, or the host shows one frozen row for
 // a run that can last a minute.
 func TestHandle_ForwardsProgressToTheToolContext(t *testing.T) {
 	fr := &fakeRunner{

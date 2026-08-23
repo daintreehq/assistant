@@ -2,7 +2,7 @@
 // builds every dependency once in a fixed order — config → store → mcp → queue →
 // backend → tools registry → skills → agent session → (lazy) scheduler — exposes a
 // ToolContext factory, the main AgentSession, and drives both the CLI and the
-// (future Bubble Tea) cockpit. Shutdown tears the dependencies down in reverse.
+// (future Bubble Tea) attached session. Shutdown tears the dependencies down in reverse.
 package app
 
 import (
@@ -43,7 +43,7 @@ type AppHooks struct {
 	Confirm func(ctx context.Context, req tools.ConfirmRequest) (bool, error)
 	// AskChoice presents a multiple-choice question to the interactive main actor and
 	// blocks until they answer (or the turn is cancelled). Wired only by interactive
-	// surfaces (cockpit, classic REPL); nil elsewhere (one-shot, host), so the tool
+	// surfaces (attached session, line REPL); nil elsewhere (one-shot, host), so the tool
 	// reports that the runtime can't ask.
 	AskChoice func(ctx context.Context, req tools.AskChoiceRequest) (tools.AskChoiceAnswer, error)
 	// Log emits an out-of-band line to the user.
@@ -90,7 +90,7 @@ type CreateOptions struct {
 	// ResumeCurrentSession (with an empty SessionID) resumes the project's
 	// durable current-session pointer (runtime_state) instead of minting a fresh
 	// session — the supervisor daemon's continuity mechanism: its autonomous
-	// wake turns continue the SAME conversation the last cockpit ran. A missing
+	// wake turns continue the SAME conversation the last attached session ran. A missing
 	// pointer still mints fresh. Ignored when SessionID is set explicitly.
 	ResumeCurrentSession bool
 	// PinnedSkillIDs names backend runbooks every turn of this session must load
@@ -240,11 +240,11 @@ type App struct {
 	startupGeneration       uint64
 
 	// display is the surface's live render geometry, published by the front end that
-	// owns the terminal — today only the cockpit, which measures at boot and on every
+	// owns the terminal — today only the attached session, which measures at boot and on every
 	// resize. An atomic POINTER, not two counters: the pair must move together, so a
 	// turn building its runtime context reads one coherent geometry rather than a new
 	// column count against a stale content width. It stays nil everywhere the reply is
-	// not wrapped by us (the classic REPL streams raw tokens the host wraps itself, a
+	// not wrapped by us (the line REPL streams raw tokens the host wraps itself, a
 	// piped one-shot, the stdio host, the headless daemon) — the backend is told
 	// "unknown" and picks its own default rather than being handed a fabricated 80x24.
 	display atomic.Pointer[prompts.DisplayContext]
@@ -293,7 +293,7 @@ func (a *App) SetTier(t domain.Tier) {
 
 // SetDisplaySize publishes the front end's live render geometry: `columns` is the
 // terminal, `contentWidth` the measure the assistant's own text is wrapped at (the
-// cockpit's content width, which is narrower than the terminal and capped). Called
+// attached session's content width, which is narrower than the terminal and capped). Called
 // from the UI's Update loop on every resize while turns read it on their own
 // goroutines, hence the atomic pointer.
 //
@@ -391,7 +391,7 @@ func (a *App) backendAcceptsDisplayContext() bool {
 // behaviour: full history, every round.
 //
 // KNOWN LIMIT, and deliberate. It reads only what an EXPLICIT handshake left behind —
-// the cockpit's boot fetch, /doctor, /routing, or a pinned-skill negotiation. A classic
+// the attached session's boot fetch, /doctor, /routing, or a pinned-skill negotiation. A classic
 // REPL, a one-shot, the embedded host, the MCP server and the supervisor daemon perform
 // none of those, so compaction stays off there, and it stays off after a /backend switch
 // until something negotiates with the new endpoint. That is invisible and costs only
@@ -569,7 +569,7 @@ func Create(opts CreateOptions) (*App, error) {
 	// credentials, prompt assembly, and skill selection.
 	//
 	// The endpoint comes from the resolved config (internal/config) — app.Create never
-	// reads the environment itself, so every entry point (cockpit, one-shot, host,
+	// reads the environment itself, so every entry point (attached session, one-shot, host,
 	// supervisor daemon) is configured identically. There is no credential to resolve
 	// on the normal path: the backend holds its own upstream key and serves a request
 	// with no Authorization header. cfg.APIKey is set only when DAINTREE_API_KEY named
@@ -619,7 +619,7 @@ func Create(opts CreateOptions) (*App, error) {
 		Store:        store,
 		WorkflowSink: workflowSink,
 		// Ownership-boot adoption: when the coordinator starts it re-tracks the
-		// persisted live invocations a prior owner (cockpit or supervisor daemon)
+		// persisted live invocations a prior owner (attached session or supervisor daemon)
 		// left polling, and retries any finalized-but-unpublished completion.
 		AdoptLister: store,
 		Notify: func() {
@@ -755,7 +755,7 @@ func Create(opts CreateOptions) (*App, error) {
 		ArtifactPersister: store,
 		WorkflowRunLister: store,
 		// Durable mirror + seed for the opaque backend state token, so a session
-		// handed over between processes (cockpit ↔ supervisor daemon) keeps the
+		// handed over between processes (attached session ↔ supervisor daemon) keeps the
 		// backend's skill-selection cadence. Seeded only on a genuine resume: a
 		// fresh session id has no persisted token.
 		BackendStateStore:   store,
@@ -833,7 +833,7 @@ func (a *App) turnActor() (domain.ToolActor, string) {
 
 // AdoptAsCurrentSession durably marks this App's session as the project's
 // current conversation — the one a detached supervisor daemon continues with
-// autonomous wake turns. Interactive paths (cockpit, classic REPL, host) call
+// autonomous wake turns. Interactive paths (attached session, line REPL, host) call
 // it once after Create; one-shot and doctor runs deliberately do NOT, so a
 // script probe never hijacks the conversation the daemon is supervising.
 func (a *App) AdoptAsCurrentSession() {

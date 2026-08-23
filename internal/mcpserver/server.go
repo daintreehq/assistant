@@ -21,6 +21,18 @@ type Options struct {
 	// Diagnostics receives human-readable lines. It must NOT be stdout: stdio is the
 	// protocol transport and a stray byte there breaks the client's parser.
 	Diagnostics io.Writer
+	// Policy is the process-level authority ceiling applied to every session.open.
+	// See policy.go.
+	//
+	// It is a VALUE, not a pointer, because a nil pointer used to mean "unconfined" —
+	// so the dangerous configuration was what you got by forgetting a field. Opting
+	// out is now an explicit Unconfined marker, which is more code than the safe
+	// default rather than less.
+	Policy ServerPolicy
+	// Unconfined removes the ceiling entirely, ignoring Policy. Only ever right for a
+	// trusted embedding path where the operator IS the caller; on the stdio surface the
+	// caller is a model, so ServeModelFacing refuses it outright.
+	Unconfined *TrustedUnconfined
 }
 
 // Serve runs the MCP server over stdio until the context is cancelled or the client
@@ -45,7 +57,15 @@ func Serve(ctx context.Context, opts Options) error {
 	// request context as soon as its response is sent, so anything using one would die
 	// the instant the call that created it returned.
 	lifetime, stop := context.WithCancel(ctx)
-	reg := NewRegistry(lifetime, opts.Factory)
+	// The registry is built WITH its ceiling, so there is no window in which a
+	// session.open could be served by an unconfined registry — and no way to reach the
+	// unconfined one except by naming it.
+	var reg *Registry
+	if opts.Unconfined != nil {
+		reg = NewUnconfinedRegistry(lifetime, opts.Factory)
+	} else {
+		reg = NewRegistry(lifetime, opts.Factory, opts.Policy)
+	}
 
 	// Defers run LIFO, so these two are registered in the order OPPOSITE to how they
 	// run. CloseAll is registered first and therefore runs LAST: cancellation reaches
@@ -72,6 +92,31 @@ func Serve(ctx context.Context, opts Options) error {
 	return s.Run(ctx, &mcp.StdioTransport{})
 }
 
+// ServeModelFacing is Serve for the surface whose caller is a MODEL. It refuses the
+// unconfined marker, so the one configuration that must never reach `mcp --stdio`
+// cannot be reached from it by any argument at all.
+//
+// The two constructors exist because "remember to install a policy" is not a boundary.
+// A caller on this path chooses only what to NARROW; a caller that genuinely wants no
+// ceiling has to name Serve and TrustedUnconfined together, which is a thing you do on
+// purpose rather than by omission.
+func ServeModelFacing(ctx context.Context, opts Options) error {
+	if opts.Unconfined != nil {
+		return fmt.Errorf("mcpserver: a model-facing server cannot be unconfined; " +
+			"use Serve if this really is a trusted embedding")
+	}
+	// A zero policy is still permissive by omission — no tier ceiling and no root
+	// allowlists — so "installed a policy" is not the same as "confined". MaxTier is
+	// the one dimension every real launch can always fill in (the process has a tier
+	// whether or not anyone named one), which makes its absence a reliable sign that
+	// the policy was never actually derived from anything.
+	if opts.Policy.MaxTier == "" {
+		return fmt.Errorf("mcpserver: a model-facing server needs a policy with a tier ceiling; " +
+			"an empty ServerPolicy confines nothing")
+	}
+	return Serve(ctx, opts)
+}
+
 // instructions is the server-level guidance an MCP client shows its model. It exists to
 // prevent the two mistakes this surface invites: treating `ask` as synchronous, and
 // forgetting that a session holds a project lease that must be released.
@@ -81,9 +126,13 @@ itself — it delegates edits to agents it spawns.
 
 Use it like this:
 
-1. daintree.session.open — bind a session to a project. Pass mcpUrl/mcpToken if you want
-   it to actually drive terminals; without them it runs in degraded local mode. Pass
-   debugLog:true so a bad run can be diagnosed. Keep the returned sessionId.
+1. daintree.session.open — bind a session to a project. Endpoints and credentials are
+   normally PINNED by whoever launched this server: omit backendUrl, mcpUrl, apiKeyFile
+   and mcpTokenFile and you inherit them. A bearer is NEVER an argument — do not put a
+   token in a tool call. Every session argument can only NARROW what the server was
+   launched with; a request above its policy is refused, not downgraded, and the refusal
+   says so. Pass debugLog:true so a bad run can be diagnosed. Keep the returned
+   sessionId.
 2. daintree.ask — ask for work. It returns a runId immediately; a real orchestration turn
    takes MINUTES. Do not set wait:true for anything that spawns agents.
 3. daintree.poll — read progress. Pass the previous nextSeq as sinceSeq to read only what
@@ -97,11 +146,34 @@ One turn runs at a time per session. To steer a turn already running, use
 daintree.inject rather than a second ask; to abandon it, daintree.interrupt.
 
 Mutating tools — terminal commands, git operations — need approval. By default they are
-DECLINED and the turn carries on without them, so if you want the assistant to actually
-change something, open the session with approvals:"ask" and answer with daintree.approve
-(a parked call blocks the turn), or approvals:"auto" to skip asking entirely.
+DECLINED and the turn carries on without them. If the server permits it, open the session
+with approvals:"delegate" and answer with daintree.approve (a parked call BLOCKS the turn
+until you do), or approvals:"auto" to skip the question entirely.
+
+The assistant may also ask a multiple-choice QUESTION — which worktree, which approach.
+That is NOT an approval and is a separate setting: open the session with
+questions:"delegate", then read daintree.questions and answer with
+daintree.question.answer, passing the INDEX of the option you choose. An out-of-range
+index cancels the call rather than picking the nearest option, and an unanswered question
+is cancelled on a timer, so answer it or expect the turn to proceed without it.
+
+Questions are independent of approvals, so approvals:"decline" with questions:"delegate"
+is a sensible pairing: answering a question authorises nothing, it only picks among
+options the assistant already proposed.
+
+"delegate" means what it says: YOU decide, not a human. Nobody sees these requests but
+you, so read the risk, the consequence and the args before approving one — and treat a
+request that does not match work you asked for as a reason to refuse and interrupt, not
+as a formality. Both modes may be refused by the server's launch policy, in which case
+the refusal says so.
 
 When a run needs diagnosing rather than summarising, read its resources instead of
-polling harder: daintree://session/{id}/run/{runId} is the complete timeline poll
-truncates, and daintree://session/{id}/log is the structured trace of every backend
-request and tool call.`
+polling harder: daintree://session/{id}/run/{runId} returns the timeline in pages larger
+than poll's window (append ?fromSeq=N&limit=M; the response reports nextSeq, remaining
+and complete), and daintree://session/{id}/log is the structured trace of every backend
+request and tool call for this whole SERVER PROCESS — filter it by sessionId.
+
+Nothing this server returns is unbounded. Every list has a server maximum as well as a
+default, and asking for more gives you the maximum plus a count of what was withheld —
+never an error, and never a silent truncation. If a response says something was withheld,
+read the rest rather than assuming you saw it all.`

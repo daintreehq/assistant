@@ -56,7 +56,7 @@ func TestWrapperRiskClassesAndConsequences(t *testing.T) {
 }
 
 // A disconnected MCP must point the model at /reconnect — the recovery command
-// that works in both the REPL and the cockpit (issue #211).
+// that works in both the REPL and the host (issue #211).
 func TestPassthroughDisconnectedNamesReconnect(t *testing.T) {
 	m := &fakeMCP{connected: false}
 	tool := findTool(Tools(Deps{}), "forge.listIssues")

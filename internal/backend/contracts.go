@@ -27,14 +27,18 @@ import (
 // mismatch yields HTTP 426.
 const ProtocolVersion = 2
 
-// DefaultBaseURL is the deployed backend — the endpoint a fresh install signs in to.
+// DefaultBaseURL is the deployed backend, and the endpoint a fresh install uses.
 //
-// The backend requires authentication in EVERY environment: each request carries the
-// caller's own API key as the bearer token, and that key is also the upstream
-// credential funding the turn's model calls (the server holds none of its own). There
-// is no unauthenticated mode to fall back to, so a CLI without a stored key cannot
-// talk to any endpoint — see internal/credentials and the login flow in
-// internal/cli/login.go.
+// THERE IS NO SIGN-IN. The backend holds its own upstream credential and funds every
+// turn from it, so a request carries no Authorization header at all and an anonymous
+// principal is a valid caller. `DAINTREE_API_KEY` remains supported — a caller-supplied
+// bearer still WINS over the backend's own credential for that request — but it is
+// unset on a normal install.
+//
+// (This comment previously described a mandatory per-caller API key and pointed at
+// `internal/credentials` and `internal/cli/login.go`. Both were deleted with the
+// backend migration; the sign-in it described has not existed for some time. See
+// docs/BACKEND.md, which is the live account of how a turn is funded.)
 const DefaultBaseURL = "https://assistant.daintree.org"
 
 // LocalBaseURL is the local development backend (`python -m daintree_assistant_server`
@@ -249,7 +253,7 @@ type RuntimeContext struct {
 // columns is the raw terminal, sent so the model can answer questions about the window
 // it is running in without inferring one number from the other. Both are cells, and
 // both are optional on the backend: a surface that knows its wrap width but not its
-// window (a future non-cockpit publisher) sends content_width alone rather than a
+// window (a future non-attached session publisher) sends content_width alone rather than a
 // guessed pair.
 //
 // Bounded by displayWidthMax to mirror the backend's validation: the request is

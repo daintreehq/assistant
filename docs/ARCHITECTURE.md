@@ -2,13 +2,14 @@
 
 Architecture reference for the Go binary. Every package described below is
 implemented; the contracts (the `ToolDef` shape, the scheduler decision record, the
-per-package behavior notes) describe the system as it stands. The cockpit's own
-rendering architecture has a dedicated doc — see [`BUBBLE_TEA.md`](BUBBLE_TEA.md).
+per-package behavior notes) describe the system as it stands. The binary is **headless**:
+Daintree embeds it over `host --stdio` and renders the conversation natively, so there is
+no terminal UI package any more — see [`DAINTREE_HOST.md`](DAINTREE_HOST.md).
 
 ## Layout
 
 ```
-cmd/daintree-assistant/   main.go — flags → one-shot | doctor | cockpit | classic
+cmd/daintree-assistant/   main.go — flags → one-shot | doctor | host | mcp | daemon | repl
 internal/
   domain/        pure vocabulary (uuid + stdlib only): RiskClass, Tier, ModelTier, RunPhase,
                  ToolResult (Ok/Fail), AgentEvent union, DB-row records, WatchCondition DSL,
@@ -56,10 +57,9 @@ internal/
   daemon/        scheduler.go (3s tick) + watcher.go (terminal watcher state machine)
   queue/         Queue — attention queue
   app/           App.Create — wires deps, ctx, session, scheduler; ToolContext factory
-  commands/      slash-command catalog + handlers (cockpit & classic)
-  cli/           Run(Options) entry, repl.go (classic), CockpitRunner seam, render/, jsonout/
-  ui/            Bubble Tea cockpit (the ONLY bubbletea importers) — see BUBBLE_TEA.md
-  host/          embedded host (run.go) — stdio NDJSON, PROTOCOL_VERSION 2
+  commands/      slash-command catalog + handlers (structured results for the host + REPL)
+  cli/           Run(Options) entry, repl.go (line REPL), host.go, mcpserve.go, render/, jsonout/
+  host/          embedded host (host.go) — stdio NDJSON, PROTOCOL_VERSION 3
   terminal/      TTY-gated raw escapes (clear.go) — the only host-scrollback wipe
 ```
 
@@ -220,4 +220,5 @@ secrets; the store's due-timer / due-watcher / dedupe queries; the think-filter 
 `<think>…</think>` across chunk boundaries; `Dispatch` audits a read tool and yields
 `USER_DECLINED` on a declined confirm; the watcher engine's condition evaluation and
 outcome decisions; the scheduler firing a one-shot vs rescheduling a repeat; and the
-cockpit's no-alt-screen / no-mouse contract (`internal/ui/view_test.go`).
+and the embedded host's transport framing, bridge, interrupt and wake/shutdown paths
+(`internal/host/*_test.go`).

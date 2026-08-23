@@ -191,7 +191,7 @@ const asyncQuiesceInterval = 100 * time.Millisecond
 // the turn would be torn down before it polled once.
 //
 // It is NOT folded into Shutdown. "Stop safely" and "stay alive until useful work
-// finishes" are different operations: every other caller (cockpit, REPL, daemon,
+// finishes" are different operations: every other caller (attached session, REPL, daemon,
 // mcp --stdio) outlives its async work by construction and must keep paying nothing
 // for a wait it does not need.
 //
@@ -394,7 +394,7 @@ func (a daemonRegistryAdapter) Dispatch(ctx context.Context, actor domain.ToolAc
 }
 
 // DaemonMCP exposes the same read-only MCP adapter the daemon ticks use, so the
-// cockpit's off-loop dashboard build can drive daemon.FetchPreviews through it. The
+// attached session's off-loop dashboard build can drive daemon.FetchPreviews through it. The
 // adapter just wraps a pointer (no I/O to construct) and *mcp.Client is concurrent-
 // safe, so the UI hook and the scheduler can share one client without coordination.
 func (a *App) DaemonMCP() daemon.MCP { return daemonMcpAdapter{c: a.MCP} }

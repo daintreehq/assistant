@@ -58,9 +58,10 @@ the local one (`http://127.0.0.1:8473`) you get by running `../assistant-backend
 `--backend-url` → `DAINTREE_BACKEND_URL` (trusted env) → the endpoint **stored by
 `/backend`** (`internal/config/endpoint.go`, a 0600 `endpoint.json` at the per-user state
 root, holding ONLY `{backend_url}` — it is a preference, never a credential) → the
-default. In the cockpit `/backend` with no argument opens a
-SELECTION SHEET (↑/↓, letter keys, Enter) reusing the question sheet the model's
-`user.askMultipleChoice` uses — `pendingQuestion.local` marks it user-opened so Esc
+default. `/backend` with no argument reports the resolved endpoint; choosing between
+candidates is a HOST concern now (Daintree renders the picker), reusing the same
+question channel the model's `user.askMultipleChoice` uses — `pendingQuestion.local`
+marks it user-opened so Esc
 dismisses instead of cancelling the turn, and nothing blocks on a reply channel. With a
 target (`local`, `official`, a number, or a URL) it swaps the `Swappable` in place AND
 persists; `/backend default` forgets. The classic REPL, which has no sheet, prints the
@@ -71,7 +72,7 @@ feature, `cfg.BackendURLPinnedByEnv` makes `/backend` say so.
 **There is no sign-in, and the CLI stores no credential.** The backend holds its own
 upstream key and serves a request that carries **no `Authorization` header at all**, so
 the CLI never prompts for a key, never writes one to disk, and never gates startup on
-one. `login` / `logout`, `/auth`, `/login`, the cockpit sign-in sheet, `internal/credentials`
+one. `login` / `logout`, `/auth`, `/login`, any local sign-in sheet, `internal/credentials`
 and the `reset credentials` scope are all GONE — do not reintroduce them. That is a
 deliberate stage, not the destination: Daintree account authentication is being built
 next, and it lands in the seams kept alive for it, not in a rebuilt OpenRouter-key flow.
@@ -110,14 +111,14 @@ make build                                                    # trimpath + versi
 make install                                                  # go install with the same ldflags
 
 # Run
-./bin/daintree-assistant                     # interactive Bubble Tea cockpit (TTY, not --classic)
+./bin/daintree-assistant host --stdio        # THE embedding path — Daintree drives this
 ./bin/daintree-assistant --classic           # classic line REPL (also used for non-TTY)
 ./bin/daintree-assistant "which worktrees are ready?"   # one-shot, prints, exits
 ./bin/daintree-assistant --json "…"          # one-shot, JSONL events to stdout
 ./bin/daintree-assistant doctor              # environment gate; `doctor --json` for the structured form
 ./bin/daintree-assistant support-bundle      # redacted diagnostics archive to send to a maintainer
 ./bin/daintree-assistant reset <scope>       # project-state | all-data (lease-aware, backs up)
-./bin/daintree-assistant host --stdio        # embedded host: stdio NDJSON, PROTOCOL_VERSION 2
+./bin/daintree-assistant host --stdio        # embedded host: stdio NDJSON, PROTOCOL_VERSION 3
 
 # Gates (run before considering work done)
 go test ./...                # the whole suite, no network — fakes for MCP + backend
@@ -159,18 +160,19 @@ because that needs an Apple certificate this repo cannot provision.
 with the real binary if a result looks off.
 
 There is **no ESLint/Prettier/Biome equivalent**: the only gates are `go build`,
-`go vet`, `go test`, and a `gofmt` check. The full cockpit architecture contract is
-in `docs/BUBBLE_TEA.md`.
+`go vet`, `go test`, and a `gofmt` check. The host-embedding contract is in
+`docs/DAINTREE_HOST.md`.
 
 ## Layout & architecture
 
 Module `github.com/daintreehq/assistant`, `go 1.25.13`. **Import with full
 module paths.** SQLite is `modernc.org/sqlite` (pure Go, **no CGO** — `CGO_ENABLED=0`
-builds work). MCP is `github.com/modelcontextprotocol/go-sdk`. The cockpit is **Bubble
-Tea v2** (`charm.land/bubbletea/v2`, with `bubbles/v2`, `lipgloss/v2`, `glamour/v2`).
+builds work). MCP is `github.com/modelcontextprotocol/go-sdk`. There is **no UI stack** —
+the dependency tree is deliberately tiny (6 direct modules) and adding a rendering library
+to it is a review blocker.
 
 ```
-cmd/daintree-assistant/   main.go — entrypoint: flags → one-shot | doctor | cockpit | classic; injects main.version
+cmd/daintree-assistant/   main.go — entrypoint: flags → one-shot | doctor | host | mcp | daemon | repl; injects main.version
 internal/
   domain/        pure vocabulary (imports only uuid + stdlib): RiskClass, Tier, ModelTier,
                  RunPhase, ToolResult (Ok/Fail), AgentEvent union, DB-row records, constants
@@ -219,11 +221,9 @@ internal/
   supervisor/    the persistent per-project daemon: lease contention loop, headless App spans,
                  autonomous wake reactor, client-side AcquireOwnership/spawn. See docs/SUPERVISOR.md
   app/           App.Create(CreateOptions) — wires every dependency once, exposes the ToolContext factory
-  commands/      slash-command catalog + handlers (shared by cockpit & classic REPL)
-  cli/           Run(Options) entry, classic REPL (repl.go), CockpitRunner seam, render/, jsonout/
-  ui/            Bubble Tea cockpit (the ONLY bubbletea importers): model/update/view, pump,
-                 scrollback, splash, composer/ theme/ markdown/
-  host/          embedded host (run.go) — stdio NDJSON transport, PROTOCOL_VERSION 2
+  commands/      slash-command catalog + handlers (structured results for the host + REPL)
+  cli/           Run(Options) entry, line REPL (repl.go), host.go, mcpserve.go, render/, jsonout/
+  host/          embedded host (host.go) — stdio NDJSON transport, PROTOCOL_VERSION 3
   mcpserver/     the assistant AS an MCP server (`mcp --stdio`) so another agent can drive
                  it as a sub-agent: per-session config (no server-held binding, because an
                  MCP client cannot restart us), async-first ask/poll because a turn takes
@@ -251,7 +251,7 @@ the eager meta's signed state so the backend reuses that selection. **Skill sele
 server-owned**: the backend's selector picks/injects runbook bodies before it calls the
 upstream model, so the runbook is in hand for that same generation; the CLI just stores the
 state token. **Backend skill loads never enter the conversation** — no card, no cue, in the
-cockpit or the classic REPL (pinned by `internal/ui/render_skill_test.go`). They are prompt
+host stream or the line REPL. They are prompt
 assembly, not a step the operator takes, and the delta the old card showed was misleading
 besides (never what was retained, capped, or auto-paired as a foundation). There is **no
 `/skills` command** either — a standing "what's active?" reveal is the same information with
@@ -348,37 +348,35 @@ sub-threads publish to the **attention queue** instead of interrupting the main 
   publish-only under the same dedupe key — exactly-once across crashes.
   The live ledger rides every round's `request.turn.async_operations` block so the
   model can't forget or re-issue in-flight work.
-- **UI boundary.** Only `internal/ui` imports `charm.land/bubbletea/*` (+ bubbles /
-  lipgloss / glamour). The runtime emits structured events via `agent.EventSink`,
-  consumed by the cockpit's event pump or the console / JSONL sink. Tools never render;
-  the model loop never writes to stdout.
-- **Inline cockpit on the NORMAL screen buffer — NEVER the alternate screen (Claude
-  Code model).** The cockpit is **Bubble Tea v2**. `internal/ui/run.go` builds the
-  `tea.Program` with **no `AltScreen`, no mouse capture** (bracketed paste on). Daintree
-  always runs the assistant inside xterm, and **the host terminal must own scrolling** —
-  native mouse-wheel-where-you-hover, scrollbar, selection, copy/paste. The alt screen
-  and mouse capture would disable all of that, so both are forbidden (enforced by
-  `internal/ui/view_test.go`: `View()` must contain no `\x1b[?1049h`, and the program
-  `View` must report `AltScreen == false` / `MouseMode == MouseModeNone`). A growing
-  transcript lives in the host's **native scrollback**: finished turns + the masthead
-  commit ONCE via `tea.Println` (a strict, one-in-flight commit queue, masthead-first,
-  ack'd by `ScrollbackCommittedMsg`), and only a small **live footer** (in-flight turn +
-  status + composer) repaints. NEVER render the whole transcript into the `View()` string
-  — that garbles the layout the instant the transcript outgrows the terminal height. The
-  **masthead has NO full-width rule** (a committed rule would wrap on host shrink).
-  `/clear` is the ONLY scrollback wipe (`internal/terminal/clear.go`,
-  `\x1b[2J\x1b[3J\x1b[H`, TTY-gated). See `docs/BUBBLE_TEA.md`.
+- **THE BINARY IS HEADLESS. There is no terminal UI package, and none may be added.**
+  The Bubble Tea cockpit (`internal/ui`) was deleted when Daintree took over rendering;
+  the whole charm stack (bubbletea / bubbles / lipgloss / glamour, and chroma / goldmark
+  behind glamour) is out of `go.mod` and must stay out. Rendering belongs to Daintree,
+  which drives this binary over `host --stdio` and draws the conversation in React. If a
+  turn needs to *say* something new, that is a new **event on the host protocol**
+  (`internal/host`), never a new thing drawn here.
+- **Structured events are the only output.** The runtime emits `agent.EventSink` events,
+  consumed by exactly three sinks: the host bridge (`internal/host/bridge.go`), the JSONL
+  sink (`internal/cli/jsonout`), and the plain console sink (`internal/cli/consolesink.go`)
+  behind the line REPL. Tools never render; the model loop never writes to stdout. Adding
+  a fourth sink is fine; adding a *renderer* is not.
+- **The line REPL is an operator convenience, not a product surface.** `internal/cli/repl.go`
+  writes plain lines to the normal screen buffer — no raw mode, no alternate screen, no
+  mouse capture — so a shell or SSH session keeps native scrolling and copy/paste. Do not
+  grow it. `--classic` is a deprecated no-op kept only so existing invocations don't break.
+  `/clear` remains the ONLY scrollback wipe (`internal/terminal/clear.go`,
+  `\x1b[2J\x1b[3J\x1b[H`, TTY-gated).
 - **Explicit liveness, ordered turn model.** The active turn is driven by a first-class
   `domain.RunPhase` (Received → Analyzing → Generating → ToolQueued/Running →
   Integrating → Complete/Failed/Cancelled), NOT inferred from "is the assistant text
   empty". A turn is an ordered `[]TurnStep` (prose / tool / status / note), not a flat
-  string + a separate activities slice — so `preamble → tools → conclusion` renders in
-  true chronological order. See `docs/BUBBLE_TEA.md`.
+  string + a separate activities slice — so `preamble → tools → conclusion` reaches a
+  consumer in true chronological order.
 - **Watcher engine is a state machine, not a poller** (`daemon/watcher.go`):
   deterministic signals (agent state, exit code, tail regex, timeout) first, the small
   model only when needed, dedupe, publish only meaningful changes; completion is gated
   on a read-only git-cleanliness check before any irreversible action is suggested.
-- **Fresh starts are honest, not amnesiac.** A new session's cockpit starts with a
+- **Fresh starts are honest, not amnesiac.** A new session starts with a
   clean transcript (no old failed turns), but PROJECT state deliberately carries
   over: adopted watchers/async keep running, the attention inbox persists, and the
   one-time "While you were away" notice (App.AttachSummaryLines, consumed on read)
@@ -387,9 +385,9 @@ sub-threads publish to the **attention queue** instead of interrupting the main 
   first check (watchers reconcile against the live terminal state), and the
   detached-activity notice never repeats.
 - **Comment style:** dense, "why"-focused block comments on non-obvious logic. Match it.
-  Tests use Go's `testing` package; UI tests render through Bubble Tea's `View()` and
-  assert on the string (no native renderer needed). `:memory:` SQLite and fakes for
-  MCP/models — never the network.
+  Tests use Go's `testing` package; the host protocol is tested by driving NDJSON frames
+  through `internal/host` and asserting on the emitted event stream. `:memory:` SQLite and
+  fakes for MCP/models — never the network.
 
 ## Debug logging
 
@@ -405,13 +403,13 @@ exists. `internal/redact` does the work: credential SHAPES (bearer, `sk-`, PATs,
 plus `DAINTREE_API_KEY` at boot on the rare install that sets one. Registration is additive: a rotated key stays
 registered, because a log line written under it is still on disk. Block values are capped
 at 64 KiB with a size + sha256 prefix. The same redactor also guards the durable audit
-rows (`tools.safeJSON`) and the cockpit's approval sheet (`internal/ui/redact.go`).
+rows (`tools.safeJSON`) and the `approval:requested` payloads the host protocol emits.
 The flag is read from the process env, the bound project's `.env`, or the assistant's
 own `.env` fallback. `debuglog.StartDebugLog(cfg, sessionId)` runs once per process at
 boot: it deletes logs older than 7 days, opens a **per-session** `<date>-<sessionId>.log`
 (never clobbering a prior run, dir 0700 / file 0600), writes a `session.start` header,
-and returns the path so the caller can print `logging to <file>`. The cockpit shows a
-`◌ LOG` badge + the path when active. The logger is a no-op when disabled and never
+and returns the path so the caller can print `logging to <file>`. The `--json` session
+header and `daintree.session.open` both report it. The logger is a no-op when disabled and never
 throws. Tests pin `DAINTREE_ASSISTANT_DEBUG_LOG=0` / pass an explicit `logDir`.
 
 ### Replaying MCP calls by hand (live debugging)
@@ -530,14 +528,14 @@ subdir when a project id is set).
 `docs/BACKEND.md` (**the backend integration — read this for the model / skill / prompt
 story**), `docs/SUPERVISOR.md` (the persistent supervisor daemon: leases, adoption,
 autonomous wake turns, credential lifecycle), `docs/SUBAGENTS.md` (**delegated research — the sub-agent loop, its bounds, the read-only
-guarantee, sub-agent skill selection, and the cockpit rows**),
+guarantee, and sub-agent skill selection**),
 `docs/SKILLS.md` (how server-owned skills
 work + the local run-tracking tools), `docs/WORKFLOW_INTELLIGENCE.md` (the flag-gated
 workflow execution-graph layer: graph model, tools, observer, async linking, and the
 backend contract it expects),
 `docs/HEADLESS.md` (**driving the CLI from a script or another agent — the `mcp --stdio`
 server, the flags, the `--json` event schema, exit codes, isolation**),
-`README.md` (full overview), `docs/BUBBLE_TEA.md` (cockpit architecture),
+`README.md` (full overview), `docs/DAINTREE_HOST.md` (host embedding),
 `docs/ARCHITECTURE.md`, `docs/DAINTREE_MCP.md` (Daintree's MCP protocol),
 `docs/DAINTREE_HOST.md` (how Daintree launches / displays / hides / restarts this CLI),
 `docs/LOGGING.md` (the debug-log event reference), `docs/RUNTIME.md` (auto-compaction +

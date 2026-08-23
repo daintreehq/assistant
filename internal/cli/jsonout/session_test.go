@@ -115,6 +115,10 @@ func TestSessionKeysMatchTheContract(t *testing.T) {
 	line := decodeLines(t, &buf)[0]
 	want := []string{
 		"type", "ts", "seq",
+		// schemaVersion is on the FIRST frame as well as the terminal result, so a
+		// streaming consumer can reject an unknown schema before it parses anything
+		// else rather than after it has parsed everything.
+		"schemaVersion",
 		"sessionId", "project", "tier", "backendUrl", "logPath", "version",
 		"autoApprove", "mcpConnected", "mcpTransport",
 	}
@@ -125,6 +129,30 @@ func TestSessionKeysMatchTheContract(t *testing.T) {
 	}
 	if len(line) != len(want) {
 		t.Errorf("session line has %d keys, want exactly %d: %v", len(line), len(want), line)
+	}
+	// It must be the REAL version, not a zero left by the caller: the sink stamps it so
+	// a consumer can always rely on it.
+	if got := line["schemaVersion"]; got != float64(domain.JSONOutputSchemaVersion) {
+		t.Errorf("schemaVersion = %v, want %d", got, domain.JSONOutputSchemaVersion)
+	}
+}
+
+// TestSchemaVersionAgreesAcrossFirstAndLastFrame: two declarations of the same fact are
+// a drift hazard, so pin that they cannot disagree.
+func TestSchemaVersionAgreesAcrossFirstAndLastFrame(t *testing.T) {
+	var buf bytes.Buffer
+	s := New(&buf, fixedClock)
+	s.Session(SessionInfo{})
+	s.Finish()
+
+	lines := decodeLines(t, &buf)
+	first := lines[0]
+	last := lines[len(lines)-1]
+	if last["type"] != "result" {
+		t.Fatalf("last frame = %v, want result", last["type"])
+	}
+	if first["schemaVersion"] != last["schemaVersion"] {
+		t.Errorf("session says schemaVersion %v but result says %v", first["schemaVersion"], last["schemaVersion"])
 	}
 }
 
@@ -326,5 +354,34 @@ func TestCancelRunNeverDowngradesAFailedRun(t *testing.T) {
 	last := lines[len(lines)-1]
 	if last["status"] != string(domain.JSONStatusError) {
 		t.Errorf("status = %v, want error", last["status"])
+	}
+}
+
+// The documented guarantee is that a streaming consumer can reject an incompatible
+// schema on the FIRST line it sees. That was false for the case that needs it most: a
+// setup failure emits `error` before any session frame exists, so the version has to
+// live on the common envelope rather than only on the session header.
+func TestEverySchemaVersionIsOnEveryFrameIncludingAnErrorBeforeTheSession(t *testing.T) {
+	var buf bytes.Buffer
+	s := New(&buf, fixedClock)
+	// No Session() call at all — exactly the setup-failure shape.
+	s.Error("could not acquire the project lease")
+	s.Finish()
+
+	lines := decodeLines(t, &buf)
+	if len(lines) == 0 {
+		t.Fatal("no frames emitted")
+	}
+	for i, line := range lines {
+		got, ok := line["schemaVersion"]
+		if !ok {
+			t.Fatalf("frame %d (%v) carries no schemaVersion: %v", i, line["type"], line)
+		}
+		if got != float64(domain.JSONOutputSchemaVersion) {
+			t.Errorf("frame %d schemaVersion = %v, want %d", i, got, domain.JSONOutputSchemaVersion)
+		}
+	}
+	if lines[0]["type"] == "session" {
+		t.Fatal("this test must exercise the no-session path to be meaningful")
 	}
 }

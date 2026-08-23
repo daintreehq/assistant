@@ -3,9 +3,12 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/daintreehq/assistant/internal/agent"
@@ -85,6 +88,9 @@ type Host struct {
 
 	runCtx    context.Context
 	runCancel context.CancelFunc
+	// transportFailed records that the outbound stream broke, so teardown can report
+	// `error` rather than a clean `exit`.
+	transportFailed atomic.Bool
 
 	teardownOnce sync.Once
 }
@@ -135,6 +141,12 @@ func (h *Host) reportSync(code, message string) {
 // post sends an event through the transport, stamping the current session id.
 func (h *Host) post(ev HostEvent) { h.tr.send(h.sessionID, ev) }
 
+// postStream is the backpressure lane for high-volume events (tokens, tool progress,
+// phase beats). It WAITS for queue room instead of dropping the frame — see
+// streamHighWater. Control events keep using post, which never waits, so an approval
+// decision or an interrupt can never stall behind a token burst.
+func (h *Host) postStream(ev HostEvent) { h.tr.sendStream(h.sessionID, ev) }
+
 // Run is the entry point: install the stdout-fail hook, run the command loop, and
 // (on a terminal inbound) tear down. It blocks until teardown calls exit. The
 // caller wires os.Stdin/os.Stdout/os.Stderr.
@@ -147,8 +159,15 @@ func (h *Host) Run(parent context.Context) {
 	}
 
 	// A broken stdout means the parent is gone → cancel + teardown.
+	//
+	// It is latched as a TRANSPORT FAILURE, not an ordinary exit. A session ended
+	// because a critical frame could not be delivered is a protocol failure, and
+	// reporting it with reason "exit" and status 0 told anyone reading the outcome —
+	// a supervisor, a log, a person — that everything went fine. It did not: frames
+	// this process produced never reached the host.
 	h.tr.onSendFail = func(err error) {
 		h.tr.diag(fmt.Sprintf("host: stdout write failed (parent gone?): %v", err))
+		h.transportFailed.Store(true)
 		h.runCancel()
 	}
 
@@ -169,9 +188,11 @@ func (h *Host) Run(parent context.Context) {
 	for {
 		select {
 		case <-h.runCtx.Done():
-			// Parent exit / stdout failure → cancel any turn + teardown.
+			// Parent exit / stdout failure → cancel any turn + teardown. A transport
+			// failure is reported as `error`, not `exit`: this is the one cancellation
+			// path where the session did not end cleanly.
 			h.cancelTurn()
-			h.teardown(ShutdownExit, "")
+			h.teardown(h.shutdownReason(), "")
 			return
 		case msg, ok := <-commands:
 			if !ok {
@@ -188,6 +209,15 @@ func (h *Host) Run(parent context.Context) {
 			h.onLine(msg.line)
 		}
 	}
+}
+
+// shutdownReason maps the cancellation cause onto the wire vocabulary: a broken
+// transport is an `error`, everything else is a normal `exit`.
+func (h *Host) shutdownReason() HostShutdownReason {
+	if h.transportFailed.Load() {
+		return ShutdownError
+	}
+	return ShutdownExit
 }
 
 // onLine drives the descriptor/command state machine.
@@ -258,7 +288,27 @@ func (h *Host) boot(desc SessionDescriptor) {
 		SessionID:           appSessionID,
 		ProjectPath:         desc.Cwd,
 		ProjectInstructions: pi.Content,
+		// The descriptor's own claim about what this session is bound to, so the
+		// factory can check it against the environment the runtime will actually use.
+		// Two independent statements of the same fact are only worth carrying if they
+		// are compared; otherwise there are two truths and no way to tell which is live.
+		Declared: Binding{
+			ProjectID: desc.ProjectID,
+			WindowID:  strconv.FormatInt(desc.WindowID, 10),
+			Tier:      desc.Tier,
+			Cwd:       desc.Cwd,
+		},
 	})
+	var mismatch *BindingMismatchError
+	if errors.As(err, &mismatch) {
+		// Its own code, not a generic bootstrap failure: this is the one startup error
+		// whose cause is a disagreement between the two repositories, and a host that
+		// cannot tell it from "the database would not open" has no way to know its own
+		// descriptor is wrong.
+		h.reportSync("binding-mismatch", mismatch.Error())
+		h.teardown(ShutdownError, "")
+		return
+	}
 	if err != nil {
 		// Fatal pre-app path (factory failed → no running App): synchronous +
 		// flushed so the bootstrap-error precedes the host:shutdown reason.
@@ -276,15 +326,19 @@ func (h *Host) boot(desc SessionDescriptor) {
 
 	// Bridge: maps the agent event stream + confirm hook → wire events.
 	h.bridge = NewBridge(BridgeOptions{
-		SessionID: h.sessionID,
-		Post:      h.post,
-		RiskOf:    app.RiskOf,
+		SessionID:  h.sessionID,
+		Post:       h.post,
+		PostStream: h.postStream,
+		RiskOf:     app.RiskOf,
 	})
 
 	app.SetHooks(AppHooks{
 		AgentEvents: h.bridge,
 		Confirm: func(ctx context.Context, req ConfirmRequest) bool {
 			return h.bridge.Confirm(ctx, req)
+		},
+		AskChoice: func(ctx context.Context, req AskChoiceRequest) (AskChoiceAnswer, error) {
+			return h.bridge.AskChoice(ctx, req)
 		},
 	})
 
@@ -318,7 +372,11 @@ func (h *Host) boot(desc SessionDescriptor) {
 	// Hand off from the boot guard to the steady-state fatal path.
 	h.guardActive = false
 	h.ready = true
-	ev := EvReady{ProtocolVersion: ProtocolVersion}
+	ev := EvReady{
+		ProtocolVersion: ProtocolVersion,
+		Version:         BuildVersion,
+		AutoApprove:     app.Config().AutoApprove,
+	}
 	if desc.ResumeSessionID != "" {
 		ev.ResumedSessionID = desc.ResumeSessionID
 	}

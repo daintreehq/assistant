@@ -89,7 +89,7 @@ type ResetOptions struct {
 // resolve paths in Go (never re-derive them in make) → stop the daemon → TAKE the owner
 // lease → show exactly what will be removed → confirm → back up → remove only the
 // requested scope → release. The lease is the load-bearing step: holding it proves no
-// cockpit or daemon is mid-write, and releasing it afterwards lets the next launch
+// attached session or daemon is mid-write, and releasing it afterwards lets the next launch
 // rebuild cleanly.
 func RunReset(ctx context.Context, opts Options, scope ResetScope, ropts ResetOptions) int {
 	r := render.Stdout()
@@ -144,7 +144,7 @@ func RunReset(ctx context.Context, opts Options, scope ResetScope, ropts ResetOp
 		}
 	}
 
-	// Stop the daemon FIRST. It holds the owner lease whenever no cockpit is attached,
+	// Stop the daemon FIRST. It holds the owner lease whenever no session is attached,
 	// so without this the acquire below would simply time out — and worse, a daemon that
 	// survived the reset would keep an open handle to a database we are about to delete.
 	if err := supervisor.RequestShutdown(ctx, cfg.StateDir); err != nil && !errors.Is(err, ipc.ErrNoDaemon) {
@@ -154,7 +154,7 @@ func RunReset(ctx context.Context, opts Options, scope ResetScope, ropts ResetOp
 	// Take the owner lease. This is the whole reason the command exists: acquiring it
 	// proves nothing else is mid-write, and failing to acquire it is the ONLY safe
 	// outcome when something is — far better than deleting a database out from under a
-	// live cockpit. SpawnDaemon is false: spawning a supervisor to immediately delete its
+	// live attached session. SpawnDaemon is false: spawning a supervisor to immediately delete its
 	// state would be absurd.
 	own, err := supervisor.AcquireOwnership(ctx, cfg, supervisor.AcquireOptions{
 		SpawnDaemon: false,

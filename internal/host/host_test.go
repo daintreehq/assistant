@@ -183,7 +183,7 @@ func TestHostProtocolMismatch(t *testing.T) {
 
 func TestHostReadyAndShutdown(t *testing.T) {
 	factory := func(context.Context, AppParams) (App, error) { return &fakeApp{}, nil }
-	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":2}`
+	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`
 	lines := driveHost(t, factory, []string{desc, `{"type":"shutdown","sessionId":"s"}`})
 
 	var sawReady, sawShutdown bool
@@ -205,7 +205,7 @@ func TestHostReadyAndShutdown(t *testing.T) {
 
 func TestHostForeignMessageDropped(t *testing.T) {
 	factory := func(context.Context, AppParams) (App, error) { return &fakeApp{}, nil }
-	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":2}`
+	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`
 	// Wrong-session command must be dropped silently (no error), then shutdown.
 	lines := driveHost(t, factory, []string{
 		desc,
@@ -254,7 +254,7 @@ func TestHostCommandLoopNotBlockedByWedgedStdout(t *testing.T) {
 
 	go h.Run(context.Background())
 
-	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":2}`
+	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`
 	// Feed: descriptor, a decide for a (non-existent) approval (a no-op resolve that
 	// still proves the loop services decide), then shutdown — all while stdout is
 	// wedged. The loop processing these without blocking is the regression guard.
@@ -290,7 +290,7 @@ func TestHostCommandLoopNotBlockedByWedgedStdout(t *testing.T) {
 
 func TestHostHibernateCarriesResume(t *testing.T) {
 	factory := func(context.Context, AppParams) (App, error) { return &fakeApp{}, nil }
-	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":2}`
+	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`
 	lines := driveHost(t, factory, []string{desc, `{"type":"hibernate","sessionId":"s"}`})
 	var saw bool
 	for _, m := range lines {

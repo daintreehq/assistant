@@ -138,8 +138,8 @@ func backendAliasList() string {
 //
 //   - The turn gate. A turn is multi-round, and swapping between rounds would send the
 //     next round to a backend that cannot read the `state` token the previous one
-//     signed. The cockpit refuses /backend while its own turn is in flight, but that
-//     flag only knows about the cockpit — an autonomous wake turn, the classic REPL, a
+//     signed. The attached session refuses /backend while its own turn is in flight, but that
+//     flag only knows about the attached session — an autonomous wake turn, the line REPL, a
 //     one-shot, or an MCP-driven session would all sail past it. Session.DropBackendState
 //     returns ErrTurnInProgress from under the session lock, which is the only place that
 //     knows for certain.

@@ -30,7 +30,7 @@ const doctorProbeTimeout = 5 * time.Second
 
 // boundedProbeCtx bounds a LIVE-client MCP probe with a CANCEL-based timer rather
 // than context.WithTimeout — the mcp-bestEffort-reads rule (see
-// internal/app/toolterminal.go). /doctor runs against the cockpit's live
+// internal/app/toolterminal.go). /doctor runs against the attached session's live
 // a.MCP, and the client's own per-attempt budget (20s) is longer than this 5s
 // one, so a slow-but-alive server would otherwise surface the CALLER's
 // DeadlineExceeded to the client's degrade path and close the session — making

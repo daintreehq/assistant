@@ -4,9 +4,12 @@ The CLI is a **thin local runtime**. It no longer acts as a model client; instea
 talks to the **Daintree Assistant backend** (a Daintree-native HTTP API — *not*
 OpenAI-compatible). The backend owns the system prompt, developer instructions, skill /
 runbook selection, model choice, prompt assembly, the utility-model prompts, and prompt
-caching. The CLI owns the terminal UI, the visible conversation, the local tool registry
-+ execution, permissions, runtime / project context collection, memory + scheduler state,
-stream rendering, and the opaque backend state token.
+caching. The CLI owns the visible conversation, the local tool registry + execution,
+permissions, runtime / project context collection, memory + scheduler state, and the
+opaque backend state token. It owns **no UI**: the runtime emits structured events, thin
+adapters serialize them (host NDJSON, JSONL, the console sink), Daintree renders the
+product, and the line REPL is a development convenience. "Terminal UI" and "stream
+rendering" were this document's description of a cockpit that no longer exists.
 
 ```
 User → Daintree CLI ──(structured startup + visible conversation + runtime/turn + tools)──► Daintree backend
@@ -462,9 +465,9 @@ with something unparseable (usually a provider or compatibility problem).
   include environment or other sensitive configuration.
 - **The reply's own width is reported.** `runtime.display` carries `{columns,
   content_width}` in terminal cells: `columns` is the window, `content_width` the narrower
-  measure the assistant's markdown is actually wrapped at (after the cockpit's left inset,
+  measure the assistant's markdown is actually wrapped at (after the attached session's left inset,
   the autowrap gutter, and the `ui.ContentMax` prose cap) — the one the backend's response
-  contract is written against. The cockpit republishes on every resize
+  contract is written against. The attached session republishes on every resize
   (`App.SetDisplaySize`), so a dragged window lands on the next round. An omitted block
   means "unmeasured" — a piped one-shot, the stdio host, the headless daemon — and the
   backend applies its own default width rather than being handed a fabricated 80×24.

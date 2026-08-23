@@ -21,14 +21,31 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // PROTOCOL_VERSION is the wire-format version. MUST equal Daintree's
 // ASSISTANT_HOST_PROTOCOL_VERSION; Daintree Zod-rejects an unrecognized version.
 //
-// It is 2: the transport is stdio NDJSON line frames. The framing is a breaking
-// change for any consumer of an older format, so the version moves in lockstep.
-const ProtocolVersion = 2
+// It is 3. v2 described a TERMINAL SESSION for a parent that drew an activity strip
+// beside an xterm; v3 describes a CONVERSATION for a parent that renders the whole
+// thing. Three changes make it breaking rather than additive:
+//
+//  1. Every event carries a monotonic `seq`. v2 dropped frames silently when the
+//     writer queue filled, with no way for a consumer to notice — unusable once the
+//     transcript IS the product. v3 applies backpressure to stream traffic instead,
+//     and `seq` makes any residual gap detectable rather than invisible.
+//  2. `turn:end` carries the authoritative final `content`. v2 carried only an
+//     outcome class, so a lost token frame could never be repaired.
+//  3. The event set covers what the runtime actually produces — phase, reasoning,
+//     interjections, the whole tool batch, tool state and progress, usage, cost, and
+//     notices — instead of the subset a strip needed.
+const ProtocolVersion = 3
+
+// BuildVersion is the engine build string reported in host:ready, injected by the
+// CLI layer at startup (main's -ldflags value). Package-level rather than an App
+// interface method because it is a build constant, not session state.
+var BuildVersion = "dev"
 
 // ---------------------------------------------------------------------------
 // Vocabularies (verbatim wire strings). Validated on decode.
@@ -156,16 +173,16 @@ func ParseDescriptor(line []byte) (SessionDescriptor, error) {
 		return SessionDescriptor{}, fmt.Errorf("descriptor is not a JSON object: %w", err)
 	}
 	var d SessionDescriptor
-	if err := wantString(raw, "sessionId", &d.SessionID); err != nil {
+	if err := wantIdentityString(raw, "sessionId", &d.SessionID); err != nil {
 		return SessionDescriptor{}, err
 	}
-	if err := wantString(raw, "projectId", &d.ProjectID); err != nil {
+	if err := wantIdentityString(raw, "projectId", &d.ProjectID); err != nil {
 		return SessionDescriptor{}, err
 	}
-	if err := wantString(raw, "cwd", &d.Cwd); err != nil {
+	if err := wantIdentityString(raw, "cwd", &d.Cwd); err != nil {
 		return SessionDescriptor{}, err
 	}
-	if err := wantString(raw, "tier", &d.Tier); err != nil {
+	if err := wantIdentityString(raw, "tier", &d.Tier); err != nil {
 		return SessionDescriptor{}, err
 	}
 	if err := wantNumber(raw, "windowId", &d.WindowID); err != nil {
@@ -176,13 +193,41 @@ func ParseDescriptor(line []byte) (SessionDescriptor, error) {
 		return SessionDescriptor{}, err
 	}
 	d.ProtocolVersion = int(pv)
-	// resumeSessionId is optional — decode if present, ignore type mismatches by
-	// only reading a JSON string (matches "NOT checked" — absence is fine).
+	// resumeSessionId is OPTIONAL but TYPED. Absence is fine; a present-but-wrong value
+	// is not.
+	//
+	// It used to swallow a type mismatch, which is too loose for a field that decides
+	// which conversation this session continues. A number or an object silently became
+	// "" — indistinguishable from "start fresh" — so a host that meant to resume got a
+	// blank session and no indication that its request had been discarded. A resume that
+	// was asked for and did not happen must be an error, not a default.
 	if v, ok := raw["resumeSessionId"]; ok {
-		_ = json.Unmarshal(v, &d.ResumeSessionID)
+		// JSON null is an explicit "no resume", which is a legitimate way for a host to
+		// serialize an absent optional.
+		if !bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+			if err := json.Unmarshal(v, &d.ResumeSessionID); err != nil {
+				return SessionDescriptor{}, errors.New(
+					"descriptor field \"resumeSessionId\" must be a string (omit it, or send null, to start a fresh session)")
+			}
+			if len(d.ResumeSessionID) > maxSessionIDBytes {
+				return SessionDescriptor{}, fmt.Errorf(
+					"descriptor field \"resumeSessionId\" is %d bytes, past the %d-byte limit",
+					len(d.ResumeSessionID), maxSessionIDBytes)
+			}
+		}
 	}
 	return d, nil
 }
+
+// maxSessionIDBytes bounds a session identifier on the wire. Generated ids are short
+// ASCII; the bound exists so a malformed descriptor cannot carry a megabyte in a field
+// that ends up naming a file on disk.
+//
+// BYTES, not characters, and named so. The two coincide for the ids this actually sees,
+// but calling a byte length a character count is the kind of contract detail that reads
+// as correct until someone sends a multi-byte id and gets an error citing a number they
+// cannot reconcile with what they sent.
+const maxSessionIDBytes = 256
 
 func wantString(raw map[string]json.RawMessage, key string, dst *string) error {
 	v, ok := raw[key]
@@ -191,6 +236,29 @@ func wantString(raw map[string]json.RawMessage, key string, dst *string) error {
 	}
 	if err := json.Unmarshal(v, dst); err != nil {
 		return fmt.Errorf("descriptor field %q must be a string", key)
+	}
+	return nil
+}
+
+// wantIdentityString is wantString for a field that NAMES something — a session, a
+// project, a directory, a tier.
+//
+// It additionally refuses a blank. A required identity field that arrives as "" or "  "
+// is type-correct and says nothing, and every consumer downstream trims before comparing
+// — so a whitespace-only projectId passed the type check and then skipped the binding
+// cross-check as "not stated", which is precisely the field that check exists to compare.
+// Refusing it here keeps it one clear error instead of a silently weakened guarantee
+// three layers away.
+//
+// Deliberately NOT applied to every string on the wire: a command's `decision` is
+// legitimately empty (it normalizes to "rejected"), so the rule belongs to the fields
+// that carry identity, not to the type.
+func wantIdentityString(raw map[string]json.RawMessage, key string, dst *string) error {
+	if err := wantString(raw, key, dst); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*dst) == "" {
+		return fmt.Errorf("descriptor field %q is blank; it must name a value", key)
 	}
 	return nil
 }
@@ -269,6 +337,12 @@ type HostCommandType string
 const (
 	CmdPrompt         HostCommandType = "prompt"
 	CmdApprovalDecide HostCommandType = "approval:decide"
+	// CmdQuestionAnswer answers a multiple-choice question the model asked
+	// (user.askMultipleChoice). Approvals and questions are DIFFERENT decisions —
+	// "may I do this?" versus "which of these did you mean?" — and collapsing them
+	// onto the approval frames would force a host to render a yes/no sheet for a
+	// question that has four answers.
+	CmdQuestionAnswer HostCommandType = "question:answer"
 	CmdInterrupt      HostCommandType = "interrupt"
 	CmdHibernate      HostCommandType = "hibernate"
 	CmdShutdown       HostCommandType = "shutdown"
@@ -284,6 +358,13 @@ type HostCommand struct {
 	// approval:decide
 	ApprovalID string
 	Decision   string
+	// question:answer
+	QuestionID string
+	// ChoiceIndex is the 0-based option the user picked. Negative means the user
+	// dismissed the question without choosing, which is a CANCELLATION of the tool
+	// call, not a selection — a host must be able to express "I closed the sheet"
+	// without being forced to pick an answer on the user's behalf.
+	ChoiceIndex int
 }
 
 // errNotCommand signals a line that is not a recognizable command — the running
@@ -340,6 +421,19 @@ func ParseCommand(line []byte) (HostCommand, error) {
 		// approval:decided — collapse it to the safe default (rejected) so a parked
 		// dispatch unblocks declined rather than emitting an off-contract decision.
 		cmd.Decision = string(normalizeDecision(cmd.Decision))
+	case CmdQuestionAnswer:
+		if err := wantString(raw, "questionId", &cmd.QuestionID); err != nil {
+			return HostCommand{}, errNotCommand
+		}
+		// choiceIndex is REQUIRED and must be a number. A missing or non-numeric one
+		// would otherwise default to 0 — silently answering "the first option" for a
+		// user who never chose, which is the one wrong answer a decision channel must
+		// never invent.
+		var idx int64
+		if err := wantIntegralNumber(raw, "choiceIndex", &idx); err != nil {
+			return HostCommand{}, errNotCommand
+		}
+		cmd.ChoiceIndex = int(idx)
 	case CmdInterrupt, CmdHibernate, CmdShutdown:
 		// no extra fields
 	default:

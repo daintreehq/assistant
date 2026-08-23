@@ -2,7 +2,7 @@
 
 This is the architecture reference for the **persistent supervisor runtime**: the
 process split that lets the assistant keep supervising Daintree work after the
-interactive cockpit closes, then hand everything back on the next launch. It is the
+interactive attached session closes, then hand everything back on the next launch. It is the
 companion to [`ARCHITECTURE.md`](ARCHITECTURE.md) (which describes the in-process
 engines) and [`DAINTREE_HOST.md`](DAINTREE_HOST.md) (how Daintree launches the CLI —
 several design decisions below exist because of that document; read its §7 lifecycle
@@ -17,7 +17,7 @@ matrix first if you touch credential handling).
 > single-owner invariant is what keeps two processes from writing the same `state.db`.
 >
 > Consequence for a Windows tester: timers, watchers, and async operations run only while
-> the cockpit is open and **stop when it exits**. Nothing is corrupted and nothing is
+> the attached session is open and **stop when it exits**. Nothing is corrupted and nothing is
 > abandoned — the rows persist and are adopted on the next launch — but there is no
 > background supervision, so "I'll tell you when it's done" cannot be honoured after the
 > panel closes. Windows is not a supported platform until the ownership model is ported
@@ -26,9 +26,9 @@ matrix first if you touch credential handling).
 ## TL;DR
 
 - **Exactly one process at a time owns a project's `state.db`** — an open assistant
-  (cockpit/REPL/one-shot/host) or the supervisor daemon — serialized by an flock
+  (attached session/REPL/one-shot/host) or the supervisor daemon — serialized by an flock
   **owner lease** (`<stateDir>/owner.lock`). flock is the primitive because the
-  kernel releases it when the holder dies: a crashed cockpit hands supervision back
+  kernel releases it when the holder dies: a crashed attached session hands supervision back
   with zero cleanup code.
 - The daemon (`daintree-assistant daemon`) is a **persistent contender** for that
   lease. While an assistant is attached (an open connection on the control socket)
@@ -50,14 +50,14 @@ matrix first if you touch credential handling).
 ## Process & lease choreography
 
 ```
-cockpit start ──► ensure daemon (spawn detached if absent, Setsid)
+attached session start ──► ensure daemon (spawn detached if absent, Setsid)
               ──► ReqAttach over <sockets>/dXXXX.sock   (carries fresh MCP creds)
               │     daemon: cancel supervision span → drain wake turn → close App/
               │     store → release owner.lock → stand down while the conn lives
               ──► flock(owner.lock)  → app.Create() → run exactly as before
-cockpit exit  ──► App.Shutdown → release owner.lock → conn closes
+attached session exit  ──► App.Shutdown → release owner.lock → conn closes
               │     daemon: ConnClosed → re-contend → flock → new supervision span
-cockpit CRASH ──► kernel releases flock + conn drops → same path, no cleanup code
+attached session CRASH ──► kernel releases flock + conn drops → same path, no cleanup code
 ```
 
 - **Daemon singleton:** `daemon.lock` (flock) — a second `daemon` invocation exits 0.
@@ -66,7 +66,7 @@ cockpit CRASH ──► kernel releases flock + conn drops → same path, no cle
   per-user root (`~/.daintree/sockets/d<hash12>.sock`, override
   `DAINTREE_ASSISTANT_SOCKET_DIR`) because state-dir paths overflow darwin's
   104-byte `sun_path`.
-- **A second cockpit** while one is attached gets `OwnerBusy` and exits with a clear
+- **A second attached session** while one is attached gets `OwnerBusy` and exits with a clear
   message — there is never a second scheduler on one DB. (Daintree itself never
   launches two assistants per project — it displaces — so this only affects manual
   terminal launches.)
@@ -108,7 +108,7 @@ The daemon's wake loop mirrors the embedded host's reactor: scheduler `onAttenti
 `Session.Send(IsWake: true)` — single-flight, one retry, chained bursts. Every
 successful wake is accumulated into the durable `detached_activity` record, which
 the next attaching assistant consumes into its one-time "While you were away" notice
-(cockpit note lines / REPL banner lines).
+(attached session note lines / REPL banner lines).
 
 Safety: the daemon App is created with `DispatchActor: domain.ActorWake`, so every
 tool dispatch takes the registry's **non-interactive branch** — tier gate, then

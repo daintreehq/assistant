@@ -12,6 +12,7 @@ import (
 
 	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/redact"
 )
 
 // Approval/redaction constants.
@@ -32,8 +33,11 @@ type RiskOfFunc func(toolName string) (domain.RiskClass, bool)
 
 // BridgeOptions configures a Bridge.
 type BridgeOptions struct {
-	SessionID         string
-	Post              PostFunc
+	SessionID string
+	Post      PostFunc
+	// PostStream is the backpressure lane for high-volume events. Defaults to Post
+	// when nil (tests, and any consumer that does not care to separate the two).
+	PostStream        PostFunc
 	RiskOf            RiskOfFunc   // default: always unknown
 	Now               func() int64 // default: domain.NowMS
 	ApprovalTimeoutMs int          // default: DefaultApprovalTimeoutMs (0 disables the timer)
@@ -46,6 +50,22 @@ type pendingApproval struct {
 	timer   *time.Timer
 }
 
+// pendingQuestion is one outstanding multiple-choice question: the channel the
+// AskChoice caller blocks on, the options it was offered (so an answer can be resolved
+// to a label/text without the host echoing them back), and the auto-timeout timer.
+type pendingQuestion struct {
+	resolve chan questionOutcome
+	options []QuestionOption
+	timer   *time.Timer
+}
+
+// questionOutcome is what the host said. Cancelled is explicit rather than encoded as a
+// sentinel index, because "no answer" and "option -1" must never be confusable.
+type questionOutcome struct {
+	index     int
+	cancelled bool
+}
+
 // Bridge adapts the in-process agent EventSink + tool-confirm hook into wire
 // HostEvents. It owns the single-turn lifecycle, approvals, redaction, and audit
 // mapping. The agent loop runs Send() on another goroutine and calls the sink
@@ -54,6 +74,7 @@ type pendingApproval struct {
 type Bridge struct {
 	sessionID         string
 	post              PostFunc
+	postStream        PostFunc
 	riskOf            RiskOfFunc
 	now               func() int64
 	approvalTimeoutMs int
@@ -62,6 +83,7 @@ type Bridge struct {
 	activeTurnID     string
 	interrupted      bool // latched until next startExchange
 	pendingApprovals map[string]*pendingApproval
+	pendingQuestions map[string]*pendingQuestion
 	toolStartedAt    map[string]int64
 }
 
@@ -76,13 +98,18 @@ func NewBridge(opts BridgeOptions) *Bridge {
 	if opts.ApprovalTimeoutMs == 0 {
 		opts.ApprovalTimeoutMs = DefaultApprovalTimeoutMs
 	}
+	if opts.PostStream == nil {
+		opts.PostStream = opts.Post
+	}
 	return &Bridge{
 		sessionID:         opts.SessionID,
 		post:              opts.Post,
+		postStream:        opts.PostStream,
 		riskOf:            opts.RiskOf,
 		now:               opts.Now,
 		approvalTimeoutMs: opts.ApprovalTimeoutMs,
 		pendingApprovals:  make(map[string]*pendingApproval),
+		pendingQuestions:  make(map[string]*pendingQuestion),
 		toolStartedAt:     make(map[string]int64),
 	}
 }
@@ -97,8 +124,19 @@ func genID(prefix string) string { return domain.NewID(prefix + "_") }
 // calls: AssistantStart fires once per round but only the FIRST opens the turn.
 // ---------------------------------------------------------------------------
 
-// Phase is live-only UI vocabulary with no host-protocol channel — dropped.
-func (b *Bridge) Phase(domain.RunPhase) {}
+// Phase forwards the explicit run lifecycle. v2 dropped it as "live-only UI
+// vocabulary"; under v3 the host IS the UI, and liveness inferred from "has any
+// token arrived" is exactly the heuristic domain.RunPhase exists to replace.
+func (b *Bridge) Phase(p domain.RunPhase) {
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	interrupted := b.interrupted
+	b.mu.Unlock()
+	if interrupted {
+		return
+	}
+	b.postStream(EvTurnPhase{TurnID: turnID, Phase: p.String()})
+}
 
 func (b *Bridge) AssistantStart() {
 	b.mu.Lock()
@@ -121,40 +159,112 @@ func (b *Bridge) AssistantToken(chunk string) {
 	}
 	turnID := b.activeTurnID
 	b.mu.Unlock()
-	b.post(EvTurnToken{TurnID: turnID, Chunk: chunk})
+	b.postStream(EvTurnToken{TurnID: turnID, Chunk: chunk})
 }
 
 // AssistantEnd closes the turn: "answered" if content is non-blank else "unknown".
-// (reasoning is not forwarded over the host protocol.)
-func (b *Bridge) AssistantEnd(content, _ string) {
+//
+// The content is carried on turn:end as the AUTHORITATIVE text (see EvTurnEnd) so a
+// consumer can replace whatever it accumulated from turn:token. Reasoning, when the
+// round produced any, goes out first as its own event — ahead of turn:end, so a host
+// that renders it can attach it to a turn that is still open.
+func (b *Bridge) AssistantEnd(content, reasoning string) {
+	if trimNonEmpty(reasoning) {
+		b.mu.Lock()
+		turnID := b.activeTurnID
+		interrupted := b.interrupted
+		b.mu.Unlock()
+		if !interrupted && turnID != "" {
+			b.post(EvTurnReasoning{TurnID: turnID, Text: reasoning})
+		}
+	}
 	outcome := OutcomeUnknown
 	if trimNonEmpty(content) {
 		outcome = OutcomeAnswered
 	}
-	b.closeTurn(outcome)
+	b.closeTurnWithContent(outcome, content, true)
 }
 
+// AssistantCancelled closes the turn as cancelled. The streamed buffer is dropped by
+// contract, so no authoritative content is claimed — a host keeps what it rendered
+// and marks the turn cancelled rather than blanking it.
 func (b *Bridge) AssistantCancelled(string) { b.closeTurn(OutcomeCancelled) }
 
-// Interjection has no host-protocol channel: the Daintree parent already holds the
-// text it sent as the mid-turn prompt (handlePrompt routes it to InjectPrompt while
-// busy), so echoing it back would be redundant. Dropped, like Phase.
-func (b *Bridge) Interjection(string) {}
+// Interjection reports a mid-turn steer at the moment the loop FOLDS IT IN. The host
+// sent the text, so v2 called echoing it redundant — but only the runtime knows when
+// it actually landed, and a transcript that shows the steer in the wrong place
+// misrepresents what the model saw when it answered.
+func (b *Bridge) Interjection(text string) {
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	interrupted := b.interrupted
+	b.mu.Unlock()
+	if interrupted {
+		return
+	}
+	b.post(EvTurnInterjection{TurnID: turnID, Text: text})
+}
 
-// SkillLoaded has no host-protocol channel (the parent doesn't surface the assistant's
-// internal skill loads); dropped, like Interjection.
+// SkillLoaded stays unforwarded. It is a per-ATTEMPT cue that fires on a delta, so a
+// retried round can report a load the committed round did not repeat — reconstructing
+// the active set from it is wrong by construction. SkillDecision is the authority.
 func (b *Bridge) SkillLoaded([]string) {}
 
-// SkillDecision likewise has no host-protocol channel. A host wanting the skill decision
-// reads the --json stream or the run transcript, not this bridge.
+// SkillDecision is diagnostic, not conversational: backend skill selection is prompt
+// assembly the user neither approves nor steers, and the runtime contract is that no
+// sink folds it into the transcript. It reaches a human only through an explicit
+// `/explain <run>` replay, which reads the durable run log — so the bridge still
+// drops it rather than putting prompt-assembly machinery on the conversation wire.
 func (b *Bridge) SkillDecision(agent.SkillDecisionEvent) {}
 
-// ToolBatch/ToolState/ToolProgress are live-footer-only in the loop; the host
-// protocol keys off the concrete tool:started/tool:settled events, so the
-// in-tool substep stream has no host channel and is dropped.
-func (b *Bridge) ToolBatch([]agent.BatchedToolCall) {}
-func (b *Bridge) ToolState(string, agent.ToolState) {}
-func (b *Bridge) ToolProgress(string, string)       {}
+// ToolBatch announces the WHOLE batch as queued before dispatch begins. Without it a
+// host can only reveal calls one at a time as each starts, which reads as the
+// assistant improvising rather than working through a plan it already made.
+func (b *Bridge) ToolBatch(calls []agent.BatchedToolCall) {
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	interrupted := b.interrupted
+	b.mu.Unlock()
+	if interrupted || len(calls) == 0 {
+		return
+	}
+	out := make([]BatchedCall, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, BatchedCall{
+			ToolCallID:  c.ID,
+			ToolID:      c.Name,
+			ArgsSummary: redactArgs(c.Args),
+			Danger:      b.isDanger(c.Name),
+		})
+	}
+	b.post(EvToolBatch{TurnID: turnID, Calls: out})
+}
+
+// ToolState promotes one announced call. "waiting" is the load-bearing one: it means
+// blocked on the USER, not on the tool, and a host that renders it as ordinary
+// progress leaves someone watching a spinner for their own unanswered approval.
+func (b *Bridge) ToolState(id string, state agent.ToolState) {
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	interrupted := b.interrupted
+	b.mu.Unlock()
+	if interrupted {
+		return
+	}
+	b.post(EvToolState{ToolCallID: id, State: string(state), TurnID: turnID})
+}
+
+// ToolProgress carries an in-tool substep so a long call does not look frozen.
+func (b *Bridge) ToolProgress(id string, msg string) {
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	interrupted := b.interrupted
+	b.mu.Unlock()
+	if interrupted {
+		return
+	}
+	b.postStream(EvToolProgress{ToolCallID: id, Message: msg, TurnID: turnID})
+}
 
 func (b *Bridge) ToolCall(ev agent.ToolCallEvent) {
 	b.mu.Lock()
@@ -205,7 +315,7 @@ func (b *Bridge) ToolResult(ev agent.ToolResultEvent) {
 	}
 	// An accepted async handle: surface it so the host can render "accepted,
 	// still running in the background" instead of a finished success (parity
-	// with the cockpit's yellow async-pending state).
+	// with the host's yellow async-pending state).
 	if ev.Result.Ok && ev.Result.Async != nil {
 		settled.AsyncID = ev.Result.Async.ID
 	}
@@ -217,22 +327,57 @@ func (b *Bridge) Error(message string) {
 	b.closeTurn(OutcomeUnknown)
 }
 
-// Warn has no protocol channel — intentionally dropped (like Info).
-func (b *Bridge) Warn(string) {}
+// Warn forwards a non-fatal warning (a tool loop repeating the same failure, a
+// pinned skill the backend could not honour). v2 dropped these, which meant that once
+// the local renderer was gone they reached nobody at all.
+func (b *Bridge) Warn(message string) { b.postNotice("warning", message) }
 
-// Info has no protocol channel — intentionally dropped.
-func (b *Bridge) Info(string) {}
+// Info forwards an informational notice.
+func (b *Bridge) Info(message string) { b.postNotice("info", message) }
 
-// Usage is not forwarded over the host protocol (token/cost stays in-process).
-func (b *Bridge) Usage(agent.UsageEvent) {}
+// postNotice is the shared Warn/Info path.
+func (b *Bridge) postNotice(level, message string) {
+	if !trimNonEmpty(message) {
+		return
+	}
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	b.mu.Unlock()
+	b.post(EvNotice{Level: level, Message: message, TurnID: turnID})
+}
+
+// Usage forwards per-round token accounting. ContextTokens against ContextWindow is
+// what drives a context meter, and ContextThreshold is where auto-compaction fires —
+// none of which a host can compute for itself.
+func (b *Bridge) Usage(ev agent.UsageEvent) {
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	b.mu.Unlock()
+	b.post(EvUsage{
+		TurnID:           turnID,
+		PromptTokens:     ev.PromptTokens,
+		CompletionTokens: ev.CompletionTokens,
+		TotalTokens:      ev.TotalTokens,
+		CachedTokens:     ev.CachedTokens,
+		CacheHitRatio:    ev.CacheHitRatio,
+		ContextTokens:    ev.ContextTokens,
+		ContextThreshold: ev.ContextThreshold,
+		ContextWindow:    ev.ContextWindow,
+	})
+}
 
 // TurnPrompt has no host-protocol channel — Daintree originated the prompt, so the
 // bridge drops it (it's persisted for /explain by the run-event sink).
 func (b *Bridge) TurnPrompt(string) {}
 
-// ModelRateLimited is a live cockpit health cue with no host-protocol channel —
-// dropped. The "Model rate-limited" reply still flows through the normal turn text.
-func (b *Bridge) ModelRateLimited() {}
+// ModelRateLimited signals the provider throttled us after the retry budget was
+// exhausted. A health cue that clears on the next usage event, not a turn failure.
+func (b *Bridge) ModelRateLimited() {
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	b.mu.Unlock()
+	b.post(EvModelRateLimited{TurnID: turnID})
+}
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -278,6 +423,14 @@ func (b *Bridge) Interrupt() {
 // active turn id) so AssistantEnd + AssistantCancelled can both fire — the first
 // closes, the second no-ops.
 func (b *Bridge) closeTurn(outcome TurnOutcomeClass) {
+	b.closeTurnWithContent(outcome, "", false)
+}
+
+// closeTurnWithContent closes the active turn, optionally carrying the authoritative
+// final text. hasContent distinguishes "the turn said nothing" from "the turn said
+// the empty string", which a host needs in order to tell a tool-only round from an
+// empty answer.
+func (b *Bridge) closeTurnWithContent(outcome TurnOutcomeClass, content string, hasContent bool) {
 	b.mu.Lock()
 	turnID := b.activeTurnID
 	if turnID == "" {
@@ -287,7 +440,13 @@ func (b *Bridge) closeTurn(outcome TurnOutcomeClass) {
 	b.activeTurnID = ""
 	now := b.now()
 	b.mu.Unlock()
-	b.post(EvTurnEnd{TurnID: turnID, EndedAt: now, Outcome: outcome})
+	b.post(EvTurnEnd{
+		TurnID:     turnID,
+		EndedAt:    now,
+		Outcome:    outcome,
+		Content:    content,
+		HasContent: hasContent,
+	})
 }
 
 // Confirm is the tool-confirm hook: mint an approval, emit approval:requested,
@@ -297,7 +456,7 @@ func (b *Bridge) closeTurn(outcome TurnOutcomeClass) {
 // The emitted approval:requested carries the request's display context — risk
 // class (passed through verbatim, so a per-confirm override survives), the
 // human-readable consequence, and a redacted args summary (redactArgs, the same
-// helper tool:started uses) — so Daintree's timeline matches a local cockpit
+// helper tool:started uses) — so Daintree's timeline matches a local host
 // approval. Empty fields are omitted by the event encoder.
 func (b *Bridge) Confirm(ctx context.Context, req ConfirmRequest) bool {
 	approvalID := genID("apr")
@@ -318,20 +477,30 @@ func (b *Bridge) Confirm(ctx context.Context, req ConfirmRequest) bool {
 	b.mu.Unlock()
 
 	b.post(EvApprovalRequested{
-		ApprovalID:  approvalID,
-		ToolID:      req.ToolName,
-		Summary:     req.Summary,
-		RequestedAt: now,
-		TurnID:      turnID,
-		RiskClass:   req.RiskClass,
-		Consequence: req.Consequence,
-		ArgsSummary: redactArgs(req.RawArgs),
+		ApprovalID:        approvalID,
+		ToolID:            req.ToolName,
+		Summary:           req.Summary,
+		RequestedAt:       now,
+		TurnID:            turnID,
+		RiskClass:         req.RiskClass,
+		Consequence:       req.Consequence,
+		ArgsSummary:       redactArgs(req.RawArgs),
+		NeedsTypedConfirm: req.NeedsTypedConfirm,
 	})
 
 	// Block on the decision. ctx cancellation (turn abort) also frees the dispatch:
 	// resolve as rejected so a parked dispatch returns USER_DECLINED.
 	select {
 	case d := <-resolve:
+		// CANCELLATION DOMINATES. When a decision and a cancellation are both ready,
+		// Go picks a select arm arbitrarily — so without this check an approval that
+		// arrived just before the user pressed stop could still return true, and the
+		// mutating call would run after the turn had been cancelled. That is the one
+		// outcome someone who pressed stop must never get. internal/mcpserver reached
+		// the same conclusion in settleDecision; the host needs it for the same reason.
+		if ctx.Err() != nil {
+			return false
+		}
 		return d == DecisionApproved
 	case <-ctx.Done():
 		b.ResolveApproval(approvalID, DecisionRejected)
@@ -360,6 +529,128 @@ func (b *Bridge) ResolveApproval(approvalID string, decision ConfirmationDecisio
 	select {
 	case pa.resolve <- decision:
 	default:
+	}
+}
+
+// AskChoice presents a multiple-choice question to the host and BLOCKS the dispatch
+// until it answers, the turn is cancelled, or the timeout fires.
+//
+// This is the counterpart to Confirm, and the host is the surface that most needed it:
+// without it the product path returned QUESTION_UNAVAILABLE, so a model that wanted to
+// ask "which of these three worktrees did you mean?" had to guess or give up and end the
+// turn in prose. The line REPL could ask; the thing the user actually runs could not.
+//
+// A timeout CANCELS rather than defaulting. An unanswered approval can safely resolve to
+// "no", but an unanswered question has no safe answer — picking one would put words in
+// the user's mouth and then act on them.
+func (b *Bridge) AskChoice(ctx context.Context, req AskChoiceRequest) (AskChoiceAnswer, error) {
+	questionID := genID("qst")
+	resolve := make(chan questionOutcome, 1)
+
+	opts := make([]QuestionOption, 0, len(req.Options))
+	for _, o := range req.Options {
+		opts = append(opts, QuestionOption{Label: o.Label, Text: o.Text})
+	}
+
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	now := b.now()
+	pq := &pendingQuestion{resolve: resolve, options: opts}
+	b.pendingQuestions[questionID] = pq
+	b.mu.Unlock()
+
+	// The request frame is posted BEFORE the timer is armed. Arming first leaves a
+	// window — a very short timeout, or a descheduled goroutine — in which
+	// question:answered(cancelled) reaches the host ahead of the question:requested it
+	// answers, leaving a ghost sheet the host can never close.
+	b.post(EvQuestionRequested{
+		QuestionID:  questionID,
+		Question:    req.Question,
+		Options:     opts,
+		Default:     req.Default,
+		RequestedAt: now,
+		TurnID:      turnID,
+		ToolCallID:  req.ToolCallID,
+	})
+
+	// Armed only if this question is STILL pending: the host may already have answered
+	// between the post above and here, and arming a timer for a settled question would
+	// leave it to fire against an id that no longer exists.
+	if b.approvalTimeoutMs > 0 {
+		b.mu.Lock()
+		if live, ok := b.pendingQuestions[questionID]; ok && live == pq {
+			pq.timer = time.AfterFunc(time.Duration(b.approvalTimeoutMs)*time.Millisecond, func() {
+				b.ResolveQuestion(questionID, -1)
+			})
+		}
+		b.mu.Unlock()
+	}
+
+	select {
+	case out := <-resolve:
+		// Cancellation dominates, exactly as in Confirm: both arms can be ready at
+		// once, and an answer that lands as the turn is being abandoned must not be
+		// acted on.
+		if ctx.Err() != nil {
+			return AskChoiceAnswer{}, ctx.Err()
+		}
+		if out.cancelled || out.index < 0 || out.index >= len(opts) {
+			// Out of range is treated as a cancellation, not clamped. Clamping would
+			// answer with an option the user never selected.
+			return AskChoiceAnswer{}, context.Canceled
+		}
+		chosen := opts[out.index]
+		return AskChoiceAnswer{Label: chosen.Label, Index: out.index, Text: chosen.Text}, nil
+	case <-ctx.Done():
+		b.ResolveQuestion(questionID, -1)
+		return AskChoiceAnswer{}, ctx.Err()
+	}
+}
+
+// ResolveQuestion settles an outstanding question. A negative index cancels it. No-op
+// when nothing is pending under that id, so a duplicate answer from a host that retried
+// is harmless.
+func (b *Bridge) ResolveQuestion(questionID string, index int) {
+	b.mu.Lock()
+	pq, ok := b.pendingQuestions[questionID]
+	if !ok {
+		b.mu.Unlock()
+		return
+	}
+	delete(b.pendingQuestions, questionID)
+	if pq.timer != nil {
+		pq.timer.Stop()
+	}
+	now := b.now()
+	opts := pq.options
+	b.mu.Unlock()
+
+	ev := EvQuestionAnswered{QuestionID: questionID, ChoiceIndex: index, AnsweredAt: now}
+	if index < 0 || index >= len(opts) {
+		ev.Cancelled = true
+		ev.ChoiceIndex = -1
+	} else {
+		ev.Label, ev.Text = opts[index].Label, opts[index].Text
+	}
+	b.post(ev)
+	select {
+	case pq.resolve <- questionOutcome{index: index, cancelled: ev.Cancelled}:
+	default:
+	}
+}
+
+// SettlePendingQuestions cancels every outstanding question. Used on interrupt and
+// teardown drain, for the same reason approvals are drained: a parked dispatch that
+// nobody will ever answer would strand the turn as busy forever.
+func (b *Bridge) SettlePendingQuestions() {
+	b.mu.Lock()
+	ids := make([]string, 0, len(b.pendingQuestions))
+	for id := range b.pendingQuestions {
+		ids = append(ids, id)
+	}
+	b.mu.Unlock()
+	for _, id := range ids {
+		b.ResolveQuestion(id, -1)
 	}
 }
 
@@ -447,6 +738,20 @@ func redactArgs(rawArgs string) string {
 	if rawArgs == "" {
 		return ""
 	}
+	// CREDENTIAL MASKING FIRST, structural summarization second.
+	//
+	// The structural pass below only collapses values by SHAPE and LENGTH — a short
+	// string passes through verbatim, so `{"password":"hunter2hunter2"}` used to cross
+	// the wire unchanged. Ordinary tool:started events were safe because the agent
+	// EventSink already sanitizes at the source, but a CONFIRM request does not come
+	// through that path: it is built straight from the dispatch arguments.
+	//
+	// So the masking has to happen at this boundary, not upstream of it. redact.String
+	// removes registered exact secrets first, then credential shapes (sensitive JSON
+	// keys, env assignments, PEM blocks, URL userinfo). Running it on the raw JSON text
+	// keeps key-aware rules working, since it can still see `"password":` next to its
+	// value — a value-by-value pass after the structure was flattened could not.
+	rawArgs = redact.String(rawArgs)
 	var v any
 	if err := json.Unmarshal([]byte(rawArgs), &v); err != nil {
 		// Not valid JSON: treat the raw string itself as the top-level string value.

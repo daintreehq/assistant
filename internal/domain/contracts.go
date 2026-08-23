@@ -159,10 +159,16 @@ type JsonRunStats struct {
 // are NOT sanitized, so the honest guarantee is "no field here is a credential", not
 // "no field here can embarrass you".
 type JsonSessionPayload struct {
-	SessionID  string `json:"sessionId"`
-	Project    string `json:"project"`
-	Tier       string `json:"tier"`
-	BackendURL string `json:"backendUrl"`
+	// SchemaVersion is repeated here, on the FIRST line, as well as on the terminal
+	// `result`. Carrying it only on the last line meant a streaming consumer had to
+	// parse the entire run before it could learn which schema it had been reading — so
+	// a version it does not understand surfaced as mis-parsed events rather than as a
+	// clean compatibility error at frame one. It is the same value in both places.
+	SchemaVersion int    `json:"schemaVersion"`
+	SessionID     string `json:"sessionId"`
+	Project       string `json:"project"`
+	Tier          string `json:"tier"`
+	BackendURL    string `json:"backendUrl"`
 	// LogPath is "" when debug logging is off — reported as empty rather than omitted,
 	// so a consumer can tell "logging disabled" from "field absent in this version".
 	LogPath string `json:"logPath"`
@@ -204,7 +210,7 @@ type JsonTurnEndPayload struct {
 // JsonCommandResultPayload records one slash command run between turns.
 //
 // Title and Content come from the shared UI command handler, so a JSONL consumer sees
-// exactly what the cockpit would have shown — as DATA, never rendered, because stdout in
+// exactly what the attached session would have shown — as DATA, never rendered, because stdout in
 // --json mode carries only these lines.
 type JsonCommandResultPayload struct {
 	// Command is the line as read, leading slash included, with surrounding whitespace

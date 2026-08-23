@@ -225,6 +225,9 @@ func (s *Sink) Session(info SessionInfo) {
 		return
 	}
 	s.sessionEmitted = true
+	// Stamped here rather than left to every caller: the point of putting the version
+	// on the first frame is that a consumer can ALWAYS rely on it being there.
+	info.SchemaVersion = domain.JSONOutputSchemaVersion
 	s.emitStruct("session", info)
 }
 
@@ -235,7 +238,13 @@ func (s *Sink) emit(typ string, payload map[string]any) {
 	if s.finished {
 		return
 	}
-	line := map[string]any{"type": typ, "ts": s.now(), "seq": s.seq}
+	// schemaVersion on EVERY frame, not just the session header and the terminal
+	// result. Stamping it only on the session line left the documented "reject an
+	// incompatible schema at frame one" guarantee false for the case that needs it
+	// most: a setup failure — bad arguments, an unreadable key file, a busy lease —
+	// emits `error` before any session frame exists, so a strict consumer met an
+	// unversioned line first.
+	line := map[string]any{"type": typ, "ts": s.now(), "seq": s.seq, "schemaVersion": domain.JSONOutputSchemaVersion}
 	s.seq++
 	for k, v := range payload {
 		line[k] = v
@@ -244,6 +253,7 @@ func (s *Sink) emit(typ string, payload map[string]any) {
 	if err != nil {
 		degraded := map[string]any{
 			"type": typ, "ts": line["ts"], "seq": line["seq"], "serializationError": true,
+			"schemaVersion": domain.JSONOutputSchemaVersion,
 		}
 		b, _ = json.Marshal(degraded)
 	}

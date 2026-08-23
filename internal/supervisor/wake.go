@@ -8,7 +8,7 @@ import (
 	"github.com/daintreehq/assistant/internal/domain"
 )
 
-// agentIsActionableWake mirrors the host/cockpit wake filter: only terminal-
+// agentIsActionableWake mirrors the host/attached session wake filter: only terminal-
 // watcher events with a real terminal and async-tool completions wake the
 // model autonomously.
 func agentIsActionableWake(e domain.QueueEvent) bool { return agent.IsActionableWake(e) }
@@ -17,7 +17,7 @@ func agentIsActionableWake(e domain.QueueEvent) bool { return agent.IsActionable
 // is present: no questions, no confirmation prompts — act within grants,
 // queue everything else. Prompt-level (not a wire flag) so no backend contract
 // change is needed for the model to see it.
-const unattendedWakeNote = "\n\n[unattended] The assistant cockpit is CLOSED — this turn runs inside the " +
+const unattendedWakeNote = "\n\n[unattended] The assistant attached session is CLOSED — this turn runs inside the " +
 	"background supervisor and the user will read the outcome later. Do read-only integration " +
 	"(summaries, workflow/ledger updates, queue.resolve for items you fully handled). Mutating " +
 	"tools require a pre-existing automation grant; without one they are blocked and land in the " +
@@ -90,7 +90,7 @@ func (r *Runtime) reactWake(ctx context.Context) {
 		r.wakeTurns++
 		r.lastWakeAt = domain.NowMS()
 		r.lastError = ""
-		// Watcher events only (mirrors host/cockpit): record the terminals we got
+		// Watcher events only (mirrors host/attached session): record the terminals we got
 		// a full summary for, so a later burst renders them as one-line acks.
 		for _, e := range events {
 			if e.Source == domain.SourceTerminalWatcher && e.Target != nil && e.Target.TerminalID != "" {
