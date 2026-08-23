@@ -179,6 +179,10 @@ capture stdout and parse it without filtering.
 Exit codes (`domain.OneShotExitCode`): `0` success, `1` error, `2` cancelled, `4` hard
 timeout. `3` is reserved and never emitted.
 
+Every JSONL frame carries `schemaVersion`, not just the session header and the terminal
+`result` — a streaming consumer can reject an incompatible schema on the first line it
+sees, including a setup `error` emitted before any session frame exists.
+
 **`--timeout` is bounded in two stages.** The first cancels the run's context at the
 deadline; that is cooperative, and a context only bounds code that *watches* it — a
 syscall in flight, a tool that ignores cancellation, or a `-` stdin read that never sees

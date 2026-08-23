@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"runtime"
 	"strings"
@@ -34,8 +35,14 @@ type Options struct {
 	// the token in an argument — the MCP server surface, where the argument would be
 	// chosen by a model. Read and validated on the same fatal path as --api-key-file.
 	McpTokenFile string
-	Project      string
-	Tier         string
+	// NoInheritedMcpToken / NoInheritedAPIKey drop a credential inherited from this
+	// process's own environment. Set by the MCP server when a session redirects an
+	// endpoint without supplying its own credential for it — an inherited bearer must
+	// never follow a URL a model chose.
+	NoInheritedMcpToken bool
+	NoInheritedAPIKey   bool
+	Project             string
+	Tier                string
 	// Offline/AutoApprove/DebugLog are POINTERS: nil means the flag was not passed and
 	// the environment decides, false means it was explicitly turned OFF and must beat
 	// the environment. Collapsing those two cases would let DAINTREE_ASSISTANT_AUTO_APPROVE=1
@@ -140,6 +147,8 @@ func overridesFromOptions(opts Options) (config.ConfigOverrides, error) {
 		}
 		o.APIKey = &key
 	}
+	o.NoInheritedMcpToken = opts.NoInheritedMcpToken
+	o.NoInheritedAPIKey = opts.NoInheritedAPIKey
 	if opts.McpTokenFile != "" {
 		token, err := readMcpTokenFile(opts.McpTokenFile)
 		if err != nil {
@@ -237,15 +246,40 @@ var osExit = os.Exit
 // path — that is what makes it a failure worth a distinct exit code rather than a
 // cancellation.
 func startHardTimeoutWatchdog(timeout time.Duration, diag io.Writer, exit func(int)) func() {
-	timer := time.AfterFunc(timeout+domain.HardTimeoutGrace, func() {
-		fmt.Fprintf(diag,
-			"hard timeout: --timeout (%s) expired and the run did not unwind within %s; killing the process (exit %d). "+
-				"Something ignored cancellation — a tool, a wedged read, or a syscall in flight.\n",
-			timeout, domain.HardTimeoutGrace, domain.OneShotExitCode.HardTimeout)
+	// Saturate rather than wrap. A timeout within the grace of MaxInt64 would overflow
+	// into a negative deadline and fire the watchdog IMMEDIATELY — killing a run that
+	// had just asked for effectively no limit, which is the exact opposite of what was
+	// requested.
+	fireAfter := timeout + domain.HardTimeoutGrace
+	if timeout > 0 && fireAfter < timeout {
+		fireAfter = time.Duration(math.MaxInt64)
+	}
+	timer := time.AfterFunc(fireAfter, func() {
+		// The diagnostic is BEST-EFFORT and must not gate the exit. stderr can be a
+		// pipe nobody is draining, and a blocking Fprintf there would leave the process
+		// alive forever — the watchdog would have become another way to hang, which is
+		// precisely the failure it exists to end. Write on a separate goroutine, give it
+		// a moment, then exit regardless of whether it got through.
+		written := make(chan struct{})
+		go func() {
+			defer close(written)
+			fmt.Fprintf(diag,
+				"hard timeout: --timeout (%s) expired and the run did not unwind within %s; killing the process (exit %d). "+
+					"Something ignored cancellation — a tool, a wedged read, or a syscall in flight.\n",
+				timeout, domain.HardTimeoutGrace, domain.OneShotExitCode.HardTimeout)
+		}()
+		select {
+		case <-written:
+		case <-time.After(hardTimeoutDiagnosticGrace):
+		}
 		exit(domain.OneShotExitCode.HardTimeout)
 	})
 	return func() { timer.Stop() }
 }
+
+// hardTimeoutDiagnosticGrace bounds the watchdog's own diagnostic write. Short on
+// purpose: the message is a courtesy, the exit is the contract.
+const hardTimeoutDiagnosticGrace = 2 * time.Second
 
 // readMcpTokenFile reads the Daintree MCP bearer from a file.
 //

@@ -149,7 +149,10 @@ func TestSkillDecisionEmptySetsAreArraysAndConfidenceIsNull(t *testing.T) {
 
 	// The FULL key set, so an added omitempty (or a new stray field) fails here rather
 	// than silently changing the contract a consumer parses.
-	wantTop := map[string]bool{"type": true, "ts": true, "seq": true,
+	// schemaVersion is part of the COMMON envelope (type/ts/seq/schemaVersion), so a
+	// streaming consumer can reject an incompatible schema on the first line it sees —
+	// including a setup `error` emitted before any session frame exists.
+	wantTop := map[string]bool{"type": true, "ts": true, "seq": true, "schemaVersion": true,
 		"active": true, "newlyLoaded": true, "selector": true}
 	assertExactKeys(t, "line", line, wantTop)
 

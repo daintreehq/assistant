@@ -52,6 +52,27 @@ type ServerPolicy struct {
 	// differ: a caller may legitimately read a project it may not scribble beside.
 	AllowedStateRoots []string
 	AllowedLogRoots   []string
+
+	// The Default* fields describe what an OMITTED argument actually resolves to in
+	// this process. They exist because a ceiling that inspects the raw arguments is not
+	// a ceiling: a blank `tier` resolves to the process tier (system, by default) and a
+	// blank `approvals` resolves to auto whenever the process was launched with
+	// auto-approve — so simply LEAVING A FIELD OUT walked straight past checks that
+	// only fired on an explicit request. The policy compares the resolved authority,
+	// which is the thing that actually governs the session.
+	DefaultTier        domain.Tier
+	DefaultAutoApprove bool
+	DefaultProject     string
+	DefaultStateDir    string
+	DefaultLogDir      string
+}
+
+// resolve folds an omitted argument onto the default it would actually take.
+func resolve(requested, def string) string {
+	if strings.TrimSpace(requested) != "" {
+		return requested
+	}
+	return def
 }
 
 // tierRank orders the tiers so a ceiling can be compared. It is deliberately a closed
@@ -90,32 +111,45 @@ func (p ServerPolicy) Check(in OpenParams, openSessions int) error {
 			"this server allows %d concurrent session(s) and %d are open; close one first",
 			p.MaxSessions, openSessions)}
 	}
-	if err := p.checkTier(in.Tier); err != nil {
+	if err := p.checkTier(resolve(in.Tier, string(p.DefaultTier))); err != nil {
 		return err
 	}
-	if in.Approvals == ApprovalAuto && !p.AllowAutoApprove {
+	// The RESOLVED mode, not the requested one: an omitted `approvals` becomes auto in
+	// a process launched with auto-approve, so checking only the explicit value let a
+	// caller reach unattended approval by saying nothing at all.
+	mode := in.Approvals
+	if mode == "" && p.DefaultAutoApprove {
+		mode = ApprovalAuto
+	}
+	if mode == ApprovalAuto && !p.AllowAutoApprove {
 		return &PolicyError{Field: "approvals:\"auto\"", Reason: "this server does not permit unattended approval of " +
 			"mutating tools; use \"ask\" and answer them, or \"decline\""}
 	}
-	if err := checkRoot("project", in.Project, p.AllowedProjectRoots); err != nil {
+	if err := checkRoot("project", resolve(in.Project, p.DefaultProject), p.AllowedProjectRoots); err != nil {
 		return err
 	}
-	if err := checkRoot("stateDir", in.StateDir, p.AllowedStateRoots); err != nil {
+	if err := checkRoot("stateDir", resolve(in.StateDir, p.DefaultStateDir), p.AllowedStateRoots); err != nil {
 		return err
 	}
-	return checkRoot("logDir", in.LogDir, p.AllowedLogRoots)
+	return checkRoot("logDir", resolve(in.LogDir, p.DefaultLogDir), p.AllowedLogRoots)
 }
 
 func (p ServerPolicy) checkTier(requested string) error {
-	if p.MaxTier == "" || strings.TrimSpace(requested) == "" {
+	if p.MaxTier == "" {
 		return nil
 	}
 	max, ok := tierRank(p.MaxTier)
+	// Validate the CEILING before the request. Returning early on a blank request let a
+	// policy carrying an unintelligible MaxTier fail OPEN for exactly the caller who
+	// said nothing — the case that resolves to the most privileged default.
 	if !ok {
-		// A policy carrying a tier this build does not know is a misconfiguration, and
-		// the safe reading of an unintelligible ceiling is that nothing clears it.
 		return &PolicyError{Field: "tier", Reason: fmt.Sprintf(
 			"this server's policy names an unknown maximum tier %q", p.MaxTier)}
+	}
+	if strings.TrimSpace(requested) == "" {
+		// Nothing requested and nothing to resolve it to: the factory decides, and the
+		// policy has no resolved value to judge.
+		return nil
 	}
 	want, ok := tierRank(domain.Tier(strings.TrimSpace(requested)))
 	if !ok {

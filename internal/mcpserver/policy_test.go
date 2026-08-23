@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/daintreehq/assistant/internal/domain"
 )
@@ -172,5 +176,125 @@ func TestPolicyRefusalNeverBuildsARuntime(t *testing.T) {
 	}
 	if built {
 		t.Error("the runtime was constructed for a refused open; the lease would already be held")
+	}
+}
+
+// The session cap must hold under CONCURRENT opens. Building a runtime is slow (lease,
+// database, MCP connect) so it cannot happen under the registry lock — which means the
+// count an open reads before building is stale by the time it registers. Enforcing only
+// on that early read admitted two sessions under a cap of one.
+func TestPolicySessionCapHoldsUnderConcurrentOpens(t *testing.T) {
+	const cap = 1
+
+	var built sync.WaitGroup
+	release := make(chan struct{})
+	reg := NewRegistry(context.Background(), func(_, _ context.Context, _ OpenParams) (Runtime, error) {
+		// Park every factory call until both opens are past the early check, which is
+		// exactly the interleaving that defeats a check-then-act cap.
+		built.Done()
+		<-release
+		return newFakeRuntime(domain.NewID("ses_")), nil
+	})
+	reg.SetPolicy(ServerPolicy{MaxSessions: cap})
+
+	const attempts = 2
+	built.Add(attempts)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	opened := 0
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := reg.Open(context.Background(), OpenParams{}); err == nil {
+				mu.Lock()
+				opened++
+				mu.Unlock()
+			}
+		}()
+	}
+	built.Wait()
+	close(release)
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if opened != cap {
+		t.Fatalf("%d sessions opened under a cap of %d; the cap is check-then-act", opened, cap)
+	}
+	if got := len(reg.List()); got != cap {
+		t.Fatalf("registry holds %d sessions, want %d", got, cap)
+	}
+}
+
+// A long poll must never sleep through a turn that is STOPPED. The revision counter
+// alone cannot catch an approval that parked BETWEEN two polls: the handler then
+// captures an already-advanced revision, sinceSeq sits at the event tail, and nothing
+// further is ever signalled — so the caller waits out its whole budget, possibly past
+// the approval's own timeout, on a run that is blocked rather than slow.
+func TestPollDoesNotWaitWhenTheRunIsAlreadyParkedOnAnApproval(t *testing.T) {
+	run := NewRun("mrun_p", "ses_p", "prompt", func() {})
+	approvals := NewApprovals(ApprovalAsk, 0)
+
+	if hasPendingApproval(run, approvals) {
+		t.Fatal("a fresh run reported a pending approval")
+	}
+	if hasPendingApproval(run, nil) {
+		t.Fatal("a nil broker must report nothing pending, not panic")
+	}
+
+	parked := make(chan struct{})
+	go func() {
+		close(parked)
+		approvals.Confirm(context.Background(), ApprovalRequest{Tool: "git.push", RunID: run.ID})
+	}()
+	<-parked
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && !hasPendingApproval(run, approvals) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !hasPendingApproval(run, approvals) {
+		t.Fatal("the parked approval was never visible to the poll pre-check")
+	}
+
+	// An approval parked against a DIFFERENT run must not short-circuit this one's wait
+	// — that would turn every poll in the session into a busy loop.
+	other := NewRun("mrun_other", "ses_p", "prompt", func() {})
+	if hasPendingApproval(other, approvals) {
+		t.Error("another run's approval was reported as blocking this one")
+	}
+
+	approvals.RejectRun(run.ID)
+}
+
+// The Daintree bearer must not be reachable as a tool ARGUMENT, and the server's own
+// instructions must not teach a model to try. Both halves matter: the schema is what a
+// client validates against, and the instructions are what the model actually reads —
+// prose telling it to "pass mcpToken" produces invalid calls AND pressures a maintainer
+// to put the field back.
+func TestTheInlineMcpBearerIsGoneFromEveryModelFacingSurface(t *testing.T) {
+	// The argument struct is what the SDK projects into the tool schema.
+	typ := reflect.TypeOf(OpenInput{})
+	for i := 0; i < typ.NumField(); i++ {
+		tag := typ.Field(i).Tag.Get("json")
+		name := strings.Split(tag, ",")[0]
+		if name == "mcpToken" {
+			t.Fatalf("OpenInput still exposes an inline %q field; the bearer must be named by FILE", name)
+		}
+	}
+	// A path field is the supported replacement, so this is not passing by deletion.
+	if _, ok := typ.FieldByName("McpTokenFile"); !ok {
+		t.Fatal("OpenInput lost McpTokenFile; there must still be a way to name the token")
+	}
+
+	// `mcpTokenFile` legitimately contains the substring `mcpToken`, so match the
+	// standalone word rather than a naive Contains.
+	inlineMention := regexp.MustCompile(`\bmcpToken\b`)
+	if inlineMention.MatchString(instructions) {
+		t.Errorf("the server instructions still tell a model to pass mcpToken:\n%s", instructions)
+	}
+	if !strings.Contains(instructions, "mcpTokenFile") {
+		t.Error("the instructions should name mcpTokenFile so a model knows the supported route")
 	}
 }

@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"io"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -119,3 +121,44 @@ func (b *lockedBuffer) String() string {
 // testFireIn returns the --timeout value that makes the watchdog fire after d, given
 // that it arms at timeout+grace. Waiting the real grace would make every test here 30s.
 func testFireIn(d time.Duration) time.Duration { return d - domain.HardTimeoutGrace }
+
+// The diagnostic is a courtesy; the exit is the contract. stderr can be a pipe nobody
+// drains, and a blocking write there would leave the process alive forever — the
+// watchdog would have become another way to hang.
+func TestHardTimeoutWatchdogExitsEvenWhenTheDiagnosticBlocks(t *testing.T) {
+	exited := make(chan int, 1)
+	disarm := startHardTimeoutWatchdog(testFireIn(100*time.Millisecond), blockingWriter{}, func(c int) {
+		exited <- c
+	})
+	defer disarm()
+
+	select {
+	case code := <-exited:
+		if code != domain.OneShotExitCode.HardTimeout {
+			t.Errorf("exit code = %d, want %d", code, domain.OneShotExitCode.HardTimeout)
+		}
+	case <-time.After(hardTimeoutDiagnosticGrace + 5*time.Second):
+		t.Fatal("the watchdog waited forever on a blocked stderr; it became another way to hang")
+	}
+}
+
+// blockingWriter never returns, standing in for a pipe with no reader.
+type blockingWriter struct{}
+
+func (blockingWriter) Write([]byte) (int, error) { select {} }
+
+// A timeout within the grace of MaxInt64 must not wrap into a negative deadline and fire
+// immediately — that would kill a run which had just asked for effectively no limit.
+func TestHardTimeoutWatchdogDoesNotOverflowIntoAnInstantKill(t *testing.T) {
+	fired := make(chan struct{}, 1)
+	disarm := startHardTimeoutWatchdog(time.Duration(math.MaxInt64)-time.Second, io.Discard, func(int) {
+		fired <- struct{}{}
+	})
+	defer disarm()
+
+	select {
+	case <-fired:
+		t.Fatal("the deadline overflowed and the watchdog fired instantly")
+	case <-time.After(500 * time.Millisecond):
+	}
+}

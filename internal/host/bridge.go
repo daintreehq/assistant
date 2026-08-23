@@ -492,6 +492,15 @@ func (b *Bridge) Confirm(ctx context.Context, req ConfirmRequest) bool {
 	// resolve as rejected so a parked dispatch returns USER_DECLINED.
 	select {
 	case d := <-resolve:
+		// CANCELLATION DOMINATES. When a decision and a cancellation are both ready,
+		// Go picks a select arm arbitrarily — so without this check an approval that
+		// arrived just before the user pressed stop could still return true, and the
+		// mutating call would run after the turn had been cancelled. That is the one
+		// outcome someone who pressed stop must never get. internal/mcpserver reached
+		// the same conclusion in settleDecision; the host needs it for the same reason.
+		if ctx.Err() != nil {
+			return false
+		}
 		return d == DecisionApproved
 	case <-ctx.Done():
 		b.ResolveApproval(approvalID, DecisionRejected)
@@ -547,14 +556,13 @@ func (b *Bridge) AskChoice(ctx context.Context, req AskChoiceRequest) (AskChoice
 	turnID := b.activeTurnID
 	now := b.now()
 	pq := &pendingQuestion{resolve: resolve, options: opts}
-	if b.approvalTimeoutMs > 0 {
-		pq.timer = time.AfterFunc(time.Duration(b.approvalTimeoutMs)*time.Millisecond, func() {
-			b.ResolveQuestion(questionID, -1)
-		})
-	}
 	b.pendingQuestions[questionID] = pq
 	b.mu.Unlock()
 
+	// The request frame is posted BEFORE the timer is armed. Arming first leaves a
+	// window — a very short timeout, or a descheduled goroutine — in which
+	// question:answered(cancelled) reaches the host ahead of the question:requested it
+	// answers, leaving a ghost sheet the host can never close.
 	b.post(EvQuestionRequested{
 		QuestionID:  questionID,
 		Question:    req.Question,
@@ -565,8 +573,27 @@ func (b *Bridge) AskChoice(ctx context.Context, req AskChoiceRequest) (AskChoice
 		ToolCallID:  req.ToolCallID,
 	})
 
+	// Armed only if this question is STILL pending: the host may already have answered
+	// between the post above and here, and arming a timer for a settled question would
+	// leave it to fire against an id that no longer exists.
+	if b.approvalTimeoutMs > 0 {
+		b.mu.Lock()
+		if live, ok := b.pendingQuestions[questionID]; ok && live == pq {
+			pq.timer = time.AfterFunc(time.Duration(b.approvalTimeoutMs)*time.Millisecond, func() {
+				b.ResolveQuestion(questionID, -1)
+			})
+		}
+		b.mu.Unlock()
+	}
+
 	select {
 	case out := <-resolve:
+		// Cancellation dominates, exactly as in Confirm: both arms can be ready at
+		// once, and an answer that lands as the turn is being abandoned must not be
+		// acted on.
+		if ctx.Err() != nil {
+			return AskChoiceAnswer{}, ctx.Err()
+		}
 		if out.cancelled || out.index < 0 || out.index >= len(opts) {
 			// Out of range is treated as a cancellation, not clamped. Clamping would
 			// answer with an option the user never selected.

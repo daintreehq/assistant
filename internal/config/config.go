@@ -138,12 +138,21 @@ type AppConfig struct {
 // the CLI holds no model credentials and never talks to a provider — the backend
 // owns the model choice, the prompts, and the keys (see docs/BACKEND.md).
 type ConfigOverrides struct {
-	ProjectPath          *string
-	StateDir             *string
-	ProjectID            *string
-	WindowID             *string
-	McpURL               *string
-	McpToken             *string
+	ProjectPath *string
+	StateDir    *string
+	ProjectID   *string
+	WindowID    *string
+	McpURL      *string
+	McpToken    *string
+	// NoInheritedMcpToken and NoInheritedAPIKey drop a credential this PROCESS
+	// inherited from its own environment, after resolution.
+	//
+	// They exist because an empty override cannot express "none": FirstString skips
+	// blank values, so writing "" simply falls through to the environment. The caller
+	// that needs this is the MCP server, where a session may redirect an endpoint —
+	// and an inherited bearer must not follow a URL that a model chose.
+	NoInheritedMcpToken  bool
+	NoInheritedAPIKey    bool
 	BackendURL           *string
 	APIKey               *string
 	Tier                 *string
@@ -298,6 +307,11 @@ func loadConfig(overrides ConfigOverrides, ensureStateDir bool) (AppConfig, erro
 	// inject a token: no default → degraded local mode when genuinely unset.
 	cfg.McpURL = FirstString(deref(overrides.McpURL), e.trustedOrOwnGet("DAINTREE_MCP_URL"))
 	cfg.McpToken = FirstString(deref(overrides.McpToken), e.trustedOrOwnGet("DAINTREE_MCP_TOKEN"))
+	// Applied AFTER resolution: the point is to discard what the environment supplied,
+	// which an empty override cannot do.
+	if overrides.NoInheritedMcpToken && deref(overrides.McpToken) == "" {
+		cfg.McpToken = ""
+	}
 	// ProjectID + WindowID are the Daintree-injected IDENTITY (they scope StateDir
 	// and the UI binding) and DebugLog gates full-fidelity tracing — all trustedOrOwn
 	// (real env or the assistant's OWN .env), NEVER the project .env. A bound repo
@@ -407,6 +421,11 @@ func loadConfig(overrides ConfigOverrides, ensureStateDir bool) (AppConfig, erro
 		deref(overrides.APIKey),
 		e.trustedGet("DAINTREE_API_KEY"),
 	)
+	// See NoInheritedMcpToken: applied after resolution, because an empty override
+	// falls through to the environment rather than clearing it.
+	if overrides.NoInheritedAPIKey && deref(overrides.APIKey) == "" {
+		cfg.APIKey = ""
+	}
 	// Shape-check it HERE, where the value is resolved, because this is the only place
 	// a human error is still legible. Nobody is prompted for this key any more, so a
 	// bad one arrives via the environment — shell-mangled, smart-quoted, wrapped — and

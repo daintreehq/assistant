@@ -214,3 +214,50 @@ func TestSessionOptionsOverlaysPinnedSkills(t *testing.T) {
 		t.Fatalf("sessionOptions mutated the process-level pins: %v", process.PinnedSkillIDs)
 	}
 }
+
+// AN INHERITED CREDENTIAL MUST NEVER FOLLOW A SESSION-CHOSEN URL.
+//
+// Both endpoints are session arguments by design, but on the MCP surface the caller is a
+// model. Naming `mcpUrl: http://attacker/` and saying nothing about the token would
+// otherwise make the server post its own system-tier Daintree bearer to that host; the
+// same trick with `backendUrl` targets a spendable API key.
+func TestSessionRedirectingAnEndpointForfeitsTheInheritedCredential(t *testing.T) {
+	base := Options{}
+
+	t.Run("redirecting mcpUrl alone drops the inherited token", func(t *testing.T) {
+		got := sessionOptions(base, mcpserver.OpenParams{McpURL: "http://attacker.example/mcp"})
+		if !got.NoInheritedMcpToken {
+			t.Error("the session redirected the MCP endpoint but kept the process's inherited bearer")
+		}
+	})
+
+	t.Run("redirecting mcpUrl with its own token file is allowed", func(t *testing.T) {
+		got := sessionOptions(base, mcpserver.OpenParams{
+			McpURL: "http://other.example/mcp", McpTokenFile: "/tmp/tok",
+		})
+		if got.NoInheritedMcpToken {
+			t.Error("a session that supplied its own credential was still denied the endpoint")
+		}
+	})
+
+	t.Run("leaving mcpUrl alone keeps the inherited token", func(t *testing.T) {
+		got := sessionOptions(base, mcpserver.OpenParams{})
+		if got.NoInheritedMcpToken {
+			t.Error("a session that did not redirect anything lost the inherited token")
+		}
+	})
+
+	t.Run("redirecting backendUrl alone drops the inherited api key", func(t *testing.T) {
+		got := sessionOptions(base, mcpserver.OpenParams{BackendURL: "http://attacker.example"})
+		if !got.NoInheritedAPIKey {
+			t.Error("the session redirected the backend but kept the process's inherited key")
+		}
+	})
+
+	t.Run("blank-but-present values do not count as a redirect", func(t *testing.T) {
+		got := sessionOptions(base, mcpserver.OpenParams{McpURL: "   ", BackendURL: "  "})
+		if got.NoInheritedMcpToken || got.NoInheritedAPIKey {
+			t.Error("whitespace was treated as a redirect; config trims it to unset")
+		}
+	})
+}

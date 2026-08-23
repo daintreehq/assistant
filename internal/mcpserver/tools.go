@@ -361,9 +361,19 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 			return nil, RunOutput{}, err
 		}
 		if in.WaitMs > 0 {
-			// Revision captured BEFORE the wait: a change that lands between here and
-			// the select must not be slept through.
-			waitForChange(ctx, run, in.SinceSeq, run.Revision(), in.WaitMs)
+			// A run PARKED on an approval is the case a long poll must never sleep
+			// through, and the revision alone cannot catch it: if the approval parked
+			// BETWEEN two polls, this handler captures an already-advanced revision,
+			// sinceSeq is at the event tail, and nothing further will ever be signalled
+			// — so the caller would wait out its whole budget on a turn that is stopped,
+			// possibly past the approval's own timeout. Checking for a pending approval
+			// before waiting covers parked-before-capture, parked-between, and
+			// parked-after alike.
+			if !hasPendingApproval(run, sess.Approvals()) {
+				// Revision captured BEFORE the wait: a change that lands between here
+				// and the select must not be slept through either.
+				waitForChange(ctx, run, in.SinceSeq, run.Revision(), in.WaitMs)
+			}
 		}
 		max := in.MaxEvents
 		if max <= 0 {
@@ -602,6 +612,20 @@ func waitForSettle(ctx context.Context, run *Run, waitMs int) {
 // expired. A caller that wants the whole run should block on ask instead.
 func waitForChange(ctx context.Context, run *Run, sinceSeq int, sinceRev uint64, waitMs int) {
 	run.WaitForChange(ctx, sinceSeq, sinceRev, waitBudget(waitMs))
+}
+
+// hasPendingApproval reports whether this run is currently blocked on a confirmation.
+// approvals may be nil (tests).
+func hasPendingApproval(run *Run, approvals *Approvals) bool {
+	if approvals == nil {
+		return false
+	}
+	for _, pa := range approvals.Pending() {
+		if pa.RunID == run.ID {
+			return true
+		}
+	}
+	return false
 }
 
 // renderRun projects a run into its tool response. approvals may be nil (tests).

@@ -356,3 +356,32 @@ func TestCancelRunNeverDowngradesAFailedRun(t *testing.T) {
 		t.Errorf("status = %v, want error", last["status"])
 	}
 }
+
+// The documented guarantee is that a streaming consumer can reject an incompatible
+// schema on the FIRST line it sees. That was false for the case that needs it most: a
+// setup failure emits `error` before any session frame exists, so the version has to
+// live on the common envelope rather than only on the session header.
+func TestEverySchemaVersionIsOnEveryFrameIncludingAnErrorBeforeTheSession(t *testing.T) {
+	var buf bytes.Buffer
+	s := New(&buf, fixedClock)
+	// No Session() call at all — exactly the setup-failure shape.
+	s.Error("could not acquire the project lease")
+	s.Finish()
+
+	lines := decodeLines(t, &buf)
+	if len(lines) == 0 {
+		t.Fatal("no frames emitted")
+	}
+	for i, line := range lines {
+		got, ok := line["schemaVersion"]
+		if !ok {
+			t.Fatalf("frame %d (%v) carries no schemaVersion: %v", i, line["type"], line)
+		}
+		if got != float64(domain.JSONOutputSchemaVersion) {
+			t.Errorf("frame %d schemaVersion = %v, want %d", i, got, domain.JSONOutputSchemaVersion)
+		}
+	}
+	if lines[0]["type"] == "session" {
+		t.Fatal("this test must exercise the no-session path to be meaningful")
+	}
+}

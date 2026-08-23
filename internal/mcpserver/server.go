@@ -21,6 +21,11 @@ type Options struct {
 	// Diagnostics receives human-readable lines. It must NOT be stdout: stdio is the
 	// protocol transport and a stray byte there breaks the client's parser.
 	Diagnostics io.Writer
+	// Policy is the process-level authority ceiling applied to every session.open.
+	// Nil leaves the server UNCONFINED, which is only ever right for a trusted
+	// embedding path — on this stdio surface the caller is a model, so RunMCPServe
+	// always supplies one. See policy.go.
+	Policy *ServerPolicy
 }
 
 // Serve runs the MCP server over stdio until the context is cancelled or the client
@@ -46,6 +51,11 @@ func Serve(ctx context.Context, opts Options) error {
 	// the instant the call that created it returned.
 	lifetime, stop := context.WithCancel(ctx)
 	reg := NewRegistry(lifetime, opts.Factory)
+	// Installed BEFORE any tool is registered, so there is no window in which a
+	// session.open could be served by an unconfined registry.
+	if opts.Policy != nil {
+		reg.SetPolicy(*opts.Policy)
+	}
 
 	// Defers run LIFO, so these two are registered in the order OPPOSITE to how they
 	// run. CloseAll is registered first and therefore runs LAST: cancellation reaches
@@ -81,9 +91,13 @@ itself — it delegates edits to agents it spawns.
 
 Use it like this:
 
-1. daintree.session.open — bind a session to a project. Pass mcpUrl/mcpToken if you want
-   it to actually drive terminals; without them it runs in degraded local mode. Pass
-   debugLog:true so a bad run can be diagnosed. Keep the returned sessionId.
+1. daintree.session.open — bind a session to a project. Pass mcpUrl if you want it to
+   actually drive terminals; without it the session runs in degraded local mode. The
+   bearer is NEVER an argument: the server inherits it from its own environment, or you
+   name a FILE with mcpTokenFile. Do not put a token in a tool call. Note that naming
+   your own mcpUrl means the server will NOT lend you its inherited token — supply
+   mcpTokenFile as well if you redirect the endpoint. Pass debugLog:true so a bad run
+   can be diagnosed. Keep the returned sessionId.
 2. daintree.ask — ask for work. It returns a runId immediately; a real orchestration turn
    takes MINUTES. Do not set wait:true for anything that spawns agents.
 3. daintree.poll — read progress. Pass the previous nextSeq as sinceSeq to read only what

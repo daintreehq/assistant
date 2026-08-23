@@ -614,3 +614,48 @@ func TestInvalidRoutingFailsAtStartup(t *testing.T) {
 		t.Errorf("error %q does not name the valid choices", err)
 	}
 }
+
+// An empty override cannot express "no credential": FirstString skips blank values and
+// falls through to the environment. The MCP server needs to DROP an inherited bearer
+// when a session redirects the endpoint, so the suppression has to survive resolution.
+func TestNoInheritedCredentialsDropsEnvValues(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("DAINTREE_MCP_TOKEN", "fake-inherited-mcp-token")
+	t.Setenv("DAINTREE_API_KEY", "sk-test-fakeinheritedkey1234567890")
+
+	// Baseline: without the flags the environment is inherited, which is the behaviour
+	// every normal launch depends on.
+	base := mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir)})
+	if base.McpToken == "" || base.APIKey == "" {
+		t.Fatalf("baseline lost the inherited credentials: mcp=%q api=%q", base.McpToken, base.APIKey)
+	}
+
+	got := mustLoad(t, ConfigOverrides{
+		StateDir:            strptr(stateDir),
+		NoInheritedMcpToken: true,
+		NoInheritedAPIKey:   true,
+	})
+	if got.McpToken != "" {
+		t.Errorf("McpToken = %q, want it dropped — an inherited bearer must not follow a redirected endpoint", got.McpToken)
+	}
+	if got.APIKey != "" {
+		t.Errorf("APIKey = %q, want it dropped", got.APIKey)
+	}
+}
+
+// The suppression must not clobber a credential the caller supplied explicitly: it drops
+// what was INHERITED, not what was chosen.
+func TestNoInheritedCredentialsKeepsAnExplicitOverride(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("DAINTREE_MCP_TOKEN", "fake-inherited-mcp-token")
+
+	explicit := "fake-session-supplied-token"
+	got := mustLoad(t, ConfigOverrides{
+		StateDir:            strptr(stateDir),
+		McpToken:            strptr(explicit),
+		NoInheritedMcpToken: true,
+	})
+	if got.McpToken != explicit {
+		t.Errorf("McpToken = %q, want the explicitly supplied %q", got.McpToken, explicit)
+	}
+}

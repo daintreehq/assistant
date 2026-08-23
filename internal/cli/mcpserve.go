@@ -32,8 +32,25 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 	// decides", so inspecting the pointer would silently report false for a process
 	// launched with DAINTREE_ASSISTANT_AUTO_APPROVE=1 and then suppress it.
 	var defaultAutoApprove bool
+	// policy is the process-level authority ceiling. On THIS surface the caller is a
+	// model whose arguments can be steered by repository text or tool output, so the
+	// ceiling is not optional — an unconfined registry here would let a prompt
+	// injection choose its own tier and approval mode. It is derived from what the
+	// OPERATOR launched this process with, which makes the rule precise: a session may
+	// narrow what the operator already chose, and can never widen it.
+	policy := mcpserver.ServerPolicy{}
 	if cfg, err := loadConfigFromOptions(opts); err == nil {
 		defaultAutoApprove = cfg.AutoApprove
+		policy.DefaultAutoApprove = cfg.AutoApprove
+		// Auto-approve is permitted for a session only if the operator already turned
+		// it on process-wide. Otherwise a session cannot grant itself unattended
+		// mutation.
+		policy.AllowAutoApprove = cfg.AutoApprove
+		policy.MaxTier = domain.Tier(cfg.Tier)
+		policy.DefaultTier = domain.Tier(cfg.Tier)
+		policy.DefaultProject = cfg.ProjectPath
+		policy.DefaultStateDir = cfg.StateDir
+		policy.DefaultLogDir = cfg.LogDir
 	}
 
 	// One debug log for the PROCESS, not one per session. debuglog keeps a single
@@ -186,6 +203,7 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 		Version:     buildVersion,
 		Factory:     factory,
 		Diagnostics: os.Stderr,
+		Policy:      &policy,
 	})
 	if err != nil && ctx.Err() == nil {
 		fmt.Fprintln(os.Stderr, "mcp server:", err)
@@ -243,6 +261,27 @@ func sessionOptions(base Options, p mcpserver.OpenParams) Options {
 	applyIfSet(&o.Tier, p.Tier)
 	applyIfSet(&o.McpURL, p.McpURL)
 	applyIfSet(&o.McpTokenFile, p.McpTokenFile)
+	// AN INHERITED CREDENTIAL MUST NEVER FOLLOW A SESSION-CHOSEN URL.
+	//
+	// Both endpoints are session arguments by design — an MCP client cannot restart this
+	// process, so repointing has to be possible. But on this surface the caller is a
+	// MODEL whose context can be steered by repository text or tool output, and the
+	// process may hold credentials it inherited from ITS launch. Combining the two gives
+	// a clean exfiltration primitive: name `mcpUrl: http://attacker/`, say nothing about
+	// the token, and the server posts its own Daintree bearer — which authorises
+	// system-tier actions — straight to that host. `backendUrl` plus an inherited
+	// DAINTREE_API_KEY is the same trick against a spendable key.
+	//
+	// So redirecting an endpoint forfeits the inherited secret for it. A session that
+	// genuinely needs a different endpoint supplies its own credential file for that
+	// endpoint; one that supplies neither simply runs degraded, which is a visible,
+	// recoverable state rather than a silent leak.
+	// Clearing the field is NOT enough — config's FirstString skips a blank value and
+	// falls straight through to the environment, so an assignment of "" here would have
+	// left the inherited token in place and the leak wide open. The suppression has to
+	// be an explicit signal that survives resolution.
+	o.NoInheritedMcpToken = strings.TrimSpace(p.McpURL) != "" && strings.TrimSpace(p.McpTokenFile) == ""
+	o.NoInheritedAPIKey = strings.TrimSpace(p.BackendURL) != "" && strings.TrimSpace(p.APIKeyFile) == ""
 	applyIfSet(&o.StateDir, p.StateDir)
 	applyIfSet(&o.LogDir, p.LogDir)
 	applyIfSet(&o.ProjectID, p.ProjectID)

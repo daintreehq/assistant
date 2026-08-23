@@ -228,6 +228,10 @@ func (r *Registry) Open(ctx context.Context, p OpenParams) (*Session, error) {
 	// Checked BEFORE the factory runs. A policy violation must not have already
 	// acquired a project lease, opened a database, or connected MCP by the time it is
 	// refused — the refusal would then be the only thing that was not a side effect.
+	//
+	// This early check is an OPTIMISATION, not the enforcement point: it is read
+	// outside the lock the registration takes, so the session count it sees can be
+	// stale. The authoritative re-check happens below, under the lock that inserts.
 	policy, open := r.policy, len(r.sessions)
 	r.mu.Unlock()
 	if policy != nil {
@@ -278,6 +282,19 @@ func (r *Registry) Open(ctx context.Context, p OpenParams) (*Session, error) {
 		r.mu.Unlock()
 		_ = rt.Close()
 		return nil, fmt.Errorf("session id %q is already open", s.ID)
+	}
+	// THE session cap is enforced here, not by the early check above. Building the
+	// runtime is slow (lease, database, MCP connect) and must not hold this lock, so
+	// two concurrent opens can both pass a count read before either had registered —
+	// admitting two sessions under a cap of one. Re-checking under the insert lock is
+	// what actually makes the cap hold; the runtime we just built is torn down rather
+	// than leaked, exactly as the clash path above does.
+	if policy != nil && policy.MaxSessions > 0 && len(r.sessions) >= policy.MaxSessions {
+		r.mu.Unlock()
+		_ = rt.Close()
+		return nil, &PolicyError{Field: "session.open", Reason: fmt.Sprintf(
+			"this server allows %d concurrent session(s) and %d are open; close one first",
+			policy.MaxSessions, len(r.sessions))}
 	}
 	r.sessions[s.ID] = s
 	r.mu.Unlock()
@@ -566,7 +583,19 @@ func (s *Session) Interrupt(expectRunID string) error {
 	// Discard here as well as at the next Ask: an interrupt is the likeliest way for an
 	// injection to miss its fold window, and leaving it buffered means the next turn
 	// silently inherits an instruction meant for the abandoned one.
-	s.runtime.DiscardPendingInjections()
+	//
+	// But ONLY if the run we just cancelled is still the current one. The lock was
+	// released above so the cancel could not deadlock, and in that window the captured
+	// run can finish and a successor start — which a caller may already have injected
+	// into and been told succeeded. An unscoped discard would then silently delete a
+	// message belonging to a turn this interrupt was never aimed at. RejectRun above is
+	// run-scoped for exactly this reason; the discard has to be too.
+	s.mu.Lock()
+	stillCurrent := s.current == current
+	s.mu.Unlock()
+	if stillCurrent {
+		s.runtime.DiscardPendingInjections()
+	}
 	return nil
 }
 
