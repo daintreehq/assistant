@@ -94,16 +94,39 @@ its own, so a stale token in the user's OS environment cannot leak in.
 `sessionId`, `projectId`, `cwd` and `tier` must be strings; `windowId` and `protocolVersion`
 must be **numbers**. A quoted number is a string and is rejected. `protocolVersion` must be
 integral — a fractional `2.9` is refused rather than truncated past the `== ProtocolVersion`
-check. `resumeSessionId` is optional and not type-checked.
+check. `resumeSessionId` is optional but **typed**: absent or `null` starts a fresh session, a
+non-string is rejected, and it is capped at 256 **bytes**. It used to swallow a type
+mismatch, which silently turned a resume request into a fresh session with no indication
+the request had been discarded.
 
 **The descriptor carries no secret, deliberately.** `windowId` / `projectId` / `tier` are
-validated here, but the *live* binding values come from the environment: a leaked or forged
-descriptor line cannot re-point the session at another project or hand it a token.
+validated here *and* cross-checked against the environment, so a descriptor that disagrees
+with the live binding is refused rather than honoured — and it can never hand the session
+a token, because tokens only arrive by environment.
+
+**`cwd` is the exception, and it is worth being exact about it.** It is not merely
+declared: it *becomes* the runtime's project path. So a descriptor written on this pipe
+does choose which directory the session operates in, and there is no second source to
+check it against. That is bounded by who can write the pipe — stdin of a child process,
+which only its parent holds — and a writer that can forge a descriptor already controls
+the process. But the honest statement is that `cwd` is descriptor-controlled, not that the
+descriptor cannot re-point the session.
 
 A malformed descriptor yields `host:error` with code `bad-descriptor`, followed by teardown.
-A version mismatch yields code `protocol-mismatch` naming both versions, then teardown. Both
-are emitted **synchronously and flushed**, so the specific error reaches the parent before the
+A version mismatch yields code `protocol-mismatch` naming both versions, then teardown. A
+descriptor whose `projectId`, `windowId` or `tier` disagrees with the effective
+environment yields `binding-mismatch` — the descriptor is what Daintree *believes* it
+opened and the environment is what the runtime actually *uses*, and nothing compared them
+before, so the two could disagree while both sides reported success. All three errors are
+emitted **synchronously and flushed**, so the specific one reaches the parent before the
 `host:shutdown` reason does.
+
+`cwd` is deliberately *not* cross-checked. There is no independent second source for it:
+the descriptor's `cwd` **is** the project binding this process resolves from, so comparing
+the two would compare a value against itself. A check that can never fire is worse than no
+check, because it makes the handshake look more self-auditing than it is. The other three
+fields are stated twice — once in the descriptor, once in the environment — which is what
+makes them checkable.
 
 ### The reply: `host:ready`
 
@@ -201,10 +224,41 @@ confirmation" from "this peer is too old to say".
 - **Frame cap: 4 MiB** inbound and outbound (`maxFrameBytes`). An oversize inbound line is
   refused rather than buffered without bound.
 - **Backpressure, not silent drops.** Stream events (tokens, tool progress) *wait* when the
-  queue is above the high-water mark. Terminal and decision frames — `turn:end`,
-  `approval:requested`, `host:shutdown`, command acks — **never wait and never drop**: they
-  take the whole queue. This is the reserve that stops progress traffic from starving a
-  result.
+  queue is above the high-water mark, and a wedged consumer eventually sheds them — with
+  the sequence number still burned, so the hole is detectable. Terminal and decision
+  frames — `turn:end`, `approval:requested`, `host:shutdown`, command acks — **never
+  wait**: they take the whole queue depth, which is the reserve that stops progress
+  traffic from starving a result.
+
+  They are not promised to *never drop*, because with a finite queue and an unread pipe
+  that is not implementable — something has to give. The honest guarantee is stronger
+  than the old wording anyway: **a critical frame is never silently discarded.** If one
+  cannot be delivered, the session FAILS — the host treats the parent as gone, tears down,
+  and reports `host:shutdown` with reason `error` rather than a clean `exit` — instead of
+  continuing with a hole where a turn outcome or an approval request used to be.
+
+  "Critical" means *a host cannot make progress without it*: `turn:end`, `host:ready`,
+  `host:error`, `host:shutdown`, and the approval/question request and decision frames.
+  Telemetry — usage, cost, notices, reasoning, rate-limit — is not worth a session, so a
+  congested consumer drops those with the sequence gap left visible rather than killing a
+  healthy run over a stale meter.
+- **Outbound frames that would exceed 4 MiB are cut, not dropped.** This only arises for
+  `turn:end`, whose `content` is unbounded, and it matters because `turn:end` is the frame
+  that says the turn is over: refusing it left the host showing a turn running forever
+  over a conversation that had finished. The content is truncated with a visible marker in
+  the rendered text, and if even that will not fit, the frame goes out with the marker
+  alone — a recoverable loss, unlike never learning the answer exists. The cut is chosen
+  by measuring the *encoded* frame, not the raw string, because JSON escaping can inflate
+  a payload several times over.
+
+  **Open cross-repository question.** `turn:end.content` is documented as authoritative —
+  a consumer replaces its accumulated token buffer with it. When the content was cut, that
+  rule makes the transcript *worse* for a host that received every token: a complete
+  buffer is replaced by a truncated one. Resolving it properly needs a decision on the
+  Daintree side — treat marked truncation as a fallback rather than an unconditional
+  replacement, or carry the authoritative content in chunks. Until then, truncation is the
+  better default of the two available: a host that lost tokens gets something, and the
+  marker tells the reader what happened.
 - **`seq` is assigned during encode, under the same lock as the enqueue.** Assigning it
   outside would let two producers interleave — A takes N, is descheduled, B takes N+1 and
   enqueues first — so a consumer would see frames out of order and reasonably conclude one
@@ -221,6 +275,14 @@ confirmation" from "this peer is too old to say".
 | `hibernate` command | `hibernate` |
 | stdin EOF / read failure / oversize line | `exit` |
 | fatal protocol error | `error` |
+
+**`host:shutdown` is TERMINAL: no frame ever follows it.** Teardown seals the stream
+before writing it — the writer stops accepting new frames, whatever is already in flight
+is drained in order, and only then is the shutdown frame stamped, so its `seq` is
+genuinely the highest of the session. A consumer may stop reading at that line and know
+it has the whole turn. (The drain is bounded; a wedged stdout cannot hold teardown open
+forever, and the frame still carries its sequence number so a truncated shutdown is
+distinguishable from a clean one.)
 
 **`host:shutdown` is emitted FIRST**, before the app tears down, so Daintree learns the reason
 even if teardown itself hangs. Teardown then drains pending approvals (rejecting them so no

@@ -675,11 +675,24 @@ with the answer still in `result.content`. A run that already **failed** keeps i
 `error` status and exit `1` — an expired wait never downgrades a real failure into a
 cancellation.
 
-The bound is cooperative, not a hard kill, and it has no second deadline behind it.
-Teardown joins any in-flight scheduler tick before closing the database, so a transport
-that ignored cancellation entirely could hold the exit open indefinitely. That is the
-deliberate trade — returning while a tick still held the store would be a data race — but
-do not read `--timeout` as a guaranteed upper bound on process lifetime.
+The *first* stage of the bound is cooperative: teardown joins any in-flight scheduler
+tick before closing the database, so a transport that ignored cancellation could hold the
+graceful exit open. That is the deliberate trade — returning while a tick still held the
+store would be a data race.
+
+The second stage is not cooperative. The same watchdog described above applies here:
+`--timeout` plus `domain.HardTimeoutGrace` (30s), armed before any setup and still armed
+through teardown, kills the process with exit `4`. So `--timeout` **is** a guaranteed
+upper bound on process lifetime, and the graceful path is what decides whether you exit
+`0`/`1`/`2` with a terminal `result` line or exit `4` with none.
+
+The precise ceiling is `timeout + 30s + 2s`: the watchdog gives its own stderr diagnostic
+up to two seconds to write before calling `os.Exit`, because stderr can be a pipe nobody
+is draining and a blocking write there would have turned the watchdog into one more way
+to hang.
+
+Durable async rows may remain live for the next owner in either case; the invocation
+itself always ends.
 
 Four things are worth knowing before you reach for it:
 

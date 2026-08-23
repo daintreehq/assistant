@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // PROTOCOL_VERSION is the wire-format version. MUST equal Daintree's
@@ -172,16 +173,16 @@ func ParseDescriptor(line []byte) (SessionDescriptor, error) {
 		return SessionDescriptor{}, fmt.Errorf("descriptor is not a JSON object: %w", err)
 	}
 	var d SessionDescriptor
-	if err := wantString(raw, "sessionId", &d.SessionID); err != nil {
+	if err := wantIdentityString(raw, "sessionId", &d.SessionID); err != nil {
 		return SessionDescriptor{}, err
 	}
-	if err := wantString(raw, "projectId", &d.ProjectID); err != nil {
+	if err := wantIdentityString(raw, "projectId", &d.ProjectID); err != nil {
 		return SessionDescriptor{}, err
 	}
-	if err := wantString(raw, "cwd", &d.Cwd); err != nil {
+	if err := wantIdentityString(raw, "cwd", &d.Cwd); err != nil {
 		return SessionDescriptor{}, err
 	}
-	if err := wantString(raw, "tier", &d.Tier); err != nil {
+	if err := wantIdentityString(raw, "tier", &d.Tier); err != nil {
 		return SessionDescriptor{}, err
 	}
 	if err := wantNumber(raw, "windowId", &d.WindowID); err != nil {
@@ -192,13 +193,41 @@ func ParseDescriptor(line []byte) (SessionDescriptor, error) {
 		return SessionDescriptor{}, err
 	}
 	d.ProtocolVersion = int(pv)
-	// resumeSessionId is optional — decode if present, ignore type mismatches by
-	// only reading a JSON string (matches "NOT checked" — absence is fine).
+	// resumeSessionId is OPTIONAL but TYPED. Absence is fine; a present-but-wrong value
+	// is not.
+	//
+	// It used to swallow a type mismatch, which is too loose for a field that decides
+	// which conversation this session continues. A number or an object silently became
+	// "" — indistinguishable from "start fresh" — so a host that meant to resume got a
+	// blank session and no indication that its request had been discarded. A resume that
+	// was asked for and did not happen must be an error, not a default.
 	if v, ok := raw["resumeSessionId"]; ok {
-		_ = json.Unmarshal(v, &d.ResumeSessionID)
+		// JSON null is an explicit "no resume", which is a legitimate way for a host to
+		// serialize an absent optional.
+		if !bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+			if err := json.Unmarshal(v, &d.ResumeSessionID); err != nil {
+				return SessionDescriptor{}, errors.New(
+					"descriptor field \"resumeSessionId\" must be a string (omit it, or send null, to start a fresh session)")
+			}
+			if len(d.ResumeSessionID) > maxSessionIDBytes {
+				return SessionDescriptor{}, fmt.Errorf(
+					"descriptor field \"resumeSessionId\" is %d bytes, past the %d-byte limit",
+					len(d.ResumeSessionID), maxSessionIDBytes)
+			}
+		}
 	}
 	return d, nil
 }
+
+// maxSessionIDBytes bounds a session identifier on the wire. Generated ids are short
+// ASCII; the bound exists so a malformed descriptor cannot carry a megabyte in a field
+// that ends up naming a file on disk.
+//
+// BYTES, not characters, and named so. The two coincide for the ids this actually sees,
+// but calling a byte length a character count is the kind of contract detail that reads
+// as correct until someone sends a multi-byte id and gets an error citing a number they
+// cannot reconcile with what they sent.
+const maxSessionIDBytes = 256
 
 func wantString(raw map[string]json.RawMessage, key string, dst *string) error {
 	v, ok := raw[key]
@@ -207,6 +236,29 @@ func wantString(raw map[string]json.RawMessage, key string, dst *string) error {
 	}
 	if err := json.Unmarshal(v, dst); err != nil {
 		return fmt.Errorf("descriptor field %q must be a string", key)
+	}
+	return nil
+}
+
+// wantIdentityString is wantString for a field that NAMES something — a session, a
+// project, a directory, a tier.
+//
+// It additionally refuses a blank. A required identity field that arrives as "" or "  "
+// is type-correct and says nothing, and every consumer downstream trims before comparing
+// — so a whitespace-only projectId passed the type check and then skipped the binding
+// cross-check as "not stated", which is precisely the field that check exists to compare.
+// Refusing it here keeps it one clear error instead of a silently weakened guarantee
+// three layers away.
+//
+// Deliberately NOT applied to every string on the wire: a command's `decision` is
+// legitimately empty (it normalizes to "rejected"), so the rule belongs to the fields
+// that carry identity, not to the type.
+func wantIdentityString(raw map[string]json.RawMessage, key string, dst *string) error {
+	if err := wantString(raw, key, dst); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*dst) == "" {
+		return fmt.Errorf("descriptor field %q is blank; it must name a value", key)
 	}
 	return nil
 }

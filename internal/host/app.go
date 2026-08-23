@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/config"
@@ -167,4 +168,45 @@ type AppParams struct {
 	SessionID           string // appSessionId: resume id when resuming, else session id
 	ProjectPath         string // descriptor.cwd → overrides.projectPath
 	ProjectInstructions string // loaded DAINTREE.md content → overrides
+
+	// Declared is what the DESCRIPTOR claimed this session is bound to. The live
+	// binding comes from the environment, so these are the host's opportunity to check
+	// that the two agree — see Binding.
+	Declared Binding
+}
+
+// Binding is the identity a session is bound to: which project, which window, at what
+// permission tier, in which directory.
+//
+// It exists because the descriptor and the environment are two independent statements
+// of the same fact, and nothing compared them. The descriptor is what Daintree BELIEVES
+// it opened; the environment is what the runtime actually USES — so a mismatch means the
+// two processes disagree about which project this session can act on, while both report
+// success. Redundant identity is only worth carrying if it is cross-checked; otherwise
+// it is two truths and no way to tell which one is live.
+type Binding struct {
+	ProjectID string
+	WindowID  string
+	Tier      string
+	Cwd       string
+}
+
+// BindingMismatchError is a descriptor that disagrees with the effective environment.
+//
+// It is FATAL rather than a warning. The alternative is a session that runs under a
+// binding its host does not know about: Daintree renders the conversation as belonging
+// to one project while the runtime spawns agents in another, and every terminal that
+// appears is attributed to the wrong window. There is no safe way to guess which of the
+// two was meant.
+type BindingMismatchError struct {
+	Field    string
+	Declared string
+	Actual   string
+}
+
+func (e *BindingMismatchError) Error() string {
+	return fmt.Sprintf(
+		"session descriptor %s is %q but this process is bound to %q — the host and the runtime disagree "+
+			"about which session this is, so neither can be trusted to act on it",
+		e.Field, e.Declared, e.Actual)
 }

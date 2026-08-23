@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/daintreehq/assistant/internal/agent"
@@ -52,6 +53,27 @@ func RunHost(ctx context.Context, opts Options) int {
 	}
 	factory := func(fctx context.Context, params host.AppParams) (host.App, error) {
 		overrides := hostOverrides(baseOverrides, params)
+		// CROSS-CHECK THE DESCRIPTOR AGAINST THE ENVIRONMENT, before taking a lease or
+		// opening a database. The descriptor is what Daintree believes it opened; the
+		// environment is what this runtime actually binds to. Nothing compared them, so
+		// two independent statements of the same identity could disagree while both
+		// sides reported success — Daintree rendering a conversation as one project's
+		// while the runtime spawned agents in another's.
+		//
+		// Resolved as a PROBE: this must not create a state directory for a session that
+		// is about to be refused.
+		//
+		// A probe FAILURE is fatal, not a reason to skip the check. Swallowing it made
+		// the cross-check fail open in exactly the situation where configuration is
+		// already suspect — and app.Create can still succeed afterwards on the overrides
+		// that were resolved earlier, so the session would run unchecked.
+		cfg, cerr := loadProbeConfigFromOptions(withOverrides(opts, overrides))
+		if cerr != nil {
+			return nil, fmt.Errorf("cannot resolve this session's configuration to check it against the descriptor: %w", cerr)
+		}
+		if berr := checkDescriptorBinding(params.Declared, cfg); berr != nil {
+			return nil, berr
+		}
 		// The embedded host owns the project like any interactive assistant: take
 		// the lease (spawning/attaching to the supervisor daemon) before opening
 		// the DB. The Ownership handle is deliberately held for the PROCESS
@@ -204,3 +226,42 @@ func (h *hostAppAdapter) Shutdown(context.Context) error {
 type errMCP string
 
 func (e errMCP) Error() string { return string(e) }
+
+// checkDescriptorBinding compares what the descriptor DECLARED against what this process
+// actually resolved from the environment.
+//
+// Only fields the descriptor genuinely carries are checked, and a blank on either side is
+// skipped: the descriptor validates these for type while the live values come from the
+// environment, so an absent one means "not stated" rather than "stated as empty".
+// Comparing an unstated field would refuse every launch that simply does not inject that
+// variable — which, since Daintree injects them all, means this is strict exactly where
+// there is something to be strict about.
+func checkDescriptorBinding(declared host.Binding, cfg config.AppConfig) error {
+	if d, a := strings.TrimSpace(declared.ProjectID), strings.TrimSpace(cfg.ProjectID); d != "" && a != "" && d != a {
+		return &host.BindingMismatchError{Field: "projectId", Declared: d, Actual: a}
+	}
+	if d, a := strings.TrimSpace(declared.WindowID), strings.TrimSpace(cfg.WindowID); d != "" && a != "" && d != a {
+		return &host.BindingMismatchError{Field: "windowId", Declared: d, Actual: a}
+	}
+	if d, a := strings.TrimSpace(declared.Tier), strings.TrimSpace(string(cfg.Tier)); d != "" && a != "" && d != a {
+		return &host.BindingMismatchError{Field: "tier", Declared: d, Actual: a}
+	}
+	// cwd is deliberately NOT compared here, and the reason is worth stating: there is no
+	// independent second source for it in this process. hostOverrides derives the
+	// config's project path FROM the descriptor's cwd, so comparing the two would be
+	// comparing a value against itself — a check that can never fire, which is worse than
+	// no check because it makes the cross-check look more complete than it is.
+	//
+	// The other three fields are genuinely independent: the descriptor states them and
+	// the environment states them separately, so they can actually disagree.
+	return nil
+}
+
+// withOverrides returns opts carrying the already-merged descriptor overrides, so the
+// binding probe resolves exactly the configuration the session is about to use.
+func withOverrides(opts Options, o config.ConfigOverrides) Options {
+	if o.ProjectPath != nil {
+		opts.Project = *o.ProjectPath
+	}
+	return opts
+}

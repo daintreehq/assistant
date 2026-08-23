@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/daintreehq/assistant/internal/domain"
 )
@@ -15,6 +16,18 @@ import (
 type HostEvent interface {
 	// encode returns the full NDJSON object (type + sessionId + seq) for stdout.
 	encode(sessionID string, seq uint64) ([]byte, error)
+}
+
+// shrinkable is implemented by an event whose payload can be reduced to fit the frame
+// cap. See transport.stampAndEnqueue: without it, an oversize frame is simply not sent.
+//
+// Only events with an unbounded field need it, and only turn:end genuinely matters —
+// it is the TERMINAL frame, so a host that never receives it never learns the turn
+// ended and waits forever on a turn that is over.
+type shrinkable interface {
+	// shrink returns a copy whose payload fits within budget bytes of content, and
+	// whether shrinking was possible at all.
+	shrink(budget int) (HostEvent, bool)
 }
 
 // encodeSeq is the transport's entry point: it stamps seq onto ev. Kept as a free
@@ -144,6 +157,54 @@ func (e EvTurnEnd) encode(sid string, seq uint64) ([]byte, error) {
 	}
 	return marshalEvent("turn:end", sid, seq, f)
 }
+
+// shrink cuts the authoritative content down so the terminal frame still FITS.
+//
+// The alternative, which is what happened before, is that the frame is refused for being
+// oversize and never sent at all — and turn:end is the frame that says the turn is over.
+// A host that does not receive it shows a turn running forever, over a conversation that
+// finished. Losing the tail of a very long answer is bad; losing the fact that the answer
+// exists is worse, and it is unrecoverable without restarting the session.
+//
+// The loss is NOT silent: the marker is inside the rendered content, where the person
+// reading the answer sees it. It goes in the content rather than a new field because the
+// frame shape is a cross-repository contract — Daintree validates these lines and a field
+// it does not know is a rejected frame, which would put us back to not delivering it.
+func (e EvTurnEnd) shrink(budget int) (HostEvent, bool) {
+	if !e.HasContent || len(e.Content) <= budget {
+		return e, false
+	}
+	// budget 0 is the last resort: emit the frame with the content REMOVED rather than
+	// not at all. HasContent stays true so the field is still present as an empty
+	// string — a host can then tell "the answer did not fit" from "the turn said
+	// nothing", which is the distinction HasContent exists to carry.
+	if budget <= 0 {
+		e.Content = truncationNote
+		return e, true
+	}
+	room := budget - len(truncationNote)
+	if room < 0 {
+		room = 0
+	}
+	cut := room
+	if cut > len(e.Content) {
+		cut = len(e.Content)
+	}
+	// Land on a rune boundary: a byte-exact cut through a multi-byte character is
+	// invalid UTF-8, and the JSON encoder would replace it rather than carry it.
+	for cut > 0 && !utf8.RuneStart(e.Content[cut]) {
+		cut--
+	}
+	e.Content = e.Content[:cut] + truncationNote
+	return e, true
+}
+
+// truncationNote is what a reader sees where the rest of an over-large answer would be.
+// It goes in the CONTENT rather than a new field because the frame shape is a
+// cross-repository contract, and a field Daintree does not know is a rejected frame —
+// which would put us back to not delivering the terminal frame at all.
+const truncationNote = "\n\n[This answer was too large for one protocol frame and has been cut here. " +
+	"The full text is in the run transcript.]"
 
 // EvToolStarted — tool:started. turnId optional.
 type EvToolStarted struct {
