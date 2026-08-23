@@ -40,11 +40,16 @@ unusable for exactly the work this assistant exists to do — spawning a cohort 
 and supervising them. It is the same shape the assistant already uses internally for its
 own long work (`terminal.run.async` returns a handle a coordinator settles later).
 
-**The server holds no configuration.** A client launches this process once and keeps the
-pipe for its whole session; it cannot restart it when you want a different project or a
-locally-rebuilt backend. So project, endpoint, tier, MCP credentials and state dir are
-all arguments to `daintree.session.open`, and the process env supplies defaults only.
-Repointing is a close/open pair, never a reconnect.
+**The server holds no configuration of its own.** A client launches this process once
+and keeps the pipe for its whole session; it cannot restart it when you want a different
+project. So project, tier, state dir and identity are all arguments to
+`daintree.session.open`, and the process env supplies defaults only — repointing those is
+a close/open pair, never a reconnect.
+
+Endpoints and credentials are the exception, and they are **pinned at launch**. See
+[the process policy](#the-process-policy-is-the-authority-ceiling) below: they decide
+where the conversation goes and whose credential pays for it, which makes them the
+operator's call rather than an argument the caller can reach.
 
 **No secret is a tool argument.** The backend key is named by `apiKeyFile` and the Daintree
 MCP bearer by `mcpTokenFile` — paths, never values. Both are chosen by a *model* on this
@@ -52,6 +57,44 @@ surface, and that bearer authorises system-tier Daintree actions for its whole v
 window: inline, it could be echoed back by a prompt injection, logged by your MCP client, or
 captured by traces outside this repository. Omit `mcpTokenFile` to inherit
 `DAINTREE_MCP_TOKEN` from the server process.
+
+### The process policy is the authority ceiling
+
+Every field above is chosen by a **model** whose context can be steered by repository
+text, tool output, or anything else it reads. A session argument that changes a
+filesystem root, a network origin, a credential, a permission tier, or approval
+behaviour is therefore part of the security boundary — and prose in a prompt saying
+"don't do that" is not a control. `internal/mcpserver/policy.go` is.
+
+The rule is one-directional: **a session may narrow what the operator launched this
+process with, and can never widen it.** The policy is fixed at launch, where the operator
+decides it, and there is deliberately no tool that reaches it.
+
+What `mcp --stdio` pins by default:
+
+| Dimension | Default | Why |
+|---|---|---|
+| `backendUrl` | **pinned** — an override is refused | it decides where the whole conversation, project context and every tool result are posted; an unbounded one is both an SSRF primitive and an exfiltration route |
+| `mcpUrl` | **pinned** | it decides which server advertises the tools the assistant believes and calls |
+| `apiKeyFile` / `mcpTokenFile` | **pinned** | a path keeps the *value* out of model context but still lets a model *select* a credential — spending another account, or acquiring a system-tier Daintree bearer |
+| `project` / `stateDir` / `logDir` | confined to the directories the process was launched against | a prompt injection in one repository must not open a system-tier session on another one, or on `$HOME` |
+| `tier` | at most the process tier | a request *above* the ceiling is refused, never quietly downgraded — a caller told it has system tier would read every later refusal as a bug |
+| `approvals: "auto"` | refused unless the process itself was launched with auto-approve | a session cannot grant itself unattended mutation |
+
+Path confinement compares **resolved** paths: both the allowlisted root and the requested
+path go through `filepath.EvalSymlinks` first, so `/allowed/link -> /etc` is outside the
+root even though it reads as inside it. A path that does not exist yet — the usual case
+for a state directory the open is about to create — resolves through its nearest existing
+ancestor, which is where any escaping symlink would have to live.
+
+A harness that genuinely needs a different endpoint or credential launches a **second
+server** against it. That is a decision made at a shell, by a human, once — not an
+argument a model can reach.
+
+Embedding the server in a trusted host, where the operator *is* the caller, is the one
+case with no ceiling. It requires naming `Serve` with `TrustedUnconfined` explicitly:
+`ServeModelFacing` refuses that marker outright, so the unconfined configuration takes
+more code than the safe one rather than less.
 
 ### The tools
 

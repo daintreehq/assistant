@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -23,7 +24,7 @@ import (
 // default.
 func TestNoPolicyPermitsEverything(t *testing.T) {
 	built := false
-	reg := NewRegistry(context.Background(), func(_, _ context.Context, _ OpenParams) (Runtime, error) {
+	reg := NewUnconfinedRegistry(context.Background(), func(_, _ context.Context, _ OpenParams) (Runtime, error) {
 		built = true
 		return newFakeRuntime("ses_test"), nil
 	})
@@ -42,7 +43,7 @@ func TestNoPolicyPermitsEverything(t *testing.T) {
 
 // An INSTALLED policy denies by default, even one whose fields are all zero.
 func TestInstalledPolicyDeniesAutoApproveByDefault(t *testing.T) {
-	reg := NewRegistry(context.Background(), func(_, _ context.Context, _ OpenParams) (Runtime, error) {
+	reg := NewUnconfinedRegistry(context.Background(), func(_, _ context.Context, _ OpenParams) (Runtime, error) {
 		return newFakeRuntime("ses_test"), nil
 	})
 	reg.SetPolicy(ServerPolicy{})
@@ -165,7 +166,7 @@ func TestPolicyCapsConcurrentSessions(t *testing.T) {
 // effect.
 func TestPolicyRefusalNeverBuildsARuntime(t *testing.T) {
 	built := false
-	reg := NewRegistry(context.Background(), func(_, _ context.Context, _ OpenParams) (Runtime, error) {
+	reg := NewUnconfinedRegistry(context.Background(), func(_, _ context.Context, _ OpenParams) (Runtime, error) {
 		built = true
 		return newFakeRuntime("ses_test"), nil
 	})
@@ -188,7 +189,7 @@ func TestPolicySessionCapHoldsUnderConcurrentOpens(t *testing.T) {
 
 	var built sync.WaitGroup
 	release := make(chan struct{})
-	reg := NewRegistry(context.Background(), func(_, _ context.Context, _ OpenParams) (Runtime, error) {
+	reg := NewUnconfinedRegistry(context.Background(), func(_, _ context.Context, _ OpenParams) (Runtime, error) {
 		// Park every factory call until both opens are past the early check, which is
 		// exactly the interleaving that defeats a check-then-act cap.
 		built.Done()
@@ -296,5 +297,367 @@ func TestTheInlineMcpBearerIsGoneFromEveryModelFacingSurface(t *testing.T) {
 	}
 	if !strings.Contains(instructions, "mcpTokenFile") {
 		t.Error("the instructions should name mcpTokenFile so a model knows the supported route")
+	}
+}
+
+// --- Endpoint authority (P0-1, P0-2) ---
+
+// The two endpoint arguments decide where a session's conversation goes and which tool
+// server it believes. Under a policy they are pinned, and an override is a refusal
+// rather than a silent redirect.
+func TestPolicyPinsEndpointsByDefault(t *testing.T) {
+	p := ServerPolicy{}
+	for _, tc := range []struct {
+		field string
+		in    OpenParams
+	}{
+		{"backendUrl", OpenParams{BackendURL: "http://attacker.example/"}},
+		{"mcpUrl", OpenParams{McpURL: "http://attacker.example/mcp"}},
+	} {
+		err := p.Check(tc.in, 0)
+		var pe *PolicyError
+		if !errors.As(err, &pe) {
+			t.Fatalf("%s override was not refused by an installed policy: %v", tc.field, err)
+		}
+		if pe.Field != tc.field {
+			t.Errorf("refusal named %q, want %q", pe.Field, tc.field)
+		}
+	}
+	// Omitting them is always fine — the caller chose nothing, so there is nothing to
+	// judge.
+	if err := p.Check(OpenParams{}, 0); err != nil {
+		t.Fatalf("omitted endpoints were refused: %v", err)
+	}
+}
+
+func TestPolicyEnforcesEndpointOriginAllowlist(t *testing.T) {
+	p := ServerPolicy{
+		AllowBackendOverride:  true,
+		AllowedBackendOrigins: []string{"https://assistant.daintree.org"},
+	}
+	if err := p.Check(OpenParams{BackendURL: "https://assistant.daintree.org/v1/x"}, 0); err != nil {
+		t.Fatalf("an allowlisted origin was refused: %v", err)
+	}
+	if err := p.Check(OpenParams{BackendURL: "https://evil.example/v1/x"}, 0); err == nil {
+		t.Fatal("an origin outside the allowlist was permitted")
+	}
+	// The switch and the list are separate decisions: listing origins must not by
+	// itself turn overrides on.
+	off := ServerPolicy{AllowedBackendOrigins: []string{"https://assistant.daintree.org"}}
+	if err := off.Check(OpenParams{BackendURL: "https://assistant.daintree.org"}, 0); err == nil {
+		t.Fatal("an origin allowlist alone enabled overrides")
+	}
+}
+
+// Userinfo is a credential travelling through the one channel that exists so that
+// credentials do not. It is refused, never stripped — stripping would leave the caller
+// believing it had authenticated.
+func TestPolicyRefusesEndpointUserinfoAndOddSchemes(t *testing.T) {
+	p := ServerPolicy{AllowBackendOverride: true}
+	for _, raw := range []string{
+		"https://user:pass@backend.example/",
+		"file:///etc/passwd",
+		"gopher://backend.example/",
+		"https://",
+	} {
+		if err := p.Check(OpenParams{BackendURL: raw}, 0); err == nil {
+			t.Errorf("%q was accepted as an endpoint", raw)
+		}
+	}
+}
+
+// Plaintext is fine on loopback (that IS the local dev backend) and refused off it.
+func TestPolicyRequiresTLSOffLoopback(t *testing.T) {
+	p := ServerPolicy{AllowBackendOverride: true, RequireTLSForRemoteEndpoints: true}
+	if err := p.Check(OpenParams{BackendURL: "http://127.0.0.1:8473"}, 0); err != nil {
+		t.Fatalf("loopback http was refused: %v", err)
+	}
+	if err := p.Check(OpenParams{BackendURL: "http://backend.example"}, 0); err == nil {
+		t.Fatal("remote plaintext was permitted under RequireTLSForRemoteEndpoints")
+	}
+}
+
+// --- Credential authority (P0-3) ---
+
+func TestPolicyPinsCredentialFilesByDefault(t *testing.T) {
+	p := ServerPolicy{}
+	for _, tc := range []struct {
+		field string
+		in    OpenParams
+	}{
+		{"apiKeyFile", OpenParams{APIKeyFile: "/home/someone/.keys/other-account"}},
+		{"mcpTokenFile", OpenParams{McpTokenFile: "/proc/self/environ"}},
+	} {
+		err := p.Check(tc.in, 0)
+		var pe *PolicyError
+		if !errors.As(err, &pe) || pe.Field != tc.field {
+			t.Errorf("%s was not refused by an installed policy: %v", tc.field, err)
+		}
+	}
+}
+
+// The allowlist holds EXACT files, and a symlink pointing at one of them does not count
+// as being one of them in either direction — both sides resolve before comparison.
+func TestPolicyAllowsOnlyExactCredentialFiles(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "backend.key")
+	if err := os.WriteFile(real, []byte("fake-test-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(dir, "other.key")
+	if err := os.WriteFile(other, []byte("fake-test-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.key")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	p := ServerPolicy{AllowCredentialOverride: true, AllowedAPIKeyFiles: []string{real}}
+	if err := p.Check(OpenParams{APIKeyFile: real}, 0); err != nil {
+		t.Fatalf("the allowlisted file was refused: %v", err)
+	}
+	// A symlink TO the allowlisted file resolves to it, so it is the same credential.
+	if err := p.Check(OpenParams{APIKeyFile: link}, 0); err != nil {
+		t.Fatalf("a symlink to the allowlisted file was refused: %v", err)
+	}
+	if err := p.Check(OpenParams{APIKeyFile: other}, 0); err == nil {
+		t.Fatal("a file outside the allowlist was permitted")
+	}
+}
+
+// --- Symlink-safe root confinement (P0-4) ---
+
+// The finding this closes: a lexical prefix check makes "allowed root" a set of STRINGS.
+// /srv/projects/link is textually inside /srv/projects even when link points at /etc.
+func TestPolicyRootConfinementSurvivesASymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	link := filepath.Join(root, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	p := ServerPolicy{AllowedProjectRoots: []string{root}}
+
+	if err := p.Check(OpenParams{Project: filepath.Join(root, "inside")}, 0); err != nil {
+		t.Fatalf("a genuinely-inside path was refused: %v", err)
+	}
+	if err := p.Check(OpenParams{Project: link}, 0); err == nil {
+		t.Fatal("a symlink out of the allowed root was accepted as being inside it")
+	}
+	if err := p.Check(OpenParams{Project: filepath.Join(link, "deeper")}, 0); err == nil {
+		t.Fatal("a path THROUGH an escaping symlink was accepted")
+	}
+}
+
+// A state or log root is routinely created by the open that names it, so confinement has
+// to work on a path that does not exist yet — while still resolving the ancestors it
+// hangs off.
+func TestPolicyConfinesNotYetExistingPathsThroughTheirAncestors(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	link := filepath.Join(root, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	p := ServerPolicy{AllowedStateRoots: []string{root}}
+
+	if err := p.Check(OpenParams{StateDir: filepath.Join(root, "a", "b", "c")}, 0); err != nil {
+		t.Fatalf("a not-yet-created path inside the root was refused: %v", err)
+	}
+	if err := p.Check(OpenParams{StateDir: filepath.Join(link, "a", "b")}, 0); err == nil {
+		t.Fatal("a not-yet-created path behind an escaping symlink was accepted")
+	}
+}
+
+// A symlinked ROOT is the mirror case: the allowlist entry itself resolves, so naming
+// the resolved directory is naming the same place.
+func TestPolicyResolvesTheAllowlistedRootToo(t *testing.T) {
+	real := t.TempDir()
+	parent := t.TempDir()
+	link := filepath.Join(parent, "root-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	p := ServerPolicy{AllowedProjectRoots: []string{link}}
+	if err := p.Check(OpenParams{Project: filepath.Join(real, "project")}, 0); err != nil {
+		t.Fatalf("the resolved form of a symlinked root was refused: %v", err)
+	}
+}
+
+// --- The unsafe configuration must take more code than the safe one (P0-7) ---
+
+func TestServeModelFacingRefusesTheUnconfinedMarker(t *testing.T) {
+	err := ServeModelFacing(context.Background(), Options{
+		Factory:    func(_, _ context.Context, _ OpenParams) (Runtime, error) { return newFakeRuntime("ses"), nil },
+		Unconfined: &TrustedUnconfined{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unconfined") {
+		t.Fatalf("a model-facing server accepted the unconfined marker: %v", err)
+	}
+}
+
+// --- Path spelling: the policy and the code that opens the path must agree ---
+
+// The escape this closes: config trims every value it resolves and the session layer
+// deliberately does not, so "/repo/state " (a symlink into the allowed root) and
+// "/repo/state" (an attacker-controlled directory outside it) are the same argument to
+// one layer and different paths to the other.
+func TestPolicyRefusesPathsPaddedWithWhitespace(t *testing.T) {
+	root := t.TempDir()
+	p := ServerPolicy{
+		AllowedProjectRoots:     []string{root},
+		AllowedStateRoots:       []string{root},
+		AllowedLogRoots:         []string{root},
+		AllowCredentialOverride: true,
+	}.Canonicalize()
+
+	for _, tc := range []struct {
+		field string
+		in    OpenParams
+	}{
+		{"project", OpenParams{Project: filepath.Join(root, "p") + " "}},
+		{"stateDir", OpenParams{StateDir: " " + filepath.Join(root, "s")}},
+		{"logDir", OpenParams{LogDir: filepath.Join(root, "l") + "\t"}},
+		{"apiKeyFile", OpenParams{APIKeyFile: filepath.Join(root, "k") + " "}},
+	} {
+		err := p.Check(tc.in, 0)
+		var pe *PolicyError
+		if !errors.As(err, &pe) || pe.Field != tc.field {
+			t.Errorf("a whitespace-padded %s was accepted: %v", tc.field, err)
+		}
+	}
+}
+
+// filepath.Abs cleans "a/link/../b" to "a/b" LEXICALLY, before any symlink is followed,
+// while the kernel follows `link` first and lands somewhere else. Every check built on
+// the cleaned path is answering a question about a path that will never be opened.
+func TestPolicyRefusesDotDotComponents(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	p := ServerPolicy{AllowedProjectRoots: []string{root}}.Canonicalize()
+
+	// Built by concatenation, not filepath.Join — Join CLEANS, which would eliminate the
+	// ".." before the policy ever saw it and quietly turn this into a different test.
+	//
+	// Lexically this cleans to <root>/target and passes; the kernel resolves `link`
+	// first and lands at <outside>/../target, which is not inside the root at all.
+	escape := root + string(filepath.Separator) + "link" + string(filepath.Separator) +
+		".." + string(filepath.Separator) + "target"
+	err := p.Check(OpenParams{Project: escape}, 0)
+	var pe *PolicyError
+	if !errors.As(err, &pe) || pe.Field != "project" {
+		t.Fatalf("a path traversing a symlink via .. was accepted: %v", err)
+	}
+}
+
+// --- The ceiling must not move after launch (F4) ---
+
+// A root the operator named as a symlink was re-followed on EVERY check, so retargeting
+// that link while the server ran widened the ceiling. Canonicalize pins it once.
+func TestCanonicalizePinsASymlinkedRootAtInstallTime(t *testing.T) {
+	real := t.TempDir()
+	elsewhere := t.TempDir()
+	parent := t.TempDir()
+	link := filepath.Join(parent, "root-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	pinned := ServerPolicy{AllowedProjectRoots: []string{link}}.Canonicalize()
+
+	// Retarget the link, exactly as an attacker with write access to its directory would.
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pinned.Check(OpenParams{Project: filepath.Join(real, "p")}, 0); err != nil {
+		t.Errorf("the pinned root stopped admitting its original target: %v", err)
+	}
+	if err := pinned.Check(OpenParams{Project: filepath.Join(elsewhere, "p")}, 0); err == nil {
+		t.Error("retargeting the symlink moved the ceiling")
+	}
+}
+
+// A root that cannot be resolved must stay in the allowlist in its lexical form. Dropping
+// it would empty the list, and an empty list means UNCONFINED — the one outcome a
+// resolution failure must never produce.
+func TestCanonicalizeKeepsAnUnresolvableRootRatherThanEmptyingTheList(t *testing.T) {
+	pinned := ServerPolicy{AllowedProjectRoots: []string{"/definitely/not/here/at/all"}}.Canonicalize()
+	if len(pinned.AllowedProjectRoots) != 1 {
+		t.Fatalf("an unresolvable root was dropped: %#v", pinned.AllowedProjectRoots)
+	}
+	if err := pinned.Check(OpenParams{Project: "/tmp"}, 0); err == nil {
+		t.Error("dropping an unresolvable root left the policy unconfined")
+	}
+}
+
+// --- resolvePath's error handling (F6) ---
+
+// A component that ENOENTs but is present to Lstat is a DANGLING SYMLINK, not a missing
+// name — and its target decides where the eventual mkdir lands.
+func TestResolvePathRefusesADanglingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "dangling")
+	if err := os.Symlink(filepath.Join(dir, "nothing-here"), link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := resolvePath(filepath.Join(link, "state")); err == nil {
+		t.Error("a path through a dangling symlink resolved as though the name were merely missing")
+	}
+}
+
+func TestResolvePathResolvesANotYetCreatedTail(t *testing.T) {
+	dir := t.TempDir()
+	got, err := resolvePath(filepath.Join(dir, "a", "b", "c"))
+	if err != nil {
+		t.Fatalf("a not-yet-created path failed to resolve: %v", err)
+	}
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(real, "a", "b", "c"); got != want {
+		t.Errorf("resolvePath = %q, want %q", got, want)
+	}
+}
+
+// --- Loopback detection (F7) ---
+
+// "127." as a string prefix is not loopback: 127.attacker.example is an ordinary remote
+// hostname that happens to start with those four characters.
+func TestRemoteHostnameStartingWith127IsNotLoopback(t *testing.T) {
+	p := ServerPolicy{AllowBackendOverride: true, RequireTLSForRemoteEndpoints: true}
+	if err := p.Check(OpenParams{BackendURL: "http://127.attacker.example/"}, 0); err == nil {
+		t.Fatal("a remote hostname beginning \"127.\" was treated as loopback")
+	}
+	for _, ok := range []string{"http://127.0.0.1:8473", "http://localhost:8473", "http://[::1]:8473"} {
+		if err := p.Check(OpenParams{BackendURL: ok}, 0); err != nil {
+			t.Errorf("%s was refused as non-loopback: %v", ok, err)
+		}
+	}
+	// Not loopback, and deliberately not treated as such.
+	for _, bad := range []string{"http://0.0.0.0:8473", "http://[::]:8473"} {
+		if err := p.Check(OpenParams{BackendURL: bad}, 0); err == nil {
+			t.Errorf("%s was treated as loopback", bad)
+		}
+	}
+}
+
+// --- The unsafe configuration must take more code than the safe one (F8) ---
+
+// An installed-but-empty policy confines nothing. "Has a policy" and "is confined" are
+// different claims, and the model-facing constructor must check the second one.
+func TestServeModelFacingRefusesAPolicyThatConfinesNothing(t *testing.T) {
+	err := ServeModelFacing(context.Background(), Options{
+		Factory: func(_, _ context.Context, _ OpenParams) (Runtime, error) { return newFakeRuntime("ses"), nil },
+	})
+	if err == nil || !strings.Contains(err.Error(), "tier ceiling") {
+		t.Fatalf("a model-facing server accepted an empty policy: %v", err)
 	}
 }

@@ -181,7 +181,7 @@ func (f *fakeRuntime) isClosed() bool {
 func connect(t *testing.T, factory RuntimeFactory) (*mcp.ClientSession, *Registry) {
 	t.Helper()
 	ctx := context.Background()
-	reg := NewRegistry(ctx, factory)
+	reg := NewUnconfinedRegistry(ctx, factory)
 	srv := mcp.NewServer(&mcp.Implementation{Name: ServerName, Version: "test"}, nil)
 	Register(srv, reg, NewBinaryInfo("test"), ctx)
 
@@ -633,7 +633,7 @@ func TestCloseAllReleasesEverySession(t *testing.T) {
 	var runtimes []*fakeRuntime
 	var mu sync.Mutex
 	n := 0
-	reg := NewRegistry(context.Background(), func(_, _ context.Context, _ OpenParams) (Runtime, error) {
+	reg := NewUnconfinedRegistry(context.Background(), func(_, _ context.Context, _ OpenParams) (Runtime, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		n++
@@ -1031,7 +1031,7 @@ func TestPollWaitReturnsImmediatelyWhenAlreadyFresh(t *testing.T) {
 func TestDuplicateSessionIDIsRejected(t *testing.T) {
 	var built []*fakeRuntime
 	var mu sync.Mutex
-	reg := NewRegistry(context.Background(), func(_, _ context.Context, _ OpenParams) (Runtime, error) {
+	reg := NewUnconfinedRegistry(context.Background(), func(_, _ context.Context, _ OpenParams) (Runtime, error) {
 		f := newFakeRuntime("ses_same")
 		f.letFinish()
 		mu.Lock()

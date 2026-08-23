@@ -21,7 +21,7 @@ import (
 func connectWithResources(t *testing.T, factory RuntimeFactory) (*mcp.ClientSession, *Registry) {
 	t.Helper()
 	ctx := context.Background()
-	reg := NewRegistry(ctx, factory)
+	reg := NewUnconfinedRegistry(ctx, factory)
 	srv := mcp.NewServer(&mcp.Implementation{Name: ServerName, Version: "test"}, nil)
 	Register(srv, reg, NewBinaryInfo("test"), ctx)
 	RegisterResources(srv, reg)

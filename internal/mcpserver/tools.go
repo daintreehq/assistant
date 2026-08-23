@@ -33,10 +33,10 @@ const maxBlockWait = 2 * time.Minute
 // OpenInput is the argument shape of daintree.session.open.
 type OpenInput struct {
 	Project    string `json:"project,omitempty" jsonschema:"Absolute path to the project the assistant should operate on. Defaults to the server process's working directory."`
-	BackendURL string `json:"backendUrl,omitempty" jsonschema:"Assistant backend endpoint, e.g. http://127.0.0.1:8473 for a local backend. Defaults to the environment or the deployed endpoint."`
-	APIKeyFile string `json:"apiKeyFile,omitempty" jsonschema:"Path to a file containing the API key. There is deliberately no way to pass the key inline."`
+	BackendURL string `json:"backendUrl,omitempty" jsonschema:"Assistant backend endpoint, e.g. http://127.0.0.1:8473 for a local backend. Most servers PIN this at launch and reject an override - omit it to use the endpoint the operator configured."`
+	APIKeyFile string `json:"apiKeyFile,omitempty" jsonschema:"Path to a file containing the API key. There is deliberately no way to pass the key inline, and most servers reject a session-chosen credential file outright - omit it to use the credential the operator gave this process."`
 	Tier       string `json:"tier,omitempty" jsonschema:"Permission tier: supervisor, operator, or system."`
-	McpURL     string `json:"mcpUrl,omitempty" jsonschema:"Daintree MCP endpoint. Without it the assistant runs in degraded local mode and every orchestration tool reports 'not connected'."`
+	McpURL     string `json:"mcpUrl,omitempty" jsonschema:"Daintree MCP endpoint. Most servers PIN this at launch and reject an override; omit it to inherit DAINTREE_MCP_URL from the server process. Without any MCP endpoint the assistant runs in degraded local mode and every orchestration tool reports 'not connected'."`
 	// A PATH, never the token itself — exactly the rule apiKeyFile already follows, and
 	// for a stronger reason. This bearer authorizes system-tier Daintree actions for its
 	// whole validity window, and an inline argument is chosen by a model that may be
@@ -44,7 +44,7 @@ type OpenInput struct {
 	// client, and captured by traces outside this repository. The runtime already
 	// stopped writing this token to its own debug log for the same reason; accepting it
 	// as a model-callable string would put it right back in circulation.
-	McpTokenFile string `json:"mcpTokenFile,omitempty" jsonschema:"Path to a file containing the Daintree MCP bearer token. There is deliberately no way to pass the token inline - it authorizes system-tier Daintree actions and must not travel through a model-callable argument. Omit it to inherit DAINTREE_MCP_TOKEN from the server process. These tokens expire roughly 12 minutes after minting."`
+	McpTokenFile string `json:"mcpTokenFile,omitempty" jsonschema:"Path to a file containing the Daintree MCP bearer token. There is deliberately no way to pass the token inline - it authorizes system-tier Daintree actions and must not travel through a model-callable argument. Most servers reject a session-chosen credential file outright; omit it to inherit DAINTREE_MCP_TOKEN from the server process. These tokens expire roughly 12 minutes after minting."`
 	StateDir     string `json:"stateDir,omitempty" jsonschema:"State root - the conversation database, artifacts and the owner lease. Use a scratch path to isolate from the developer's real state."`
 	LogDir       string `json:"logDir,omitempty" jsonschema:"Directory for the debug log."`
 	// Project identity. This surface exists so a client that cannot restart the process
@@ -257,9 +257,10 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "daintree.session.open",
 		Description: "Open an assistant session bound to a project. Returns a sessionId used by every other tool. " +
-			"All configuration is per-session, so repointing at a different backend or project is a close/open pair rather than a server restart. " +
+			"Session arguments NARROW what the server was launched with and can never widen it: a request above the server's " +
+			"policy is refused rather than quietly downgraded, and endpoints and credentials are normally pinned at launch. " +
 			"Without an MCP URL and token the assistant runs in degraded local mode where it cannot see or drive terminals; " +
-			"the token is inherited from the server process's environment, or named as a FILE via mcpTokenFile — never passed inline.",
+			"the token is inherited from the server process's environment, and is never passed inline.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in OpenInput) (*mcp.CallToolResult, SessionOutput, error) {
 		mode := ApprovalMode(strings.TrimSpace(in.Approvals))
 		if mode != "" && !mode.Valid() {

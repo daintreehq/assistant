@@ -22,10 +22,17 @@ type Options struct {
 	// protocol transport and a stray byte there breaks the client's parser.
 	Diagnostics io.Writer
 	// Policy is the process-level authority ceiling applied to every session.open.
-	// Nil leaves the server UNCONFINED, which is only ever right for a trusted
-	// embedding path — on this stdio surface the caller is a model, so RunMCPServe
-	// always supplies one. See policy.go.
-	Policy *ServerPolicy
+	// See policy.go.
+	//
+	// It is a VALUE, not a pointer, because a nil pointer used to mean "unconfined" —
+	// so the dangerous configuration was what you got by forgetting a field. Opting
+	// out is now an explicit Unconfined marker, which is more code than the safe
+	// default rather than less.
+	Policy ServerPolicy
+	// Unconfined removes the ceiling entirely, ignoring Policy. Only ever right for a
+	// trusted embedding path where the operator IS the caller; on the stdio surface the
+	// caller is a model, so ServeModelFacing refuses it outright.
+	Unconfined *TrustedUnconfined
 }
 
 // Serve runs the MCP server over stdio until the context is cancelled or the client
@@ -50,11 +57,14 @@ func Serve(ctx context.Context, opts Options) error {
 	// request context as soon as its response is sent, so anything using one would die
 	// the instant the call that created it returned.
 	lifetime, stop := context.WithCancel(ctx)
-	reg := NewRegistry(lifetime, opts.Factory)
-	// Installed BEFORE any tool is registered, so there is no window in which a
-	// session.open could be served by an unconfined registry.
-	if opts.Policy != nil {
-		reg.SetPolicy(*opts.Policy)
+	// The registry is built WITH its ceiling, so there is no window in which a
+	// session.open could be served by an unconfined registry — and no way to reach the
+	// unconfined one except by naming it.
+	var reg *Registry
+	if opts.Unconfined != nil {
+		reg = NewUnconfinedRegistry(lifetime, opts.Factory)
+	} else {
+		reg = NewRegistry(lifetime, opts.Factory, opts.Policy)
 	}
 
 	// Defers run LIFO, so these two are registered in the order OPPOSITE to how they
@@ -82,6 +92,31 @@ func Serve(ctx context.Context, opts Options) error {
 	return s.Run(ctx, &mcp.StdioTransport{})
 }
 
+// ServeModelFacing is Serve for the surface whose caller is a MODEL. It refuses the
+// unconfined marker, so the one configuration that must never reach `mcp --stdio`
+// cannot be reached from it by any argument at all.
+//
+// The two constructors exist because "remember to install a policy" is not a boundary.
+// A caller on this path chooses only what to NARROW; a caller that genuinely wants no
+// ceiling has to name Serve and TrustedUnconfined together, which is a thing you do on
+// purpose rather than by omission.
+func ServeModelFacing(ctx context.Context, opts Options) error {
+	if opts.Unconfined != nil {
+		return fmt.Errorf("mcpserver: a model-facing server cannot be unconfined; " +
+			"use Serve if this really is a trusted embedding")
+	}
+	// A zero policy is still permissive by omission — no tier ceiling and no root
+	// allowlists — so "installed a policy" is not the same as "confined". MaxTier is
+	// the one dimension every real launch can always fill in (the process has a tier
+	// whether or not anyone named one), which makes its absence a reliable sign that
+	// the policy was never actually derived from anything.
+	if opts.Policy.MaxTier == "" {
+		return fmt.Errorf("mcpserver: a model-facing server needs a policy with a tier ceiling; " +
+			"an empty ServerPolicy confines nothing")
+	}
+	return Serve(ctx, opts)
+}
+
 // instructions is the server-level guidance an MCP client shows its model. It exists to
 // prevent the two mistakes this surface invites: treating `ask` as synchronous, and
 // forgetting that a session holds a project lease that must be released.
@@ -91,13 +126,13 @@ itself — it delegates edits to agents it spawns.
 
 Use it like this:
 
-1. daintree.session.open — bind a session to a project. Pass mcpUrl if you want it to
-   actually drive terminals; without it the session runs in degraded local mode. The
-   bearer is NEVER an argument: the server inherits it from its own environment, or you
-   name a FILE with mcpTokenFile. Do not put a token in a tool call. Note that naming
-   your own mcpUrl means the server will NOT lend you its inherited token — supply
-   mcpTokenFile as well if you redirect the endpoint. Pass debugLog:true so a bad run
-   can be diagnosed. Keep the returned sessionId.
+1. daintree.session.open — bind a session to a project. Endpoints and credentials are
+   normally PINNED by whoever launched this server: omit backendUrl, mcpUrl, apiKeyFile
+   and mcpTokenFile and you inherit them. A bearer is NEVER an argument — do not put a
+   token in a tool call. Every session argument can only NARROW what the server was
+   launched with; a request above its policy is refused, not downgraded, and the refusal
+   says so. Pass debugLog:true so a bad run can be diagnosed. Keep the returned
+   sessionId.
 2. daintree.ask — ask for work. It returns a runId immediately; a real orchestration turn
    takes MINUTES. Do not set wait:true for anything that spawns agents.
 3. daintree.poll — read progress. Pass the previous nextSeq as sinceSeq to read only what

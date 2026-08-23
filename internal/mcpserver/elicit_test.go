@@ -22,7 +22,7 @@ import (
 func connectElicit(t *testing.T, fake *fakeRuntime, handler func(context.Context, *mcp.ElicitRequest) (*mcp.ElicitResult, error)) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
-	reg := NewRegistry(ctx, func(_, _ context.Context, _ OpenParams) (Runtime, error) { return fake, nil })
+	reg := NewUnconfinedRegistry(ctx, func(_, _ context.Context, _ OpenParams) (Runtime, error) { return fake, nil })
 	srv := mcp.NewServer(&mcp.Implementation{Name: ServerName, Version: "test"}, nil)
 	Register(srv, reg, NewBinaryInfo("test"), ctx)
 

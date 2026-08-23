@@ -1,6 +1,12 @@
 package cli
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+
+	"github.com/daintreehq/assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/domain"
 	"testing"
 
 	"github.com/daintreehq/assistant/internal/mcpserver"
@@ -260,4 +266,84 @@ func TestSessionRedirectingAnEndpointForfeitsTheInheritedCredential(t *testing.T
 			t.Error("whitespace was treated as a redirect; config trims it to unset")
 		}
 	})
+}
+
+// confineRoots turns the process's resolved directories into an allowlist, and a blank
+// one must yield NIL rather than a one-element list holding "". An empty string resolves
+// to the working directory, so the wrong answer here would silently confine every
+// session to wherever the server happened to be launched — a policy the operator never
+// chose, applied without saying so.
+func TestConfineRootsLeavesAnUnboundDimensionUnconfined(t *testing.T) {
+	if got := confineRoots(""); got != nil {
+		t.Errorf("a blank directory produced %#v, want nil", got)
+	}
+	if got := confineRoots("   "); got != nil {
+		t.Errorf("a whitespace directory produced %#v, want nil", got)
+	}
+	if got := confineRoots("/srv/project"); len(got) != 1 || got[0] != "/srv/project" {
+		t.Errorf("confineRoots(%q) = %#v", "/srv/project", got)
+	}
+}
+
+// A session may name its own stateDir, and config reads the stored `/backend` preference
+// out of an EXPLICIT state directory rather than the per-user root — which is how a
+// harness keeps its own choice off the developer's. Put those two facts together and a
+// session that names only a stateDir, with no endpoint argument in sight, picks up
+// whatever endpoint that directory's endpoint.json names.
+//
+// RunMCPServe closes that by resolving the launch endpoint once and pinning it onto
+// every session, where it outranks the stored file. This asserts the precedence the fix
+// depends on: an explicit override wins over a stored endpoint in the session's own
+// state directory.
+func TestAnExplicitBackendURLOutranksAStoredEndpointInASessionStateDir(t *testing.T) {
+	stateDir := t.TempDir()
+	stored := `{"backend_url":"https://attacker.example"}`
+	if err := os.WriteFile(config.EndpointPath(stateDir), []byte(stored), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	const pinned = "http://127.0.0.1:8473"
+	cfg, err := loadConfigFromOptions(Options{
+		Project:    t.TempDir(),
+		StateDir:   stateDir,
+		BackendURL: pinned,
+	})
+	if err != nil {
+		t.Fatalf("loadConfigFromOptions: %v", err)
+	}
+	if cfg.BackendURL != pinned {
+		t.Fatalf("a stored endpoint in the session's state dir overrode the pinned one: got %q, want %q",
+			cfg.BackendURL, pinned)
+	}
+
+	// And the control: without the pin, that same directory DOES redirect the backend —
+	// which is exactly why RunMCPServe pins it.
+	loose, err := loadConfigFromOptions(Options{Project: t.TempDir(), StateDir: stateDir})
+	if err != nil {
+		t.Fatalf("loadConfigFromOptions: %v", err)
+	}
+	if loose.BackendURL != "https://attacker.example" {
+		t.Skipf("the stored-endpoint path did not apply here (got %q); the pin above is what matters",
+			loose.BackendURL)
+	}
+}
+
+// The ceiling is DERIVED from the launch config. Ignoring a failure to resolve it left
+// the policy with empty root allowlists and no tier ceiling — the unconfined server the
+// policy exists to prevent — and a session argument could then repair the very config
+// error that produced it (name a writable stateDir, an arbitrary project, tier "system")
+// and run under no ceiling at all.
+func TestMCPServeRefusesToStartWhenItCannotResolveItsCeiling(t *testing.T) {
+	// A regular file where the state directory has to be: MkdirAll cannot make a
+	// directory under it, so config resolution fails.
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", filepath.Join(blocker, "state"))
+
+	code := RunMCPServe(context.Background(), Options{Project: t.TempDir()})
+	if code != domain.OneShotExitCode.Error {
+		t.Fatalf("RunMCPServe returned %d for an unresolvable launch config; it must refuse to serve", code)
+	}
 }

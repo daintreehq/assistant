@@ -203,15 +203,36 @@ type Registry struct {
 // SetPolicy installs the process policy. Call it once, at launch, before any session is
 // opened; there is deliberately no tool that reaches it — a ceiling a session argument
 // could raise is not a ceiling.
+//
+// The policy is CANONICALIZED on the way in: its roots are resolved once, here, rather
+// than on every check, so a symlink retargeted while the server runs cannot move the
+// ceiling afterwards.
 func (r *Registry) SetPolicy(p ServerPolicy) {
+	pinned := p.Canonicalize()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.policy = &p
+	r.policy = &pinned
 }
 
-// NewRegistry builds an empty registry over a runtime factory. lifetime is the server's
-// context; a nil one falls back to Background so tests need not thread one through.
-func NewRegistry(lifetime context.Context, factory RuntimeFactory) *Registry {
+// NewRegistry builds a registry over a runtime factory, under a process policy. lifetime
+// is the server's context; a nil one falls back to Background so tests need not thread
+// one through.
+//
+// The policy is a required ARGUMENT rather than an optional second step: forgetting
+// SetPolicy used to produce a fully unconfined registry, which made the dangerous
+// configuration the one you got by omission. A registry that genuinely wants no ceiling
+// says so with NewUnconfinedRegistry.
+func NewRegistry(lifetime context.Context, factory RuntimeFactory, policy ServerPolicy) *Registry {
+	r := NewUnconfinedRegistry(lifetime, factory)
+	r.SetPolicy(policy)
+	return r
+}
+
+// NewUnconfinedRegistry builds a registry with NO process ceiling. Only ever right for a
+// trusted embedding path where the operator IS the caller — and for tests that are
+// exercising something other than the policy. On a model-facing surface this is the one
+// configuration that must not happen, which is why it has its own name.
+func NewUnconfinedRegistry(lifetime context.Context, factory RuntimeFactory) *Registry {
 	if lifetime == nil {
 		lifetime = context.Background()
 	}

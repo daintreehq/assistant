@@ -61,8 +61,18 @@ var logDirSubpath = filepath.Join(".daintree", "logs")
 type AppConfig struct {
 	ProjectPath string
 	StateDir    string
-	DBPath      string
-	LogDir      string
+	// StateRoot is the directory StateDir was derived from — the per-user state root,
+	// or the explicitly-named directory when one was given. It equals StateDir except
+	// when a project id scoped a subdirectory out of the root.
+	//
+	// It exists because a caller that wants to CONFINE state has to name the set of
+	// directories this process can legitimately produce, not just the one it resolved
+	// this time: a session naming a different projectId lands in a sibling under the
+	// same root, and an allowlist holding only StateDir would be checked against a path
+	// the factory then declines to use. See internal/cli/mcpserve.go.
+	StateRoot string
+	DBPath    string
+	LogDir    string
 
 	McpURL    string
 	McpToken  string
@@ -356,7 +366,9 @@ func loadConfig(overrides ConfigOverrides, ensureStateDir bool) (AppConfig, erro
 	}
 	stateRoot := filepath.Join(home, stateRootSubpath)
 	cfg.StateDir = explicitStateDir
+	cfg.StateRoot = explicitStateDir
 	if cfg.StateDir == "" {
+		cfg.StateRoot = stateRoot
 		if cfg.ProjectID != "" {
 			cfg.StateDir = filepath.Join(stateRoot, ProjectIDToDir(cfg.ProjectID))
 		} else {
@@ -371,6 +383,9 @@ func loadConfig(overrides ConfigOverrides, ensureStateDir bool) (AppConfig, erro
 	// different databases, and a credentials.json created inside the user's repository.
 	if abs, err := filepath.Abs(cfg.StateDir); err == nil {
 		cfg.StateDir = abs
+	}
+	if abs, err := filepath.Abs(cfg.StateRoot); err == nil {
+		cfg.StateRoot = abs
 	}
 	// 0700: the state dir holds conversations, the audit trail, automation grants, and
 	// memories — owner-only, never world/group readable (mirrors the debug-log dir perms).

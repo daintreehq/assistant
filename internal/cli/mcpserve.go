@@ -38,20 +38,75 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 	// injection choose its own tier and approval mode. It is derived from what the
 	// OPERATOR launched this process with, which makes the rule precise: a session may
 	// narrow what the operator already chose, and can never widen it.
-	policy := mcpserver.ServerPolicy{}
-	if cfg, err := loadConfigFromOptions(opts); err == nil {
-		defaultAutoApprove = cfg.AutoApprove
-		policy.DefaultAutoApprove = cfg.AutoApprove
-		// Auto-approve is permitted for a session only if the operator already turned
-		// it on process-wide. Otherwise a session cannot grant itself unattended
-		// mutation.
-		policy.AllowAutoApprove = cfg.AutoApprove
-		policy.MaxTier = domain.Tier(cfg.Tier)
-		policy.DefaultTier = domain.Tier(cfg.Tier)
-		policy.DefaultProject = cfg.ProjectPath
-		policy.DefaultStateDir = cfg.StateDir
-		policy.DefaultLogDir = cfg.LogDir
+	policy := mcpserver.ServerPolicy{
+		// Endpoints and credentials are PINNED to what the operator launched this
+		// process with. They are the two arguments that decide where a session's data
+		// goes and whose credential pays for it, and neither is a thing a model reading
+		// a repository is entitled to choose. A harness that genuinely needs to repoint
+		// launches a second server against the other endpoint — which is a decision
+		// made at the shell, by a human, exactly once.
+		AllowBackendOverride:         false,
+		AllowMCPOverride:             false,
+		AllowCredentialOverride:      false,
+		RequireTLSForRemoteEndpoints: true,
 	}
+	// FATAL, not best-effort. The ceiling is DERIVED from this config: without it the
+	// policy keeps empty root allowlists and no MaxTier, which is precisely the
+	// unconfined server the policy exists to prevent — and a session argument can then
+	// repair the very config error that produced it (name a writable stateDir, an
+	// arbitrary project, tier "system") and run under no ceiling at all. A
+	// model-facing process cannot safely synthesize its own ceiling from a failure.
+	cfg, err := loadConfigFromOptions(opts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mcp server: cannot resolve the launch configuration this server's "+
+			"authority ceiling is derived from:", err)
+		return domain.OneShotExitCode.Error
+	}
+	defaultAutoApprove = cfg.AutoApprove
+	policy.DefaultAutoApprove = cfg.AutoApprove
+	// Auto-approve is permitted for a session only if the operator already turned
+	// it on process-wide. Otherwise a session cannot grant itself unattended
+	// mutation.
+	policy.AllowAutoApprove = cfg.AutoApprove
+	policy.MaxTier = domain.Tier(cfg.Tier)
+	policy.DefaultTier = domain.Tier(cfg.Tier)
+	policy.DefaultProject = cfg.ProjectPath
+	policy.DefaultStateDir = cfg.StateDir
+	policy.DefaultLogDir = cfg.LogDir
+	// CONFINE the filesystem too, and to the directories this process was launched
+	// against rather than to nothing.
+	//
+	// An empty allowlist means unconfined, which is the wrong default here for the
+	// same reason an unpinned endpoint is: a prompt injection in one repository
+	// should not be able to open a system-tier session on another one, or on the
+	// user's home directory. The operator picks the project by launching the server
+	// in it (or with --project); a session may still name a path INSIDE that
+	// project, which is what a monorepo harness actually needs.
+	policy.AllowedProjectRoots = confineRoots(cfg.ProjectPath)
+	// The state ROOT, not the resolved state DIR. A session may legitimately name a
+	// different projectId, which config scopes into a SIBLING directory under the
+	// same root — so an allowlist holding only this launch's resolved dir would be
+	// checked against a path the factory then declines to use, and the confinement
+	// would be a string comparison rather than a boundary. The root is the honest
+	// set of directories this process can produce. An explicitly-named state dir has
+	// no scoping, so root and dir are the same path there.
+	policy.AllowedStateRoots = confineRoots(cfg.StateRoot)
+	policy.AllowedLogRoots = confineRoots(cfg.LogDir)
+
+	// PIN THE RESOLVED ENDPOINT ONTO EVERY SESSION.
+	//
+	// Refusing an explicit `backendUrl` is not enough on its own, because the endpoint
+	// has a second, indirect source: an explicit state directory makes config read
+	// `endpoint.json` from THAT directory rather than the per-user root (it is how a
+	// harness keeps its own `/backend` choice off the developer's). A session that names
+	// only a stateDir — perfectly legal, confined, no endpoint argument in sight —
+	// would therefore pick up whatever endpoint that directory's file names, and the
+	// inherited API key would follow it, since nothing looked like a redirect.
+	//
+	// Resolving the endpoint once here and handing it to every session closes that: an
+	// explicit override outranks the stored file, so the launch endpoint is the endpoint
+	// whatever a session does with its state directory.
+	opts.BackendURL = cfg.BackendURL
 
 	// One debug log for the PROCESS, not one per session. debuglog keeps a single
 	// package-global active path, so a per-session start would silently redirect every
@@ -199,11 +254,11 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 		return rt, nil
 	}
 
-	err := mcpserver.Serve(ctx, mcpserver.Options{
+	err = mcpserver.ServeModelFacing(ctx, mcpserver.Options{
 		Version:     buildVersion,
 		Factory:     factory,
 		Diagnostics: os.Stderr,
-		Policy:      &policy,
+		Policy:      policy,
 	})
 	if err != nil && ctx.Err() == nil {
 		fmt.Fprintln(os.Stderr, "mcp server:", err)
@@ -322,4 +377,18 @@ func applySliceIfSet(dst *[]string, v []string) {
 	if v != nil {
 		*dst = append([]string(nil), v...)
 	}
+}
+
+// confineRoots turns one resolved process-level directory into an allowlist.
+//
+// A blank one yields NIL, not a one-element list holding "" — an empty string would
+// resolve to the process working directory and quietly confine every session there,
+// which is a different (and unannounced) policy from the one the operator chose. Nil
+// means the same thing the policy has always meant by an empty allowlist: this
+// dimension is unconfined, because the process itself never bound it.
+func confineRoots(dir string) []string {
+	if strings.TrimSpace(dir) == "" {
+		return nil
+	}
+	return []string{dir}
 }
