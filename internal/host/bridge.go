@@ -286,7 +286,16 @@ func (b *Bridge) ToolState(id string, state agent.ToolState) {
 		return
 	}
 	turnID := b.activeTurnID
-	b.liveTools[id] = string(state)
+	// A TERMINAL state leaves the live set rather than joining it. The engine emits
+	// tool:state(done) after every successful result — after ToolResult has already
+	// forgotten the call — so recording it here put a finished call back among the
+	// live ones, and a later interrupt would rewrite it as "not-run": a call that
+	// demonstrably ran, reported as never started.
+	if state == "done" || state == "failed" {
+		delete(b.liveTools, id)
+	} else {
+		b.liveTools[id] = string(state)
+	}
 	b.mu.Unlock()
 	b.postLive(EvToolState{ToolCallID: id, State: string(state), TurnID: turnID})
 }
@@ -608,8 +617,12 @@ func (b *Bridge) Confirm(ctx context.Context, req ConfirmRequest) bool {
 		})
 	}
 	b.pendingApprovals[approvalID] = pa
-	b.mu.Unlock()
-
+	// Registered AND announced under one hold. Releasing first let a decision — which
+	// can arrive the instant the request is visible — enqueue `approval:decided` ahead
+	// of the `approval:requested` it answers, leaving a card on screen that nothing
+	// will ever close. Unlocked explicitly right after the post, NOT deferred: the
+	// select below blocks until the decision arrives, and ResolveApproval needs this
+	// same lock to deliver it.
 	b.post(EvApprovalRequested{
 		ApprovalID:        approvalID,
 		ToolID:            req.ToolName,
@@ -623,6 +636,7 @@ func (b *Bridge) Confirm(ctx context.Context, req ConfirmRequest) bool {
 		Rememberable:      rememberable(req.RiskClass),
 		ToolKey:           req.ToolKey,
 	})
+	b.mu.Unlock()
 
 	// Block on the decision. ctx cancellation (turn abort) also frees the dispatch:
 	// resolve as rejected so a parked dispatch returns USER_DECLINED.

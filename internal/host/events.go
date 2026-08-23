@@ -464,6 +464,12 @@ func (e EvApprovalRequested) encode(sid string, seq uint64) ([]byte, error) {
 	// Always present, never omitted-when-false: a host must be able to tell "this
 	// action does not need typed confirmation" from "this peer is too old to say".
 	f["needsTypedConfirm"] = e.NeedsTypedConfirm
+	if e.Rememberable {
+		f["rememberable"] = true
+	}
+	if e.ToolKey != "" {
+		f["toolKey"] = e.ToolKey
+	}
 	return marshalEvent("approval:requested", sid, seq, f)
 }
 

@@ -413,3 +413,52 @@ func TestIsDanger(t *testing.T) {
 		t.Error("unknown tool must not be danger")
 	}
 }
+
+// The approval event's display fields are only useful if they reach the wire. Both of
+// these existed on the struct while the encoder silently omitted them, so a host that
+// depended on either behaved as though every action were unrememberable.
+func TestApprovalRequestedEncodesGrantFields(t *testing.T) {
+	ev := EvApprovalRequested{
+		ApprovalID:   "apr_1",
+		ToolID:       "Send input",
+		Rememberable: true,
+		ToolKey:      "plugin:alpha/terminal.sendInput",
+	}
+	raw, err := ev.encode("s1", 1)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["rememberable"] != true {
+		t.Errorf("rememberable missing from the wire object: %v", got)
+	}
+	if got["toolKey"] != "plugin:alpha/terminal.sendInput" {
+		t.Errorf("toolKey missing or wrong: %v", got["toolKey"])
+	}
+}
+
+// A call that finished must LEAVE the live set. The engine emits tool:state(done)
+// after ToolResult has already forgotten the call, so recording it put a finished call
+// back among the live ones — and a later interrupt rewrote it as "not-run": a call that
+// demonstrably ran, reported as never started.
+func TestInterruptDoesNotRewriteFinishedCalls(t *testing.T) {
+	c := &collector{}
+	b := NewBridge(BridgeOptions{SessionID: "s", Post: c.post})
+	b.StartExchange()
+	b.AssistantStart()
+	b.ToolBatch([]agent.BatchedToolCall{{ID: "t1", Name: "fs.read"}})
+	b.ToolState("t1", agent.ToolState("active"))
+	b.ToolState("t1", agent.ToolState("done"))
+
+	b.Interrupt()
+
+	for _, ev := range c.snapshot() {
+		ts, ok := ev.(EvToolState)
+		if ok && ts.ToolCallID == "t1" && ts.State == toolStateNotRun {
+			t.Fatalf("a finished call was rewritten as not-run")
+		}
+	}
+}
