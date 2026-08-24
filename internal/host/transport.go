@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -46,53 +47,73 @@ type inbound struct {
 	err  error
 }
 
+// writeRequest is one frame handed to the writer goroutine. terminal marks the
+// final host:shutdown frame: the writer writes it (or gives up trying, if the
+// transport has already failed) and then stops looping — nothing enqueued after a
+// terminal request is ever read again, so nothing can follow it onto the wire. done,
+// when set, is closed once the writer has resolved the request (written or
+// abandoned), so a caller (sendSync) can wait for that outcome under its own bound
+// instead of polling internal writer state.
+type writeRequest struct {
+	frame    []byte
+	terminal bool
+	done     chan struct{}
+}
+
 // transport owns stdio NDJSON framing. Reads: a line-reader goroutine over stdin
 // feeding a channel, cancelable via Close()/context so a non-os.Exit shutdown does
-// not leak it. Writes: a SINGLE dedicated writer goroutine drains a queue of
-// pre-encoded frames, so events NEVER interleave (each is one whole line, flushed
-// before the next) AND no producer (command loop, bridge, worker) ever blocks on a
-// slow/blocked stdout — the enqueue is non-blocking. Diagnostics go to a separate
-// stderr writer; protocol JSON is never written to stderr.
+// not leak it. Writes: a SINGLE dedicated writer goroutine is the ONLY goroutine
+// that ever reads outQ or touches t.out — there is no second writer and therefore
+// no lock needed to serialize against one. Producers (command loop, bridge,
+// worker) never block on a slow/blocked stdout: enqueue is non-blocking (send) or
+// bounded (sendStream, sendSync). Diagnostics go to a separate stderr writer;
+// protocol JSON is never written to stderr.
 //
-// onSendFail is invoked (once) when a stdout write fails: a broken stdout means
-// the parent is gone, so the host cancels + tears down.
+// onSendFail is invoked (once) when a stdout write fails, or when a critical frame
+// cannot even be queued: a broken/wedged stdout means the parent is gone, so the
+// host cancels + tears down.
 type transport struct {
 	in  io.Reader
 	out io.Writer
 	err io.Writer
 
-	// outQ carries pre-encoded NDJSON frames (without the trailing newline) to the
-	// single writer goroutine. NEVER closed (producers send to it concurrently); the
-	// writer stops on t.closed, draining the buffer first.
-	outQ chan []byte
+	// outQ carries write requests to the single writer goroutine, in the exact
+	// order producers' enqueues complete. NEVER closed (producers send to it
+	// concurrently); the writer stops reading it once it processes a terminal
+	// request, or on t.closed if no terminal request ever arrives.
+	outQ chan writeRequest
 	// emu guards err writes (diag) so a producer-side diagnostic can't interleave
 	// with a writer-goroutine diagnostic.
 	emu sync.Mutex
 
-	// closeOnce makes Close idempotent; closed signals the reader to stop and gates
-	// the outQ producers so a post-Close enqueue is a no-op (never a send on a
-	// closed channel panic).
+	// closeOnce makes Close idempotent; closed signals the reader (and, absent a
+	// terminal write request, the writer) to stop, and gates outQ producers so a
+	// post-Close enqueue is a no-op (never a send on a closed channel panic).
 	closeOnce sync.Once
 	closed    chan struct{}
+	// writerDone is closed once writerLoop returns, by whichever path — a
+	// terminal request or draining out on t.closed. Nothing in production reads it
+	// (the process exits regardless); it exists so a test can observe that the
+	// writer goroutine actually retired instead of merely asserting on output bytes.
+	writerDone chan struct{}
 
-	// writeMu serializes the actual stdout write+flush so the teardown sendSync path
-	// (a direct write of the final host:shutdown frame) can never interleave with the
-	// writer goroutine still draining outQ — both write t.out. It also guards
-	// sendFailed, which both goroutines read and set.
-	writeMu    sync.Mutex
-	sendFailed bool // guarded by writeMu (writerLoop + the teardown sendSync path)
-	// sealed stops writerLoop accepting frames once teardown has begun, so nothing
-	// can be written after the terminal host:shutdown. writerBusy lets teardown wait
-	// for an already-dequeued frame rather than racing it.
-	sealed     bool
-	writerBusy bool
+	// sendFailed latches once a write or flush has failed. Lock-free: it is read
+	// by producers (sendStream's backpressure loop) that must never be able to
+	// block on writer-owned state, which is exactly the bug a mutex-guarded bool
+	// caused here before — a producer taking a lock the writer held across a
+	// blocked Write() waited on that write, not on its own bounded budget.
+	sendFailed atomic.Bool
+	// sealed latches once teardown (sendSync) has begun, so a producer can refuse a
+	// new enqueue immediately rather than adding traffic behind the terminal frame
+	// that is about to be requested. It is a courtesy for producers, not what makes
+	// the terminal frame actually final — the writer stopping after it does that.
+	sealed atomic.Bool
+
 	failOnce   sync.Once
 	onSendFail func(error)
-	// wedged is closed when the transport has concluded the consumer is gone. It is a
-	// CHANNEL rather than a bool under writeMu because the one case it reports is a
-	// writer blocked inside Write while holding writeMu — so anything that had to take
-	// that lock to learn the state would block on exactly the stall it was checking for.
-	// Teardown reads it before reaching for the lock.
+	// wedged is closed when a CRITICAL frame could not even be queued (the queue is
+	// full and nothing is draining it), which for a consumer that has simply
+	// stopped reading produces no write error to observe. See failSend.
 	wedged     chan struct{}
 	wedgedOnce sync.Once
 
@@ -134,7 +155,8 @@ type enqueueResult int
 
 const (
 	enqueueOK enqueueResult = iota
-	// enqueueClosed: teardown is running. The final frames go out through sendSync.
+	// enqueueClosed: teardown has begun (sealed) or already finished (closed). The
+	// terminal frame goes out through sendSync; nothing else may follow it.
 	enqueueClosed
 	// enqueueUndeliverable: the queue is full. Nothing is draining it, which for a
 	// consumer that has simply stopped reading produces no write error to observe.
@@ -162,8 +184,11 @@ func (t *transport) stampAndEnqueue(sessionID string, ev HostEvent) enqueueResul
 		return enqueueClosed
 	default:
 	}
+	if t.sealed.Load() {
+		return enqueueClosed
+	}
 	select {
-	case t.outQ <- data:
+	case t.outQ <- writeRequest{frame: data}:
 		return enqueueOK
 	default:
 		return enqueueUndeliverable
@@ -271,12 +296,13 @@ func (t *transport) burnSeq() {
 
 func newTransport(in io.Reader, out, errw io.Writer) *transport {
 	return &transport{
-		in:     in,
-		out:    out,
-		err:    errw,
-		outQ:   make(chan []byte, outQueueDepth),
-		closed: make(chan struct{}),
-		wedged: make(chan struct{}),
+		in:         in,
+		out:        out,
+		err:        errw,
+		outQ:       make(chan writeRequest, outQueueDepth),
+		closed:     make(chan struct{}),
+		wedged:     make(chan struct{}),
+		writerDone: make(chan struct{}),
 	}
 }
 
@@ -286,26 +312,38 @@ func (t *transport) start() {
 	go t.writerLoop()
 }
 
-// writerLoop is the single stdout owner. It drains outQ in order, writing each
-// frame as one NDJSON line and flushing immediately, so frames never interleave
-// and the last event before exit is delivered. The first write failure trips
-// onSendFail (parent gone) and the loop keeps draining (cheaply discarding) until
-// Close so producers never block.
+// writerLoop is the single stdout owner — the ONLY goroutine that ever reads outQ
+// or writes t.out. It drains outQ in order, writing each frame as one NDJSON line
+// and flushing immediately, so frames never interleave.
 //
-// It exits on t.closed, NOT on a closed outQ: outQ is deliberately never closed (a
-// producer may be mid-enqueue on another goroutine, and closing it would risk a
-// send-on-closed panic in send()). On t.closed it drains whatever is buffered for a
-// best-effort final delivery, then returns.
+// It stops in exactly two ways: after processing a request marked terminal (the
+// host:shutdown frame — nothing enqueued after it is ever read, which is what makes
+// it structurally the last frame on the wire, not a race against a second writer),
+// or on t.closed when no terminal request ever arrives (Close() called directly, as
+// most tests and any non-graceful teardown do) — draining whatever is already
+// buffered for a best-effort final delivery first.
+//
+// Because this goroutine is the sole consumer AND the sole writer, there is no
+// dequeue-then-acquire-a-lock gap for a concurrent teardown to race: a frame is
+// either still in the channel (and will be written before anything enqueued after
+// it, including a later terminal request) or it has already been handed to
+// t.out.Write — there is no third state in which it has been claimed but might
+// still be silently dropped.
 func (t *transport) writerLoop() {
+	defer close(t.writerDone)
 	for {
 		select {
-		case frame := <-t.outQ:
-			t.writeFrame(frame)
+		case req := <-t.outQ:
+			if t.deliver(req) {
+				return
+			}
 		case <-t.closed:
 			for {
 				select {
-				case frame := <-t.outQ:
-					t.writeFrame(frame)
+				case req := <-t.outQ:
+					if t.deliver(req) {
+						return
+					}
 				default:
 					return
 				}
@@ -314,59 +352,60 @@ func (t *transport) writerLoop() {
 	}
 }
 
-// writeFrame writes one NDJSON frame under writeMu — serialized against the
-// teardown sendSync direct-write so the two never interleave on t.out — and trips
-// onSendFail once on the first write error.
-func (t *transport) writeFrame(frame []byte) {
-	t.writeMu.Lock()
-	// Sealed: teardown owns the stream from here, and nothing may follow the terminal
-	// frame it is about to write.
-	if t.sendFailed || t.sealed {
-		t.writeMu.Unlock()
-		return
-	}
-	// Published so teardown can wait for an in-flight write instead of racing it.
-	//
-	// The clear MUST re-take the lock. writeFrame releases writeMu before returning on
-	// every path, so a bare `defer t.writerBusy = false` would write the field with no
-	// lock held while sendSync reads it under one — a genuine data race, and one the
-	// race detector catches immediately.
-	t.writerBusy = true
+// deliver writes one frame (unless the transport has already failed) and resolves
+// the request's done channel, if any. It reports whether the writer must stop
+// looping — true for a terminal request, regardless of whether the write itself
+// succeeded, because nothing may ever be read after it either way.
+func (t *transport) deliver(req writeRequest) (stop bool) {
 	defer func() {
-		t.writeMu.Lock()
-		t.writerBusy = false
-		t.writeMu.Unlock()
+		if req.done != nil {
+			close(req.done)
+		}
 	}()
-	if _, werr := t.out.Write(append(frame, '\n')); werr != nil {
-		t.sendFailed = true
-		t.writeMu.Unlock()
-		t.failOnce.Do(func() {
-			if t.onSendFail != nil {
-				// Off-goroutine: the hook only signals cancellation; it must not
-				// re-enter send (which would deadlock on this single writer).
-				go t.onSendFail(werr)
-			}
-		})
-		return
+	if !t.sendFailed.Load() {
+		if _, werr := t.out.Write(append(req.frame, '\n')); werr != nil {
+			t.fail(werr)
+		} else if ferr := flushWriter(t.out); ferr != nil {
+			// A buffered writer can accept bytes into memory and only fail once they are
+			// actually sent downstream. Treating that as success let a critical frame
+			// disappear with sendFailed still false and onSendFail never called.
+			t.fail(ferr)
+		}
 	}
-	// bufio.Writer needs an explicit Flush(); an *os.File write is already
-	// unbuffered. Detect Flush() first (bufio), fall back to Sync() (file-level
-	// best-effort). Either error is best-effort — the frame already left Write.
-	flushWriter(t.out)
-	t.writeMu.Unlock()
+	return req.terminal
 }
 
-// flushWriter flushes a buffered writer (bufio.Writer.Flush) or syncs a file
-// (os.File.Sync). bufio.Writer implements Flush() but NOT Sync(), so a Sync-only
-// check would silently leave a bufio-wrapped writer unflushed per event.
-func flushWriter(w io.Writer) {
+// fail latches the first write/flush failure and trips onSendFail exactly once.
+func (t *transport) fail(err error) {
+	t.sendFailed.Store(true)
+	t.failOnce.Do(func() {
+		if t.onSendFail != nil {
+			// Off-goroutine: the hook only signals cancellation; it must not re-enter
+			// send (which would deadlock on this single writer).
+			go t.onSendFail(err)
+		}
+	})
+}
+
+// flushWriter flushes a BUFFERED writer (bufio.Writer.Flush), returning its error —
+// a buffered writer can accept a Write into memory and only fail once the bytes are
+// actually sent downstream, so a Flush error is exactly as fatal as a Write error.
+//
+// It deliberately does NOT call Sync() on a plain *os.File. Write on an unbuffered
+// file/pipe already hands the bytes to the kernel with no in-process buffering, so
+// there is nothing left to flush; fsync additionally asks for durable-storage
+// persistence, a question this protocol never asks (production stdout is a live
+// pipe to the parent process, not something either side reads back from disk), and
+// is often simply unsupported for a pipe (EINVAL on Linux, similarly on Darwin).
+// Calling it unconditionally would either fail every healthy session on its very
+// first frame (if treated as fatal, the original form of this bug) or spam a
+// diagnostic on literally every frame forever (if merely logged, since a pipe never
+// stops erroring) — so it is not called at all.
+func flushWriter(w io.Writer) error {
 	if f, ok := w.(interface{ Flush() error }); ok {
-		_ = f.Flush()
-		return
+		return f.Flush()
 	}
-	if f, ok := w.(interface{ Sync() error }); ok {
-		_ = f.Sync()
-	}
+	return nil
 }
 
 // commands starts the stdin reader goroutine and returns a channel of inbound
@@ -414,7 +453,8 @@ func (t *transport) commands() <-chan inbound {
 func (t *transport) send(sessionID string, ev HostEvent) {
 	switch t.stampAndEnqueue(sessionID, ev) {
 	case enqueueOK, enqueueClosed:
-		// Delivered, or teardown is running and the final frames go out through sendSync.
+		// Delivered, or teardown is running/finished and the final frame goes out
+		// through sendSync.
 		return
 	case enqueueUnencodable:
 		// The frame could not be built or could not be made to fit. That is a producer
@@ -454,13 +494,16 @@ func (t *transport) send(sessionID string, ev HostEvent) {
 // That distinction is the whole reason not every undeliverable frame ends the session. A
 // host that misses a usage update renders a slightly stale meter. A host that misses
 // turn:end waits forever on a turn that is over; one that misses approval:requested waits
-// forever on a decision it was never asked for. Only the second kind is worth ending a
-// session over, and treating them alike meant a burst of optional telemetry against a
-// briefly slow consumer could kill a healthy run.
+// forever on a decision it was never asked for; one that misses command:result never
+// learns whether `/clear` actually happened and can go on rendering a transcript the
+// engine no longer has. Only this kind is worth ending a session over, and treating them
+// alike meant a burst of optional telemetry against a briefly slow consumer could kill a
+// healthy run.
 func criticalFrame(ev HostEvent) bool {
 	switch ev.(type) {
 	case EvTurnEnd, EvApprovalRequested, EvApprovalDecided,
-		EvQuestionRequested, EvQuestionAnswered, EvShutdown, EvError, EvReady:
+		EvQuestionRequested, EvQuestionAnswered, EvShutdown, EvError, EvReady,
+		EvCommandResult:
 		return true
 	}
 	return false
@@ -469,20 +512,11 @@ func criticalFrame(ev HostEvent) bool {
 // failSend trips the parent-gone hook exactly once, from a producer rather than from a
 // write error. Used when a control frame cannot be delivered — see send.
 //
-// It shares failOnce with the write-error path, so a wedged consumer that later also
-// produces a write error does not cancel twice. The hook runs on its own goroutine for
-// the same reason the writer's does: it only signals cancellation, and re-entering send
-// from here would deadlock against the caller that is still inside it.
+// It shares failOnce with the write-failure path (see fail), so a wedged consumer that
+// later also produces a write error does not cancel twice. The hook runs on its own
+// goroutine for the same reason fail's does: it only signals cancellation, and
+// re-entering send from here would deadlock against the caller that is still inside it.
 func (t *transport) failSend(reason error) {
-	// The latch is a CHANNEL, closed without a lock. The writer holds writeMu across its
-	// Write, and the case this function exists for is a consumer that has stopped
-	// reading — so the writer is blocked inside Write, holding writeMu, and touching
-	// that lock here would deadlock the producer against the very stall it is reporting.
-	//
-	// Teardown then reads the latch before reaching for writeMu itself. Without it,
-	// cancelling the host led straight into sendSync, which blocks on the same held
-	// lock: the session would have failed by never exiting, which is the failure mode
-	// the whole path exists to end.
 	t.wedgedOnce.Do(func() { close(t.wedged) })
 	t.failOnce.Do(func() {
 		if t.onSendFail != nil {
@@ -505,7 +539,10 @@ func (t *transport) isWedged() bool {
 // sendStream enqueues a high-volume STREAM frame, WAITING when the queue is above
 // streamHighWater rather than dropping it. See streamHighWater for why v3 waits
 // where v2 dropped. It returns as soon as the frame is queued, the transport
-// closes, or the writer has already failed (parent gone) — never spins.
+// closes, or the writer has already failed (parent gone) — never spins, and never
+// takes a lock the writer goroutine might be holding across a blocked Write: the
+// only writer-owned state it reads (sendFailed) is lock-free by construction, so a
+// wedged stdout cannot stall this check before the backpressure budget even starts.
 func (t *transport) sendStream(sessionID string, ev HostEvent) {
 	// The WAIT happens before any sequence number is taken, so a frame that has to
 	// queue behind others does not reserve a number and then hand it over out of
@@ -520,10 +557,7 @@ func (t *transport) sendStream(sessionID string, ev HostEvent) {
 
 		// A FAILED writer never drains again; waiting would park the agent loop until
 		// teardown. Give up at once — the parent is already gone.
-		t.writeMu.Lock()
-		failed := t.sendFailed
-		t.writeMu.Unlock()
-		if failed {
+		if t.sendFailed.Load() {
 			return
 		}
 
@@ -590,79 +624,46 @@ const streamBackpressurePoll = 2 * time.Millisecond
 const streamBackpressureBudget = 5 * time.Second
 
 // sendSync emits the FINAL frame of the session (host:shutdown) and guarantees it is
-// last on the wire.
-//
-// "Last" is the whole contract, and bypassing the queue cannot provide it. The writer
-// goroutine may already have dequeued a frame and be waiting on writeMu; a direct
-// write that merely takes the lock first would be followed by that frame, putting an
-// ordinary event AFTER a terminal one. A consumer that correctly stops reading at
-// shutdown would then lose the tail of the turn.
-//
-// So teardown SEALS the stream instead: it stops the writer from accepting anything
-// new, waits for whatever is already in flight to finish, and only then writes. The
-// wait is bounded — a wedged stdout must not hold teardown open forever — and the
-// frame still carries its sequence number, so a consumer can tell a truncated
-// shutdown from a clean one.
+// last on the wire. See sendPriority — this is the terminal case.
 func (t *transport) sendSync(sessionID string, ev HostEvent) {
-	// A WEDGED consumer is checked FIRST, before any lock. The writer holds writeMu
-	// across its Write, so when stdout has stopped draining that lock is held by a
-	// goroutine that is not coming back — and teardown, whose whole job is to exit,
-	// would block here forever. There is nothing to write to a consumer that is not
-	// reading; skipping the frame is what lets the process actually shut down.
-	if t.isWedged() {
-		t.diag("host: stdout is wedged; skipping the final frame so teardown can complete")
-		return
-	}
-	// Seal first: writeFrame refuses new frames from here on, so nothing can slip in
-	// behind the shutdown after the drain below.
-	//
-	// The lock is acquired under a DEADLINE, not unconditionally. writeFrame holds it
-	// across t.out.Write, so a consumer that stopped reading between the wedged check
-	// above and this line leaves it held by a goroutine that will not return — and
-	// teardown, whose entire purpose is to exit, would wait on it forever. "Bounded
-	// teardown" has to include the lock acquisitions, or it is bounded only in the case
-	// where nothing was wrong.
-	if !t.lockWriteBefore(time.Now().Add(sealDrainBudget)) {
-		t.diag("host: could not seal the stream within " + sealDrainBudget.String() +
-			"; stdout is wedged, skipping the final frame so teardown can complete")
-		t.failSend(errControlFrameUndeliverable)
-		return
-	}
-	t.sealed = true
-	t.writeMu.Unlock()
+	t.sendPriority(sessionID, ev, true)
+}
 
-	// Wait for the writer to finish any frame it had already dequeued.
-	deadline := time.Now().Add(sealDrainBudget)
-	for {
-		if t.isWedged() {
-			return
-		}
-		t.writeMu.Lock()
-		busy := t.writerBusy
-		t.writeMu.Unlock()
-		if !busy || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(streamBackpressurePoll)
-	}
+// sendPriorityError writes a control frame synchronously and BEFORE anything queued
+// after it, WITHOUT ending the session — used by reportSync for a fatal pre-app
+// error that must reach the parent before the host:shutdown reason that follows it.
+//
+// Unlike sendSync it is not terminal: the writer keeps looping afterward, because a
+// real sendSync (the actual host:shutdown) still needs to go through right after.
+// Ordering between the two is free — both calls happen sequentially on the same
+// goroutine, so the error's write request is enqueued strictly before shutdown's.
+func (t *transport) sendPriorityError(sessionID string, ev HostEvent) {
+	t.sendPriority(sessionID, ev, false)
+}
 
-	if !t.lockWriteBefore(time.Now().Add(sealDrainBudget)) {
-		t.diag("host: stdout wedged while writing the final frame; teardown continues")
-		return
-	}
-	defer t.writeMu.Unlock()
-	if t.sendFailed {
+// sendPriority stamps ev last (so its sequence number reflects emission order),
+// seals the transport (new enqueues are refused from here on — see
+// stampAndEnqueue) and hands it to the SAME queue every other frame goes through.
+// Routing it through the queue rather than writing it directly is what removes the
+// old two-consumer hazard: the writer goroutine is the only thing that ever writes
+// t.out, so a frame already queued ahead of this one is guaranteed to be written
+// first (FIFO). When terminal, the writer stops reading the instant it processes
+// this request, so nothing enqueued after it can ever reach the wire even if a
+// producer's enqueue happens to still be admitted in the same instant.
+//
+// The wait for delivery is bounded — a wedged stdout must not hold the caller open
+// forever — but the frame is on the queue either way, so if the writer is merely
+// slow (not stuck) it still gets written after this function gives up waiting.
+func (t *transport) sendPriority(sessionID string, ev HostEvent, terminal bool) {
+	t.sealed.Store(true)
+
+	// A consumer already known gone: nothing to deliver, and no point spending the
+	// budget finding that out again.
+	if t.isWedged() || t.sendFailed.Load() {
+		t.diag("host: stdout already failed or wedged; skipping a priority frame")
 		return
 	}
 
-	// Flush what the queue still holds, in order, so the tail of the turn precedes
-	// the terminal frame rather than being discarded with it.
-	t.drainQueuedLocked(sealDrainBudget)
-	if t.sendFailed {
-		return
-	}
-
-	// Stamped last, so its sequence number is genuinely the highest of the session.
 	t.seqMu.Lock()
 	t.seq++
 	data, err := encodeOrShrink(ev, sessionID, t.seq, t.diag)
@@ -674,64 +675,44 @@ func (t *transport) sendSync(sessionID string, ev HostEvent) {
 	if data == nil {
 		return
 	}
-	if _, werr := t.out.Write(append(data, '\n')); werr != nil {
-		t.sendFailed = true
+
+	done := make(chan struct{})
+	req := writeRequest{frame: data, terminal: terminal, done: done}
+
+	deadline := time.After(sealDrainBudget)
+	select {
+	case t.outQ <- req:
+	case <-deadline:
+		// The queue could not take it within the budget: the same "nothing is
+		// draining stdout" condition send() treats as fatal for a critical frame,
+		// and this is never anything less than critical. Diagnostic-only here would
+		// let the caller (teardown) carry on and exit 0 believing host:shutdown went
+		// out when it never even reached the queue.
+		t.diag("host: PROTOCOL GAP — could not enqueue a priority frame within " + sealDrainBudget.String() +
+			"; treating the parent as gone")
+		t.failSend(errControlFrameUndeliverable)
 		return
 	}
-	flushWriter(t.out)
-}
 
-// lockWriteBefore acquires writeMu, giving up at the deadline. It reports whether the
-// lock was taken.
-//
-// TryLock in a poll rather than a plain Lock, because the holder may be blocked inside
-// t.out.Write on a consumer that has stopped reading — an unbounded wait there is a
-// process that never exits. Only teardown uses it; ordinary writers still block, which is
-// correct for them.
-func (t *transport) lockWriteBefore(deadline time.Time) bool {
-	for {
-		if t.writeMu.TryLock() {
-			return true
-		}
-		if t.isWedged() || time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(streamBackpressurePoll)
+	select {
+	case <-done:
+	case <-time.After(sealDrainBudget):
+		// The frame is still on the queue and MIGHT still be written a moment later
+		// by a writer that is merely slow rather than truly wedged — but from here
+		// there is no way to tell the two apart, and the doc's own "never silently
+		// discarded" contract for a critical frame doesn't get to make an exception
+		// for "probably fine." Fail the same way an enqueue timeout does, so the
+		// caller (teardown) doesn't proceed to exit(0) believing this succeeded.
+		t.diag("host: PROTOCOL GAP — gave up waiting for the writer to deliver a priority frame within " +
+			sealDrainBudget.String() + "; treating the parent as gone")
+		t.failSend(errControlFrameUndeliverable)
 	}
 }
 
-// sealDrainBudget bounds how long teardown waits for the writer to go idle and the
-// queue to flush before emitting the terminal frame.
+// sealDrainBudget bounds how long teardown waits — first to enqueue the final
+// frame, then to have it actually written — before giving up so a wedged stdout
+// cannot hold the process open.
 const sealDrainBudget = 2 * time.Second
-
-// drainQueuedLocked writes every frame currently buffered in outQ, in order. The
-// caller MUST hold writeMu (it writes t.out directly, exactly as writerLoop does).
-//
-// It races writerLoop for frames, which is harmless: both take from the same channel
-// and both write under the same mutex, so each frame is written exactly once and in
-// queue order. It stops at the budget, on a write failure, or when the queue is empty.
-func (t *transport) drainQueuedLocked(budget time.Duration) {
-	deadline := time.Now().Add(budget)
-	for {
-		select {
-		case frame := <-t.outQ:
-			if t.sendFailed {
-				return
-			}
-			if _, werr := t.out.Write(append(frame, '\n')); werr != nil {
-				t.sendFailed = true
-				return
-			}
-			flushWriter(t.out)
-			if time.Now().After(deadline) {
-				t.diag("host: shutdown barrier gave up draining the writer queue")
-				return
-			}
-		default:
-			return
-		}
-	}
-}
 
 // Close signals the reader to stop and shuts the writer queue. Idempotent. After
 // Close, send() is a no-op (drops). The teardown path calls Close after its final
@@ -763,13 +744,22 @@ func (t *transport) diag(msg string) {
 	_, _ = io.WriteString(t.err, msg+"\n")
 }
 
-// contextCloser cancels Close when ctx is done — used so a parent-context cancel
-// (non-os.Exit shutdown) reliably unblocks the reader goroutine.
+// closeOnContext unblocks a reader goroutine stuck in Scan() when ctx is
+// cancelled, by closing the underlying input directly — NOT by calling the full
+// Close(). Run's own handling of the same ctx.Done() always follows immediately
+// with teardown() -> sendSync() -> Close(), in that order; calling Close() here too
+// raced that sequence, since Close() marks t.closed, and an idle writer that had
+// nothing left in outQ at that instant would retire on it before sendSync ever got
+// a chance to enqueue the terminal frame — silently losing host:shutdown. The
+// reader's own bounded exit (it selects on t.closed for its final send) still works
+// once teardown's own Close() runs a moment later.
 func (t *transport) closeOnContext(ctx context.Context) {
 	go func() {
 		select {
 		case <-ctx.Done():
-			t.Close()
+			if c, ok := t.in.(io.Closer); ok {
+				_ = c.Close()
+			}
 		case <-t.closed:
 		}
 	}()

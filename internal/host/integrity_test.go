@@ -224,9 +224,11 @@ func TestNothingFollowsHostShutdown(t *testing.T) {
 		t.Errorf("host:shutdown carries seq %v but the session reached %v; its seq must be the highest",
 			shutdownSeq, maxSeq)
 	}
-	// And the tail of the turn preceded it rather than being discarded with it.
-	if len(lines) < 2 {
-		t.Error("teardown dropped the queued tail of the turn instead of draining it")
+	// The full queued tail preceded it rather than being discarded with it — all 40
+	// tokens plus the shutdown frame itself, exactly, not merely "more than one".
+	if len(lines) != 41 {
+		t.Errorf("got %d frames, want exactly 41 (40 queued tokens + host:shutdown); "+
+			"teardown dropped part of the queued tail instead of draining all of it", len(lines))
 	}
 }
 
@@ -315,10 +317,16 @@ func TestOnlyCriticalFramesEndTheSession(t *testing.T) {
 	for _, ev := range []HostEvent{
 		EvTurnEnd{TurnID: "t"},
 		EvApprovalRequested{ApprovalID: "a"},
+		EvApprovalDecided{ApprovalID: "a"},
 		EvQuestionRequested{QuestionID: "q"},
+		EvQuestionAnswered{QuestionID: "q"},
 		EvShutdown{Reason: ShutdownExit},
 		EvError{Code: "x"},
 		EvReady{},
+		// command:result carries /clear's AUTHORITATIVE conversationCleared outcome —
+		// losing it silently leaves the engine and renderer disagreeing about whether
+		// the transcript was wiped (doc finding NH-007).
+		EvCommandResult{Command: "/clear", ConversationCleared: true},
 	} {
 		if !criticalFrame(ev) {
 			t.Errorf("%T is not treated as critical; losing it leaves the host unable to proceed", ev)

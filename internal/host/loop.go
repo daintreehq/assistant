@@ -460,10 +460,12 @@ func (h *Host) teardown(reason HostShutdownReason, resumeSessionID string) {
 			h.bridge.SettlePendingQuestions()
 		}
 		// host:shutdown BEFORE app.Shutdown() — reason reaches Daintree regardless.
-		// Written SYNCHRONOUSLY (bypassing the queue) so the final frame can't be
-		// lost in the writer-goroutine close race, then Close() stops the writer +
-		// unblocks the reader. (Events a dying turn posts after Close are dropped —
-		// host:shutdown stays the last frame on the wire.)
+		// sendSync routes it through the SAME queue as every other frame, marked
+		// terminal: the writer goroutine writes it in FIFO order after anything
+		// already queued and then stops for good, so nothing can ever follow it on
+		// the wire. Close() (after sendSync returns) then stops the reader. (Events a
+		// dying turn posts after this point are refused at enqueue time — see
+		// stampAndEnqueue's sealed check.)
 		ev := EvShutdown{Reason: reason}
 		if resumeSessionID != "" {
 			ev.ResumeSessionID = resumeSessionID

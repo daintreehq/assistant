@@ -23,7 +23,7 @@ import (
 // reclaimed and dispatched as a fresh command turn — never stranded.
 func TestStrandedInjectionRedispatchedAsFreshTurn(t *testing.T) {
 	sess := newWakeSession()
-	h, _, _ := newWakeHost(sess)
+	h, _, _ := newWakeHost(t, sess)
 
 	go h.handlePrompt("first")
 	select {
@@ -65,7 +65,7 @@ func TestStrandedInjectionRedispatchedAsFreshTurn(t *testing.T) {
 // LIFO — the reclaim must restore FIFO) and joined into one fresh turn.
 func TestMultipleStrandedInjectionsKeepArrivalOrder(t *testing.T) {
 	sess := newWakeSession()
-	h, _, _ := newWakeHost(sess)
+	h, _, _ := newWakeHost(t, sess)
 
 	go h.handlePrompt("first")
 	select {
@@ -102,7 +102,7 @@ func TestMultipleStrandedInjectionsKeepArrivalOrder(t *testing.T) {
 func TestPromptRacingTurnCompletionIsNeverStranded(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		sess := newWakeSession()
-		h, _, _ := newWakeHost(sess)
+		h, _, _ := newWakeHost(t, sess)
 
 		go h.handlePrompt("first")
 		select {
@@ -149,7 +149,7 @@ func TestPromptRacingTurnCompletionIsNeverStranded(t *testing.T) {
 // work must NOT resurrect as a fresh turn.
 func TestInterruptDiscardsUnfoldedInjection(t *testing.T) {
 	sess := newWakeSession()
-	h, _, _ := newWakeHost(sess)
+	h, _, _ := newWakeHost(t, sess)
 
 	go h.handlePrompt("first")
 	select {

@@ -146,9 +146,14 @@ func (a *shutdownProbeApp) Shutdown(context.Context) error {
 // newWakeHost builds a booted-state Host wired to the fake session/app, skipping
 // the descriptor handshake (the wiring under test is the turn/teardown machinery,
 // not boot). The injected exit closes `exited` instead of killing the process.
-func newWakeHost(sess *wakeSession) (*Host, *shutdownProbeApp, chan struct{}) {
+func newWakeHost(t *testing.T, sess *wakeSession) (*Host, *shutdownProbeApp, chan struct{}) {
 	app := &shutdownProbeApp{sess: sess}
 	h := NewHost(nil, strings.NewReader(""), io.Discard, io.Discard)
+	h.tr.start() // this helper skips Run(), which normally starts the writer goroutine
+	// Not every test using this helper drives the host all the way through
+	// teardown/Close() itself, so guarantee the writer goroutine is retired either
+	// way rather than leaking it past the test.
+	t.Cleanup(h.tr.Close)
 	h.runCtx, h.runCancel = context.WithCancel(context.Background())
 	h.sessionID = "s"
 	h.state = stateRunning
@@ -194,7 +199,7 @@ func waitClosed(t *testing.T, ch chan struct{}, timeout time.Duration, what stri
 // live Send — and still exit promptly.
 func TestShutdownDuringWakeCancelsAndJoinsBeforeAppShutdown(t *testing.T) {
 	sess := newWakeSession()
-	h, app, exited := newWakeHost(sess)
+	h, app, exited := newWakeHost(t, sess)
 	startWake(t, h, sess)
 
 	go h.handleCommand(HostCommand{Type: CmdShutdown, SessionID: "s"})
@@ -214,7 +219,7 @@ func TestShutdownDuringWakeCancelsAndJoinsBeforeAppShutdown(t *testing.T) {
 // Hibernate is the same teardown path: a live wake must be cancelled and joined.
 func TestHibernateDuringWakeCancelsWake(t *testing.T) {
 	sess := newWakeSession()
-	h, app, exited := newWakeHost(sess)
+	h, app, exited := newWakeHost(t, sess)
 	startWake(t, h, sess)
 
 	go h.handleCommand(HostCommand{Type: CmdHibernate, SessionID: "s"})
@@ -239,7 +244,7 @@ func TestHibernateDuringWakeCancelsWake(t *testing.T) {
 // the store half).
 func TestHibernateDuringWakeDurablyRearmsBurstForNextRun(t *testing.T) {
 	sess := newWakeSession()
-	h, app, exited := newWakeHost(sess)
+	h, app, exited := newWakeHost(t, sess)
 	startWake(t, h, sess)
 
 	go h.handleCommand(HostCommand{Type: CmdHibernate, SessionID: "s"})
@@ -255,7 +260,7 @@ func TestHibernateDuringWakeDurablyRearmsBurstForNextRun(t *testing.T) {
 // and pendingWake dies with the process. Teardown's sweep must re-arm it too.
 func TestShutdownRearmsQueuedNeverStartedWakeBurst(t *testing.T) {
 	sess := newWakeSession()
-	h, app, exited := newWakeHost(sess)
+	h, app, exited := newWakeHost(t, sess)
 
 	// Occupy the host with a command turn so the queued burst cannot start.
 	h.handlePrompt("busy work")
@@ -282,7 +287,7 @@ func TestShutdownRearmsQueuedNeverStartedWakeBurst(t *testing.T) {
 // re-arm would duplicate the delivery on the next run).
 func TestCompletedWakeDoesNotRearm(t *testing.T) {
 	sess := newWakeSession()
-	h, app, _ := newWakeHost(sess)
+	h, app, _ := newWakeHost(t, sess)
 	startWake(t, h, sess)
 
 	close(sess.release)
@@ -315,7 +320,7 @@ func waitNotBusy(t *testing.T, h *Host) {
 func TestShutdownDuringUncancellableWakeExitsBounded(t *testing.T) {
 	sess := newWakeSession()
 	sess.ignoreCancel = true
-	h, _, exited := newWakeHost(sess)
+	h, _, exited := newWakeHost(t, sess)
 	h.turnJoinTimeout = 150 * time.Millisecond
 	startWake(t, h, sess)
 
@@ -333,7 +338,7 @@ func TestShutdownDuringUncancellableWakeExitsBounded(t *testing.T) {
 // normally and clears busy.
 func TestInterruptDuringWakeDoesNotAbortWake(t *testing.T) {
 	sess := newWakeSession()
-	h, _, _ := newWakeHost(sess)
+	h, _, _ := newWakeHost(t, sess)
 	startWake(t, h, sess)
 
 	h.handleInterrupt()
@@ -363,7 +368,7 @@ func TestInterruptDuringWakeDoesNotAbortWake(t *testing.T) {
 // injected into the running turn (InjectPrompt), never started as a second Send.
 func TestPromptDuringWakeFoldsViaInjectPrompt(t *testing.T) {
 	sess := newWakeSession()
-	h, _, _ := newWakeHost(sess)
+	h, _, _ := newWakeHost(t, sess)
 	startWake(t, h, sess)
 
 	h.handlePrompt("please also check the logs")
@@ -381,7 +386,7 @@ func TestPromptDuringWakeFoldsViaInjectPrompt(t *testing.T) {
 // (the turnWG join would otherwise race a fresh Add).
 func TestWakeAfterCloseLatchDoesNotStart(t *testing.T) {
 	sess := newWakeSession()
-	h, _, exited := newWakeHost(sess)
+	h, _, exited := newWakeHost(t, sess)
 
 	h.handleCommand(HostCommand{Type: CmdShutdown, SessionID: "s"})
 	waitClosed(t, exited, 2*time.Second, "idle shutdown")

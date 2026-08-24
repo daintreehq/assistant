@@ -120,22 +120,23 @@ func (h *Host) report(code, message string) {
 	h.post(EvError{Code: code, Message: message})
 }
 
-// reportSync emits a host:error like report, but SYNCHRONOUSLY and FLUSHED via the
-// same direct write path teardown uses for the final host:shutdown. It exists for
-// the FATAL PRE-APP paths (bad descriptor, protocol mismatch): there the host
-// reports an error and immediately tears down before any App is running, so a
-// queued (async) host:error would race the synchronous host:shutdown + process exit
-// and could be dropped or reordered. Writing the error synchronously here guarantees
-// the parent receives the SPECIFIC error first, then the shutdown reason. Do NOT use
-// this on the steady-state path: there shutdown-first (so the reason escapes an App
-// hang) is intentional.
+// reportSync emits a host:error like report, but SYNCHRONOUSLY: it waits (bounded)
+// for the transport to actually deliver the frame, via the same priority path
+// teardown uses for the final host:shutdown — just non-terminal, so the writer
+// keeps running afterward. It exists for the FATAL PRE-APP paths (bad descriptor,
+// protocol mismatch): there the host reports an error and immediately tears down
+// before any App is running, so a queued (async) host:error would race the
+// synchronous host:shutdown + process exit and could be dropped or reordered.
+// Writing the error this way guarantees the parent receives the SPECIFIC error
+// first, then the shutdown reason. Do NOT use this on the steady-state path: there
+// shutdown-first (so the reason escapes an App hang) is intentional.
 func (h *Host) reportSync(code, message string) {
 	if h.sessionID == "" {
 		// No session yet: still surface to stderr so the failure isn't silent.
 		h.tr.diag(fmt.Sprintf("host: %s (no session): %s", code, message))
 		return
 	}
-	h.tr.sendSync(h.sessionID, EvError{Code: code, Message: message})
+	h.tr.sendPriorityError(h.sessionID, EvError{Code: code, Message: message})
 }
 
 // post sends an event through the transport, stamping the current session id.
