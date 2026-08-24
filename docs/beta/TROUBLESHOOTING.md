@@ -135,6 +135,13 @@ destroys state silently. To do it deliberately:
 daintree-assistant reset project-state
 ```
 
+**The opposite case — the database is NEWER than this binary understands — is different,
+and never a reset.** It means a *newer* install already upgraded this project's database,
+and an older copy of the binary (often the `binary.duplicates` problem below) just opened
+it. Resetting would destroy state the newer install wrote and needs; there is nothing to
+back up your way out of here. The fix is to update this binary (`make install` from a
+current checkout, or remove the stale duplicate from PATH), not to reset anything.
+
 ---
 
 ## `binary.duplicates` — more than one copy on PATH

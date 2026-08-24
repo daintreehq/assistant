@@ -23,11 +23,6 @@ the binary, hands it a session, drives turns, answers approvals, and tears it do
 
 ## `host:ready` — the session facts a host renders (protocol v3)
 
-> **Note.** Most of this document describes the PTY embedding, where Daintree ran this
-> binary as a terminal panel. Daintree now embeds the engine **headless** over the stdio
-> NDJSON protocol in `internal/host/` and draws its own interface. The env contract and
-> tier semantics below still hold; the "terminal panel" framing does not.
-
 The first frame of a session is `host:ready`. Beyond `protocolVersion`, it carries the
 facts a host needs to state what this session *is* — the same set the CLI's own masthead
 stated, and for the same reason it exists at all: **a protocol-only consumer never reads
@@ -112,7 +107,7 @@ real process environment (or the assistant's own `.env`), **never** from the bou
 | Variable | Value | Read? |
 | --- | --- | --- |
 | `DAINTREE_MCP_URL` | `http://127.0.0.1:<port>/mcp` — Streamable HTTP. `<port>` is the *actually bound* port (default 45454, walks up to 10 on conflict). **Never hard-code the port.** | **Yes** → `cfg.McpURL` |
-| `DAINTREE_MCP_TOKEN` | Per-session bearer, sent as `Authorization: Bearer <token>`. Expires ~12 minutes after minting. | **Yes** → `cfg.McpToken` |
+| `DAINTREE_MCP_TOKEN` | Per-session bearer, sent as `Authorization: Bearer <token>`. Long-lived once bound to this session (no fixed TTL) — Daintree's `HelpSessionService` only reaps an *unbound* provisional bearer that never got attached, after ~30 minutes. A bound bearer instead gets REVOKED on specific events (e.g. Daintree closing); the supervisor distinguishes that from a transient outage and waits for a fresh credential rather than retrying blindly. | **Yes** → `cfg.McpToken` |
 | `DAINTREE_PROJECT_ID` | The bound project's id. Scopes `StateDir` to `~/.daintree/assistant-cli/<project>/state.db`, and is stable across launches — safe to key per-project memory on. | **Yes** → `cfg.ProjectID` |
 | `DAINTREE_WINDOW_ID` | Launching window id. **Informational**; the enforceable binding is server-side. | **Yes** → `cfg.WindowID` |
 | `DAINTREE_ASSISTANT_AUTO_APPROVE` | `"1"` when the user turned off permission prompts. Reported back on `host:ready`. | **Yes** → `cfg.AutoApprove` |

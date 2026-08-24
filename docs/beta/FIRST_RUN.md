@@ -45,9 +45,13 @@ credential and **Daintree pays for the model calls** — including the backgroun
 (watcher checks, async completions, summarize/extract/classify) that happen while you are
 not looking.
 
-Nothing is stored on your machine and nothing reaches a model provider from it: the CLI
-sends its requests to the backend with no `Authorization` header, and the backend does the
-rest. Account sign-in is being built; when it lands, this page grows a step.
+No model-provider credential is stored on your machine, and nothing reaches a model
+provider from it directly: the CLI sends its requests to the backend with no
+`Authorization` header, and the backend does the rest. The CLI does store project-scoped
+conversation and operational state locally (`state.db` under `~/.daintree/assistant-cli/`)
+so sessions, memories, supervision, audit, and recovery can work — see
+[`PRIVACY_AND_DATA.md`](PRIVACY_AND_DATA.md) for exactly what and for how long. Account
+sign-in is being built; when it lands, this page grows a step.
 
 ---
 

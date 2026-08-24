@@ -184,9 +184,13 @@ DAINTREE_BACKEND_URL=http://127.0.0.1:8473 daintree-assistant
 e2e tests use the same override to point at a fake backend. They need nothing else —
 there is no sign-in gate left to clear.
 
-A remote endpoint should still be `https://`. Nothing forces it any more (there is no
-prompt left to validate at, and a request with no bearer carries no secret of its own),
-but a turn's prose, tool arguments and results all cross that wire.
+A remote endpoint's plaintext `http://` is refused by default: `config.LoadConfig` refuses a non-loopback `http://`
+backend URL by default (`backend.ValidatePlaintextRemote`) — a request may carry no
+bearer, but a turn's prose, tool arguments and results all cross that wire, and plaintext to
+anything but this machine is a confidentiality failure regardless. Loopback (the local dev
+loop above) stays permitted unconditionally. The escape hatch for a deliberately plaintext
+remote endpoint is `--allow-insecure-backend` / `DAINTREE_ALLOW_INSECURE_BACKEND=1`
+(trusted-env only).
 
 ## Wire contract
 
@@ -434,7 +438,7 @@ with something unparseable (usually a provider or compatibility problem).
   unusable agent id. `request.runtime` carries tier, MCP, scheduler, a freshly read typed
   worktree snapshot, open terminals, and the terminal geometry the reply renders at. Stable project
   and agent fields are not duplicated in this fresh tail. `request.turn` carries the goal,
-  wake, workflow runs, async operations, memories, and session-ended watchers.
+  wake, workflow runs, async operations, memories, and `resumed_watchers`.
 - **The integration surface names its endpoints.** `runtime.mcp_servers` lists every MCP
   server this process is wired to — the primary Daintree control plane, and nothing else
   since the docs client was removed (issue #332) — each as `name` + a `description` leading
@@ -518,7 +522,7 @@ Three rules the checker encodes:
 - **An unreported inventory is "cannot verify", never a failure.**
   `/v1/daintree/capabilities` sits behind `require_auth` *and* `require_ready`, so a
   warming backend legitimately advertises nothing.
-- **Workflow ids are required only when `DAINTREE_WORKFLOW_INTELLIGENCE=1`.**
+- **Workflow ids are required unless `DAINTREE_WORKFLOW_INTELLIGENCE=0`** (ON by default).
 
 > Why the machinery: on **2026-07-07** the backend dropped a `.v1` suffix from every
 > task id. The count was unchanged, and *both* sides asserted only a count — so every

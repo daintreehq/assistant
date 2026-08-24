@@ -66,7 +66,7 @@ LEARN=apply scripts/start-backend.sh     # self-improvement ON — review with s
 ```
 Poll readiness before running: `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8473/readyz` must be `200`. To A/B thinking mode, prefix `THINKING=on|off` (default is the config default, currently off).
 
-**3 — Get a fresh MCP token.** Daintree mints per-session tokens that **expire in ~12 minutes**. The scripts read `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` from the environment and **nowhere else**.
+**3 — Get a fresh MCP token.** A token bound to a live session is long-lived (no fixed TTL), but it can be REVOKED (e.g. Daintree closing) and an unbound provisional one is reaped after ~30 minutes — either way, take one from a currently-running Daintree window rather than reusing an old capture. The scripts read `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` from the environment and **nowhere else**.
 
 > **They are not in the debug log, and must never be put back there.** The runtime deleted its `mcp.credentials` log line deliberately: the token authorises system-tier Daintree actions for its whole validity window and a log file outlives it. A script that scrapes logs for credentials is broken on every current build *and* teaches the next reader to look for secrets in logs — which is the pressure that gets the unsafe line reinstated. Don't add a fallback.
 

@@ -338,15 +338,16 @@ tool, so the turn stalls on a contradiction it cannot report. That has already h
 once: six removed tools, five runbooks still naming them, nothing detecting it.
 
 ```bash
-go run ./cmd/tooldump                         # → stdout, the projection a normal launch sends
+go run ./cmd/tooldump                                # → stdout, the projection a normal launch sends
 go run ./cmd/tooldump -o tools.json
-go run ./cmd/tooldump -workflow-intelligence  # …plus the DAINTREE_WORKFLOW_INTELLIGENCE=1 tools
+go run ./cmd/tooldump -workflow-intelligence=false    # …WITHOUT the execution-graph tools (DAINTREE_WORKFLOW_INTELLIGENCE=0)
 ```
 
-The default output deliberately EXCLUDES the flag-gated execution-graph tools: pinning
-them would promise the backend that `workflow.plan` is always offered, and a runbook
-written against that promise would name an unoffered tool for everyone who has not opted
-in.
+The default output INCLUDES the execution-graph tools, matching `cfg.WorkflowIntelligence`'s
+own default: the backend now advertises the matching `workflow_state` contract, so a normal
+launch registers them unless `DAINTREE_WORKFLOW_INTELLIGENCE=0` explicitly disables it, and
+this dump has to match that to actually be "the projection a normal launch sends" rather than
+silently under-representing it.
 
 Output is deterministic and indented, so a refresh reads as an additive diff. It is the
 same JSON value the wire carries — including JSON's HTML escaping, which the real request

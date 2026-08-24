@@ -15,8 +15,9 @@
 >
 > The raw Daintree MCP URL + bearer token used to be written to the top of every log as
 > an `mcp.credentials` line, so a session log could be replayed by hand against the live
-> MCP. **That was removed** — a short-lived MCP token still authorises system-tier
-> Daintree actions for its whole validity window, and log files outlive it. To replay MCP
+> MCP. **That was removed** — a bound MCP token stays valid until Daintree revokes it (no
+> fixed TTL) and still authorises system-tier Daintree actions for that whole window, and
+> log files outlive it. To replay MCP
 > calls, take the credentials from the running process's environment
 > (`DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN`) while it still owns them.
 

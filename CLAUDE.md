@@ -69,6 +69,18 @@ list instead. Env deliberately outranks the stored choice so a harness or
 CI is never silently redirected — and because that would otherwise look like a broken
 feature, `cfg.BackendURLPinnedByEnv` makes `/backend` say so.
 
+**A remote endpoint's plaintext HTTP is refused by default.** `LoadConfig` refuses a non-loopback `http://`
+backend URL by default — a normal turn carries the whole conversation, terminal
+output, file excerpts, and tool results, and that crossing the wire in the clear
+is a confidentiality failure whether or not a bearer is set. Loopback stays
+permitted unconditionally (there is no network to intercept). The escape hatch is
+`--allow-insecure-backend` / `DAINTREE_ALLOW_INSECURE_BACKEND=1` (trusted-env only,
+propagated to a spawned daemon); a STORED `/backend` preference that fails this
+check degrades to the default instead of bricking the launch (same contract as an
+unreadable stored preference), surfaced via `cfg.EndpointInsecureRejected`. See
+`backend.ValidatePlaintextRemote` / `internal/app/backendswitch.go`'s own
+independent check on the interactive `/backend <url>` path (no escape hatch there).
+
 **There is no sign-in, and the CLI stores no credential.** The backend holds its own
 upstream key and serves a request that carries **no `Authorization` header at all**, so
 the CLI never prompts for a key, never writes one to disk, and never gates startup on
@@ -140,7 +152,7 @@ taken from a real boot rather than re-derived, and needing no source edits:
 ```bash
 go run ./cmd/tooldump                      # the projection a normal launch sends → stdout
 go run ./cmd/tooldump -o tools.json        # …to a file
-go run ./cmd/tooldump -workflow-intelligence  # …plus the flag-gated graph tools
+go run ./cmd/tooldump -workflow-intelligence=false  # …WITHOUT the graph tools (DAINTREE_WORKFLOW_INTELLIGENCE=0)
 ```
 
 CI additionally runs on **macOS and Linux** (PTY harness on macOS, race detector on
@@ -183,7 +195,8 @@ internal/
   projectinstructions/  Load(projectPath) → DAINTREE.md (16 KiB cap)
   debuglog/      StartDebugLog / LogDebug / CurrentDebugLogPath (0700/0600, 7-day prune)
   storage/       Store (store.go) over modernc.org/sqlite — timers, watchers, events, audit,
-                 conversation, grants, memory; cancels stale watchers on Open
+                 conversation, grants, memory; watchers/async/the attention inbox are
+                 PROJECT-scoped and adopted (never cancelled) on Open — see BeginOwnership
   backend/       Daintree backend client — the CLI's ONLY model gateway. client.go (Respond/
                  RunTask/Health), contracts.go (strict wire envelope), sse.go (named-event
                  meta/delta/done/error parser), tasks.go (server-owned utility tasks). See docs/BACKEND.md
@@ -211,7 +224,7 @@ internal/
                  terminal.await.async): 1s pure-FSM polls, sibling coalescing, completion →
                  attention queue → autonomous wake. PROJECT-scoped: Start ADOPTS persisted live
                  rows and retries unconfirmed publishes (exactly-once via the group dedupe key)
-  workflowgraph/ the workflow-intelligence layer (gated on DAINTREE_WORKFLOW_INTELLIGENCE=1):
+  workflowgraph/ the workflow-intelligence layer (ON by default; DAINTREE_WORKFLOW_INTELLIGENCE=0 disables it):
                  typed durable execution graphs (DAG of nodes/edges/resources/blockers/evidence)
                  with local validation, patch application under optimistic revisions, prompt
                  digests, the dispatch observer, and adapters for the backend's stateless
@@ -423,8 +436,9 @@ the model loop only shows the post-parse result.
 Take the URL + token from the **running process's environment** (`DAINTREE_MCP_URL` /
 `DAINTREE_MCP_TOKEN`, injected by Daintree) while it still owns them. They are **NOT** in
 the session log: the old `mcp.credentials` line and `App.logMcpCredentials` were removed,
-because a short-lived MCP token still authorises system-tier Daintree actions for its whole
-validity window and a log file outlives it. Do not add credential material back to the log.
+because a bound MCP token stays valid until Daintree revokes it (no fixed TTL) and still
+authorises system-tier Daintree actions for that whole window, while a log file outlives it.
+Do not add credential material back to the log.
 
 Connecting (Streamable HTTP, `github.com/modelcontextprotocol/go-sdk`): POST JSON-RPC to
 the URL with `Authorization: Bearer <token>`, `Content-Type: application/json`, and
@@ -501,7 +515,9 @@ tokens, never goes stale — see the prompt-cache invariant above.)
 
 `DAINTREE_BACKEND_URL` (the backend endpoint — trusted-env ONLY, never a project `.env`;
 defaults to the deployed backend, and pointing it at `http://127.0.0.1:8473` IS the local
-dev loop) · `DAINTREE_API_KEY` (OPTIONAL bearer, trusted-env ONLY, unset on a normal
+dev loop) · `DAINTREE_ALLOW_INSECURE_BACKEND` (trusted-env ONLY; authorizes a non-loopback
+plaintext `http://` endpoint, which is otherwise refused — see `backend.ValidatePlaintextRemote`)
+· `DAINTREE_API_KEY` (OPTIONAL bearer, trusted-env ONLY, unset on a normal
 install — when set it overrides the backend's own upstream credential for this session) ·
 `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` /
 `DAINTREE_PROJECT_ID` / `DAINTREE_WINDOW_ID` (injected by Daintree) ·
@@ -513,9 +529,9 @@ mid-turn 400; `/routing` shows the active posture using the BACKEND's own privac
 wording) ·
 `DAINTREE_ASSISTANT_TIER` (default `system`) · `DAINTREE_ASSISTANT_AUTO_APPROVE` ·
 `DAINTREE_ASSISTANT_OFFLINE` · `DAINTREE_ASSISTANT_STATE_DIR` · `DAINTREE_ASSISTANT_DEBUG_LOG` /
-`DAINTREE_ASSISTANT_LOG_DIR` · `DAINTREE_WORKFLOW_INTELLIGENCE` (rollout flag for the
-workflow execution-graph layer, off by default — needs a backend carrying the matching
-`workflow_state` turn-context contract + workflow tasks; see docs/WORKFLOW_INTELLIGENCE.md).
+`DAINTREE_ASSISTANT_LOG_DIR` · `DAINTREE_WORKFLOW_INTELLIGENCE` (the workflow execution-graph
+layer, ON by default now that the backend carries the matching `workflow_state` turn-context
+contract + workflow tasks; `=0` disables it; see docs/WORKFLOW_INTELLIGENCE.md).
 (Model/provider variables — every `*_API_KEY` and the `DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL`
 trio — are **backend-only**. The CLI reads none of them and its `AppConfig` carries no
 model or provider fields at all. On a normal install it holds no credential whatsoever;

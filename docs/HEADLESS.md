@@ -412,6 +412,7 @@ Every knob is a flag, and every flag shadows a trusted env var and wins over it.
 | Flag | Env | Notes |
 |---|---|---|
 | `--backend-url URL` | `DAINTREE_BACKEND_URL` | outranks the endpoint stored by `/backend` |
+| `--allow-insecure-backend` | `DAINTREE_ALLOW_INSECURE_BACKEND=1` | authorizes a non-loopback plaintext `http://` endpoint, which is otherwise refused |
 | `--api-key-file PATH` | `DAINTREE_API_KEY` | OPTIONAL — see below. Deliberately **no `--api-key`** |
 | `--prompt-file PATH` | — | one-shot only; `-` reads stdin. Capped at 1 MiB |
 | `--multi-turn` | — | one prompt per stdin line, one session, one transcript. Requires `--json`; each line capped at 1 MiB |
@@ -645,9 +646,10 @@ only `error` + `result` and **no session line at all**. Handle its absence.
 orchestration tool reports "not connected". That is invisible in the answer text and is
 the commonest cause of a confusing run — check it before diagnosing anything else. It is
 sampled once, right after connect: MCP can still degrade mid-run, so read it as a
-starting condition rather than a whole-run guarantee. Daintree's MCP tokens also expire
-roughly 12 minutes after minting, so a long harness run can begin connected and end
-otherwise.
+starting condition rather than a whole-run guarantee. A bound MCP token is long-lived
+(no fixed TTL) but can still be REVOKED mid-run (e.g. Daintree closing), so
+a long harness run can begin connected and end otherwise for that reason rather than
+expiry on a clock.
 
 `logPath` is present-but-empty when debug logging is off. `backendUrl` is stripped of
 userinfo and query string before it is emitted (`mcp.SanitizeURL`, which fails closed to

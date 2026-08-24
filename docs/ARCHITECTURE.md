@@ -211,9 +211,13 @@ automation grant. read/local/ui never confirm.
 `storage.Store` is built on `modernc.org/sqlite` (pure Go, no CGO). State lives at
 `~/.daintree/assistant-cli/state.db` (a per-project subdir when a project id is set) and
 holds timers, watchers, events, audit, conversation, grants, and memory. The schema is a
-**single clean baseline** (`schemaUserVersion`, currently 7); pre-release, a schema change is a
-hard reset, not a migration chain. On open, the store cancels any stale (non-terminal)
-watchers so a new session never inherits a prior one's supervision.
+**single clean baseline** (`schemaUserVersion`, currently 12); pre-release, a schema change is a
+hard reset, not a migration chain — an older binary opening a newer schema fails closed
+(`SchemaTooNewError`) rather than running stale DDL/writes against it. Watchers, async
+invocations, and the attention inbox are PROJECT-scoped and deliberately NOT torn down on
+open: they survive process boundaries so the supervisor daemon (or the next attached
+session) adopts them rather than losing in-flight supervision. `/clear` is the only
+wholesale teardown.
 
 ## Test coverage
 

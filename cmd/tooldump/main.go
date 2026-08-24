@@ -3,7 +3,7 @@
 //
 //	go run ./cmd/tooldump                          # the projection a normal launch sends
 //	go run ./cmd/tooldump -o tools.json            # …to a file
-//	go run ./cmd/tooldump -workflow-intelligence   # …including the flag-gated graph tools
+//	go run ./cmd/tooldump -workflow-intelligence=false   # …WITHOUT the graph tools (DAINTREE_WORKFLOW_INTELLIGENCE=0)
 //
 // It exists for the backend, which pins a captured copy of this payload and needs to
 // regenerate it in CI to catch catalog drift (a removed tool that its runbooks still name).
@@ -26,9 +26,14 @@ import (
 
 func main() {
 	var (
-		out      = flag.String("o", "", "write to this file instead of stdout")
-		workflow = flag.Bool("workflow-intelligence", false,
-			"include the execution-graph tools, which register unless DAINTREE_WORKFLOW_INTELLIGENCE=0")
+		out = flag.String("o", "", "write to this file instead of stdout")
+		// ON by default, matching cfg.WorkflowIntelligence's own default (see
+		// internal/config/config.go's resolveBoolDefault call) — a normal launch
+		// registers the graph tools unless DAINTREE_WORKFLOW_INTELLIGENCE=0, so this
+		// dump must match that by default to actually be "the projection a normal
+		// launch sends" rather than silently omitting them.
+		workflow = flag.Bool("workflow-intelligence", true,
+			"include the execution-graph tools; pass -workflow-intelligence=false to match DAINTREE_WORKFLOW_INTELLIGENCE=0")
 	)
 	flag.Parse()
 

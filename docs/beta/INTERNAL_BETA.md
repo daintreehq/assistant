@@ -85,12 +85,15 @@ quits, supervision *pauses* — it does not fabricate outcomes, and it does not 
 work; it publishes a blocked item and resumes on the next launch. Nobody should be told
 "I'll have that done overnight" unless Daintree is staying up.
 
-**Schema changes reset local state.** This is pre-release: the SQLite schema is a single
-clean baseline rather than a migration chain. On an **interactive** launch your existing
-database is moved aside to a timestamped backup and recreated, and the path is printed. A
-non-TTY launch (one-shot, `--json`, host, daemon) fails loudly instead, so a script never
-destroys state silently. Conversation history and memories for that project do not
-survive.
+**An OLDER on-disk schema resets local state.** This is pre-release: the SQLite schema is a
+single clean baseline rather than a migration chain. On an **interactive** launch a database
+stamped at an older baseline is moved aside to a timestamped backup and recreated, and the
+path is printed. A non-TTY launch (one-shot, `--json`, host, daemon) fails loudly instead, so
+a script never destroys state silently. Conversation history and memories for that project do
+not survive. A NEWER on-disk schema (this binary is the one behind — often a stale duplicate
+elsewhere on PATH) is the opposite case and never resets anything — see the `state.schema`
+entry in [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md): the fix there is updating the binary,
+not touching the database.
 
 **Workflow Intelligence is on.** The execution-graph layer is enabled by default now that
 the backend advertises the three workflow tasks it needs. Set
