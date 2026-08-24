@@ -52,6 +52,34 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
+// ValidatePlaintextRemote checks the one specifically security-relevant property a
+// backend endpoint URL must satisfy: a plaintext http:// scheme is acceptable only
+// for a loopback address, unless explicitly authorized. A normal request carries
+// conversation history, terminal output, file excerpts, and tool results — even
+// with no bearer credential, sending that in the clear to anything but this
+// machine is a confidentiality failure, and an on-path attacker on a plaintext hop
+// can also rewrite the response to inject tool calls that then run under the
+// session's tier and grants.
+//
+// Shared by config.LoadConfig (the startup path: override / trusted env / a
+// stored `/backend` preference) and app.ResolveBackendTarget (the interactive
+// `/backend <url>` switch) so the two never drift on this specific property, even
+// though each layers its own additional hygiene checks around it (userinfo,
+// query/fragment, control characters — see ResolveBackendTarget's doc comment).
+func ValidatePlaintextRemote(rawURL string, allowInsecure bool) error {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return fmt.Errorf("invalid backend URL %q: %w", rawURL, err)
+	}
+	if u.Scheme != "http" || allowInsecure || isLoopbackHost(u.Hostname()) {
+		return nil
+	}
+	return fmt.Errorf(
+		"%s is plaintext http to a remote host — every turn would cross that wire in the clear. "+
+			"Use https://, a loopback address, or authorize it explicitly (--allow-insecure-backend or DAINTREE_ALLOW_INSECURE_BACKEND=1)",
+		u.Host)
+}
+
 // IsLoopbackURL reports whether a base URL addresses THIS machine, whatever its
 // spelling — scheme, port, case, bracketed IPv6, and a trailing DNS root dot are all
 // normalised away by url.Parse + isLoopbackHost.

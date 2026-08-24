@@ -1058,6 +1058,30 @@ func (c *Client) doJSONOnce(ctx context.Context, method, path string, payload []
 	return err
 }
 
+// maxSmallJSONResponseBytes bounds a health/capability/version/auth-verify reply
+// — small, fixed-shape status JSON. Generous relative to any legitimate response;
+// its job is to cap a misconfigured or compromised backend/proxy's forced
+// allocation, not to be a tight budget.
+const maxSmallJSONResponseBytes = 1 << 20 // 1 MiB
+
+// maxTaskJSONResponseBytes bounds a non-streaming /respond or /tasks reply, which
+// can legitimately carry a model's answer or a utility task's output text —
+// larger than a status response, but still finite.
+const maxTaskJSONResponseBytes = 16 << 20 // 16 MiB
+
+// jsonResponseLimit maps an endpoint path to its response size bound. Defaults to
+// the SMALL limit: a new endpoint that turns out to carry real content earns the
+// larger one explicitly, rather than every future endpoint silently inheriting an
+// unbounded read by omission.
+func jsonResponseLimit(path string) int64 {
+	switch path {
+	case "/v1/daintree/respond", "/v1/daintree/tasks":
+		return maxTaskJSONResponseBytes
+	default:
+		return maxSmallJSONResponseBytes
+	}
+}
+
 // doJSONAttempt is one request/response round trip under an already-bounded context.
 func (c *Client) doJSONAttempt(attemptCtx context.Context, method, path string, payload []byte, hasBody bool, out any) error {
 	var reader io.Reader
@@ -1084,9 +1108,41 @@ func (c *Client) doJSONAttempt(attemptCtx context.Context, method, path string, 
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil
 	}
-	dec := json.NewDecoder(resp.Body)
+	// Unlike readErrorResponse's io.ReadAll(io.LimitReader(...)), a successful body
+	// was decoded directly from resp.Body with no size bound at all — a
+	// misconfigured custom backend or compromised proxy could force an unbounded
+	// allocation on a normal 2xx response.
+	//
+	// Read into a bounded buffer FIRST rather than decoding straight off a capped
+	// reader: a live *io.LimitedReader can't distinguish "the single JSON value
+	// legitimately needed every byte of the cap" from "the value itself is over the
+	// limit" once Decode has already succeeded, so an exact multiple of (limit+1)
+	// bytes of otherwise-valid JSON would silently pass. A length check on the
+	// fully-read buffer has no such ambiguity.
+	limit := jsonResponseLimit(path)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return &Error{HTTPStatus: resp.StatusCode, Code: "read", Message: "could not read backend response: " + err.Error()}
+	}
+	if int64(len(data)) > limit {
+		return &Error{HTTPStatus: resp.StatusCode, Code: "response_too_large",
+			Message: fmt.Sprintf("backend response for %s exceeded %d bytes", path, limit)}
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
 	if err := dec.Decode(out); err != nil {
 		return &Error{HTTPStatus: resp.StatusCode, Code: "decode", Message: "could not decode backend response: " + err.Error()}
+	}
+	// One JSON document, not two silently concatenated. NOT dec.More(): its
+	// contract is "another element in the CURRENT array/object", not "another
+	// top-level document" — it can misreport on a stray trailing `}`/`]` (treating
+	// it as the close of an enclosing structure that was never open at this level).
+	// Attempting a second decode and requiring io.EOF is the correct idiom here,
+	// and — because `data` is now a fixed in-memory buffer, not a live network
+	// stream — unambiguous: anything other than io.EOF means real trailing bytes.
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		return &Error{HTTPStatus: resp.StatusCode, Code: "trailing_json",
+			Message: fmt.Sprintf("backend response for %s carried more than one JSON document", path)}
 	}
 	return nil
 }

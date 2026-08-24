@@ -166,7 +166,12 @@ func parseArgsInto(args []string) (parsedArgs, *flag.FlagSet, error) {
 		// that a scripted caller (a test harness, another agent) can say all of this in
 		// argv instead of having to rewrite the process environment.
 		backendURL = fs.String("backend-url", "", "")
-		apiKeyFile = fs.String("api-key-file", "", "")
+		// allowInsecureBackend is the deliberately-named escape hatch for a
+		// non-loopback plaintext HTTP endpoint, which config.LoadConfig otherwise
+		// refuses outright as a confidentiality failure (conversation, terminal
+		// output, and file content would travel unencrypted).
+		allowInsecureBackend = fs.Bool("allow-insecure-backend", false, "")
+		apiKeyFile           = fs.String("api-key-file", "", "")
 		// promptFile carries the one-shot prompt out of argv entirely. A runbook-test prompt
 		// is long and multi-line and wants to live in a file next to the runbook it
 		// exercises, rather than being shell-quoted — and a prompt beginning with a dash
@@ -333,6 +338,7 @@ func parseArgsInto(args []string) (parsedArgs, *flag.FlagSet, error) {
 		JSON:                    *jsonOut,
 		Inline:                  *inline, // accepted and ignored (deprecated)
 		BackendURL:              *backendURL,
+		AllowInsecureBackend:    boolFlag("allow-insecure-backend", allowInsecureBackend),
 		APIKeyFile:              *apiKeyFile,
 		PromptFile:              *promptFile,
 		MultiTurn:               *multiTurn,
@@ -652,6 +658,8 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "  --mcp-url URL       Daintree MCP URL (env: DAINTREE_MCP_URL)")
 	fmt.Fprintln(w, "  --mcp-token TOKEN   Daintree MCP token (env: DAINTREE_MCP_TOKEN)")
 	fmt.Fprintln(w, "  --backend-url URL   assistant backend (env: DAINTREE_BACKEND_URL)")
+	fmt.Fprintln(w, "  --allow-insecure-backend  allow a non-loopback backend over plain HTTP")
+	fmt.Fprintln(w, "                      (env: DAINTREE_ALLOW_INSECURE_BACKEND)")
 	fmt.Fprintln(w, "  --api-key-file PATH read the API key from a file (env: DAINTREE_API_KEY)")
 	fmt.Fprintln(w, "  --prompt-file PATH  read the one-shot prompt from a file ('-' for stdin)")
 	fmt.Fprintln(w, "  --multi-turn        run one prompt per stdin line as a conversation in one")

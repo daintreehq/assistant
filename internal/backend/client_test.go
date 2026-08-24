@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -533,4 +534,220 @@ func errorsAs(err error, target **Error) bool {
 		return true
 	}
 	return false
+}
+
+// Regression for doc finding BE-001: a successful (2xx) JSON response body used to
+// be decoded straight off resp.Body with no size bound at all — unlike the error
+// path, which already read through io.LimitReader(resp.Body, 1<<20). A
+// misconfigured custom backend or a compromised proxy could force an unbounded
+// allocation on any normal 2xx response.
+// jsonStatusBodyOfExactSize builds `{"status":"ok","pad":"...a..."}` padded to
+// EXACTLY n total bytes, for precise boundary tests.
+func jsonStatusBodyOfExactSize(t *testing.T, n int64) string {
+	t.Helper()
+	const prefix, suffix = `{"status":"ok","pad":"`, `"}`
+	padLen := int(n) - len(prefix) - len(suffix)
+	if padLen < 0 {
+		t.Fatalf("n=%d too small to hold the envelope (%d bytes)", n, len(prefix)+len(suffix))
+	}
+	return prefix + strings.Repeat("a", padLen) + suffix
+}
+
+// A body of EXACTLY the limit must still decode — the bound is a maximum, not a
+// tighter budget that starts rejecting early.
+func TestJSONResponseAtExactlyTheLimitDecodesNormally(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, jsonStatusBodyOfExactSize(t, maxSmallJSONResponseBytes))
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(ClientConfig{BaseURL: srv.URL})
+
+	if err := c.Health(context.Background()); err != nil {
+		t.Fatalf("Health at exactly the limit: %v", err)
+	}
+}
+
+// Regression for doc finding BE-001: a body of exactly one byte OVER the limit,
+// otherwise perfectly valid JSON, must be rejected — this is the precise case an
+// earlier version of this fix got wrong (a *io.LimitedReader capped at limit+1
+// silently accepted any body whose first JSON value happened to complete using
+// all limit+1 bytes, since the "did we exhaust the cap" check only ran when
+// Decode itself failed).
+func TestJSONResponseOneByteOverTheLimitIsRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, jsonStatusBodyOfExactSize(t, maxSmallJSONResponseBytes+1))
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(ClientConfig{BaseURL: srv.URL, Retry: RetryPolicy{MaxAttempts: 1}})
+
+	err := c.Health(context.Background())
+	var berr *Error
+	if !errorsAs(err, &berr) || berr.Code != "response_too_large" {
+		t.Fatalf("want *Error{Code: response_too_large}, got %T: %v", err, err)
+	}
+}
+
+func TestSuccessfulJSONResponseIsSizeBounded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/health":
+			_, _ = io.WriteString(w, jsonStatusBodyOfExactSize(t, maxSmallJSONResponseBytes*2))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(ClientConfig{BaseURL: srv.URL, Retry: RetryPolicy{MaxAttempts: 1}})
+
+	err := c.Health(context.Background())
+	var berr *Error
+	if !errorsAs(err, &berr) || berr.Code != "response_too_large" {
+		t.Fatalf("want *Error{Code: response_too_large}, got %T: %v", err, err)
+	}
+}
+
+// A malformed body that is well UNDER the limit must still be reported as a
+// decode failure, not misclassified as too-large.
+func TestMalformedResponseUnderTheLimitIsDecodeError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"status":`) // truncated/invalid, tiny
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(ClientConfig{BaseURL: srv.URL, Retry: RetryPolicy{MaxAttempts: 1}})
+
+	err := c.Health(context.Background())
+	var berr *Error
+	if !errorsAs(err, &berr) || berr.Code != "decode" {
+		t.Fatalf("want *Error{Code: decode}, got %T: %v", err, err)
+	}
+}
+
+// A response that fits the bound must decode normally — the fix must not make
+// every 2xx response fail.
+func TestJSONResponseWithinBoundDecodesNormally(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"status":"ok"}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(ClientConfig{BaseURL: srv.URL})
+
+	if err := c.Health(context.Background()); err != nil {
+		t.Fatalf("Health: %v", err)
+	}
+}
+
+// Regression for doc finding BE-001: two JSON documents silently concatenated in
+// one body used to decode only the first and drop the second with no signal at
+// all — json.Decoder.Decode stops after one value and never looks further.
+func TestTrailingJSONAfterResponseIsRejected(t *testing.T) {
+	for name, body := range map[string]string{
+		"second document": `{"status":"ok"}{"status":"ok"}`,
+		"stray garbage":   `{"status":"ok"}garbage`,
+		// A stray closing bracket used to slip through: dec.More()'s contract is
+		// "another element in the CURRENT array/object", so it read a top-level `}`
+		// or `]` as the close of an enclosing structure that was never open at this
+		// level, and reported "no more" instead of "trailing garbage".
+		"stray closing brace":   `{"status":"ok"}}`,
+		"stray closing bracket": `{"status":"ok"}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, body)
+			}))
+			t.Cleanup(srv.Close)
+			c := NewClient(ClientConfig{BaseURL: srv.URL, Retry: RetryPolicy{MaxAttempts: 1}})
+
+			err := c.Health(context.Background())
+			var berr *Error
+			if !errorsAs(err, &berr) || berr.Code != "trailing_json" {
+				t.Fatalf("want *Error{Code: trailing_json}, got %T: %v", err, err)
+			}
+		})
+	}
+}
+
+// A trailing newline (a common serializer habit) is whitespace, not a second
+// document, and must not be misclassified as trailing JSON.
+func TestTrailingWhitespaceAfterResponseIsNotTreatedAsTrailingJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, "{\"status\":\"ok\"}\n")
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(ClientConfig{BaseURL: srv.URL})
+
+	if err := c.Health(context.Background()); err != nil {
+		t.Fatalf("Health: %v", err)
+	}
+}
+
+// Task/respond endpoints get the larger limit — content that would exceed the
+// small-endpoint bound must still decode normally there.
+func TestTaskResponseUsesTheLargerLimit(t *testing.T) {
+	big := strings.Repeat("a", int(maxSmallJSONResponseBytes)+1024) // over the SMALL limit
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/daintree/tasks" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"task_1","object":"daintree.task.result","task":"checkpoint","model":"m","output":{"goal":"`+big+`"},"finish_reason":"stop","usage":{"total_tokens":5},"prompt_version":"checkpoint"}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(ClientConfig{BaseURL: srv.URL})
+
+	out, err := RunCheckpoint(context.Background(), c, CheckpointInput{Transcript: "t"})
+	if err != nil {
+		t.Fatalf("RunCheckpoint: %v", err)
+	}
+	if len(out.Goal) != len(big) {
+		t.Errorf("goal length = %d, want %d — content over the small-endpoint limit must still decode on a task endpoint", len(out.Goal), len(big))
+	}
+}
+
+// A response_too_large / trailing_json failure is a deterministic backend/proxy
+// misconfiguration, not a transient blip — replaying would just download the same
+// oversized (or malformed) body again. Must never be retried.
+func TestResponseTooLargeIsNotRetried(t *testing.T) {
+	var calls atomic.Int32 // the handler runs on the server's own goroutine
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, jsonStatusBodyOfExactSize(t, maxSmallJSONResponseBytes*2))
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(ClientConfig{BaseURL: srv.URL}) // default retry policy, multiple attempts allowed
+
+	if err := c.Health(context.Background()); err == nil {
+		t.Fatal("want an error for an oversized response")
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("server was called %d times, want exactly 1 (response_too_large must not be retried)", n)
+	}
+}
+
+// The other new error code must not be retried either — a default (non-1) retry
+// policy is used deliberately so a regression here would actually be exercised.
+func TestTrailingJSONIsNotRetried(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"status":"ok"}{"status":"ok"}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(ClientConfig{BaseURL: srv.URL})
+
+	if err := c.Health(context.Background()); err == nil {
+		t.Fatal("want an error for a trailing-JSON response")
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("server was called %d times, want exactly 1 (trailing_json must not be retried)", n)
+	}
 }

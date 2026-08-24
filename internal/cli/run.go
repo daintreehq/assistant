@@ -63,6 +63,10 @@ type Options struct {
 	// carry the SAME trust as the env vars they shadow (argv is as trusted as env) and
 	// win over them, per the FirstString order in config.LoadConfig.
 	BackendURL string
+	// AllowInsecureBackend is the deliberately-named escape hatch for a
+	// non-loopback plaintext HTTP backend endpoint, which config.LoadConfig
+	// otherwise refuses outright (see config.validateBackendScheme).
+	AllowInsecureBackend *bool
 	// AllowDelegatedApprovals is the `mcp --stdio` opt-in for approvals:"delegate",
 	// where the CALLING AGENT settles each confirmation rather than a human. It is a
 	// launch decision because only the operator knows whether the agent on the other
@@ -146,6 +150,7 @@ func overridesFromOptions(opts Options) (config.ConfigOverrides, error) {
 	o.Offline = opts.Offline
 	o.AutoApprove = opts.AutoApprove
 	o.DebugLog = opts.DebugLog
+	o.AllowInsecureBackend = opts.AllowInsecureBackend
 	if opts.APIKeyFile != "" {
 		key, err := readAPIKeyFile(opts.APIKeyFile)
 		if err != nil {

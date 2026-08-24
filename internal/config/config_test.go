@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/daintreehq/assistant/internal/backend"
 	"github.com/daintreehq/assistant/internal/domain"
 )
 
@@ -29,7 +30,7 @@ func isolatedHome(t *testing.T) string {
 		"DAINTREE_MCP_URL", "DAINTREE_MCP_TOKEN", "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL",
 		// The endpoint and the optional bearer: a developer with either exported would
 		// otherwise leak their real values into every config test's expectations.
-		"DAINTREE_BACKEND_URL", "DAINTREE_API_KEY",
+		"DAINTREE_BACKEND_URL", "DAINTREE_API_KEY", "DAINTREE_ALLOW_INSECURE_BACKEND",
 		"DAINTREE_LARGE_MODEL", "DAINTREE_MEDIUM_MODEL", "DAINTREE_SMALL_MODEL",
 		// Routing is VALIDATED at load, so an ambient invalid value here would fail
 		// every unrelated config test with a message about endpoint routing.
@@ -111,6 +112,132 @@ func TestLoadConfig_WorkflowIntelligenceDefaultsOnAndCanBeTurnedOff(t *testing.T
 	t.Setenv("DAINTREE_WORKFLOW_INTELLIGENCE", "0")
 	if !mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir), WorkflowIntelligence: boolptr(true)}).WorkflowIntelligence {
 		t.Error("explicit override should beat env")
+	}
+}
+
+// Regression for doc finding SEC-001: a request carries conversation history,
+// terminal output, file excerpts, and tool results — even with no bearer, sending
+// that in the clear to a remote host is a confidentiality failure. A non-loopback
+// plaintext HTTP backend endpoint must be refused by default.
+func TestLoadConfig_RejectsPlaintextRemoteBackend(t *testing.T) {
+	isolatedHome(t)
+	_, err := LoadConfig(ConfigOverrides{
+		StateDir:   strptr(t.TempDir()),
+		BackendURL: strptr("http://example.com"),
+	})
+	if err == nil {
+		t.Fatal("a non-loopback plaintext backend URL should be refused")
+	}
+}
+
+// Loopback stays permitted unconditionally — it never leaves the machine, and
+// `http://127.0.0.1:8473` (the local backend) is the documented normal dev loop.
+func TestLoadConfig_AllowsPlaintextLoopbackBackend(t *testing.T) {
+	isolatedHome(t)
+	cfg := mustLoad(t, ConfigOverrides{
+		StateDir:   strptr(t.TempDir()),
+		BackendURL: strptr("http://127.0.0.1:8473"),
+	})
+	if cfg.BackendURL != "http://127.0.0.1:8473" {
+		t.Errorf("backendUrl = %q", cfg.BackendURL)
+	}
+}
+
+// https:// is always fine, remote or not.
+func TestLoadConfig_AllowsHTTPSRemoteBackend(t *testing.T) {
+	isolatedHome(t)
+	cfg := mustLoad(t, ConfigOverrides{
+		StateDir:   strptr(t.TempDir()),
+		BackendURL: strptr("https://example.com"),
+	})
+	if cfg.BackendURL != "https://example.com" {
+		t.Errorf("backendUrl = %q", cfg.BackendURL)
+	}
+}
+
+// The deliberately-named escape hatch — flag or trusted env — authorizes a
+// non-loopback plaintext endpoint for controlled development.
+func TestLoadConfig_AllowInsecureBackendEscapeHatch(t *testing.T) {
+	isolatedHome(t)
+	stateDir := t.TempDir()
+
+	// Via override (the --allow-insecure-backend flag path).
+	cfg := mustLoad(t, ConfigOverrides{
+		StateDir:             strptr(stateDir),
+		BackendURL:           strptr("http://example.com"),
+		AllowInsecureBackend: boolptr(true),
+	})
+	if !cfg.AllowInsecureBackend {
+		t.Error("AllowInsecureBackend should be true when explicitly overridden")
+	}
+	if cfg.BackendURL != "http://example.com" {
+		t.Errorf("backendUrl = %q", cfg.BackendURL)
+	}
+
+	// Via trusted env.
+	t.Setenv("DAINTREE_ALLOW_INSECURE_BACKEND", "1")
+	cfg = mustLoad(t, ConfigOverrides{
+		StateDir:   strptr(stateDir),
+		BackendURL: strptr("http://example.com"),
+	})
+	if !cfg.AllowInsecureBackend {
+		t.Error("DAINTREE_ALLOW_INSECURE_BACKEND=1 should authorize a plaintext remote backend")
+	}
+}
+
+// The default backend (no override at all) is the deployed https:// endpoint and
+// must never trip the plaintext refusal.
+func TestLoadConfig_DefaultBackendIsNeverRejected(t *testing.T) {
+	isolatedHome(t)
+	if _, err := LoadConfig(ConfigOverrides{StateDir: strptr(t.TempDir())}); err != nil {
+		t.Fatalf("LoadConfig with no BackendURL override: %v", err)
+	}
+}
+
+// An IP-literal loopback spelling other than 127.0.0.1 must be recognized too.
+func TestLoadConfig_AllowsIPv6LoopbackBackend(t *testing.T) {
+	isolatedHome(t)
+	cfg := mustLoad(t, ConfigOverrides{
+		StateDir:   strptr(t.TempDir()),
+		BackendURL: strptr("http://[::1]:8473"),
+	})
+	if cfg.BackendURL != "http://[::1]:8473" {
+		t.Errorf("backendUrl = %q", cfg.BackendURL)
+	}
+}
+
+// A malformed backend URL must be a clean, actionable error — not a panic and not
+// a silent pass.
+func TestLoadConfig_MalformedBackendURLIsRejected(t *testing.T) {
+	isolatedHome(t)
+	_, err := LoadConfig(ConfigOverrides{
+		StateDir:   strptr(t.TempDir()),
+		BackendURL: strptr("http://[::1"),
+	})
+	if err == nil {
+		t.Fatal("a malformed backend URL should be rejected, not silently accepted")
+	}
+}
+
+// Regression: a STORED endpoint preference (from a prior `/backend <url>`, or a
+// pre-upgrade file this check did not exist for) resolving to a plaintext remote
+// URL must NOT brick the launch — the same "must not brick" contract
+// EndpointLoadError already keeps for an unreadable stored file. It falls back to
+// the default and surfaces the rejection instead, so `/backend default` (the one
+// command that could otherwise fix it) stays reachable.
+func TestLoadConfig_StoredInsecureBackendFallsBackInsteadOfBricking(t *testing.T) {
+	isolatedHome(t)
+	stateDir := t.TempDir()
+	if err := SaveBackendURL(EndpointPath(stateDir), "http://attacker.example"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir)})
+	if cfg.BackendURL != backend.DefaultBaseURL {
+		t.Errorf("backendUrl = %q, want the default fallback (a bad stored preference must not brick the launch)", cfg.BackendURL)
+	}
+	if cfg.EndpointInsecureRejected == nil {
+		t.Error("EndpointInsecureRejected should be set so a caller can report why the stored preference was dropped")
 	}
 }
 
@@ -319,6 +446,25 @@ func TestLoadConfig_ProjectEnvCannotRedirectEndpoints(t *testing.T) {
 	}
 	if cfg.McpToken != "" {
 		t.Errorf("project .env injected McpToken %q", cfg.McpToken)
+	}
+}
+
+// A project .env must NOT be able to authorize a plaintext remote backend on
+// someone's behalf — DAINTREE_ALLOW_INSECURE_BACKEND is trusted-env only, same
+// tier as Tier/AutoApprove/Offline. The endpoint itself is set via TRUSTED env
+// here (BackendURL is already trusted-only, so a project .env could never redirect
+// it in the first place — that is not what this test is about); only the
+// AUTHORIZATION is attempted from the project .env, and it must not take effect.
+func TestLoadConfig_ProjectEnvCannotAuthorizeInsecureBackend(t *testing.T) {
+	isolatedHome(t)
+	t.Setenv("DAINTREE_BACKEND_URL", "http://attacker.example")
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, ".env"), []byte("DAINTREE_ALLOW_INSECURE_BACKEND=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadConfig(ConfigOverrides{ProjectPath: strptr(projectDir), StateDir: strptr(t.TempDir())})
+	if err == nil {
+		t.Fatal("a project .env authorized a plaintext remote backend — DAINTREE_ALLOW_INSECURE_BACKEND must be trusted-env only")
 	}
 }
 

@@ -94,6 +94,16 @@ type AppConfig struct {
 	// a surface say the preference was ignored rather than silently honouring the
 	// default. Nil both when a preference loaded cleanly and when there is none.
 	EndpointLoadError error
+	// EndpointInsecureRejected is non-nil when a STORED endpoint preference (and
+	// nothing else — no override, no trusted env) resolved to a plaintext,
+	// non-loopback URL that AllowInsecureBackend did not authorize. The resolved
+	// BackendURL falls back to the deployed default, same contract as
+	// EndpointLoadError: a stored preference must not be able to brick a launch,
+	// least of all the `/backend` command that is the only way to change it once
+	// the app is running. An override or trusted-env value that fails the same
+	// check is NOT covered here — that is a direct, actionable LoadConfig error
+	// instead, since the caller just typed or exported the bad value THIS launch.
+	EndpointInsecureRejected error
 	// BackendURLPinnedByEnv reports that DAINTREE_BACKEND_URL (or --backend-url) is
 	// deciding the endpoint, so a STORED choice is being overridden.
 	//
@@ -102,6 +112,11 @@ type AppConfig struct {
 	// profile exports the variable. Without this flag `/backend` cannot tell them why,
 	// and the feature looks broken rather than overridden.
 	BackendURLPinnedByEnv bool
+	// AllowInsecureBackend authorizes a non-loopback plaintext HTTP backend
+	// endpoint, which LoadConfig otherwise refuses outright — see
+	// backend.ValidatePlaintextRemote. Surfaced so doctor/host:ready/the support
+	// bundle can show the insecure state rather than leaving it silently in effect.
+	AllowInsecureBackend bool
 	// APIKey is an OPTIONAL caller-supplied bearer token, and is empty on virtually
 	// every install. The backend holds its own upstream credential and serves a
 	// request that carries no Authorization header at all, so the CLI neither asks
@@ -172,6 +187,11 @@ type ConfigOverrides struct {
 	LogDir               *string
 	ProjectInstructions  *string
 	WorkflowIntelligence *bool
+	// AllowInsecureBackend is the deliberately-named escape hatch for a non-loopback
+	// plaintext HTTP backend endpoint (--allow-insecure-backend). Trusted-only, like
+	// Tier/AutoApprove/Offline: a bound project's .env must not be able to downgrade
+	// the endpoint's confidentiality on someone's behalf.
+	AllowInsecureBackend *bool
 }
 
 // FirstString returns the first argument that is non-empty after TrimSpace,
@@ -444,6 +464,25 @@ func loadConfig(overrides ConfigOverrides, ensureStateDir bool) (AppConfig, erro
 		stored,
 		backend.DefaultBaseURL,
 	)
+	// Trusted-only, like Tier/AutoApprove/Offline above: a bound project's .env must
+	// not be able to authorize plaintext for an endpoint it does not control.
+	cfg.AllowInsecureBackend = resolveBool(overrides.AllowInsecureBackend, e.trustedGet("DAINTREE_ALLOW_INSECURE_BACKEND"))
+	if err := backend.ValidatePlaintextRemote(cfg.BackendURL, cfg.AllowInsecureBackend); err != nil {
+		// An override or trusted env chose this URL for THIS launch: a direct,
+		// actionable failure — the caller just typed or exported the bad value.
+		explicit := strings.TrimSpace(deref(overrides.BackendURL)) != "" || strings.TrimSpace(envURL) != ""
+		if explicit {
+			return AppConfig{}, err
+		}
+		// Nothing this launch chose it — it can only be the STORED preference (the
+		// compiled-in default is always https:// and can never fail this check).
+		// Same contract as EndpointLoadError just above: a stored preference must
+		// not be able to brick a launch, least of all the one command (`/backend
+		// default`) that could otherwise fix it — fall back instead, and surface
+		// the rejection for a caller to report.
+		cfg.EndpointInsecureRejected = err
+		cfg.BackendURL = backend.DefaultBaseURL
+	}
 	cfg.APIKey = FirstString(
 		deref(overrides.APIKey),
 		e.trustedGet("DAINTREE_API_KEY"),
@@ -580,6 +619,10 @@ func DescribeConfig(cfg AppConfig) map[string]string {
 		"offline":              strconv.FormatBool(cfg.Offline),
 		"debugLog":             strconv.FormatBool(cfg.DebugLog),
 		"workflowIntelligence": strconv.FormatBool(cfg.WorkflowIntelligence),
+		"allowInsecureBackend": strconv.FormatBool(cfg.AllowInsecureBackend),
+	}
+	if cfg.EndpointInsecureRejected != nil {
+		out["endpointInsecureRejected"] = cfg.EndpointInsecureRejected.Error()
 	}
 	if cfg.McpURL == "" {
 		out["mcpUrl"] = "(unset → degraded local mode)"

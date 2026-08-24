@@ -47,6 +47,14 @@ func spawnDaemon(cfg config.AppConfig, version string) error {
 	if cfg.BackendURL != "" {
 		env = append(env, "DAINTREE_BACKEND_URL="+cfg.BackendURL)
 	}
+	// Same reasoning as BackendURL: an authorization that came from --allow-insecure-backend
+	// (argv, not env) would otherwise be lost across this boundary, and the daemon
+	// would refuse on its next boot the exact endpoint this launch was just permitted
+	// to use — an env-set authorization already survives via os.Environ() above, so
+	// this only matters for the flag form, but both must resolve identically here.
+	if cfg.AllowInsecureBackend {
+		env = append(env, "DAINTREE_ALLOW_INSECURE_BACKEND=1")
+	}
 	if cfg.APIKey != "" {
 		env = append(env, "DAINTREE_API_KEY="+cfg.APIKey)
 	}
