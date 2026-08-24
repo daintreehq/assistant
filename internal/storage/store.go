@@ -155,9 +155,19 @@ func Open(dbPath string, opts *Options) (*Store, error) {
 
 	s := &Store{db: db, now: nowFn, retention: ret}
 
-	if err := s.applyPragmas(); err != nil {
+	// busy_timeout only, here: it is connection-scoped and covers the user_version
+	// read below against a momentarily locked WAL file. The pragmas that DO rewrite
+	// the file's on-disk format (journal_mode's DELETE→WAL transition) wait until
+	// applySchema has confirmed the version gate — a stale or too-new database gets
+	// no DDL and no schema-level write from THIS code, rather than being refused a
+	// DDL exec after already having had its journal mode flipped underneath it. This
+	// is a guarantee about application-level writes, not an absolute one about every
+	// byte SQLite's own connection/pager machinery might touch (a hot-journal
+	// recovery, or a WAL checkpoint on close) — those are the engine's own format
+	// housekeeping, not the schema-write hazard this gate exists to prevent.
+	if _, err := db.Exec(fmt.Sprintf("PRAGMA busy_timeout = %d", busyTimeoutMS)); err != nil {
 		_ = db.Close()
-		return nil, err
+		return nil, fmt.Errorf("pragma busy_timeout: %w", err)
 	}
 	if err := s.applySchema(); err != nil {
 		_ = db.Close()
@@ -205,11 +215,12 @@ func OpenReadOnly(dbPath string) (*Store, error) {
 	return s, nil
 }
 
-// applyPragmas runs the three connection PRAGMAs in order; busy_timeout first so
-// it covers the WAL write lock on a fresh file.
-func (s *Store) applyPragmas() error {
+// applyWriteOrientedPragmas runs the two connection PRAGMAs that mutate the file
+// (journal_mode's DELETE→WAL transition rewrites the header) or would otherwise be
+// pointless to apply before knowing whether this open is even going to proceed.
+// Called from applySchema, AFTER the version gate — see its comment for why.
+func (s *Store) applyWriteOrientedPragmas() error {
 	stmts := []string{
-		fmt.Sprintf("PRAGMA busy_timeout = %d", busyTimeoutMS),
 		"PRAGMA journal_mode = WAL",
 		"PRAGMA foreign_keys = ON",
 	}
@@ -226,15 +237,24 @@ func (s *Store) applyPragmas() error {
 // hard-resets on a schema change rather than chaining.
 //
 // CRUCIALLY, the version is read FIRST — before any DDL runs — so a file at an OLDER
-// baseline is rejected with a typed *SchemaStaleError BEFORE the current-shape DDL can
-// trip on the old table shape. (e.g. a pre-v5 `memories` table lacks `expiresAt`, so
-// `CREATE INDEX … ON memories(expiresAt)` in schema.sql would fail with a cryptic "no
-// such column" — masking the stale baseline and defeating the caller's graceful reset,
-// which keys on errors.As(err, &SchemaStaleError).) Order:
+// OR NEWER baseline is rejected with a typed error BEFORE any DDL/write can touch it.
+// For the older case that matters because the current-shape DDL can trip on the old
+// table shape (e.g. a pre-v5 `memories` table lacks `expiresAt`, so `CREATE INDEX …
+// ON memories(expiresAt)` in schema.sql would fail with a cryptic "no such column" —
+// masking the stale baseline and defeating the caller's graceful reset, which keys on
+// errors.As(err, &SchemaStaleError)). For the newer case it matters more: an older
+// binary does not know what a newer schema changed, and "harmless" IF NOT EXISTS DDL
+// is not the risk — the WRITES this binary would go on to make are (wrong invariants,
+// misread enum/status values, columns the newer code requires that this binary never
+// populates). Duplicate binaries on PATH silently selecting an older build is an
+// explicitly recognized failure mode in this project, which is exactly the scenario
+// that puts an old binary in front of a database a newer one already upgraded. Order:
 //   - v in (0, schemaUserVersion): stale baseline → SchemaStaleError, NO DDL run.
 //   - v == 0: brand-new file → run the schema DDL (builds the whole shape), then stamp.
-//   - v >= schemaUserVersion: current (or newer, opened by older code) → run the
-//     idempotent IF NOT EXISTS DDL as a no-op safety net; leave the version untouched.
+//   - v > schemaUserVersion: newer baseline → SchemaTooNewError, NO DDL run, no
+//     schema-level write of any kind from this code.
+//   - v == schemaUserVersion: current → run the idempotent IF NOT EXISTS DDL as a
+//     no-op safety net; leave the version untouched.
 func (s *Store) applySchema() error {
 	v, err := s.userVersion()
 	if err != nil {
@@ -244,6 +264,18 @@ func (s *Store) applySchema() error {
 	// DDL so the loud, typed error (not a mid-DDL "no such column") reaches the caller.
 	if v != 0 && v < schemaUserVersion {
 		return &SchemaStaleError{Have: v, Want: schemaUserVersion}
+	}
+	// A version above the current baseline means a NEWER binary already upgraded this
+	// file — reject it before any DDL or write, the same way, for the opposite reason:
+	// there is nothing wrong with the file, everything wrong with running old code
+	// against it.
+	if v > schemaUserVersion {
+		return &SchemaTooNewError{Have: v, MaxSupported: schemaUserVersion}
+	}
+	// The gate passed: only now is it safe to apply the pragmas that rewrite the
+	// file (journal_mode chief among them) and run the DDL.
+	if err := s.applyWriteOrientedPragmas(); err != nil {
+		return err
 	}
 	if _, err := s.db.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("exec schema: %w", err)
@@ -282,6 +314,24 @@ func (e *SchemaStaleError) Error() string {
 	// Keep the actionable dev message verbatim: this is what surfaces when no caller
 	// offers a graceful reset (scripts, the host, a non-TTY launch).
 	return fmt.Sprintf("database schema is stale (version %d, current %d) — run 'make db-reset' to reset it (honours DAINTREE_ASSISTANT_STATE_DIR)", e.Have, e.Want)
+}
+
+// SchemaTooNewError reports that the on-disk DB was initialized at a NEWER schema
+// baseline than this build understands (Have > MaxSupported). Unlike a stale file,
+// this is never something to reset — the file is not behind, this binary is: a
+// duplicate older copy on PATH (an explicitly recognized failure mode in this
+// project) opening a database a newer install already upgraded. There is no
+// graceful recovery to offer here, only a refusal: update this binary. It is a
+// TYPED error, not a bare string, so a caller (doctor, the host's boot path) can
+// name the exact condition rather than pattern-matching a driver error string.
+type SchemaTooNewError struct {
+	Have         int // the user_version stamped on the file
+	MaxSupported int // schemaUserVersion this build understands
+}
+
+func (e *SchemaTooNewError) Error() string {
+	return fmt.Sprintf("database schema (version %d) is newer than this binary understands (max %d) — "+
+		"update daintree-assistant; if multiple copies are on PATH, `doctor` lists them", e.Have, e.MaxSupported)
 }
 
 // ResetDB deletes the SQLite database at dbPath together with its WAL/SHM sidecar

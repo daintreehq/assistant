@@ -299,7 +299,7 @@ func RenderCompatibilityManifest() string {
 	b.WriteString("| Surface | Version | Failure mode when it mismatches |\n|---|---|---|\n")
 	fmt.Fprintf(&b, "| Backend wire protocol | `%d` | backend answers HTTP 426; the turn cannot run |\n", backend.ProtocolVersion)
 	fmt.Fprintf(&b, "| Embedded host (`host --stdio`) NDJSON | `%d` | Daintree and the CLI disagree on the request envelope |\n", host.ProtocolVersion)
-	fmt.Fprintf(&b, "| SQLite state schema (`schemaUserVersion`) | `%d` | an OLDER non-zero on-disk schema is refused; an interactive launch then moves it aside to a timestamped backup and recreates it (a non-TTY launch fails loudly instead). A NEWER schema — an older CLI against a newer DB — is accepted as-is |\n", storage.SchemaVersion())
+	fmt.Fprintf(&b, "| SQLite state schema (`schemaUserVersion`) | `%d` | an OLDER non-zero on-disk schema is refused; an interactive launch then moves it aside to a timestamped backup and recreates it (a non-TTY launch fails loudly instead). A NEWER schema — an older CLI against a newer DB — is ALSO refused, with no reset offered: the file is not behind, this binary is |\n", storage.SchemaVersion())
 
 	b.WriteString("\n## Backend tasks this CLI will call\n\n")
 	b.WriteString("Every id here is one the CLI actually sends. A backend that does not advertise one\n")

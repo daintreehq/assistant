@@ -57,9 +57,11 @@ func TestCreateStaleSchemaBacksUpBeforeReset(t *testing.T) {
 	if !strings.Contains(gotBackup, ".bak-v1-") {
 		t.Errorf("backup path should carry the old version + timestamp, got %q", gotBackup)
 	}
-	// The backup IS the old database: still stamped with the stale baseline (the
-	// failed pre-backup Open may have touched the journal-mode header, so a
-	// byte-exact compare would be wrong — the schema stamp is the identity).
+	// The backup IS the old database: still stamped with the stale baseline. Checked
+	// via the schema stamp rather than a byte-exact compare — Open's version gate now
+	// runs before the journal-mode pragma, but SQLite's own connection-level pager
+	// mechanics (WAL checkpoint on close, hot-journal recovery) are a lower-level
+	// concern a byte compare would need to account for regardless.
 	raw, rerr := sql.Open("sqlite", gotBackup)
 	if rerr != nil {
 		t.Fatalf("open backup: %v", rerr)

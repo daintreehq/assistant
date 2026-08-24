@@ -3,6 +3,7 @@ package storage
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,6 +84,127 @@ func TestStaleOldShapedSchemaDetectedBeforeDDL(t *testing.T) {
 	}
 	if stale.Have != 4 {
 		t.Fatalf("want Have=4, got %d", stale.Have)
+	}
+}
+
+// stampFutureDB writes a fresh sqlite file at path stamped with a NEWER baseline
+// user_version (> schemaUserVersion) so a subsequent Open trips the too-new branch.
+// Returns the path for convenience.
+func stampFutureDB(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaUserVersion+1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// Doc finding ST-001, acceptance criteria: an older binary must refuse a newer
+// on-disk schema (typed error, no DDL run) rather than accepting it as-is — the
+// prior behavior. TestTooNewSchemaReturnsTypedError covers "v13 under v12: typed
+// too-new error"; TestTooNewSchemaLeavesDatabaseByteForByteUnchanged covers "no DDL
+// run" directly, by proving the file's bytes never move.
+func TestTooNewSchemaReturnsTypedError(t *testing.T) {
+	path := stampFutureDB(t, filepath.Join(t.TempDir(), "state.db"))
+
+	_, err := Open(path, &Options{Now: func() int64 { return 1 }})
+	var tooNew *SchemaTooNewError
+	if !errors.As(err, &tooNew) {
+		t.Fatalf("want *SchemaTooNewError, got %T: %v", err, err)
+	}
+	if tooNew.Have != schemaUserVersion+1 || tooNew.MaxSupported != schemaUserVersion {
+		t.Fatalf("want Have=%d MaxSupported=%d, got Have=%d MaxSupported=%d",
+			schemaUserVersion+1, schemaUserVersion, tooNew.Have, tooNew.MaxSupported)
+	}
+	// The message stays actionable: update the binary, never "reset" (which would
+	// destroy state a newer, valid install already wrote).
+	if !strings.Contains(tooNew.Error(), "update") {
+		t.Fatalf("typed error message must point to updating the binary, got: %v", tooNew)
+	}
+}
+
+// TestTooNewSchemaLeavesDatabaseByteForByteUnchanged is the "no DDL run" half of
+// ST-001's acceptance criteria: an old binary opening a newer DB must run no
+// CREATE TABLE IF NOT EXISTS, no PRAGMA user_version write, no journal-mode
+// transition — nothing this code controls — because it does not know what
+// invariants the newer schema depends on. It regression-guards the exact bug this
+// test caught during development: Open used to apply the WAL journal-mode pragma
+// unconditionally BEFORE the version gate, so even a refused too-new open still
+// rewrote the file's on-disk format first. This is a guarantee about
+// APPLICATION-level writes; it does not (and cannot, from here) rule out SQLite's
+// own lower-level connection/pager mechanics — a hot-journal recovery or a WAL
+// checkpoint on close — which are the engine's own format housekeeping, not the
+// schema-write hazard this gate exists to prevent, and are exercised by a plain
+// DELETE-mode fixture (stampFutureDB) not at all.
+func TestTooNewSchemaLeavesDatabaseByteForByteUnchanged(t *testing.T) {
+	path := stampFutureDB(t, filepath.Join(t.TempDir(), "state.db"))
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Open(path, &Options{Now: func() int64 { return 1 }})
+	var tooNew *SchemaTooNewError
+	if !errors.As(err, &tooNew) {
+		t.Fatalf("want *SchemaTooNewError, got %T: %v", err, err)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("Open wrote to a too-new database — it must refuse before any DDL/write, not just report the error afterward")
+	}
+}
+
+// TestCurrentSchemaVersionOpensNormally is the middle case of ST-001's acceptance
+// criteria ("v12 under v12: opens normally") — the boundary right at
+// schemaUserVersion must not be misclassified as either stale or too-new.
+func TestCurrentSchemaVersionOpensNormally(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(schemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaUserVersion)); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path, &Options{Now: func() int64 { return 1 }})
+	if err != nil {
+		t.Fatalf("opening a DB already at the current schema version must succeed, got: %v", err)
+	}
+	defer s.Close()
+
+	// Deferring journal_mode/foreign_keys until after the version gate (see
+	// applyWriteOrientedPragmas) must not mean they silently stop landing on the
+	// normal-open path — only their TIMING moved, not whether they run.
+	var journalMode string
+	if err := s.DB().QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
+		t.Fatal(err)
+	}
+	if journalMode != "wal" {
+		t.Errorf("journal_mode = %q, want wal", journalMode)
+	}
+	var foreignKeys int
+	if err := s.DB().QueryRow("PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
+		t.Fatal(err)
+	}
+	if foreignKeys != 1 {
+		t.Errorf("foreign_keys = %d, want 1 (on)", foreignKeys)
 	}
 }
 
