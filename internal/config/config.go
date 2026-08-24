@@ -117,19 +117,24 @@ type AppConfig struct {
 	// backend.ValidatePlaintextRemote. Surfaced so doctor/host:ready/the support
 	// bundle can show the insecure state rather than leaving it silently in effect.
 	AllowInsecureBackend bool
-	// APIKey is an OPTIONAL caller-supplied bearer token, and is empty on virtually
-	// every install. The backend holds its own upstream credential and serves a
-	// request that carries no Authorization header at all, so the CLI neither asks
-	// for a key nor stores one — there is no sign-in to be signed out of.
+	// APIKey is a DEPRECATED caller-supplied bearer token, empty on virtually every
+	// install.
 	//
-	// The field survives because the backend still PREFERS a caller-supplied key
-	// over its own when one arrives, and Daintree's account login is being built
-	// into exactly that seam. Keeping it live (and keeping the header, the shape
-	// check and ScrubKey with it) makes per-account credentials a value flowing
-	// through existing plumbing rather than new plumbing. Trusted env only: it is
-	// spendable, so a bound project's .env must be able neither to supply nor to
-	// read it.
+	// It is no longer described as "the key that funds a turn", because that is no
+	// longer what a credential means here. Account sign-in (internal/auth) is the
+	// supported path: it identifies a PERSON and their plan, where this identifies
+	// nothing and simply overrides. The two cannot both be right about who is calling,
+	// so this one is on its way out — see APIKeyDeprecated, which callers surface.
+	//
+	// It stays readable for now so an existing harness does not break in the same
+	// release that introduces the replacement. Trusted env only, as before: it is
+	// spendable, so a bound project's .env must be able neither to supply nor read it.
 	APIKey string
+	// APIKeyDeprecated reports that a deprecated caller key is in play, so `doctor`,
+	// `auth status` and the support bundle can say so. It is surfaced rather than
+	// warned about at load time because config loading happens on every invocation,
+	// including ones with no output channel at all.
+	APIKeyDeprecated bool
 
 	Tier        domain.Tier
 	AutoApprove bool
@@ -501,6 +506,7 @@ func loadConfig(overrides ConfigOverrides, ensureStateDir bool) (AppConfig, erro
 		if err := backend.ValidateKeyShape(cfg.APIKey); err != nil {
 			return AppConfig{}, fmt.Errorf("DAINTREE_API_KEY: %w", err)
 		}
+		cfg.APIKeyDeprecated = true
 	}
 
 	// logDir (trusted/override → ~/.daintree/logs); always absolute. GLOBAL.

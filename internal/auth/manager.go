@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/redact"
 )
 
 // manager.go is the public orchestration: login, refresh, logout, status.
@@ -232,8 +233,44 @@ func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 	if cur.AccessToken != "" && !cur.NeedsRefresh(m.now()) {
 		return cur.AccessToken, nil
 	}
+
+	// Has this machine EVER signed in? The descriptor is written at login and removed at
+	// logout, so its absence is a definitive local "no" — and answering it here costs one
+	// stat instead of a discovery round trip.
+	//
+	// Without this short-circuit the signed-out path — which is every install today —
+	// would try to fetch the auth manifest before every single request, fail (an older
+	// backend does not serve one), and abort the call. A user who has never signed in
+	// would find the assistant unable to reach a backend that was perfectly willing to
+	// serve them anonymously.
+	if _, everSignedIn := loadKeyRef(m.authDir); !everSignedIn {
+		m.mu.Lock()
+		if m.state == StateUnknown {
+			m.state = StateSignedOut
+		}
+		m.mu.Unlock()
+		return "", nil
+	}
+
 	set, err := m.refresh(ctx)
 	if err != nil {
+		// NOT SIGNED IN IS NOT AN ERROR HERE. It means "send no Authorization header",
+		// which is exactly what the backend's open door expects today and what every
+		// existing install does.
+		//
+		// Returning an error instead would abort the request in setHeaders — so on a
+		// machine that has simply never signed in, every protected call would fail
+		// locally and never reach the backend at all. The backend is the authority on
+		// whether anonymous access is allowed; when it stops allowing it, it answers 401
+		// with an account code and the retry ladder handles that. Deciding here would
+		// take that call away from it.
+		//
+		// A real fault — a locked keychain, a refresh that could not complete — still
+		// fails loudly, because proceeding anonymously there would silently downgrade a
+		// session the user believes they have.
+		if CodeOf(err) == CodeNotSignedIn {
+			return "", nil
+		}
 		return "", err
 	}
 	return set.AccessToken, nil
@@ -325,6 +362,7 @@ func (m *Manager) refresh(ctx context.Context) (TokenSet, error) {
 		return TokenSet{}, wrapError(CodeStorageUnavailable, "could not read the stored session", err)
 	}
 
+	redact.RegisterSecret(stored.RefreshToken)
 	m.setState(StateRefreshing)
 	set, err := m.tokens.Refresh(ctx, man, stored.RefreshToken)
 	if err != nil {
@@ -341,14 +379,19 @@ func (m *Manager) refresh(ctx context.Context) (TokenSet, error) {
 			// credential that the next launch will try and fail on; a failed bump leaves
 			// other processes still using a session that is gone. Both are worth saying
 			// out loud, because the user's next action differs.
-			revoked := newError(CodeNotSignedIn, "the session is no longer valid").
+			// CodeSessionRevoked, never CodeNotSignedIn: AccessToken deliberately
+			// swallows the latter as "send no header", and a revocation swallowed that
+			// way would silently downgrade the user to anonymous requests instead of
+			// telling them their session ended.
+			revoked := newError(CodeSessionRevoked, "the session is no longer valid").
 				withHint("Sign in again with `daintree-assistant auth login`.")
+			_ = forgetKeyRef(m.authDir)
 			if delErr := store.Delete(ctx, key); delErr != nil && !errors.Is(delErr, ErrNotFound) {
 				revoked = wrapError(CodeStorageUnavailable,
 					"the session is no longer valid, and the stored credential could not be removed", delErr).
 					withHint("Remove the Daintree Assistant entry from your keychain manually.")
 			} else if bumpErr := m.revision.Bump(ctx); bumpErr != nil {
-				revoked = wrapError(CodeNotSignedIn,
+				revoked = wrapError(CodeSessionRevoked,
 					"the session is no longer valid, but other Daintree processes could not be notified", bumpErr)
 			}
 			m.setState(StateRevoked)
@@ -377,6 +420,7 @@ func (m *Manager) refresh(ctx context.Context) (TokenSet, error) {
 		// token on every round trip. See revision.go.
 	}
 
+	registerSecrets(set)
 	m.mu.Lock()
 	m.access = set
 	m.lastErr = nil
@@ -387,6 +431,19 @@ func (m *Manager) refresh(ctx context.Context) (TokenSet, error) {
 	}
 	m.mu.Unlock()
 	return set, nil
+}
+
+// registerSecrets teaches the redactor about a live token set.
+//
+// The JWT access token is already covered by a SHAPE pattern in internal/redact, but a
+// Supabase refresh token is an opaque string with no distinctive shape at all — no
+// prefix, no length, no separator. Nothing pattern-based can ever match it, so exact
+// registration is the only thing that can keep it out of the debug log and the support
+// bundle. Registration is additive and permanent by design: a rotated token stays
+// registered, because a log line written under it is still on disk.
+func registerSecrets(set TokenSet) {
+	redact.RegisterSecret(set.AccessToken)
+	redact.RegisterSecret(set.RefreshToken)
 }
 
 // recordUnavailable records a dependency failure WITHOUT discarding credentials.
@@ -585,6 +642,7 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 	}
 	lock.release()
 
+	registerSecrets(set)
 	m.mu.Lock()
 	m.access = set
 	m.lastErr = nil
@@ -660,6 +718,54 @@ func (m *Manager) Logout(ctx context.Context) (revokedRemotely bool, err error) 
 	// so the honest answer is that only the local credential is gone. Callers surface
 	// that rather than implying the session was killed everywhere.
 	return false, delErr
+}
+
+// Hydrate loads the stored credential and settles the local state, WITHOUT contacting
+// the backend.
+//
+// It exists because Status is deliberately I/O-free, and a freshly-constructed Manager in
+// a new process therefore knows nothing: `auth status` right after a successful login
+// would report "unknown". Hydrate is the explicit, bounded read that fills that gap — a
+// credential-store lookup and nothing more, so it stays answerable while the network is
+// down.
+//
+// It is separate from AccessToken because it must NOT refresh: someone asking about their
+// account should not spend a rotating one-time-use token to be told what it is.
+func (m *Manager) Hydrate(ctx context.Context) {
+	key, ok := m.currentKey(ctx)
+	if !ok {
+		m.mu.Lock()
+		if m.state == StateUnknown {
+			m.state = StateSignedOut
+		}
+		m.mu.Unlock()
+		return
+	}
+	store := m.ensureStore(ctx)
+	stored, err := store.Load(ctx, key)
+	switch {
+	case err == nil && stored.Valid():
+		redact.RegisterSecret(stored.RefreshToken)
+		m.mu.Lock()
+		if !m.state.SignedIn() {
+			// A stored credential proves a login exists; it proves nothing about the
+			// plan, which only the backend session endpoint can answer.
+			m.state = StateSignedInUnverified
+		}
+		m.mu.Unlock()
+	case errors.Is(err, ErrNotFound):
+		m.mu.Lock()
+		m.state = StateSignedOut
+		m.mu.Unlock()
+	case errors.Is(err, ErrStoreLocked), errors.Is(err, ErrStoreUnavailable):
+		// "We could not read it" is not "there is nothing there".
+		m.recordUnavailable(err)
+	case errors.Is(err, ErrStoreCorrupt):
+		m.mu.Lock()
+		m.lastErr = err
+		m.state = StateSignedOut
+		m.mu.Unlock()
+	}
 }
 
 // Revision exposes the shared marker, for the daemon's status and its stop-work check.

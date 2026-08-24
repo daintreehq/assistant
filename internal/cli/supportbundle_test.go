@@ -88,11 +88,11 @@ func TestSupportBundleKeepsDiagnosticMetadata(t *testing.T) {
 	}
 	env := bundleSection(t, files, "environment.json")
 
-	if env["apiKeyPresent"] != true {
-		t.Errorf("apiKeyPresent was lost or masked: %v", env["apiKeyPresent"])
+	if env["deprecatedApiKeyPresent"] != true {
+		t.Errorf("deprecatedApiKeyPresent was lost or masked: %v", env["deprecatedApiKeyPresent"])
 	}
-	if got, want := env["apiKeyLength"], float64(len(apiKey)); got != want {
-		t.Errorf("apiKeyLength = %v, want %v — this is how a truncated paste is diagnosed", got, want)
+	if got, want := env["deprecatedApiKeyLength"], float64(len(apiKey)); got != want {
+		t.Errorf("deprecatedApiKeyLength = %v, want %v — this is how a truncated paste is diagnosed", got, want)
 	}
 	if env["tier"] != "system" {
 		t.Errorf("tier was lost: %v", env["tier"])

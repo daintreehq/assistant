@@ -213,7 +213,10 @@ func (a *App) SetBackendURL(rawURL string) (string, error) {
 	// total keeps counting across the switch instead of resetting to zero.
 	cfg := a.snapshotConfig()
 	cfg.BackendURL = target
-	sw.Swap(backend.NewClient(backendClientConfig(cfg, a.CostLedger)))
+	// A new endpoint means a new credential key (see auth.CredentialKey), so the token
+	// source is rebuilt too — carrying the old one over would present a credential minted
+	// for one deployment to another.
+	sw.Swap(backend.NewClient(backendClientConfig(cfg, a.CostLedger, NewAccountTokenSource(cfg))))
 
 	a.cfgMu.Lock()
 	a.Config.BackendURL = target

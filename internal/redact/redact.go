@@ -225,8 +225,14 @@ func String(s string) string {
 	if s == "" {
 		return s
 	}
+	// The slice is COPIED under the lock, not aliased. RegisterSecret appends to and
+	// re-sorts this same backing array, so holding only a reference and iterating after
+	// unlocking races that sort: entries can move, and a value can be skipped entirely —
+	// which for this function means a live credential reaching a log. The copy is a few
+	// string headers on a path that already scans the whole input.
 	exact.RLock()
-	values := exact.values
+	values := make([]string, len(exact.values))
+	copy(values, exact.values)
 	exact.RUnlock()
 	for _, v := range values {
 		if strings.Contains(s, v) {

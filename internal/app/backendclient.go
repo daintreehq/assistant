@@ -4,6 +4,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/daintreehq/assistant/internal/auth"
 	"github.com/daintreehq/assistant/internal/backend"
 	"github.com/daintreehq/assistant/internal/config"
 	"github.com/daintreehq/assistant/internal/costledger"
@@ -26,7 +27,7 @@ import (
 // client makes. It stays a parameter rather than being read off the App so an unbilled
 // throwaway client — a probe that must not appear in the session's total — is built by
 // passing nil rather than by remembering to unhook something.
-func backendClientConfig(cfg config.AppConfig, ledger *costledger.Ledger) backend.ClientConfig {
+func backendClientConfig(cfg config.AppConfig, ledger *costledger.Ledger, tokenSource backend.TokenSource) backend.ClientConfig {
 	baseURL := strings.TrimSpace(cfg.BackendURL)
 	if baseURL == "" {
 		baseURL = backend.DefaultBaseURL
@@ -35,6 +36,15 @@ func backendClientConfig(cfg config.AppConfig, ledger *costledger.Ledger) backen
 	clientCfg := backend.ClientConfig{
 		BaseURL: baseURL,
 		APIKey:  cfg.APIKey,
+		// The account credential. Without this the whole sign-in feature is inert: a
+		// user runs `auth login`, it succeeds, and every subsequent turn still sends no
+		// Authorization header because the client fell back to NoTokenSource.
+		//
+		// It is skipped when the deprecated DAINTREE_API_KEY is set, because the two
+		// cannot both be right about who is calling and the client prefers TokenSource
+		// over APIKey. Silently overriding an explicit key would be the more surprising
+		// of the two — see the doctor warning, which tells the user the key is winning.
+		TokenSource: tokenSource,
 		ClientInfo: backend.ClientInfo{
 			Name:     "daintree-cli",
 			Platform: runtime.GOOS,
@@ -100,5 +110,29 @@ func backendClientConfig(cfg config.AppConfig, ledger *costledger.Ledger) backen
 // Listing what a backend can load is a question about the BACKEND, and it has to be
 // answerable while another assistant owns the project.
 func NewProbeBackendClient(cfg config.AppConfig) *backend.Client {
-	return backend.NewClient(backendClientConfig(cfg, nil))
+	return backend.NewClient(backendClientConfig(cfg, nil, nil))
+}
+
+// NewAccountTokenSource builds the account credential source for a resolved config, or
+// nil when the deprecated caller key is in play.
+//
+// Returning nil rather than an empty source is deliberate: NewClient prefers TokenSource
+// over APIKey, so handing back a source that yields "" would silently disable a key the
+// user explicitly exported, and they would have no way to tell why their override stopped
+// working.
+func NewAccountTokenSource(cfg config.AppConfig) backend.TokenSource {
+	if strings.TrimSpace(cfg.APIKey) != "" {
+		return nil
+	}
+	mgr, err := auth.NewManager(auth.Options{
+		StateRoot:  cfg.StateRoot,
+		BackendURL: cfg.BackendURL,
+	})
+	if err != nil {
+		// A manager that cannot be built means no auth directory, which is a broken
+		// state root — not a reason to refuse to start. The client falls back to sending
+		// no credential, exactly as it does for a signed-out user.
+		return nil
+	}
+	return mgr
 }

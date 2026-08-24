@@ -600,7 +600,7 @@ func Create(opts CreateOptions) (*App, error) {
 	if opts.BackendOverride != nil {
 		a.Backend = backend.NewSwappable(opts.BackendOverride)
 	} else {
-		a.Backend = backend.NewSwappable(backend.NewClient(backendClientConfig(cfg, a.CostLedger)))
+		a.Backend = backend.NewSwappable(backend.NewClient(backendClientConfig(cfg, a.CostLedger, NewAccountTokenSource(cfg))))
 	}
 	// The async coordinator is built BEFORE the tool registry (the asyncx family
 	// captures it) and started later, alongside the scheduler (StartScheduler).

@@ -81,7 +81,20 @@ const (
 	// login attempt itself did not produce credentials.
 	CodeRefreshFailed = "auth_refresh_failed"
 	// CodeNotSignedIn: an operation needing a credential was attempted without one.
+	//
+	// This is the ORDINARY signed-out state, and callers treat it as "send no
+	// credential" rather than as a failure — the backend's open door serves anonymous
+	// requests, and refusing to make one locally would break every install that has
+	// never signed in.
 	CodeNotSignedIn = "auth_not_signed_in"
+	// CodeSessionRevoked: a session that DID exist is gone — the provider rejected the
+	// grant, or a logout/disconnect happened elsewhere.
+	//
+	// It is separate from CodeNotSignedIn precisely because that one is swallowed. A
+	// revocation must not be: "you were signed in and no longer are" is actionable and
+	// completely different from "you have never signed in", and folding them together
+	// would turn a revoked session into a silent downgrade to anonymous requests.
+	CodeSessionRevoked = "auth_session_revoked_locally"
 	// CodeStorageUnavailable: no OS credential service, so a session cannot persist.
 	CodeStorageUnavailable = "auth_storage_unavailable"
 	// CodeLoginInProgress: another login attempt is already running.
@@ -142,6 +155,17 @@ func CodeOf(err error) string {
 	var ae *Error
 	if errors.As(err, &ae) && ae != nil {
 		return ae.Code
+	}
+	return ""
+}
+
+// HintOf returns the next action carried by err, or "" when there is none. Callers
+// render it under the message rather than inside it, so a hint can be omitted in a
+// machine-readable context without losing the error.
+func HintOf(err error) string {
+	var ae *Error
+	if errors.As(err, &ae) && ae != nil {
+		return ae.Hint
 	}
 	return ""
 }

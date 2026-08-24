@@ -1088,6 +1088,11 @@ func backendDoctorChecks(ctx context.Context, a *app.App) []DoctorCheck {
 		})
 	}
 
+	// The account row goes FIRST, before anything that can early-return on a network
+	// failure. It reads configuration only, and a row whose whole point is to work
+	// without the network must not vanish the moment the network is what broke.
+	out = append(out, accountDoctorCheck(a))
+
 	hctx, hcancel := context.WithTimeout(ctx, 3*time.Second)
 	herr := a.Backend.Health(hctx)
 	hcancel()
@@ -1114,6 +1119,34 @@ func backendDoctorChecks(ctx context.Context, a *app.App) []DoctorCheck {
 	out = append(out, verifyCredentialDoctorCheck(ctx, a, base))
 	out = append(out, taskManifestDoctorCheck(ctx, a))
 	return out
+}
+
+// accountDoctorCheck reports the ACCOUNT posture — who this install signs in as.
+//
+// It reads configuration only and performs no I/O, which is deliberate: doctor is what
+// someone runs when things are broken, and a row that itself needs the network would go
+// unknown exactly when it is most needed. The live session check belongs to
+// `auth status`, which is allowed to be slow.
+//
+// The one thing it does flag is a set DAINTREE_API_KEY. That variable is deprecated and
+// overrides account identity for the request, so an install with both a sign-in and a
+// key is one where the key silently wins — and the person reading a support bundle needs
+// to know that before anything else they see makes sense.
+func accountDoctorCheck(a *app.App) DoctorCheck {
+	c := DoctorCheck{ID: "auth.account", Label: "account"}
+	if a.Config.APIKeyDeprecated {
+		c.Status = StatusWarn
+		// Deliberately not naming only DAINTREE_API_KEY: --api-key-file sets the same
+		// value, so a reader told to unset an environment variable they never exported
+		// would go looking for something that is not there.
+		c.Detail = "a caller-supplied key (DAINTREE_API_KEY or --api-key-file) is overriding account sign-in"
+		c.Hint = "That override is deprecated. Remove it and use `daintree-assistant auth login`."
+		c.Data = map[string]any{"deprecatedApiKey": true}
+		return c
+	}
+	c.Status = StatusOK
+	c.Detail = "account sign-in (run `daintree-assistant auth status` for details)"
+	return c
 }
 
 // verifyCredentialDoctorCheck asks whether the backend can actually spend a credential —

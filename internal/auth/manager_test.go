@@ -165,6 +165,11 @@ func storedFor(t *testing.T, m *Manager, p *idp, store Store, refresh string) Cr
 	}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
+	// A real login also records the descriptor; AccessToken uses its presence as the
+	// cheap "has this machine ever signed in?" answer.
+	if err := saveKeyRef(m.AuthDirPath(), key); err != nil {
+		t.Fatalf("saveKeyRef: %v", err)
+	}
 	return key
 }
 
@@ -198,13 +203,108 @@ func TestAccessTokenRefreshesFromAStoredSession(t *testing.T) {
 	}
 }
 
-func TestNoStoredSessionReportsNotSignedIn(t *testing.T) {
+// Signed out means "send no Authorization header", NOT an error.
+//
+// This is the contract that keeps the current open-door backend working. Returning an
+// error here aborts the request inside setHeaders, so a machine that has simply never
+// signed in could not reach a backend that was perfectly willing to serve it
+// anonymously. The backend decides whether anonymous access is allowed; when it stops
+// allowing it, it answers 401 with an account code.
+func TestBeingSignedOutSendsNoHeaderRatherThanFailing(t *testing.T) {
 	p := newIDP(t)
 	m := newManager(t, p, NewMemoryStore())
-	_, err := m.AccessToken(context.Background())
-	if CodeOf(err) != CodeNotSignedIn {
-		t.Fatalf("code = %q, want %q", CodeOf(err), CodeNotSignedIn)
+	tok, err := m.AccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("a signed-out AccessToken failed: %v — every request would abort locally", err)
 	}
+	if tok != "" {
+		t.Fatalf("token = %q, want empty", tok)
+	}
+	if m.State() != StateSignedOut {
+		t.Fatalf("state = %q, want signed_out", m.State())
+	}
+}
+
+// ...and it must cost nothing. Discovery on every request would make the signed-out path
+// — which is every install today — depend on a backend endpoint older deployments do not
+// even serve.
+func TestTheSignedOutPathMakesNoNetworkCall(t *testing.T) {
+	p := newIDP(t)
+	m := newManager(t, p, NewMemoryStore())
+	p.srv.Close() // nothing is reachable
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.AccessToken(context.Background())
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("signed-out AccessToken failed with the backend down: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("signed-out AccessToken tried to reach the network")
+	}
+}
+
+// A REAL fault must still fail loudly — proceeding anonymously would silently downgrade
+// a session the user believes they have.
+func TestALockedCredentialStoreStillFails(t *testing.T) {
+	p := newIDP(t)
+	store := &lockedStore{}
+	m := newManager(t, p, store)
+	man, err := m.Manifest(context.Background())
+	if err != nil {
+		t.Fatalf("Manifest: %v", err)
+	}
+	if err := saveKeyRef(m.AuthDirPath(), m.key(man)); err != nil {
+		t.Fatalf("saveKeyRef: %v", err)
+	}
+	if _, err := m.AccessToken(context.Background()); err == nil {
+		t.Fatal("a locked credential store produced an anonymous request instead of an error")
+	}
+}
+
+// lockedStore refuses every read, as a locked keychain does.
+type lockedStore struct{}
+
+func (lockedStore) Load(context.Context, CredentialKey) (StoredSession, error) {
+	return StoredSession{}, ErrStoreLocked
+}
+func (lockedStore) Save(context.Context, CredentialKey, StoredSession) error { return ErrStoreLocked }
+func (lockedStore) Delete(context.Context, CredentialKey) error              { return nil }
+func (lockedStore) Tier(context.Context) StorageTier                         { return TierUnavailable }
+
+// Hydrate is what makes `auth status` able to answer at all: Status is I/O-free by
+// design, so a manager freshly built in a new process starts at unknown.
+func TestHydrateSettlesStateFromTheStoredCredential(t *testing.T) {
+	p := newIDP(t)
+	store := NewMemoryStore()
+	m := newManager(t, p, store)
+	storedFor(t, m, p, store, "refresh-seed")
+
+	fresh, err := NewManager(Options{StateRoot: m.stateRoot, BackendURL: p.srv.URL, Store: store, Opener: NoOpener{}})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if fresh.State() != StateUnknown {
+		t.Fatalf("a new manager started at %q, want unknown", fresh.State())
+	}
+	fresh.Hydrate(context.Background())
+	if !fresh.State().SignedIn() {
+		t.Fatalf("state after Hydrate = %q — `auth status` would report unknown right after a login", fresh.State())
+	}
+	// It must NOT refresh: asking about an account should not spend a one-time-use token.
+	if p.refreshCalls.Load() != 0 {
+		t.Fatalf("Hydrate performed %d refreshes", p.refreshCalls.Load())
+	}
+}
+
+func TestHydrateReportsSignedOutWithNoCredential(t *testing.T) {
+	p := newIDP(t)
+	m := newManager(t, p, NewMemoryStore())
+	m.Hydrate(context.Background())
 	if m.State() != StateSignedOut {
 		t.Fatalf("state = %q, want signed_out", m.State())
 	}
@@ -336,7 +436,7 @@ func TestAnInvalidGrantDeletesTheCredential(t *testing.T) {
 		t.Fatal("expected a failure")
 	}
 	if _, err := store.Load(context.Background(), key); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Load after invalid_grant = %v, want ErrNotFound", err)
+		t.Fatalf("Load after invalid_grant = %v, want ErrNotFound — the dead credential survived", err)
 	}
 	if m.State() != StateRevoked {
 		t.Fatalf("state = %q, want revoked", m.State())
@@ -780,8 +880,12 @@ func TestALogoutStillReachesAnotherProcess(t *testing.T) {
 	if _, err := terminal.Logout(context.Background()); err != nil {
 		t.Fatalf("Logout: %v", err)
 	}
-	if _, err := daemon.AccessToken(context.Background()); err == nil {
-		t.Fatal("the daemon kept working after a logout elsewhere — it would keep spending")
+	// The daemon must stop presenting the old token. It reports signed out rather than
+	// failing, which is the correct anonymous-request contract — what matters is that the
+	// cached credential is gone.
+	tok, err := daemon.AccessToken(context.Background())
+	if err == nil && tok != "" {
+		t.Fatal("the daemon kept using its cached token after a logout elsewhere — it would keep spending")
 	}
 }
 

@@ -85,6 +85,8 @@ func main() {
 		code = cli.RunSupportBundle(ctx, opts, parsed.SupportBundle)
 	case routeListRunbooks:
 		code = cli.RunListRunbooks(ctx, opts)
+	case routeAuth:
+		code = cli.RunAuth(ctx, opts, parsed.Auth)
 	default:
 		code = cli.Run(ctx, opts)
 	}
@@ -107,6 +109,7 @@ const (
 	routeReset
 	routeSupportBundle
 	routeListRunbooks
+	routeAuth
 )
 
 // parsedArgs is the pure result of command-line parsing. main is the only place
@@ -122,6 +125,8 @@ type parsedArgs struct {
 	ResetOptions cli.ResetOptions
 	// SupportBundle carries the `support-bundle` subcommand's arguments.
 	SupportBundle cli.SupportBundleOptions
+	// Auth carries the `auth <action>` subcommand's arguments.
+	Auth cli.AuthOptions
 }
 
 // parseArgs parses the CLI surface while preserving two useful properties that
@@ -140,7 +145,7 @@ func parseArgs(args []string) (parsedArgs, error) {
 	// scope a flag against. Refusing help because of a misplaced flag would withhold the
 	// one output that explains where the flag belongs.
 	if !parsed.Help && !parsed.Version {
-		if err := checkRouteScopedFlags(fs, parsed.Route); err != nil {
+		if err := checkRouteScopedFlags(fs, parsed); err != nil {
 			return parsedArgs{}, err
 		}
 	}
@@ -211,6 +216,12 @@ func parseArgsInto(args []string) (parsedArgs, *flag.FlagSet, error) {
 		// consulted on the reset route, like every other subcommand-specific option.
 		yes      = fs.Bool("yes", false, "")
 		noBackup = fs.Bool("no-backup", false, "")
+		// `auth` flags. --no-open prints the sign-in URL instead of launching a browser
+		// (for an SSH session whose browser lives elsewhere); --refresh forces a fresh
+		// session check rather than trusting cached entitlement, which is what someone
+		// reaches for immediately after completing a checkout.
+		authNoOpen  = fs.Bool("no-open", false, "")
+		authRefresh = fs.Bool("refresh", false, "")
 		// `support-bundle` flags.
 		bundleOut   = fs.String("out", "", "")
 		bundleAudit = fs.Bool("include-audit", false, "")
@@ -376,6 +387,33 @@ func parseArgsInto(args []string) (parsedArgs, *flag.FlagSet, error) {
 		parsed.Route = routeListRunbooks
 		return parsed, fs, nil
 	}
+	// `auth <action> --json` is carved out here for the same reason `doctor --json` is,
+	// and for this command it is not optional. Daintree's account UI drives
+	// `auth status --json` and `auth login --json` as its ONLY way of reading account
+	// state, so if --json left "auth" as a prompt the desktop would silently start
+	// running the word "auth" as a conversation turn — spending money to produce prose
+	// where a machine-readable status was expected.
+	if len(positionals) >= 1 && positionals[0] == "auth" && !forcePrompt {
+		if *stdio {
+			return parsedArgs{}, nil, stdioRequiresHostError()
+		}
+		if len(runbooks) > 0 {
+			return parsedArgs{}, nil, errors.New("--runbook has no effect on \"auth\", which never runs a turn")
+		}
+		if len(positionals) < 2 {
+			return parsedArgs{}, nil, fmt.Errorf("auth needs an action:\n%s", cli.AuthUsage())
+		}
+		if len(positionals) > 2 {
+			return parsedArgs{}, nil, fmt.Errorf("auth accepts one action, got: %s", strings.Join(positionals[1:], " "))
+		}
+		action, ok := cli.ParseAuthAction(positionals[1])
+		if !ok {
+			return parsedArgs{}, nil, fmt.Errorf("unknown auth action %q:\n%s", positionals[1], cli.AuthUsage())
+		}
+		parsed.Route = routeAuth
+		parsed.Auth = cli.AuthOptions{Action: action, NoOpen: *authNoOpen, Refresh: *authRefresh, Yes: *yes}
+		return parsed, fs, nil
+	}
 	// `doctor --json` is a real thing: doctor is the release gate, and a gate that can
 	// only be read by a human is not one. It is carved out BEFORE the --json rule below
 	// because that rule exists to keep a PROMPT named "doctor" working — and `-- doctor`
@@ -502,10 +540,33 @@ func parseArgsInto(args []string) (parsedArgs, *flag.FlagSet, error) {
 // to make a deliberate decision about whether the agent on the other end of the pipe may
 // approve mutations, and a flag that quietly does nothing looks exactly like one that
 // worked. Say so at the argument boundary.
-func checkRouteScopedFlags(fs *flag.FlagSet, route route) error {
+func checkRouteScopedFlags(fs *flag.FlagSet, parsed parsedArgs) error {
+	route := parsed.Route
 	if flagWasSet(fs, "allow-delegated-approvals") && route != routeMCP {
 		return errors.New("--allow-delegated-approvals only applies to \"mcp --stdio\", " +
 			"where the caller is another agent; it has no meaning on any other route")
+	}
+	// The auth flags follow the same rule for the same reason. --no-open in particular
+	// is a deliberate decision ("do not launch a browser, print the URL instead"), and
+	// accepting it on `reset` or on a prompt — where it does nothing at all — is
+	// indistinguishable from it having worked.
+	if flagWasSet(fs, "no-open") {
+		if route != routeAuth || parsed.Auth.Action != cli.AuthLogin {
+			return errors.New("--no-open only applies to \"auth login\"; it decides whether a browser is launched")
+		}
+	}
+	if flagWasSet(fs, "refresh") {
+		if route != routeAuth || parsed.Auth.Action != cli.AuthStatus {
+			return errors.New("--refresh only applies to \"auth status\"; it forces a live session check")
+		}
+	}
+	// --yes already means "skip the confirmation" on reset; auth disconnect is the second
+	// command with an irreversible-for-other-devices confirmation, so it shares the flag.
+	if flagWasSet(fs, "yes") {
+		okAuth := route == routeAuth && parsed.Auth.Action == cli.AuthDisconnect
+		if route != routeReset && !okAuth {
+			return errors.New("--yes only applies to \"reset\" and \"auth disconnect\", the commands that ask for confirmation")
+		}
 	}
 	return nil
 }
@@ -648,6 +709,8 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "  host [--stdio]      serve embedded-host NDJSON over stdio")
 	fmt.Fprintln(w, "  mcp [--stdio]       serve the assistant AS an MCP server, for another agent to drive")
 	fmt.Fprintln(w, "  support-bundle      write a redacted diagnostics archive to send to a maintainer")
+	fmt.Fprintln(w, "  auth <action>       sign in, check your account, or sign out")
+	fmt.Fprintln(w, "                      (login | status | logout | disconnect)")
 	fmt.Fprint(w, cli.ResetUsage())
 	fmt.Fprintln(w, "\nOptions:")
 	fmt.Fprintln(w, "  --project PATH      project root (default: current directory)")
@@ -660,7 +723,8 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "  --backend-url URL   assistant backend (env: DAINTREE_BACKEND_URL)")
 	fmt.Fprintln(w, "  --allow-insecure-backend  allow a non-loopback backend over plain HTTP")
 	fmt.Fprintln(w, "                      (env: DAINTREE_ALLOW_INSECURE_BACKEND)")
-	fmt.Fprintln(w, "  --api-key-file PATH read the API key from a file (env: DAINTREE_API_KEY)")
+	fmt.Fprintln(w, "  --api-key-file PATH DEPRECATED bearer override (env: DAINTREE_API_KEY);")
+	fmt.Fprintln(w, "                      use `auth login` instead — this will be removed")
 	fmt.Fprintln(w, "  --prompt-file PATH  read the one-shot prompt from a file ('-' for stdin)")
 	fmt.Fprintln(w, "  --multi-turn        run one prompt per stdin line as a conversation in one")
 	fmt.Fprintln(w, "                      session, all of it one JSONL transcript (requires --json)")
@@ -680,7 +744,9 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "                      before exiting (requires --timeout)")
 	fmt.Fprintln(w, "  --runbook ID          load this backend runbook on every turn (repeatable)")
 	fmt.Fprintln(w, "  --list-runbooks       print the runbooks this backend can load, and exit")
-	fmt.Fprintln(w, "  --yes               skip the reset confirmation (required without a TTY)")
+	fmt.Fprintln(w, "  --no-open           auth login: print the sign-in URL instead of opening a browser")
+	fmt.Fprintln(w, "  --refresh           auth status: force a live session check (after a checkout)")
+	fmt.Fprintln(w, "  --yes               skip a confirmation (reset, auth disconnect; required without a TTY)")
 	fmt.Fprintln(w, "  --no-backup         skip the reset's timestamped backup")
 	fmt.Fprintln(w, "  --out PATH          support-bundle destination")
 	fmt.Fprintln(w, "  --include-audit     add recent tool names + outcomes to the support bundle")

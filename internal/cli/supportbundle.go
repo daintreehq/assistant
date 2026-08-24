@@ -198,11 +198,13 @@ func collectSupportBundle(ctx context.Context, opts Options, cfg config.AppConfi
 		"projectPath":          cfg.ProjectPath,
 		"hasProjectId":         cfg.ProjectID != "",
 		"hasWindowId":          cfg.WindowID != "",
-		"apiKeyPresent":        strings.TrimSpace(cfg.APIKey) != "",
-		"apiKeyLength":         len(strings.TrimSpace(cfg.APIKey)),
-		"mcpUrlPresent":        strings.TrimSpace(cfg.McpURL) != "",
-		"mcpTokenPresent":      strings.TrimSpace(cfg.McpToken) != "",
-		"mcpTokenLength":       len(strings.TrimSpace(cfg.McpToken)),
+		// Presence and length only, and the name says DEPRECATED so a maintainer reading
+		// a bundle knows a set value is a finding rather than a normal install.
+		"deprecatedApiKeyPresent": strings.TrimSpace(cfg.APIKey) != "",
+		"deprecatedApiKeyLength":  len(strings.TrimSpace(cfg.APIKey)),
+		"mcpUrlPresent":           strings.TrimSpace(cfg.McpURL) != "",
+		"mcpTokenPresent":         strings.TrimSpace(cfg.McpToken) != "",
+		"mcpTokenLength":          len(strings.TrimSpace(cfg.McpToken)),
 		"hasProjectInstructions": func() bool {
 			return strings.TrimSpace(cfg.ProjectInstructions) != ""
 		}(),
