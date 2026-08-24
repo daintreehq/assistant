@@ -19,6 +19,29 @@ import (
 	"github.com/daintreehq/assistant/internal/tools"
 )
 
+// hostSchemaAutoReset authorises the stale-schema rebuild for the embedded host.
+//
+// Reported on STDERR rather than the wire: this runs inside app.Create, before the
+// session exists and therefore before any frame can be sequenced onto the protocol
+// stream — the same channel, and the same reason, as the pinned-runbook and
+// auto-approve notices below.
+func hostSchemaAutoReset(have, want int) (bool, error) {
+	fmt.Fprintf(os.Stderr,
+		"daintree-assistant host: local assistant database was from an older version "+
+			"(schema %d → %d) — resetting local state; your code and Daintree are untouched\n",
+		have, want)
+	return true, nil
+}
+
+// hostSchemaResetNotice names the backup once the stale database has been moved aside,
+// so the reset never reads as silent data loss.
+func hostSchemaResetNotice(backupPath string) {
+	if backupPath == "" {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "daintree-assistant host: previous state backed up to %s\n", backupPath)
+}
+
 // hostOverrides merges one boot descriptor onto the process-level overrides.
 //
 // The descriptor's cwd is the authoritative project path, and its DAINTREE.md content
@@ -91,6 +114,24 @@ func RunHost(ctx context.Context, opts Options) int {
 			Overrides:        overrides,
 			SessionID:        params.SessionID, // appSessionId: resume id when resuming
 			PinnedRunbookIDs: opts.PinnedRunbookIDs,
+			// The embedded host takes the SAME automatic stale-schema recovery the
+			// interactive terminal does (schemaAutoReset), and for the same reason: the
+			// pre-release policy hard-resets rather than migrates, so a stale on-disk
+			// baseline has exactly one sensible answer and it is always "yes".
+			//
+			// It was excluded before because the exclusion was written as "scripts /
+			// non-TTY", and the host is neither a TTY nor a script — it is THE product
+			// surface, driven by a GUI with a human in front of it. Leaving it on the
+			// loud-refusal branch meant every existing install died at boot the first
+			// time the schema moved, with `host:error` telling the user to run a
+			// Makefile target that does not exist in a Daintree install and no way
+			// forward from inside the app.
+			//
+			// Nothing is destroyed either way: app.Create MOVES the old database aside
+			// into a timestamped backup directory (BackupDB) and rebuilds, so the
+			// previous timers, watchers, memories and history stay on disk.
+			OnSchemaStale: hostSchemaAutoReset,
+			OnSchemaReset: hostSchemaResetNotice,
 		})
 		if err != nil {
 			own.Release()
