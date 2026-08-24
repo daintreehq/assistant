@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/asyncwork"
@@ -231,6 +232,18 @@ type App struct {
 	// while the splash handshake is still in flight and racing ahead with empty context.
 	mcpLifecycleMu          sync.Mutex
 	startupConnectAttempted bool // guarded by mcpLifecycleMu; cancelled launch attempts do not set it
+	// mcpEverConnected marks that THIS process has held a live MCP session at least
+	// once. It is the signal ensureStartupForTurn uses to tell "never connected, boot
+	// failed open, later turns stay fail-open by design" (this flag stays false) apart
+	// from "connected fine, then died mid-session" (this flag is true), which is a
+	// live turn's cue to attempt a bounded ReconnectMcp instead of silently running
+	// every remaining turn against a dead client. Guarded by mcpLifecycleMu.
+	mcpEverConnected bool
+	// lastMcpReconnectAttempt throttles that same turn-driven recovery to at most one
+	// bounded handshake per mcpTurnReconnectInterval while genuinely down, so a
+	// sustained outage costs one 8s-capped ReconnectMcp per interval rather than one
+	// per turn. Guarded by mcpLifecycleMu.
+	lastMcpReconnectAttempt time.Time
 	startupRefreshMu        sync.Mutex
 	startupMu               sync.RWMutex
 	cachedProject           *prompts.ProjectContext

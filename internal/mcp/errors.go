@@ -74,6 +74,13 @@ func SanitizeURL(raw string) string {
 	return u.String()
 }
 
+// httpAuthStatusRe matches a standalone 401/403 — an HTTP status code, not a digit
+// run that merely CONTAINS one. Word-boundaried so "127.0.0.1:54010" (a connection
+// -refused port, not a status) never matches: \b only fires at a transition between
+// a word character and a non-word one, and every digit is a word character, so "401"
+// embedded inside "54010" has a digit on both sides and no boundary either way.
+var httpAuthStatusRe = regexp.MustCompile(`\b40[13]\b`)
+
 // IsCredentialTerminalStatus reports whether a connection status/error string
 // marks this session's MCP credentials as PERMANENTLY dead: the per-session
 // bearer was revoked (401/unauthorized — Daintree rotates it on every
@@ -91,8 +98,8 @@ func IsCredentialTerminalStatus(errText string) bool {
 		return true
 	}
 	low := strings.ToLower(errText)
-	return strings.Contains(low, "401") || strings.Contains(low, "unauthorized") ||
-		strings.Contains(low, "unauthenticated") || strings.Contains(low, "403")
+	return httpAuthStatusRe.MatchString(low) || strings.Contains(low, "unauthorized") ||
+		strings.Contains(low, "unauthenticated")
 }
 
 // isUnavailable reports whether err is (or wraps) an UnavailableError. Callers use

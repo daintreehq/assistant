@@ -11,6 +11,15 @@ import (
 	"github.com/daintreehq/assistant/internal/prompts"
 )
 
+// mcpTurnReconnectInterval throttles ensureStartupForTurn's own mid-session recovery
+// attempt (see mcpEverConnected on App) to at most one bounded ReconnectMcp handshake
+// per interval, so a sustained outage costs one capped 8s connect attempt every 30s of
+// turns rather than one on every single turn. Mirrors the supervisor daemon's own
+// mcpReconnectEvery (internal/supervisor/runtime.go) in spirit — the two intervals need
+// not match exactly since the daemon and an attached session never run at once (see
+// CLAUDE.md "Single-owner, durable supervision").
+const mcpTurnReconnectInterval = 30 * time.Second
+
 // startupReadTimeout bounds every best-effort Daintree snapshot read. Use a plain
 // cancellation timer rather than context.WithTimeout: the shared MCP client treats
 // DeadlineExceeded as a transport failure, while Canceled is an intentional abort that
@@ -82,10 +91,16 @@ func (a *App) updateStartupContext(ctx context.Context, connected, force bool) {
 	a.startupMu.Unlock()
 }
 
-// ensureStartupForTurn joins the splash prefetch when it is still running, or performs
-// the same bounded discovery itself when no live boot attempt exists. Thus the first
-// backend request never races an empty boot cache merely because the user submitted
-// before Bubble Tea's bootstrap command completed.
+// ensureStartupForTurn joins the splash prefetch when it is still running, performs
+// the same bounded discovery itself when no live boot attempt exists, or recovers a
+// connection that was live earlier THIS process and has since died mid-session. Thus
+// the first backend request never races an empty boot cache merely because the user
+// submitted before the bootstrap command completed — and a turn hours into an attached
+// session, whose MCP session Daintree evicted out from under it, gets a real chance to
+// reconnect instead of running every remaining turn against a client that already knows
+// it is dead (the interactive host runs no background reconnect loop of its own — that
+// is the supervisor daemon's job, and the daemon does not run while a session is
+// attached, see CLAUDE.md "Single-owner, durable supervision").
 func (a *App) ensureStartupForTurn(ctx context.Context) {
 	// Taking the lifecycle gate first joins an in-flight splash/bootstrap connect. Read
 	// all gate state while holding it so a disconnected, already-attempted host fails open
@@ -94,15 +109,54 @@ func (a *App) ensureStartupForTurn(ctx context.Context) {
 	a.startupMu.RLock()
 	ready := a.startupReady
 	a.startupMu.RUnlock()
-	connected := a.MCP.Status().Connected
+	status := a.MCP.Status()
 	attempted := a.startupConnectAttempted
+	// A boot that never connected at all fails open PERMANENTLY by design — see
+	// ConnectMcp's own comment — because there is no evidence a retry would do
+	// anything a plain user-issued /reconnect couldn't. But a session that DID
+	// connect and has since gone quiet is different: credential revocation is the
+	// one terminal case (Daintree rotated/revoked the bearer; reconnecting with the
+	// same dead token would just fail again and risks tripping the host's abuse
+	// policy) — everything else is exactly the "gone mid-session, worth another
+	// try" case this exists for, throttled so a sustained outage cannot turn every
+	// turn into an 8s-capped handshake attempt.
+	shouldRetryDead := attempted &&
+		!status.Connected &&
+		a.mcpEverConnected &&
+		!mcp.IsCredentialTerminalStatus(status.Error) &&
+		time.Since(a.lastMcpReconnectAttempt) >= mcpTurnReconnectInterval
+	if shouldRetryDead {
+		// Stamped INSIDE the lock, before releasing it: two turns racing this check
+		// concurrently must not both pass the throttle and both fire a reconnect.
+		a.lastMcpReconnectAttempt = time.Now()
+	}
 	a.mcpLifecycleMu.Unlock()
-	if (ready && connected) || attempted {
+
+	if ready && status.Connected {
 		return
 	}
-	// The prior attempt was cancelled externally (or no boot path ran), so this live turn
-	// gets one bounded retry before the first backend request.
-	a.ConnectMcp(ctx)
+	if !attempted {
+		// The prior attempt was cancelled externally (or no boot path ran), so this
+		// live turn gets one bounded retry before the first backend request.
+		a.ConnectMcp(ctx)
+		return
+	}
+	if shouldRetryDead {
+		// Re-validate under the gate immediately before firing: a concurrent manual
+		// /reconnect or /doctor could have already re-established a fresh session in
+		// the window since this decision was made above. ReconnectMcp always tears
+		// down whatever session is live and re-handshakes UNCONDITIONALLY (that is
+		// what a forced reconnect means), so calling it onto a session someone else
+		// JUST fixed would undo their fix and pay a second needless handshake. A
+		// turn's own context dying in the same window makes the attempt pointless
+		// for the same reason ConnectMcp's cancelled-launch path already skips it.
+		a.mcpLifecycleMu.Lock()
+		stillDead := !a.MCP.Status().Connected
+		a.mcpLifecycleMu.Unlock()
+		if stillDead && ctx.Err() == nil {
+			a.ReconnectMcp(ctx)
+		}
+	}
 }
 
 // refreshCurrentWorktree re-reads the live renderer selection and publishes successful

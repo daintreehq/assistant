@@ -29,6 +29,13 @@ func (a *App) ConnectMcp(ctx context.Context) mcp.Status {
 	st := a.MCP.Connect(attemptCtx)
 	a.logMcpConnectDiagnostics(st)
 	a.warnOnDrift(st)
+	// Latched off st, NOT the post-discovery `final` below: ensureStartupContext runs
+	// real MCP reads next and can degrade the connection before `final` is sampled, and
+	// "this process held a live session at least once" is true the moment Connect
+	// itself succeeded — independent of whether the very next read happened to kill it.
+	if st.Connected {
+		a.mcpEverConnected = true
+	}
 	if st.Connected && !wasConnected && a.Session != nil {
 		// Warm the live-terminal inventory alongside the other splash reads so a fast
 		// first user turn does not have to start from an empty roster.
@@ -42,7 +49,8 @@ func (a *App) ConnectMcp(ctx context.Context) mcp.Status {
 	if ctx.Err() == nil {
 		// A normal completed/timeout attempt fails open permanently for ordinary turns;
 		// manual /reconnect owns later retries. An externally cancelled launch leaves this
-		// false so a later live bootstrap/turn can still retry once.
+		// false so a later live bootstrap/turn can still retry once. ensureStartupForTurn
+		// still recovers a LATER mid-session death via mcpEverConnected, above.
 		a.startupConnectAttempted = true
 	}
 	return final
@@ -58,6 +66,11 @@ func (a *App) ReconnectMcp(ctx context.Context) mcp.Status {
 	st := a.MCP.Reconnect(attemptCtx)
 	a.logMcpConnectDiagnostics(st)
 	a.warnOnDrift(st)
+	// Same reasoning as ConnectMcp above: latch off st, before refreshStartupContext
+	// gets a chance to degrade it again.
+	if st.Connected {
+		a.mcpEverConnected = true
+	}
 	if st.Connected && a.Session != nil {
 		a.Session.WarmOpenTerminals()
 	}

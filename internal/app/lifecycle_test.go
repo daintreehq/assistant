@@ -68,6 +68,102 @@ func TestEnsureStartupForTurnDoesNotRetryCompletedDegradedAttempt(t *testing.T) 
 	a.startupRefreshMu.Unlock()
 }
 
+// A turn whose MCP session was alive earlier THIS process, then died mid-session
+// (evicted/dropped — not a credential revocation), must get a real reconnect
+// attempt rather than running every remaining turn against a dead client. Proven
+// via the same startupRefreshMu trick as the completed-degraded-attempt test
+// above, inverted: ReconnectMcp's own refreshStartupContext call blocks on that
+// mutex, so a reconnect attempt is detected by the call BLOCKING rather than
+// fast-returning.
+func TestEnsureStartupForTurnReconnectsAfterMidSessionDeath(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+	a.mcpLifecycleMu.Lock()
+	a.startupConnectAttempted = true
+	a.mcpEverConnected = true
+	// lastMcpReconnectAttempt deliberately left at its zero value: the production
+	// code, not this test, must be the one that stamps it.
+	a.mcpLifecycleMu.Unlock()
+
+	a.startupRefreshMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		a.ensureStartupForTurn(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+		a.startupRefreshMu.Unlock()
+		t.Fatal("mid-session death did not trigger a reconnect attempt")
+	case <-time.After(100 * time.Millisecond):
+	}
+	a.startupRefreshMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reconnect attempt never completed after the refresh gate released")
+	}
+
+	// Proves the PRODUCTION code, not this test's setup, did the stamping: this
+	// test never wrote lastMcpReconnectAttempt itself, so a value here can only
+	// have come from ensureStartupForTurn's own throttle-stamp line.
+	a.mcpLifecycleMu.Lock()
+	stamped := a.lastMcpReconnectAttempt
+	a.mcpLifecycleMu.Unlock()
+	if stamped.IsZero() || time.Since(stamped) > 5*time.Second {
+		t.Fatalf("lastMcpReconnectAttempt = %v, want a recent stamp from ensureStartupForTurn itself", stamped)
+	}
+}
+
+// The negative half of the mcpEverConnected latch: a boot that ran through the REAL
+// ConnectMcp path but never actually connected (offline mode always fails to connect)
+// must leave the flag false, so ensureStartupForTurn's mid-session recovery never
+// fires for a session that was never live to begin with. Exercises the actual
+// lifecycle.go assignment rather than pre-seeding the field, unlike the tests above
+// (which have to pre-seed it — offline mode cannot reach a genuine successful
+// connect through the public API without a fake LowLevelClient).
+func TestConnectMcpOfflineNeverLatchesEverConnected(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+
+	a.ConnectMcp(context.Background())
+
+	a.mcpLifecycleMu.Lock()
+	everConnected := a.mcpEverConnected
+	a.mcpLifecycleMu.Unlock()
+	if everConnected {
+		t.Fatal("an offline connect attempt (which never actually connects) latched mcpEverConnected")
+	}
+}
+
+// The mid-session recovery above must not turn a sustained outage into an 8s-capped
+// reconnect handshake on EVERY turn — a recent attempt (within mcpTurnReconnectInterval)
+// must make this turn fail open immediately instead, exactly like the never-connected
+// case, so the cost is one handshake per interval rather than one per turn.
+func TestEnsureStartupForTurnThrottlesRepeatedReconnectAttempts(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+	a.mcpLifecycleMu.Lock()
+	a.startupConnectAttempted = true
+	a.mcpEverConnected = true
+	a.lastMcpReconnectAttempt = time.Now()
+	a.mcpLifecycleMu.Unlock()
+
+	a.startupRefreshMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		a.ensureStartupForTurn(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		a.startupRefreshMu.Unlock()
+		t.Fatal("a turn within the throttle window attempted another reconnect")
+	}
+	a.startupRefreshMu.Unlock()
+}
+
 func TestCanceledSplashAttemptRemainsRetryable(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
