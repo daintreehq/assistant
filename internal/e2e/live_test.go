@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // liveBackendURL is the LOCAL development backend the live test targets — pinned
@@ -170,8 +171,9 @@ func TestLiveBackendOneShot(t *testing.T) {
 	if last.Type != "result" {
 		t.Fatalf("last line type = %q, want result (types: %v)\nstderr:\n%s", last.Type, types, stderr.String())
 	}
-	if v, _ := last.raw["schemaVersion"].(float64); int(v) != 1 {
-		t.Errorf("result.schemaVersion = %v, want 1", last.raw["schemaVersion"])
+	if v, _ := last.raw["schemaVersion"].(float64); int(v) != domain.JSONOutputSchemaVersion {
+		t.Errorf("result.schemaVersion = %v, want %d",
+			last.raw["schemaVersion"], domain.JSONOutputSchemaVersion)
 	}
 	if s, _ := last.raw["status"].(string); s != "success" {
 		t.Errorf("result.status = %q, want success (stderr: %s)", s, stderr.String())

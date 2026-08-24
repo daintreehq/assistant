@@ -304,6 +304,12 @@ func (s *Sink) AssistantStart() {
 	s.emit("assistant:start", nil)
 }
 
+// AssistantPreamble is deliberately NOT recorded. This sink's content field is a
+// machine-readable RESULT, and the preview is provisional until `done` — the backend
+// client joins it onto the front of the final message, so AssistantEnd carries it
+// exactly once and a failed turn carries it not at all.
+func (s *Sink) AssistantPreamble(string) {}
+
 func (s *Sink) AssistantToken(token string) {
 	s.mu.Lock()
 	s.contentBuffer += token

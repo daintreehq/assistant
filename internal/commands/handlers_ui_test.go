@@ -617,21 +617,41 @@ func TestUIClearRejectedDuringActiveTurn(t *testing.T) {
 	}
 }
 
-// There is no /runbooks command. Backend runbook selection is prompt-assembly machinery the
-// user neither approves nor steers, so the CLI reports it nowhere — not in the transcript,
-// not behind a command (see agent.Session.emitRunbookLoads). The NAME is deliberately kept
-// free for future user-authored assistant runbooks, which are intent-driven and will want
-// it for list/create/edit. Pinned so it is not re-added out of reflex.
-func TestUIRunbooksCommandDoesNotExist(t *testing.T) {
+// There is no /skills command, and the name is RESERVED rather than merely unused: it is
+// held for future user-authored, project-level assistant skills — intent-driven things a
+// user writes and the model invokes, which will want it for list/create/edit.
+//
+// This reservation is why the protocol-3 rename stopped at the backend's vocabulary. What
+// the backend selects is a RUNBOOK — server-owned prompt-assembly machinery the user
+// neither approves nor steers — and renaming it is precisely what keeps "skill" free for
+// the other concept. A mechanical rename would have pointed this guard at /runbooks and
+// quietly dropped the reservation it exists to hold.
+func TestUISkillsCommandDoesNotExist(t *testing.T) {
 	a := newOfflineApp(t)
 	// An unrecognized command is still "handled" — as the Unknown-command card — so the
 	// assertion is on the TITLE, not on Handled.
+	if r := ui(a, "/skills"); r.Title != "Unknown command" {
+		t.Fatalf("/skills resolves to a real command — the name is reserved: %+v", r)
+	}
+	for _, c := range COMMAND_REGISTRY {
+		if c.Name == "skills" {
+			t.Fatalf("the skills command is in the registry — the name is reserved: %+v", c)
+		}
+	}
+}
+
+// And there is no /runbooks command either, for the separate reason that backend runbook
+// selection is machinery the user neither approves nor steers, so the CLI reports it
+// nowhere — not in the transcript, not behind a command (see agent.Session.emitRunbookLoads).
+// Pinned so it is not added out of reflex now that "runbook" is the active vocabulary.
+func TestUIRunbooksCommandDoesNotExist(t *testing.T) {
+	a := newOfflineApp(t)
 	if r := ui(a, "/runbooks"); r.Title != "Unknown command" {
-		t.Fatalf("/runbooks resolves to a real command again: %+v", r)
+		t.Fatalf("/runbooks resolves to a real command: %+v", r)
 	}
 	for _, c := range COMMAND_REGISTRY {
 		if c.Name == "runbooks" {
-			t.Fatalf("the runbooks command is back in the registry: %+v", c)
+			t.Fatalf("the runbooks command is in the registry: %+v", c)
 		}
 	}
 }

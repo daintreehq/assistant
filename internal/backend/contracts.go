@@ -898,6 +898,43 @@ type StreamCompactionBlock struct {
 	Content string `json:"content"`
 }
 
+// StreamPreamble is the `preamble` event: a short visible preview of the work about
+// to happen, written by a fast model while the executor request is still being
+// assembled. Emitted at most once per turn, after `meta` and before the executor
+// produces anything.
+//
+// It is its OWN event rather than a `delta`, and each reason is something that
+// breaks if it is folded in:
+//
+//   - It is PROVISIONAL. Nothing is committed to conversation history until the
+//     terminal `done`; a turn that dies mid-stream must leave no trace of it.
+//   - It is not the retry boundary. The client replays a failure that arrives
+//     before the first executor token, and preamble text is server-generated,
+//     idempotent intent — treating it as visible content would make every turn
+//     that showed one un-retryable for no reason. A replayed attempt sends a
+//     fresh preamble, which REPLACES the one on screen rather than appending.
+//   - Bare-intent detection reads executor output. A preamble announces intended
+//     work by design and would be a guaranteed false positive.
+//
+// The backend also appends these exact bytes to the executor's own input as its
+// prior assistant turn, so the visible text and the model's view of its last turn
+// are the same text. That is why the client commits ONE assistant message joining
+// preamble and executor content with a blank line: two messages would say the
+// conversation had a turn the executor never saw.
+//
+// Carries no provider or model identity: the product is Daintree.
+type StreamPreamble struct {
+	ID      string `json:"id"`
+	Content string `json:"content"`
+	// Provisional and CommitOn are decoded AND enforced: the parser drops any event
+	// that is not `true` / `"done"`. This client implements exactly one policy — hold
+	// it provisional, commit it on `done` — so a backend stating different terms is
+	// describing a contract we do not implement, and rendering the text anyway would
+	// show a preview under rules its sender never agreed to.
+	Provisional bool   `json:"provisional"`
+	CommitOn    string `json:"commit_on"`
+}
+
 // StreamCompaction is the `compaction` event: reconciled state standing in for old
 // history. Emitted at most once per turn, immediately BEFORE the terminal `done` and
 // never after it — `done` staying terminal is deliberate, because an SSE reader
@@ -1082,6 +1119,17 @@ type RespondResult struct {
 	// meant to be read together. nil when the attempt never reached the wire. See
 	// transport.go.
 	Transport *TransportMarks
+	// Preamble is the fast preview the user was shown before the executor answered,
+	// empty when the turn had none. Released under the SAME commit barrier as
+	// Compaction — meta seen and `done` reached — because that barrier IS the
+	// contract: the event says commit_on "done", so a stream that ended in an error
+	// must hand back nothing to commit.
+	//
+	// It is ALREADY joined onto the front of Message.Content, separated by a blank
+	// line, so every caller that commits or replays the assistant turn does the right
+	// thing without knowing this feature exists. The field is kept beside it so a
+	// caller that needs to tell the two halves apart still can.
+	Preamble string
 	// Compaction is the turn's compacted context block, when the backend sent one and
 	// the stream reached its terminal `done`. nil is the overwhelmingly common case —
 	// no compactor, no valid span, or a deployment that predates the feature.

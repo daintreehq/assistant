@@ -42,7 +42,7 @@ func TestErrorCarriesTheRequestIDFromAnHTTPFailure(t *testing.T) {
 func TestErrorCarriesTheRequestIDFromAMidStreamFailure(t *testing.T) {
 	body := strings.Join([]string{
 		`event: meta`,
-		`data: {"protocol_version":2,"request_id":"req_stream_1","model":"daintree-assistant","state":"dst1.test"}`,
+		`data: {"protocol_version":3,"request_id":"req_stream_1","model":"daintree-assistant","state":"dst1.test"}`,
 		``,
 		`event: error`,
 		`data: {"error":{"type":"api_error","code":"upstream_protocol_error","message":"malformed chunk"}}`,
@@ -82,7 +82,7 @@ func TestErrorCarriesTheRequestIDFromAMidStreamFailure(t *testing.T) {
 func TestDeterministicMidStreamFailureIsNotReplayed(t *testing.T) {
 	body := strings.Join([]string{
 		`event: meta`,
-		`data: {"protocol_version":2,"request_id":"req_1","model":"daintree-assistant","state":"dst1.test"}`,
+		`data: {"protocol_version":3,"request_id":"req_1","model":"daintree-assistant","state":"dst1.test"}`,
 		``,
 		`event: error`,
 		`data: {"error":{"type":"api_error","code":"upstream_no_compliant_provider","message":"no endpoint matched"}}`,
@@ -107,7 +107,7 @@ func TestDeterministicMidStreamFailureIsNotReplayed(t *testing.T) {
 func TestTransientMidStreamFailureIsStillReplayed(t *testing.T) {
 	fail := strings.Join([]string{
 		`event: meta`,
-		`data: {"protocol_version":2,"request_id":"req_1","model":"daintree-assistant","state":"dst1.test"}`,
+		`data: {"protocol_version":3,"request_id":"req_1","model":"daintree-assistant","state":"dst1.test"}`,
 		``,
 		`event: error`,
 		`data: {"error":{"type":"api_error","code":"upstream_unavailable","message":"provider down"}}`,
@@ -115,7 +115,7 @@ func TestTransientMidStreamFailureIsStillReplayed(t *testing.T) {
 	}, "\n")
 	succeed := strings.Join([]string{
 		`event: meta`,
-		`data: {"protocol_version":2,"request_id":"req_2","model":"daintree-assistant","state":"dst1.test"}`,
+		`data: {"protocol_version":3,"request_id":"req_2","model":"daintree-assistant","state":"dst1.test"}`,
 		``,
 		`event: delta`,
 		`data: {"content":"recovered"}`,

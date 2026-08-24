@@ -396,6 +396,7 @@ type throwingSink struct{}
 func (throwingSink) Phase(domain.RunPhase)                { panic("boom") }
 func (throwingSink) AssistantStart()                      { panic("boom") }
 func (throwingSink) AssistantToken(string)                { panic("boom") }
+func (throwingSink) AssistantPreamble(string)             { panic("boom") }
 func (throwingSink) AssistantEnd(string, string)          { panic("boom") }
 func (throwingSink) AssistantCancelled(string)            { panic("boom") }
 func (throwingSink) Interjection(string)                  { panic("boom") }
@@ -475,4 +476,46 @@ func equalInts(a, b []int) bool {
 		}
 	}
 	return true
+}
+
+// The durable journal must never record the fast preview. Both failures below were
+// real: the preview arrived as an AssistantToken, so `flushContent` promoted it into
+// a permanent `assistant:content` row — on the first executor token (via the runbook
+// decision that fires there) and again on an error.
+
+func TestRunEventSinkNeverRecordsThePreamble(t *testing.T) {
+	store := &fakeRunEventStore{}
+	ref := &RunIDRef{}
+	ref.Set("run_1")
+	sink := NewRunEventSink(store, ref)
+	sink.AssistantStart()
+	sink.AssistantPreamble("I'll check the failing test.")
+	// The runbook decision fires on the FIRST executor token and flushes buffered
+	// prose. With the preview on the token channel this wrote it out as a partial —
+	// which the joined assistant:end then repeated.
+	sink.RunbookDecision(RunbookDecisionEvent{})
+	sink.AssistantToken("The loader was wrong.")
+	sink.AssistantEnd("I'll check the failing test.\n\nThe loader was wrong.", "")
+
+	rows := store.forRun("run_1")
+	want := []string{"assistant:start", "runbook:decision", "assistant:end"}
+	if got := typesOf(rows); !equalStrings(got, want) {
+		t.Fatalf("types = %v want %v (an assistant:content row means the preview was recorded twice)", got, want)
+	}
+}
+
+func TestRunEventSinkRecordsNothingWhenAPreambledTurnFails(t *testing.T) {
+	store := &fakeRunEventStore{}
+	ref := &RunIDRef{}
+	ref.Set("run_1")
+	sink := NewRunEventSink(store, ref)
+	sink.AssistantStart()
+	sink.AssistantPreamble("I'll look into that.")
+	sink.Error("upstream exploded")
+
+	for _, typ := range typesOf(store.forRun("run_1")) {
+		if typ == "assistant:content" {
+			t.Fatal("a failed turn recorded the provisional preview as durable content")
+		}
+	}
 }

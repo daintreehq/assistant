@@ -66,6 +66,15 @@ func (s *consoleSink) Phase(p domain.RunPhase) {
 // token leaves a failed one-shot with non-empty stdout. The first token opens the
 // human answer instead; tool-only turns already add their own spacing.
 func (s *consoleSink) AssistantStart() {}
+
+// AssistantPreamble paints the fast preview into the answer the user is already
+// watching, separator included so the live text matches the message that commits.
+// This is a SCREEN, so it shows provisional text: a preview nobody sees buys nothing,
+// and a failed turn leaving words on a terminal is what streaming has always meant.
+func (s *consoleSink) AssistantPreamble(t string) {
+	s.AssistantToken(t + "\n\n")
+}
+
 func (s *consoleSink) AssistantToken(t string) {
 	if !s.answerOpen {
 		s.r.AssistantStart()

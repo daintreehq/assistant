@@ -167,7 +167,7 @@ func (f *fakeBackend) handleRespond(w http.ResponseWriter, r *http.Request) {
 		runbooks = defaultRunbooksBlock()
 	}
 	writeEvent("meta", map[string]any{
-		"protocol_version": 2,
+		"protocol_version": 3,
 		"request_id":       "req_1",
 		"model":            "daintree-assistant",
 		"runbooks":         runbooks,

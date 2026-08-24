@@ -163,6 +163,14 @@ func (b *Bridge) AssistantStart() {
 	b.post(EvTurnStart{TurnID: turnID, Role: RoleAssistant, StartedAt: now, Wake: wake})
 }
 
+// AssistantPreamble forwards the fast preview as an ordinary turn token: a host is a
+// screen, and this event exists to put legible text in front of someone early. Hosts
+// already replace what they accumulated from turn:token with turn:end's authoritative
+// content, which on success carries this same text exactly once.
+func (b *Bridge) AssistantPreamble(text string) {
+	b.AssistantToken(text + "\n\n")
+}
+
 func (b *Bridge) AssistantToken(chunk string) {
 	b.mu.Lock()
 	if b.interrupted || b.activeTurnID == "" {

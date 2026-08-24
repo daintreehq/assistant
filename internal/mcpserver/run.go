@@ -497,6 +497,10 @@ func (rec *Recorder) AssistantStart() {
 	rec.run.append(Event{Type: "assistant:start"})
 }
 
+// AssistantPreamble is deliberately NOT buffered: this buffer becomes the content
+// returned to an MCP caller, and a provisional preview must not appear there — the
+// joined final message already carries it on a turn that succeeded.
+func (rec *Recorder) AssistantPreamble(string)    {}
 func (rec *Recorder) AssistantToken(token string) { rec.buffer += token }
 
 func (rec *Recorder) AssistantEnd(content, _ string) {

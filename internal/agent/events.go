@@ -151,8 +151,30 @@ type EventSink interface {
 	// this, NEVER an emptiness heuristic.
 	Phase(p domain.RunPhase)
 
-	AssistantStart()                        // a new round is about to stream
-	AssistantToken(token string)            // one streamed visible token (think-stripped)
+	AssistantStart()             // a new round is about to stream
+	AssistantToken(token string) // one streamed visible token (think-stripped)
+	// AssistantPreamble is the backend's fast preview: one or two sentences describing
+	// the work about to happen, shown before the executor produces anything.
+	//
+	// It is PROVISIONAL, and that is why it is not an AssistantToken. A token is the
+	// RECORD channel — it buffers, and every durable flush (a runbook decision, a usage
+	// row, an error) promotes whatever is buffered into a permanent row. Routing a
+	// preview through it wrote the preview into the durable journal twice on a good
+	// turn (once as a flushed partial, once inside the joined final message) and once
+	// on a failed turn, which is exactly the "commit nothing on error" rule this
+	// preview is supposed to obey.
+	//
+	// So the split is by what a sink IS, not by taste: sinks that PAINT A SCREEN show
+	// it (the console, the host bridge — a preview the user never sees buys nothing,
+	// and text left on screen by a failed turn is what live rendering has always
+	// meant), and sinks that KEEP A RECORD ignore it (the durable run log, --json,
+	// MCP). The record channels get these same bytes anyway: the backend client joins
+	// the preview onto the front of the final assistant message, so AssistantEnd
+	// carries it exactly once.
+	//
+	// Renderers own the spacing — the committed message joins with a blank line, so a
+	// painter that wants to match it adds the separator itself.
+	AssistantPreamble(text string)
 	AssistantEnd(content, reasoning string) // final round; reasoning = <think> body ("" when none)
 	AssistantCancelled(content string)      // user abort mid-flight; content often ""
 
@@ -229,6 +251,7 @@ type NoopEventSink struct{}
 func (NoopEventSink) Phase(domain.RunPhase)                {}
 func (NoopEventSink) AssistantStart()                      {}
 func (NoopEventSink) AssistantToken(string)                {}
+func (NoopEventSink) AssistantPreamble(string)             {}
 func (NoopEventSink) AssistantEnd(string, string)          {}
 func (NoopEventSink) AssistantCancelled(string)            {}
 func (NoopEventSink) Interjection(string)                  {}
@@ -279,6 +302,12 @@ func (m *MultiSink) AssistantStart() {
 		fanOut(s, func(s EventSink) { s.AssistantStart() })
 	}
 }
+func (m *MultiSink) AssistantPreamble(t string) {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.AssistantPreamble(t) })
+	}
+}
+
 func (m *MultiSink) AssistantToken(t string) {
 	for _, s := range m.sinks {
 		fanOut(s, func(s EventSink) { s.AssistantToken(t) })
@@ -429,6 +458,12 @@ func (s *RunEventSink) AssistantStart() {
 	s.flushContent()
 	s.write("assistant:start", nil)
 }
+
+// AssistantPreamble is deliberately NOT recorded. This is the durable /explain
+// journal, and the preview is provisional until `done`; the backend client joins it
+// onto the front of the final message, so AssistantEnd persists it exactly once —
+// and a turn that failed persists it not at all.
+func (s *RunEventSink) AssistantPreamble(string) {}
 
 func (s *RunEventSink) AssistantToken(token string) {
 	// Buffered; flushed as one assistant:content row when the round ends.

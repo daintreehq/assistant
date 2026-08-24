@@ -2,8 +2,8 @@
 
 The CLI is a **thin local runtime**. It no longer acts as a model client; instead it
 talks to the **Daintree Assistant backend** (a Daintree-native HTTP API — *not*
-OpenAI-compatible). The backend owns the system prompt, developer instructions, runbook /
-runbook selection, model choice, prompt assembly, the utility-model prompts, and prompt
+OpenAI-compatible). The backend owns the system prompt, developer instructions, runbook
+selection, model choice, prompt assembly, the utility-model prompts, and prompt
 caching. The CLI owns the visible conversation, the local tool registry + execution,
 permissions, runtime / project context collection, memory + scheduler state, and the
 opaque backend state token. It owns **no UI**: the runtime emits structured events, thin

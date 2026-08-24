@@ -237,6 +237,7 @@ func (p *eventProxy) sink() agent.EventSink {
 func (p *eventProxy) Phase(ph domain.RunPhase)                      { p.sink().Phase(ph) }
 func (p *eventProxy) AssistantStart()                               { p.sink().AssistantStart() }
 func (p *eventProxy) AssistantToken(t string)                       { p.sink().AssistantToken(t) }
+func (p *eventProxy) AssistantPreamble(t string)                    { p.sink().AssistantPreamble(t) }
 func (p *eventProxy) AssistantEnd(c, r string)                      { p.sink().AssistantEnd(c, r) }
 func (p *eventProxy) AssistantCancelled(c string)                   { p.sink().AssistantCancelled(c) }
 func (p *eventProxy) Interjection(t string)                         { p.sink().Interjection(t) }

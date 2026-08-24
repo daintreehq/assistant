@@ -15,8 +15,12 @@ echo "## MCP (connected=false ⇒ token expired / Daintree down — the run can'
 # what.
 grep -m1 -E "mcp\.(connect|status)" "$LOG" | grep -oE "connected=[a-z]+|transport=[a-z-]+" | tr '\n' ' '; echo
 echo
-echo "## skills loaded  (0 ⇒ NO runbook injected → model stalls or improvises; check /clear + backend selector)"
-grep -ciE "SkillLoaded|Skill loaded" "$LOG"
+echo "## runbooks loaded  (0 ⇒ NO runbook injected → model stalls or improvises; check /clear + backend selector)"
+# Protocol 3 renamed the concept and with it the trace key. The old
+# "SkillLoaded|Skill loaded" pattern matches nothing now, so this line reported a
+# confident zero on every run — the same answer it gives when selection is genuinely
+# broken, which is the worst way for a diagnostic to fail.
+grep -ciE "backend\.respond\.runbook_cue|RunbookLoaded|Runbook loaded" "$LOG"
 echo
 echo "## rounds  (a round-0 with a HUGE toolCallCount = plan-dump; thinking-on regression)"
 grep "backend.respond.done" "$LOG" | while IFS= read -r line; do

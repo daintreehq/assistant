@@ -1037,8 +1037,12 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		retryNoticeShown := false
 		retryCount := 0
 		thinkingShown := false
+		// preambleShown suppresses the thinking cue for the same reason gotToken does:
+		// once visible prose is on screen, flipping the footer back to "Thinking"
+		// reads as the answer having been retracted.
+		preambleShown := false
 		markThinking := func() {
-			if thinkingShown || gotToken {
+			if thinkingShown || gotToken || preambleShown {
 				return
 			}
 			thinkingShown = true
@@ -1098,6 +1102,25 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 				// NEVER surfaced to the user (no AssistantToken, no event carries
 				// it); the parser still accumulates it for the final message.
 				markThinking()
+			},
+			OnPreamble: func(p backend.StreamPreamble) {
+				// Rendered live and PROVISIONALLY: nothing is committed here. The
+				// backend's joined text arrives as result.Message.Content and the
+				// sink drops this streamed buffer in favour of it, so emitting the
+				// separator too keeps the live view byte-identical to what commits.
+				//
+				// Deliberately does NOT set gotToken/firstTokenMS: those measure the
+				// EXECUTOR's first output, and the whole point of this stage is that
+				// the two numbers differ. The backend reports both.
+				preambleShown = true
+				s.events.Phase(domain.PhaseGenerating)
+				// Its OWN channel, never AssistantToken. A token buffers, and every
+				// durable flush below it (the runbook decision on the first executor
+				// token, a usage row, an error) would promote this provisional text
+				// into a permanent row — twice on a good turn, and at all on a failed
+				// one. Screen-painting sinks show it; record-keeping sinks ignore it
+				// and get these bytes from the joined final message instead.
+				s.events.AssistantPreamble(p.Content)
 			},
 			OnContent: func(tok string) {
 				if !gotToken {
@@ -1985,6 +2008,21 @@ func (s *Session) classifyBackendError(err error) string {
 		s.events.Error(msg)
 		return msg
 	}
+	if errors.As(err, &be) && be.IsProtocolMismatch() {
+		// A 426 is a VERSION problem between two programs we ship together, and it
+		// has one fix: update. Left to the generic branch it read as "Model error:
+		// backend: http 426 unsupported_daintree_pr…" — a compatibility failure
+		// dressed as a model failure, truncated before the one word that identified
+		// it, and pointing at the model, which is the one component that is fine.
+		//
+		// It is not retriable (backend.retry) and never becomes so on its own, so
+		// naming the action is the whole value of the message.
+		msg := "Daintree assistant backend is a different version of the Daintree protocol than this CLI (backend refused protocol " +
+			strconv.Itoa(backend.ProtocolVersion) + "). Update both to the same release — /doctor reports the versions each side speaks."
+		s.events.Phase(domain.PhaseFailed)
+		s.events.Error(msg)
+		return msg
+	}
 	if errors.As(err, &be) {
 		if msg := upstreamFailureAdvice(be); msg != "" {
 			s.events.Phase(domain.PhaseFailed)
@@ -2318,10 +2356,13 @@ func copyRunbookRefs(refs []backend.RunbookRef) []RunbookRef {
 // its mind while hiding what it changed from — and once selection became a ~10ms
 // in-process classifier it no longer explained a wait, which was its original job.
 //
-// The "runbook" VOCABULARY — a visible "Runbook loaded" event, the /runbooks command — is
-// deliberately left free for user-authored *assistant* runbooks, which are intent-driven
-// and will want it. Selector tuning reads the debug trace (backend.respond.meta logs the
-// active and newly-loaded sets per round), not the product UI.
+// The "skill" VOCABULARY — a visible "Skill loaded" event, the /skills command — is
+// deliberately left free for user-authored *assistant* skills, which are intent-driven
+// and will want it. That reservation SURVIVED the protocol-3 rename on purpose: what the
+// backend selects is now a runbook, which is exactly what frees "skill" for the
+// project-level, user-authored, model-invoked thing it has always been reserved for.
+// Selector tuning reads the debug trace (backend.respond.meta logs the active and
+// newly-loaded sets per round), not the product UI.
 func (s *Session) emitRunbookLoads(refs []backend.RunbookRef) bool {
 	titles := runbookLabels(refs)
 	if len(titles) == 0 {

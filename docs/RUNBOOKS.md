@@ -1,6 +1,6 @@
 # Runbooks (server-owned)
 
-A **runbook** is a procedural runbook for one Daintree operation, written *for the
+A **runbook** is a procedure for one Daintree operation, written *for the
 assistant model* — a checklist a sharp operator follows. Runbooks are the behavior
 layer that replaces fine-tuning: a growing, validated library, selected cheaply.
 
@@ -54,9 +54,11 @@ There is **no `/runbooks` command** either (pinned by `TestUIRunbooksCommandDoes
 standing "what is active?" reveal is the same information with the same missing
 affordance, which is what separates it from `/explain`'s per-run history. Selector tuning
 reads the debug trace, where `backend.respond.meta` logs the `active` and `newly_loaded`
-sets per round. The whole "runbook" **vocabulary** — a visible "Runbook loaded" event, the
-`/runbooks` name — is deliberately held in reserve for future user-authored *assistant*
-runbooks, which ARE intent-driven and will want it for list/create/edit.
+sets per round. The whole "skill" **vocabulary** — a visible "Skill loaded" event, the
+`/skills` name (pinned by `TestUISkillsCommandDoesNotExist`) — is deliberately held in
+reserve for future user-authored, project-level *assistant* skills, which ARE
+intent-driven and will want it for list/create/edit. Protocol 3 renaming the backend's
+concept to "runbook" is what frees that name rather than what spends it.
 If the terminal retry fails before receiving its own meta, the client still forwards the
 last adopted meta once so that selection state is persisted. Runbooks **never** narrow the
 local toolset — the full registry is offered every turn (`requiredTools` is a backend

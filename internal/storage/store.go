@@ -52,7 +52,9 @@ const (
 	// when the artifacts table was added (durable tool-result overflow payloads); to 5
 	// when memories gained expiresAt/runId/kind/sessionId (TTL + provenance + episodic);
 	// to 6 when the context_checkpoints table was added (durable compaction checkpoint
-	// reloaded on resume); to 7 when the dead runbook_selection_log table was DROPPED
+	// reloaded on resume); to 7 when the dead skill_selection_log table was DROPPED
+	// (named as it actually was — this line is a statement about the past, and the
+	// skill -> runbook rename came later)
 	// (runbook selection is server-owned now — the CLI never logged selections); to 8 when
 	// conversation gained reasoningContent (persist DeepSeek thinking-mode chain-of-thought
 	// for verbatim replay); to 9 when the runtime_state key/value table was added (the

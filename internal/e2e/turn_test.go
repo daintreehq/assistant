@@ -36,7 +36,9 @@ func (r *recordingSink) Phase(p domain.RunPhase) {
 	r.mu.Unlock()
 	r.log("phase:" + p.String())
 }
-func (r *recordingSink) AssistantStart() { r.log("assistant:start") }
+func (r *recordingSink) AssistantStart()            { r.log("assistant:start") }
+func (r *recordingSink) AssistantPreamble(t string) { r.AssistantToken(t + "\n\n") }
+
 func (r *recordingSink) AssistantToken(t string) {
 	r.mu.Lock()
 	r.tokens = append(r.tokens, t)

@@ -8,7 +8,7 @@ Guidance for working in this repository.
 > backward compatibility or version stable surfaces for their own sake — prefer
 > the simplest thing. We deliberately do NOT version the system prompt (the
 > cache key is a plain, unversioned identifier); just edit the prompt directly.
-> The SQLite schema is a single clean baseline (`schemaUserVersion`, currently 11) — on a
+> The SQLite schema is a single clean baseline (`schemaUserVersion`, currently 12) — on a
 > schema change, hard-reset the DB (`make db-reset`, which wipes the resolved
 > state dir, honouring `DAINTREE_ASSISTANT_STATE_DIR`) rather than accumulate a
 > migration chain.
@@ -258,8 +258,9 @@ besides (never what was retained, capped, or auto-paired as a foundation). There
 the same missing affordance. The one place a load reaches a human is the explicit
 `/explain <run>` timeline, beside that run's tool calls; the debug trace, run log and
 `--json` stream keep the full signal, and `backend.respond.meta` is where selector tuning
-reads it. The "runbook" VOCABULARY — a visible "Runbook loaded" event, the `/runbooks` name — is
-held in reserve for future user-authored ASSISTANT runbooks, which are intent-driven. On tool calls, announce the whole batch
+reads it. The "skill" VOCABULARY — a visible "Skill loaded" event, the `/skills` name — is
+held in reserve for future user-authored, project-level ASSISTANT skills, which are
+intent-driven; protocol 3 naming the backend's concept "runbook" is what keeps it free. On tool calls, announce the whole batch
 (`ToolBatch`) then `registry.Dispatch()` each in the safe sequence, feed results back and
 re-`RespondStream` (replaying the state token).
 `Dispatch` = validate args → tier gate (`safety.Decide`) → confirmation/grant → run handler →

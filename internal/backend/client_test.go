@@ -35,7 +35,7 @@ func sseServer(t *testing.T, sseBody string, lastReq *RespondRequest) *httptest.
 func TestRespondStream_BasicAnswer(t *testing.T) {
 	body := strings.Join([]string{
 		`event: meta`,
-		`data: {"protocol_version":2,"request_id":"req_1","model":"daintree-assistant","state":"dst1.test"}`,
+		`data: {"protocol_version":3,"request_id":"req_1","model":"daintree-assistant","state":"dst1.test"}`,
 		``,
 		`event: delta`,
 		`data: {"content":"Hello"}`,
@@ -185,7 +185,7 @@ func TestRespondStream_RunbookLoadFiresBeforeFirstContent(t *testing.T) {
 func TestRespondStream_ToolCallAccumulation(t *testing.T) {
 	body := strings.Join([]string{
 		`event: meta`,
-		`data: {"protocol_version":2,"request_id":"req_2","model":"daintree-assistant","state":"dst1.x"}`,
+		`data: {"protocol_version":3,"request_id":"req_2","model":"daintree-assistant","state":"dst1.x"}`,
 		``,
 		`event: delta`,
 		`data: {"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"git__status","arguments":""}}]}`,
@@ -488,7 +488,7 @@ func TestCapabilitiesAndHealth(t *testing.T) {
 		case "/readyz":
 			_, _ = io.WriteString(w, `{"status":"ready","catalog_revision":"sha256:x","runbooks":4}`)
 		case "/v1/daintree/capabilities":
-			_, _ = io.WriteString(w, `{"server_version":"1.0.0","protocol":{"min":2,"max":2},"respond":{"endpoint":"/v1/daintree/respond","model":"daintree-assistant","streaming":true,"stream_events":["meta","delta","done","error"],"system_messages_accepted":false,"max_active_runbooks":3,"display_context":true},"tasks":["checkpoint","memory_distill"],"limits":{"request_bytes":8388608,"tools":128}}`)
+			_, _ = io.WriteString(w, `{"server_version":"1.0.0","protocol":{"min":3,"max":3},"respond":{"endpoint":"/v1/daintree/respond","model":"daintree-assistant","streaming":true,"stream_events":["meta","delta","done","error"],"system_messages_accepted":false,"max_active_runbooks":3,"display_context":true},"tasks":["checkpoint","memory_distill"],"limits":{"request_bytes":8388608,"tools":128}}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -505,8 +505,11 @@ func TestCapabilitiesAndHealth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Capabilities: %v", err)
 	}
-	if caps.Protocol.Min != 2 || caps.Protocol.Max != 2 {
-		t.Errorf("protocol = %+v", caps.Protocol)
+	// Pinned against the constant, not a literal: this asserts that the advertised
+	// range is decoded, and a range that no longer brackets what the CLI speaks is a
+	// stale fixture rather than a passing test.
+	if caps.Protocol.Min != ProtocolVersion || caps.Protocol.Max != ProtocolVersion {
+		t.Errorf("protocol = %+v, want the range to bracket %d", caps.Protocol, ProtocolVersion)
 	}
 	if len(caps.Tasks) != 2 {
 		t.Errorf("tasks = %+v", caps.Tasks)

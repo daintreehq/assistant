@@ -36,7 +36,7 @@ const (
 func timingsSSE(done string) string {
 	return strings.Join([]string{
 		`event: meta`,
-		`data: {"protocol_version":2,"request_id":"req_1","model":"daintree-assistant","state":"dst1.t"}`,
+		`data: {"protocol_version":3,"request_id":"req_1","model":"daintree-assistant","state":"dst1.t"}`,
 		``,
 		`event: delta`,
 		`data: {"content":"hi"}`,
@@ -268,7 +268,7 @@ func TestTimingsEmptyAndNullBlocksAreUnmeasured(t *testing.T) {
 // that only shows up when someone is already debugging something else.
 func TestRespondResponseDecodesTimings(t *testing.T) {
 	var out RespondResponse
-	body := `{"protocol_version":2,"request_id":"r","model":"m","message":{"role":"assistant","content":"hi"},` +
+	body := `{"protocol_version":3,"request_id":"r","model":"m","message":{"role":"assistant","content":"hi"},` +
 		`"finish_reason":"stop","usage":{},"timings":{"preparation_ms":10,"total_ms":99}}`
 	if err := json.Unmarshal([]byte(body), &out); err != nil {
 		t.Fatal(err)

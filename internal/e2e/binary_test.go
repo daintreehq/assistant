@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/ipc"
 )
 
@@ -243,8 +244,9 @@ func TestBinaryJSONOneShot(t *testing.T) {
 	if last.Type != "result" {
 		t.Fatalf("last line type = %q, want result", last.Type)
 	}
-	if v, _ := last.raw["schemaVersion"].(float64); int(v) != 1 {
-		t.Errorf("result.schemaVersion = %v, want 1", last.raw["schemaVersion"])
+	if v, _ := last.raw["schemaVersion"].(float64); int(v) != domain.JSONOutputSchemaVersion {
+		t.Errorf("result.schemaVersion = %v, want %d",
+			last.raw["schemaVersion"], domain.JSONOutputSchemaVersion)
 	}
 	if s, _ := last.raw["status"].(string); s != "success" {
 		t.Errorf("result.status = %q, want success", s)

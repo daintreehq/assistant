@@ -417,6 +417,27 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 			userOnContent(s)
 		}
 	}
+	// The preamble is FIRST-WINS across attempts, and deliberately not the retry
+	// boundary — see StreamCallbacks.OnPreamble.
+	//
+	// First-wins is what keeps the screen and the committed history the same text.
+	// A replayed attempt asks the fast model again and gets its own wording, so
+	// last-wins would commit a sentence the user never read: they saw attempt 1's
+	// preamble, and nothing on screen is rewritten by attempt 2 arriving. The cost
+	// is that the winning attempt's executor was handed slightly different wording
+	// as its prior turn than the history records — a one-turn inconsistency on a
+	// rare path, against showing one thing and recording another on every retry.
+	shownPreamble := ""
+	userOnPreamble := cb.OnPreamble
+	cb.OnPreamble = func(p StreamPreamble) {
+		if shownPreamble != "" {
+			return // already on screen; a replay must not stack a second one
+		}
+		shownPreamble = p.Content
+		if userOnPreamble != nil {
+			userOnPreamble(p)
+		}
+	}
 
 	// Cost accounting spans the whole retried call, not one attempt, and it is the one
 	// piece of bookkeeping that must survive EVERY exit path — the caller is paying for
@@ -458,6 +479,24 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 		result, serr := c.respondStreamOnce(ctx, body, cb)
 		if serr == nil {
 			flushMeta() // committed success (incl. pure tool-call turns with no content)
+			// Commit exactly what was shown. Joined onto the front of the assistant
+			// content in this one place, so every caller downstream — history, the
+			// display's end hook, the trace — records the turn the user actually saw
+			// without needing to know this feature exists. The backend hands the
+			// executor these same bytes as its own prior assistant turn, so ONE
+			// joined message is the honest shape; committing two would claim a turn
+			// boundary the executor never saw.
+			result.Preamble = shownPreamble
+			if shownPreamble != "" {
+				if body := result.Message.Content; body != "" {
+					result.Message.Content = shownPreamble + "\n\n" + body
+				} else {
+					// A tool-call round can legitimately produce no prose at all.
+					// The preamble is still what the user saw, and still belongs to
+					// this turn.
+					result.Message.Content = shownPreamble
+				}
+			}
 			finalize(result, false)
 			return result, nil
 		}

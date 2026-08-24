@@ -48,9 +48,25 @@ func (b *scriptedStreamBackend) RunTask(_ context.Context, req backend.TaskReque
 // phaseSink records every phase transition and every visible token the session emits.
 type phaseSink struct {
 	NoopEventSink
-	mu     sync.Mutex
-	phases []domain.RunPhase
-	tokens []string
+	mu        sync.Mutex
+	phases    []domain.RunPhase
+	tokens    []string
+	preambles []string
+}
+
+// Recorded on its OWN list, because the split is the thing worth asserting: a
+// provisional preview must not arrive on the token channel, which is what durable
+// sinks flush into permanent rows.
+func (s *phaseSink) AssistantPreamble(t string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.preambles = append(s.preambles, t)
+}
+
+func (s *phaseSink) preambleSnapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.preambles...)
 }
 
 func (s *phaseSink) Phase(p domain.RunPhase) {
@@ -72,6 +88,11 @@ func (s *phaseSink) snapshot() ([]domain.RunPhase, []string) {
 }
 
 func runScriptedTurn(t *testing.T, script func(cb backend.StreamCallbacks), content string) ([]domain.RunPhase, []string) {
+	phases, tokens, _ := runScriptedTurnFull(t, script, content)
+	return phases, tokens
+}
+
+func runScriptedTurnFull(t *testing.T, script func(cb backend.StreamCallbacks), content string) ([]domain.RunPhase, []string, []string) {
 	t.Helper()
 	sink := &phaseSink{}
 	deps := SessionDeps{
@@ -89,7 +110,8 @@ func runScriptedTurn(t *testing.T, script func(cb backend.StreamCallbacks), cont
 		t.Fatalf("reply = %q, want %q", reply, content)
 	}
 	s.DrainBackgroundWork()
-	return sink.snapshot()
+	phases, tokens := sink.snapshot()
+	return phases, tokens, sink.preambleSnapshot()
 }
 
 func countPhase(phases []domain.RunPhase, want domain.RunPhase) int {

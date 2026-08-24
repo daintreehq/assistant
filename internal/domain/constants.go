@@ -13,7 +13,12 @@ const (
 
 	// JSONOutputSchemaVersion is the one-shot --json line schema version. Plain
 	// monotonic int; bump only on a breaking line-shape change.
-	JSONOutputSchemaVersion = 1
+	//
+	// 2: protocol 3 renamed the runbook events — `skill:loaded` -> `runbook:loaded`
+	// and `skill:decision` -> `runbook:decision`. Automation keyed on the old names
+	// stops matching, which is a breaking line-shape change however mechanical it
+	// looks; leaving the version at 1 would have told a consumer nothing had moved.
+	JSONOutputSchemaVersion = 2
 )
 
 // OneShotExitCode is the one-shot exit-code mapping.
