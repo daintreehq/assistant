@@ -34,7 +34,11 @@ type Backend interface {
 // runs server-owned utility tasks. It is safe for concurrent use.
 type Client struct {
 	baseURL string
-	apiKey  string
+	// tokens supplies the bearer credential per REQUEST rather than per client, so an
+	// hourly access-token refresh reaches every in-flight consumer without rebuilding
+	// the transport, the retry policy or the cost hook. Never nil — NewClient
+	// substitutes NoTokenSource, which is exactly the old empty-key behaviour.
+	tokens TokenSource
 	// http serves the streamed respond POST; jsonHTTP serves everything routed
 	// through doJSON. They differ only in ResponseHeaderTimeout (see NewClient).
 	http     *http.Client
@@ -50,17 +54,23 @@ type Client struct {
 	streamIdleTimeout time.Duration
 }
 
-// ClientConfig configures a Client. APIKey is REQUIRED for every real endpoint: the
-// backend authenticates in all environments (local included) and the bearer token is
-// also the upstream credential funding the turn. An empty key sends no Authorization
-// header and is useful only for the unauthenticated probes — it is left permitted so
-// `doctor` can still reach /healthz while signed out. HTTPClient defaults to one with
-// NO global timeout (a streamed turn can run for minutes; cancellation is via context).
+// ClientConfig configures a Client. Both credential fields are OPTIONAL and empty on
+// virtually every install: the backend holds its own upstream key and serves a request
+// carrying no Authorization header at all. HTTPClient defaults to one with NO global
+// timeout (a streamed turn can run for minutes; cancellation is via context).
 type ClientConfig struct {
-	BaseURL    string
-	APIKey     string
-	HTTPClient *http.Client
-	ClientInfo ClientInfo
+	BaseURL string
+	// APIKey is the fixed-credential spelling, kept for DAINTREE_API_KEY and for tests.
+	// It is sugar for TokenSource: a non-empty value becomes a StaticTokenSource.
+	// Naming both is a configuration mistake, not a precedence question, so NewClient
+	// takes TokenSource and ignores APIKey when both are set.
+	APIKey string
+	// TokenSource supplies a credential that can CHANGE between requests — an account
+	// access token that expires hourly and is refreshed underneath the client. Nil
+	// falls back to APIKey, then to NoTokenSource.
+	TokenSource TokenSource
+	HTTPClient  *http.Client
+	ClientInfo  ClientInfo
 	// Retry tunes transient-failure retries for every backend call. The zero value
 	// selects DefaultRetryPolicy (10 attempts settling into a 10–15s poll — the
 	// backend owns provider retries; this covers only the CLI↔backend hop). Set
@@ -261,9 +271,21 @@ func NewClient(cfg ClientConfig) *Client {
 	if retry.MaxAttempts == 0 {
 		retry = DefaultRetryPolicy()
 	}
+	// TokenSource wins over APIKey when both are given: a caller that built a live
+	// source has strictly more information than one that froze a string, and silently
+	// preferring the frozen one would pin the client to a token that stops working in
+	// an hour.
+	tokens := cfg.TokenSource
+	if tokens == nil {
+		if key := strings.TrimSpace(cfg.APIKey); key != "" {
+			tokens = StaticTokenSource{Token: key}
+		} else {
+			tokens = NoTokenSource{}
+		}
+	}
 	return &Client{
 		baseURL:  base,
-		apiKey:   strings.TrimSpace(cfg.APIKey),
+		tokens:   tokens,
 		http:     hc,
 		jsonHTTP: jc,
 		info:     cfg.ClientInfo,
@@ -278,16 +300,82 @@ func NewClient(cfg ClientConfig) *Client {
 // BaseURL returns the configured backend base URL (for diagnostics / doctor).
 func (c *Client) BaseURL() string { return c.baseURL }
 
-// setHeaders applies the common headers. The Authorization header is set whenever a
-// key is configured; an unkeyed client is only useful for the unauthenticated probes
-// (/healthz, /readyz, /version) — every real endpoint 401s without it.
-func (c *Client) setHeaders(req *http.Request, accept string) {
+// setHeaders applies the common headers and, for a PROTECTED path, obtains and
+// attaches the bearer credential.
+//
+// The public/protected split is new and load-bearing. Previously every request got the
+// header whenever a key existed, which was harmless for a frozen string and is not
+// harmless for a token source: /healthz, /readyz and /version are exactly what someone
+// probes when their login is broken, and making those probes wait on — or fail with —
+// a credential fetch would take the diagnostic offline at the moment it is needed.
+// /v1/daintree/auth/config is public for a sharper reason still: it is what the auth
+// layer READS to learn how to obtain a token, so requiring one would be a bootstrap no
+// client could satisfy.
+//
+// An error from the source aborts the request rather than sending it bare. Falling
+// back to an anonymous request would silently downgrade an authenticated session and
+// bill or refuse the wrong principal, which is far worse than a visible failure.
+func (c *Client) setHeaders(ctx context.Context, req *http.Request, accept string, path string) error {
+	token, err := c.credential(ctx, path)
+	if err != nil {
+		return err
+	}
+	c.applyHeaders(req, accept, token)
+	return nil
+}
+
+// credential obtains the bearer for one request, or "" when the path is public or no
+// credential is configured.
+//
+// The failure is CodeCredentialUnavailable, never CodeAuthRequired: no request was
+// sent, so this is not the backend rejecting us. The distinction is load-bearing
+// downstream — auth_required means "sign in", which is the wrong instruction for a
+// locked keychain, and it would also make doctor report that the backend refused a
+// request it never received. The cause is wrapped rather than formatted so errors.Is
+// can still recover whatever sentinel the auth layer raised.
+func (c *Client) credential(ctx context.Context, path string) (string, error) {
+	if isPublicPath(path) {
+		return "", nil
+	}
+	token, err := c.tokens.AccessToken(ctx)
+	if err != nil {
+		return "", &Error{
+			Code:    CodeCredentialUnavailable,
+			Type:    "authentication_error",
+			Message: "could not obtain an account credential: " + err.Error(),
+			cause:   err,
+		}
+	}
+	return token, nil
+}
+
+// applyHeaders sets the common headers plus the bearer, if any.
+func (c *Client) applyHeaders(req *http.Request, accept, token string) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", accept)
 	req.Header.Set("X-Daintree-Protocol", fmt.Sprintf("%d", ProtocolVersion))
-	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
+}
+
+// currentSecrets returns the credential values worth masking in text destined for a
+// human. Empty unless the token source opts into TokenScrubber — a source with nothing
+// to protect (NoTokenSource, and the open-door install it represents) costs nothing.
+func (c *Client) currentSecrets() []string {
+	s, ok := c.tokens.(TokenScrubber)
+	if !ok {
+		return nil
+	}
+	return s.Secrets()
+}
+
+// scrubSecrets removes every credential this client has issued from text.
+func (c *Client) scrubSecrets(text string) string {
+	for _, secret := range c.currentSecrets() {
+		text = ScrubKey(text, secret)
+	}
+	return text
 }
 
 // RespondStream runs one generation round against /v1/daintree/respond as a
@@ -577,6 +665,25 @@ func (c *Client) respondStreamOnce(ctx context.Context, body []byte, cb StreamCa
 	attemptCtx, cancelAttempt := context.WithCancel(ctx)
 	defer cancelAttempt()
 
+	// The credential is acquired BEFORE the transport recorder is installed, and that
+	// ordering is deliberate. Obtaining an account token can mean a synchronous refresh
+	// against the identity provider — a whole DNS lookup, TLS handshake and round trip
+	// of its own. Fetched under the traced context, every one of those events would be
+	// recorded as if it were the BACKEND's, and the elapsed marks would silently include
+	// refresh latency. A turn that looked slow because the token was stale would be
+	// indistinguishable from one where the backend was slow, which is precisely the
+	// distinction these marks exist to draw.
+	//
+	// It uses attemptCtx all the same, so the refresh honours this attempt's
+	// cancellation and deadline rather than outliving it.
+	token, err := c.credential(attemptCtx, "/v1/daintree/respond")
+	if err != nil {
+		// Scrubbed like every other error leaving this client: a token source can echo
+		// a credential it issued into its own failure text, and this one reaches the
+		// turn's error rendering and the debug log unmediated.
+		return RespondResult{}, c.scrubError(err)
+	}
+
 	// Client-side latency marks for THIS attempt. The backend's own timings begin when
 	// the request lands, so without these the difference between a client-measured round
 	// and the server's total is one opaque number covering dial, TLS, upload and the
@@ -588,7 +695,7 @@ func (c *Client) respondStreamOnce(ctx context.Context, body []byte, cb StreamCa
 	if err != nil {
 		return RespondResult{}, fmt.Errorf("backend: build respond request: %w", err)
 	}
-	c.setHeaders(httpReq, "text/event-stream")
+	c.applyHeaders(httpReq, "text/event-stream", token)
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
@@ -792,6 +899,16 @@ func taskMayHaveBilled(err error) bool {
 	switch {
 	case be.IsConnect(), be.IsContract(), be.IsProtocolMismatch():
 		return false
+	case be.Code == CodeCredentialUnavailable:
+		// Raised before dispatch: this process could not produce a credential, so no
+		// request left the machine. Checked by CODE, because it carries no HTTP status
+		// at all and the status arm below would miss it — leaving every locked-keychain
+		// failure to permanently caveat the session total as a lower bound over spend
+		// that provably never happened.
+		return false
+	case be.IsAccountIdentity(), be.IsSubscription(), be.IsAccountDependency():
+		// The backend refused at its own door, before any provider call.
+		return false
 	case be.HTTPStatus == http.StatusUnauthorized, be.HTTPStatus == http.StatusForbidden:
 		return false
 	case be.Code == CodeProviderInsufficientCredit, be.Code == CodeUpstreamNoCompliantProvider:
@@ -901,8 +1018,8 @@ func (c *Client) VerifyKey(ctx context.Context) (KeyVerification, error) {
 	// normal case; when one IS set, a provider that echoes it into its rejection reason
 	// would otherwise persist it in the host's native scrollback, which the attached session
 	// never clears. One choke point here beats N display-site fixes.
-	out.Detail = ScrubKey(out.Detail, c.apiKey)
-	out.Label = ScrubKey(out.Label, c.apiKey)
+	out.Detail = c.scrubSecrets(out.Detail)
+	out.Label = c.scrubSecrets(out.Label)
 	return out, nil
 }
 
@@ -1093,7 +1210,9 @@ func (c *Client) doJSONAttempt(attemptCtx context.Context, method, path string, 
 	if err != nil {
 		return fmt.Errorf("backend: build %s request: %w", path, err)
 	}
-	c.setHeaders(req, "application/json")
+	if err := c.setHeaders(attemptCtx, req, "application/json", path); err != nil {
+		return err
+	}
 
 	resp, err := c.jsonHTTP.Do(req)
 	if err != nil {
@@ -1222,10 +1341,10 @@ func (c *Client) scrubError(err error) error {
 	if err == nil || !errors.As(err, &be) {
 		// Not a structured backend error: scrub the flat message. A wrapped
 		// fmt.Errorf can still carry a decoder's echo of the payload.
-		if err == nil || c.apiKey == "" {
+		if err == nil {
 			return err
 		}
-		if scrubbed := ScrubKey(err.Error(), c.apiKey); scrubbed != err.Error() {
+		if scrubbed := c.scrubSecrets(err.Error()); scrubbed != err.Error() {
 			return errors.New(scrubbed)
 		}
 		return err
@@ -1237,17 +1356,17 @@ func (c *Client) scrubError(err error) error {
 // and Type are stable machine identifiers, but they are backend-controlled strings, so
 // they are scrubbed too rather than trusted to be well-behaved.
 func (c *Client) scrubBackendError(e *Error) *Error {
-	if e == nil || c.apiKey == "" {
+	if e == nil {
 		return e
 	}
-	e.Message = ScrubKey(e.Message, c.apiKey)
-	e.Param = ScrubKey(e.Param, c.apiKey)
-	e.Code = ScrubKey(e.Code, c.apiKey)
-	e.Type = ScrubKey(e.Type, c.apiKey)
+	e.Message = c.scrubSecrets(e.Message)
+	e.Param = c.scrubSecrets(e.Param)
+	e.Code = c.scrubSecrets(e.Code)
+	e.Type = c.scrubSecrets(e.Type)
 	// RequestID is header text from whatever answered — which for a custom endpoint or
 	// an intervening proxy is not necessarily the backend. It is rendered verbatim into
 	// terminal scrollback and the debug log by the "report this bug" advice, so it gets
 	// the same treatment as every other field we did not author.
-	e.RequestID = ScrubKey(e.RequestID, c.apiKey)
+	e.RequestID = c.scrubSecrets(e.RequestID)
 	return e
 }

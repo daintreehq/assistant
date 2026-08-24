@@ -88,11 +88,26 @@ type Error struct {
 	Param      string
 	RetryAfter time.Duration
 	Stream     bool
+	// cause is the underlying local error for a failure this package RAISED rather than
+	// received — today only a credential the token source could not produce. It is
+	// unexported and surfaced through Unwrap so `errors.Is` can recover a sentinel the
+	// auth layer raised (a locked keychain, a refresh outage), which a string-formatted
+	// message throws away. Nil for every error decoded off the wire.
+	cause error
 	// RequestID is the backend's X-Request-Id for the failing call, when it sent one.
 	// It is what makes "report this as a bug" actionable: the two codes that mean our
 	// bug (CodeUpstreamRequestRejected, CodeUpstreamProtocolError) are undiagnosable
 	// without it, since the useful detail is in the server's log, not the client's.
 	RequestID string
+}
+
+// Unwrap exposes the local cause of a client-raised failure, so a caller can use
+// errors.Is against the sentinel the auth layer returned. Nil for wire errors.
+func (e *Error) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
 }
 
 func (e *Error) Error() string {
@@ -123,15 +138,42 @@ func (e *Error) Error() string {
 	return b.String()
 }
 
-// IsAuth reports a 401/403 raised at OUR door — the bearer token was missing or
-// structurally malformed. The fix is the header: sign in again.
+// IsAuth reports a credential problem at OUR door — one whose fix is the Authorization
+// header: sign in, refresh, or re-authenticate.
 //
-// The provider account codes are deliberately EXCLUDED even though they share those
-// statuses. `provider_invalid_api_key` is also a 401, and telling someone whose key the
-// provider revoked to "check you pasted it in full" sends them round a re-entry loop
-// that cannot work. Same status, opposite advice — so the code decides, not the status.
+// Two families are deliberately EXCLUDED even though they share 401/403.
+//
+// The provider account codes came first: `provider_invalid_api_key` is also a 401, and
+// telling someone whose key the provider revoked to "check you pasted it in full" sends
+// them round a re-entry loop that cannot work.
+//
+// `auth_client_not_allowed` is the newer and sharper case. It is a 403 carrying a
+// perfectly valid, perfectly fresh token — from an OAuth client this deployment does
+// not accept. Reading it as "sign in again" is worse than unhelpful: the auth layer
+// treats IsAuth as licence to refresh, and every refresh mints another token that is
+// wrong in exactly the same way. The environment is misconfigured; no credential
+// operation can fix it. See AuthRemedy, which names the difference explicitly.
+//
+// A 401 or 403 carrying no code this package recognises still reads as auth, so a CLI
+// pointed at an older backend — or through a proxy that rewrote the body — keeps its
+// correct message instead of falling through to "model error".
 func (e *Error) IsAuth() bool {
+	if e == nil {
+		return false
+	}
 	if providerAccountCodes[e.Code] {
+		return false
+	}
+	// A recognised account code decides on its own. Consulting the status for these
+	// would let a `subscription_required` that happened to arrive as a 401 send the
+	// user to sign in again, only to reach the same 402 — and would let an
+	// `auth_token_expired` that arrived mid-stream (status 0) escape classification
+	// entirely. The code is the stable contract; the status is not.
+	if accountCodes[e.Code] {
+		return identityCodes[e.Code] && e.Code != CodeAuthClientNotAllowed
+	}
+	// A local credential failure is not the backend rejecting us — we never asked.
+	if e.Code == CodeCredentialUnavailable {
 		return false
 	}
 	return e.HTTPStatus == 401 || e.HTTPStatus == 403
@@ -186,10 +228,23 @@ func (e *Error) ProviderAccountReason() string {
 // The type check was previously "rate_limit", which the backend never emits — it
 // sends the "_error"-suffixed OpenAI taxonomy, so that comparison was dead and the
 // 429/code checks were carrying the whole function.
+// An exhausted plan quota is deliberately excluded even though it also rides 429 and
+// a backend may well tag it `rate_limit_error`. A rate limit clears on its own within
+// seconds; a usage cap does not clear until the billing period rolls over, so treating
+// it as one produces a backoff loop that cannot succeed and a message ("slow down")
+// that is simply untrue.
+//
+// `account_rate_limited` is recognised by CODE as well as by status, because a
+// mid-stream 429 arrives with HTTPStatus 0 and would otherwise depend on the backend
+// also setting Type — a field the stable-code contract should not need.
 func (e *Error) IsRateLimited() bool {
+	if e == nil || e.Code == CodeUsageLimitReached {
+		return false
+	}
 	return e.HTTPStatus == 429 ||
 		e.Type == "rate_limit_error" ||
-		e.Code == CodeUpstreamRateLimited
+		e.Code == CodeUpstreamRateLimited ||
+		e.Code == CodeAccountRateLimited
 }
 
 // IsRoutingDeadEnd reports that no upstream endpoint satisfied the active routing

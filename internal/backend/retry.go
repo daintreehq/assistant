@@ -159,6 +159,49 @@ var deterministicUpstreamCodes = map[string]bool{
 	CodeUpstreamProtocolError:       true,
 }
 
+// deterministicAccountCodes are account verdicts that hold identically on every replay,
+// and that the status-based rules below would otherwise misread.
+//
+// Both entries exist because of a genuine collision:
+//
+//   - auth_client_not_allowed is a 403 that IsAuth deliberately no longer claims (see
+//     errors.go). It reaches the transient switch below as an ordinary 403 and is
+//     already refused there by default — this entry states the intent explicitly so a
+//     later reshuffle of the status rules cannot start replaying a configuration error.
+//   - usage_limit_reached shares 429 with account_rate_limited. IsRateLimited now
+//     excludes it, so this is likewise belt-and-braces on the more expensive of the two
+//     mistakes: replaying an exhausted quota spends the whole ~50-75s backoff budget to
+//     re-derive the same refusal.
+//   - auth_credential_unavailable never reached the network. Replaying cannot unlock a
+//     keychain, and the auth layer owns whatever retry is actually appropriate.
+//
+// The identity codes are NOT listed here, and that is not an oversight: IsAuth CATCHES
+// them (by code, whatever the status) and the first guard below already refuses them.
+// The auth ladder owns the single refresh-and-replay; a transport-level retry underneath
+// it would multiply one deliberate replay into a loop against a credential nothing has
+// re-minted.
+var deterministicAccountCodes = map[string]bool{
+	CodeAuthClientNotAllowed:  true,
+	CodeUsageLimitReached:     true,
+	CodeCredentialUnavailable: true,
+}
+
+// retriableAccountCodes are the dependency outages that must be replayed on EITHER
+// transport.
+//
+// They are listed separately because the status rules cannot see them mid-stream. A
+// terminal SSE error carries HTTPStatus 0, so the 502/503/504 switch never fires and
+// the stream allowlist below — written for upstream conditions — does not name them.
+// The result would be that an auth or billing dependency blipping during a turn fails
+// that turn outright, which is the exact opposite of the contract: these three mean "we
+// could not check", and the whole point of them is that the caller backs off and keeps
+// the user's login rather than treating an outage as a verdict.
+var retriableAccountCodes = map[string]bool{
+	CodeAuthDependencyUnavailable:  true,
+	CodeEntitlementUnavailable:     true,
+	CodeUsageAccountingUnavailable: true,
+}
+
 // isRetriable reports whether a backend failure is a transient class worth retrying.
 // Two families are never retried: deterministic failures (auth, contract bugs,
 // protocol mismatch), where a replay fails identically; and application VERDICTS,
@@ -172,6 +215,16 @@ func isRetriable(e *Error) bool {
 	// Deterministic — retrying cannot help.
 	if e.IsAuth() || e.IsContract() || e.IsProtocolMismatch() {
 		return false
+	}
+	// Account verdicts that outlive a replay. Checked here, above the status rules,
+	// because each member is specifically one those rules get wrong.
+	if deterministicAccountCodes[e.Code] {
+		return false
+	}
+	// Dependency outages, on either transport — see retriableAccountCodes for why the
+	// status rules alone cannot cover the mid-stream case.
+	if retriableAccountCodes[e.Code] {
+		return true
 	}
 	// Deterministic upstream conditions, on either transport. Checked BEFORE everything
 	// below it, because three of those would otherwise misread one of these: the status

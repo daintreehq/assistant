@@ -1143,6 +1143,14 @@ func verifyCredentialDoctorCheck(ctx context.Context, a *app.App, base string) D
 		c.Status = StatusUnknown
 		c.Detail = "this local backend can't check"
 		return c
+	case isBackendAccountVerdict(verr):
+		// A valid token from an OAuth client this deployment does not accept. Neither
+		// signing in again nor correcting a key helps: the client id itself is wrong for
+		// this endpoint, so the fix is the endpoint or the build, not the credential.
+		c.Status = StatusFail
+		c.Detail = "this backend does not accept this client's account credentials — " + verr.Error()
+		c.Hint = "This build's OAuth client is not registered with the backend you are pointed at. Check DAINTREE_BACKEND_URL, or use a build matching this deployment."
+		return c
 	case isBackendAuthError(verr):
 		// A 401 at OUR door is a definite answer, not a failed check: this deployment
 		// will not serve this CLI, so every turn fails. Reporting it as `unknown` would
@@ -1197,6 +1205,25 @@ func verifyCredentialDoctorCheck(ctx context.Context, a *app.App, base string) D
 func isBackendAuthError(err error) bool {
 	var berr *backend.Error
 	return errors.As(err, &berr) && berr.IsAuth()
+}
+
+// isBackendAccountVerdict reports a definite, blocking account answer that IsAuth
+// deliberately does NOT claim — today `auth_client_not_allowed`.
+//
+// It exists because the two questions came apart. IsAuth now means "a credential
+// operation can fix this", which auth_client_not_allowed is precisely not: the token is
+// valid and fresh, and this deployment will not accept the OAuth client that minted it.
+// But it is still a definite verdict that no turn can survive, so doctor must fail on
+// it. Without this the row falls through to the generic "could not check" arm and
+// reports `unknown`, which does not gate — leaving doctor to conclude "no blocking
+// problems" for an install that cannot run at all. That is the exact failure the
+// credential row was added to prevent, arriving through a different door.
+func isBackendAccountVerdict(err error) bool {
+	var berr *backend.Error
+	if !errors.As(err, &berr) {
+		return false
+	}
+	return berr.AuthRemedy() == backend.RemedyReconfigure
 }
 
 // credentialOwnerSuffix names WHOSE credential the row just reported on. Without it the
