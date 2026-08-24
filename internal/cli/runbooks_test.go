@@ -314,6 +314,10 @@ func TestFailedPinPreflightDoesNotDisplaceTheCurrentSession(t *testing.T) {
 	// and returns immediately, which is enough to reach (or fail before) adoption.
 	closeStdin(t)
 
+	// Both launches run the line REPL, so give each one a closed stdin: it reads EOF
+	// and returns immediately, which is enough to reach (or fail before) adoption.
+	closeStdin(t)
+
 	// A normal launch, no pins: it adopts and becomes the project's current session.
 	good := Options{
 		Offline: boolPtr(true),
@@ -330,8 +334,8 @@ func TestFailedPinPreflightDoesNotDisplaceTheCurrentSession(t *testing.T) {
 	// Now a launch with a mistyped pin. It must fail BEFORE adopting, leaving the
 	// pointer on the baseline session.
 	bad := Options{
-		Offline:        boolPtr(true),
-		Project:        project,
+		Offline:          boolPtr(true),
+		Project:          project,
 		PinnedRunbookIDs: []string{"daintree.foundatoin"},
 	}
 	if code := runInteractive(context.Background(), bad, true); code != domain.OneShotExitCode.Error {

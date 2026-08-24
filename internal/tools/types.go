@@ -121,6 +121,12 @@ const (
 // the handler reports QUESTION_NOT_INTERACTIVE for that case instead.
 var ErrNoAskChoiceHook = errors.New("tools: no interactive question surface available")
 
+// ErrQuestionDismissed reports that a question WAS asked and the user closed it
+// without choosing. Distinct from ErrNoAskChoiceHook, which means it could not be
+// asked at all: the model needs to know the difference, because "nobody could ask you"
+// invites a retry through a different route while "you declined to answer" does not.
+var ErrQuestionDismissed = errors.New("tools: question dismissed without an answer")
+
 // ChoiceOption is one labelled option in an AskChoiceRequest. The Label (A, B, C…) is
 // assigned by the CLI, never by the model, so the model supplies only Text and can't
 // collide with or misspell the letters.
@@ -155,7 +161,15 @@ type AskChoiceAnswer struct {
 // approval sheet leads with Consequence (plain-English effect / reversibility /
 // secret exposure), falling back to a per-risk phrase when empty.
 type ConfirmRequest struct {
-	ToolName    string           `json:"toolName"`
+	ToolName string `json:"toolName"`
+	// ToolKey is the EFFECTIVE identity the tier and risk gates were applied to, which
+	// for a dynamic tool is a composite id rather than the display name.
+	//
+	// Distinct from ToolName because ToolName is the human-facing label a person is
+	// asked to reason about, and two different underlying actions can present the same
+	// one. A surface that remembers "don't ask about this again" must key on the
+	// identity, or a standing approval given for one action silently covers another.
+	ToolKey     string           `json:"toolKey,omitempty"`
 	Risk        domain.RiskClass `json:"risk"`
 	Summary     string           `json:"summary"`
 	Consequence string           `json:"consequence,omitempty"`

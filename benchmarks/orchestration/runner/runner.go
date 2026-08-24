@@ -76,11 +76,11 @@ type ScenarioResult struct {
 	Error        string         `json:"error,omitempty"`
 
 	// Latency decomposition (see scenario.RoundMetric).
-	TurnMS          int64                  `json:"turnMs,omitempty"`
-	FirstRawMetaMS  int64                  `json:"firstRawMetaMs,omitempty"`
+	TurnMS            int64                  `json:"turnMs,omitempty"`
+	FirstRawMetaMS    int64                  `json:"firstRawMetaMs,omitempty"`
 	FirstRunbookCueMS int64                  `json:"firstRunbookCueMs,omitempty"`
-	FirstContentMS  int64                  `json:"firstContentMs,omitempty"`
-	RoundDetail     []scenario.RoundMetric `json:"roundDetail,omitempty"`
+	FirstContentMS    int64                  `json:"firstContentMs,omitempty"`
+	RoundDetail       []scenario.RoundMetric `json:"roundDetail,omitempty"`
 }
 
 // RunScenario executes one trial of one scenario.
@@ -279,7 +279,7 @@ type roundTimeline struct {
 	round           int
 	requestTS       time.Time
 	rawMetaTS       time.Time
-	runbookCueTS      time.Time
+	runbookCueTS    time.Time
 	committedMetaTS time.Time
 	doneTS          time.Time
 	totalMS         int64

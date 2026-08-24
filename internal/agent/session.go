@@ -833,19 +833,25 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	coarseCounts := make(map[string]int)
 	stuckNudged := false
 
-	// The agentic loop. `iter` counts model rounds purely to drive the phase display
-	// (Analyzing on the first round, Integrating thereafter) — there is deliberately NO
-	// per-turn round ceiling. A long-running autonomous workflow (e.g. orchestrating a
-	// multi-round game across several agent terminals) legitimately needs many rounds
-	// and must be free to keep going; the genuine runaway guard is the per-tool failure
-	// breaker in runToolBatch (the same call failing the same way aborts at
-	// RepeatFailureAbort), not a blunt round cap. A message the human typed mid-turn
+	// The agentic loop. `iter` counts model rounds; it drives the phase display
+	// (Analyzing on the first round, Integrating thereafter) and feeds the convergence
+	// guard below. A long-running autonomous workflow (e.g. orchestrating a multi-round
+	// game across several agent terminals) legitimately needs many rounds, so there is
+	// no hard mid-loop kill — but "many" is not "unbounded". The per-tool failure
+	// breakers in runToolBatch only ever count FAILURES, which leaves a model whose
+	// calls all succeed free to loop forever without answering; turnStall (stall.go) is
+	// the missing progress measure, and it converges the turn by spending the last round
+	// on a tools-off report rather than by killing it. A message the human typed mid-turn
 	// (InjectPrompt) is folded into history at the TOP of a round (foldInInjections), so
 	// the very next model snapshot includes it — "between tasks" pickup. A fresh user
 	// instruction is legitimate new work, so folding one in RESETS the per-turn failure
-	// breaker (a redirect must not be aborted by the PRIOR tool's failures) and re-shows
-	// the Analyzing phase.
+	// breaker (a redirect must not be aborted by the PRIOR tool's failures) and the
+	// convergence tally with it, and re-shows the Analyzing phase.
 	iter := 0
+	stall := newTurnStall()
+	// closing latches the final, tools-off round: the guard has asked for a report, so
+	// this round sends tool_choice "none" and seals whatever prose comes back.
+	closing := false
 	resetForInjection := func() {
 		iter = 0
 		// A folded-in injection is a new active instruction: bump the revision so the
@@ -854,6 +860,8 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		failureCounts = make(map[string]int)
 		coarseCounts = make(map[string]int)
 		stuckNudged = false
+		stall.reset()
+		closing = false
 	}
 	for {
 		// 10a. Cancel check at the top of each round. A cancel always wins over a
@@ -886,6 +894,29 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 				s.events.AssistantCancelled("")
 				return domain.CancelledReply
 			}
+		}
+
+		// 10b. Convergence guard. Consulted BEFORE the snapshot below so a nudge or a
+		//      closing brief is part of the history this round actually sends. It fires
+		//      on two shapes the failure breakers cannot see: consecutive rounds that
+		//      learn nothing new, and a turn that has simply run too many rounds without
+		//      answering. Neither is fatal — a nudge gives the model one chance to
+		//      correct, and a close spends the last round with tools off asking for the
+		//      plan, so the user gets a report instead of an unbounded spend (stall.go).
+		//
+		//      It is handed roundsRun+1 — the round about to stream, counted over the
+		//      WHOLE turn — not iter, which an injection rewinds to 0. The budget has to
+		//      be the one thing a mid-turn message cannot negotiate away.
+		act := stall.step(roundsRun + 1)
+		if act.step != convergenceContinue {
+			event := "turn.stall.nudge"
+			if act.step == convergenceClose {
+				closing = true
+				event = "turn.stall.close"
+			}
+			s.pushMessage(models.TextMessage("user", act.instruction))
+			s.events.Warn(act.warning)
+			s.traceTurnStall(event, runID, turnID, roundsRun, stall.barren)
 		}
 
 		// 5/9. Project the full tool registry for this round. Runbooks no longer narrow
@@ -971,9 +1002,13 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			Startup: buildStartupContext(promptContext),
 			State:   s.backendStatePtr(),
 			Input: backend.RespondInput{
-				Messages:   bmsgs,
-				Tools:      btools,
-				ToolChoice: "auto",
+				Messages: bmsgs,
+				Tools:    btools,
+				// The closing round forbids tools at the wire rather than merely asking
+				// for prose: a model that has spent the whole turn reaching for tools
+				// will reach for one more if it is allowed to, and the point of the
+				// round is to end the turn with a report.
+				ToolChoice: toolChoiceFor(closing),
 			},
 			Runtime:    s.buildRuntimeContext(promptContext, openTerminals),
 			Turn:       s.buildTurnContext(userInput, isWake, recalledMemories, resumedWatchers),
@@ -1117,7 +1152,33 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			s.traceServerCompaction(runID, turnID, iter, result.Compaction, len(bmsgs), applied, reason)
 		}
 
-		// 10f. Append the assistant message (content null on a pure tool-call turn).
+		// 10f. Append the assistant message (content null on a pure tool-call turn). The
+		//      closing round is the exception: tools were forbidden at the wire, so a
+		//      batch that came back anyway is DROPPED rather than dispatched — and the
+		//      message must then be pushed without it, since an assistant tool_call with
+		//      no matching tool reply makes the transcript unreplayable (DeepSeek 400s).
+		if closing {
+			content := trimSpace(result.Message.Content)
+			if content == "" {
+				// A closing round that produced nothing at all still has to say
+				// something: the turn must never end on a blank bubble.
+				content = stalledReply(roundsRun)
+			}
+			s.pushMessage(models.TextMessage("assistant", content))
+			// A message the user typed during this round is new work and outranks a
+			// STALL close: fold it in, drop the latch and keep going — the same posture
+			// as the final-answer boundary in 10g. A BUDGET close is final, because
+			// yielding to an injection there is exactly how a caller with inject access
+			// would keep one turn running forever; the message stays buffered and the
+			// next turn picks it up.
+			if !stall.budgetClosed && s.foldInInjections() > 0 {
+				resetForInjection()
+				continue
+			}
+			s.events.Phase(domain.PhaseComplete)
+			s.events.AssistantEnd(content, "")
+			return content
+		}
 		s.pushMessage(backendAssistantMessage(result.Message))
 
 		// 10g. No tool calls ⇒ the model thinks it's done. But if the user slipped a
@@ -1149,6 +1210,14 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			}
 			return reply
 		}
+
+		// 10h′. Fold the SETTLED batch into the convergence tally. After dispatch, not
+		//       before: the novelty signature includes a digest of what each call
+		//       returned, which is what stops a legitimate poll of a mutable read
+		//       (watcher.list, agentTask.status) from reading as repetition. A batch the
+		//       breaker or a cancel ended never reaches here, which is harmless — those
+		//       paths have already ended the turn.
+		stall.observe(s.roundSignatures(calls))
 
 		iter++
 	}
@@ -3713,13 +3782,26 @@ func failureSignature(name, rawArgs, errCode string) string {
 // calls that differ only in key order or whitespace hash the same: parse then
 // re-marshal (Go's encoder sorts object keys). Non-JSON input passes through
 // unchanged. This keeps the circuit breaker counting a repeated-same-way failure
-// even when the model re-emits the call with reordered keys.
+// even when the model re-emits the call with reordered keys, and is the same
+// normalization the convergence guard's novelty signature is built on.
+//
+// Blank canonicalizes to "{}" because that is what the rest of the batch path already
+// treats it as (callBatchable, argsEmpty, dispatchCall): a no-arg call the model emits
+// as "" one round and "{}" the next is ONE repeated call, and hashing the two
+// differently made a repeated no-arg poll read as new work.
+//
+// Numbers are decoded with UseNumber so they survive as their literal text. Through
+// `any` they would land in float64, where every integer past 2^53 rounds to the same
+// value — two genuinely different ids hashing alike, which for a signature whose whole
+// job is "is this the same call?" is a false MATCH, the direction that costs a turn.
 func canonicalJSON(raw string) string {
-	if raw == "" {
-		return ""
+	if trimSpace(raw) == "" {
+		return "{}"
 	}
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
 	var v any
-	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+	if err := dec.Decode(&v); err != nil {
 		return raw
 	}
 	b, err := json.Marshal(v)

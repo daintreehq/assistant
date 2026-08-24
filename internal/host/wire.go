@@ -343,9 +343,16 @@ const (
 	// onto the approval frames would force a host to render a yes/no sheet for a
 	// question that has four answers.
 	CmdQuestionAnswer HostCommandType = "question:answer"
-	CmdInterrupt      HostCommandType = "interrupt"
-	CmdHibernate      HostCommandType = "hibernate"
-	CmdShutdown       HostCommandType = "shutdown"
+	// CmdCommand runs a slash command the host's own composer resolved, rather than
+	// letting the line reach the model as prose.
+	CmdCommand HostCommandType = "command"
+	// CmdOperations asks for the current operations reading — a poll, not a stream.
+	CmdOperations HostCommandType = "operations"
+	// CmdInterjectRetract takes back the most recent buffered injection (LIFO).
+	CmdInterjectRetract HostCommandType = "interject:retract"
+	CmdInterrupt        HostCommandType = "interrupt"
+	CmdHibernate        HostCommandType = "hibernate"
+	CmdShutdown         HostCommandType = "shutdown"
 )
 
 // HostCommand is a decoded inbound command. Only the fields relevant to the arm
@@ -358,6 +365,8 @@ type HostCommand struct {
 	// approval:decide
 	ApprovalID string
 	Decision   string
+	// command — the raw slash line, e.g. "/status"
+	CommandLine string
 	// question:answer
 	QuestionID string
 	// ChoiceIndex is the 0-based option the user picked. Negative means the user
@@ -421,6 +430,10 @@ func ParseCommand(line []byte) (HostCommand, error) {
 		// approval:decided — collapse it to the safe default (rejected) so a parked
 		// dispatch unblocks declined rather than emitting an off-contract decision.
 		cmd.Decision = string(normalizeDecision(cmd.Decision))
+	case CmdCommand:
+		if err := wantString(raw, "line", &cmd.CommandLine); err != nil {
+			return HostCommand{}, errNotCommand
+		}
 	case CmdQuestionAnswer:
 		if err := wantString(raw, "questionId", &cmd.QuestionID); err != nil {
 			return HostCommand{}, errNotCommand
@@ -434,6 +447,10 @@ func ParseCommand(line []byte) (HostCommand, error) {
 			return HostCommand{}, errNotCommand
 		}
 		cmd.ChoiceIndex = int(idx)
+	case CmdOperations:
+		// No fields: it is a request for the current reading.
+	case CmdInterjectRetract:
+		// No fields: it always takes the most recent buffered injection (LIFO).
 	case CmdInterrupt, CmdHibernate, CmdShutdown:
 		// no extra fields
 	default:

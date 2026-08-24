@@ -23,6 +23,37 @@ type App interface {
 	// wake or early tool call is bridged.
 	SetHooks(hooks AppHooks)
 
+	// RunCommand executes a slash line (e.g. "/status") and returns its printed
+	// output, whether it asked to quit, and whether the command was unknown.
+	//
+	// The host routes commands here rather than sending them to the model, because a
+	// command is not conversation: "/clear" as prose produces an answer ABOUT
+	// clearing and leaves the conversation intact.
+	RunCommand(ctx context.Context, line string) CommandOutcome
+
+	// Operations returns one reading of the operations deck — what the assistant is
+	// watching, running and has recently done.
+	//
+	// Built on demand, as the cockpit built it: pushing every store change to a host
+	// that may not be showing the deck is a great deal of traffic for a view nobody is
+	// looking at.
+	Operations(ctx context.Context) OperationsSnapshot
+
+	// CommandCatalog is the command set this engine will accept.
+	CommandCatalog() []CommandMeta
+
+	// McpStatus reports whether the Daintree control plane is reachable and how many
+	// tools it offers (nil count when the catalog is cold).
+	McpStatus() (connected bool, toolCount *int, errMsg string)
+
+	// CostSnapshot reports what this session has spent so far, in USD, and whether
+	// that figure is a total or a floor.
+	//
+	// Cumulative and session-wide, not per-turn: it includes the utility calls that
+	// watchers and background tasks make, which never appear as a turn and which a
+	// user has no other way to see.
+	CostSnapshot() (total float64, complete bool)
+
 	// ConnectMCP attempts the MCP connection. Best-effort: a degraded MCP is NOT a
 	// boot failure (it surfaces in prompt context + tool results), so the returned
 	// error is informational only — the host logs it to stderr and proceeds.
@@ -106,6 +137,26 @@ type ConfirmRequest struct {
 	// NeedsTypedConfirm is safety.NeedsTypedConfirm's verdict for this dispatch,
 	// forwarded verbatim so the host never re-derives the rule. See EvApprovalRequested.
 	NeedsTypedConfirm bool
+	// ToolKey is the effective identity the gates were applied to. See
+	// tools.ConfirmRequest.ToolKey.
+	ToolKey string
+}
+
+// CommandOutcome is the result of RunCommand.
+type CommandOutcome struct {
+	Text    string
+	Quit    bool
+	Unknown bool
+	// ConversationCleared reports that the command ACTUALLY cleared the conversation.
+	//
+	// It is not inferable from the command line, and a host that infers it corrupts
+	// itself: /clear is refused while a turn is in flight (Session.Clear returns
+	// ErrTurnInProgress, because clearing would corrupt the streaming snapshot), so a
+	// surface that resets on seeing the word "clear" wipes its transcript, tool rows
+	// and live state while the engine keeps the conversation and goes on working in it.
+	// The user is then talking to a model whose context they can no longer see, and the
+	// two disagree about what was said — strictly worse than the refusal it misread.
+	ConversationCleared bool
 }
 
 // AskChoiceRequest is a multiple-choice question the model needs answered before it can
@@ -124,7 +175,8 @@ type AskChoiceRequest struct {
 	Default int
 }
 
-// AskChoiceOption is one labelled choice.
+// AskChoiceOption is one labelled choice. The LABEL is assigned by the engine so
+// every surface shows the same letter for the same option.
 type AskChoiceOption struct {
 	Label string
 	Text  string

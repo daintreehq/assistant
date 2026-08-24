@@ -242,12 +242,12 @@ func TestFreshSchemaShape(t *testing.T) {
 	}
 
 	mustHaveIdx := map[string][]string{
-		"run_events":      {"idx_run_events_run", "idx_run_events_ts"},
-		"conversation":    {"idx_conv_createdat"},
-		"workflow_runs":   {"idx_workflow_runs_status"},
+		"run_events":        {"idx_run_events_run", "idx_run_events_ts"},
+		"conversation":      {"idx_conv_createdat"},
+		"workflow_runs":     {"idx_workflow_runs_status"},
 		"runbook_run_state": {"idx_runbook_run_state_key"},
-		"agent_launches":  {"idx_agent_launches_key"},
-		"artifacts":       {"idx_artifacts_session"},
+		"agent_launches":    {"idx_agent_launches_key"},
+		"artifacts":         {"idx_artifacts_session"},
 	}
 	for table, idxs := range mustHaveIdx {
 		got := indexNames(t, s, table)

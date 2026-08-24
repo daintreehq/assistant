@@ -13,14 +13,14 @@ import (
 // than string literals at call sites. Availability against a live backend is
 // verified by CheckTasks (surfaced by /doctor and the debug log) — see below.
 const (
-	TaskCheckpoint           = "checkpoint"
-	TaskMemoryDistill        = "memory_distill"
-	TaskWatcherClassify      = "watcher_classify"
-	TaskTerminalJudge        = "terminal_judge"
-	TaskTerminalSummarize    = "terminal_summarize"
-	TaskTerminalExtractText  = "terminal_extract_text"
-	TaskTerminalExtractJSON  = "terminal_extract_json"
-	TaskExtractionVerdict    = "extraction_verdict"
+	TaskCheckpoint             = "checkpoint"
+	TaskMemoryDistill          = "memory_distill"
+	TaskWatcherClassify        = "watcher_classify"
+	TaskTerminalJudge          = "terminal_judge"
+	TaskTerminalSummarize      = "terminal_summarize"
+	TaskTerminalExtractText    = "terminal_extract_text"
+	TaskTerminalExtractJSON    = "terminal_extract_json"
+	TaskExtractionVerdict      = "extraction_verdict"
 	TaskRunbookStepConsistency = "runbook_step_consistency"
 )
 
@@ -180,7 +180,7 @@ type ExtractionVerdictInput struct {
 
 // RunbookStepConsistencyInput judges whether one runbook-step advance is consistent.
 type RunbookStepConsistencyInput struct {
-	RunbookID           string           `json:"runbook_id"`
+	RunbookID         string           `json:"runbook_id"`
 	CompletedStep     int              `json:"completed_step"`
 	Status            string           `json:"status,omitempty"`
 	RequestedNext     string           `json:"requested_next,omitempty"`

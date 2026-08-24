@@ -683,7 +683,7 @@ func Register(s *mcp.Server, reg *Registry, info *BinaryInfo, lifetime context.C
 			ApprovalTimeout: approvalTimeout,
 			Questions:       questionMode,
 			QuestionTimeout: questionTimeout,
-			Runbooks:          in.Runbooks,
+			Runbooks:        in.Runbooks,
 		})
 		if err != nil {
 			return nil, SessionOutput{}, err

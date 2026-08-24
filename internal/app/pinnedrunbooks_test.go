@@ -30,8 +30,8 @@ func pinCapableApp(t *testing.T, pins []string, caps backend.Capabilities, capsE
 			Tier:                 strPtr("operator"),
 			WorkflowIntelligence: boolPtr(false),
 		},
-		BackendOverride: fb,
-		PinnedRunbookIDs:  pins,
+		BackendOverride:  fb,
+		PinnedRunbookIDs: pins,
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -309,7 +309,11 @@ func TestPinGateClosesAfterAnEndpointSwitch(t *testing.T) {
 			ProjectPath:          &dir,
 			Tier:                 strPtr("operator"),
 			WorkflowIntelligence: boolPtr(false),
-			BackendURL:           strPtr(backend.LocalBaseURL),
+			// No BackendURL override: one would PIN the session (see
+			// App.SetBackendURL), and a pinned session refuses to switch — which is
+			// the behaviour under test's own precondition, not its subject. The
+			// session therefore starts on the default endpoint and switches to the
+			// local one, which exercises the same swap in the other direction.
 		},
 		PinnedRunbookIDs: []string{"a.one"},
 	})
@@ -326,10 +330,10 @@ func TestPinGateClosesAfterAnEndpointSwitch(t *testing.T) {
 		t.Fatal("gate should be open against the endpoint that answered")
 	}
 
-	if _, err := a.SetBackendURL(backend.DefaultBaseURL); err != nil {
+	if _, err := a.SetBackendURL(backend.LocalBaseURL); err != nil {
 		t.Fatalf("SetBackendURL: %v", err)
 	}
-	if a.Backend.BaseURL() != backend.DefaultBaseURL {
+	if a.Backend.BaseURL() != backend.LocalBaseURL {
 		t.Fatalf("the swap did not take: BaseURL = %q", a.Backend.BaseURL())
 	}
 	if a.backendAcceptsPinnedRunbookIDs() {

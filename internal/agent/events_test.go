@@ -393,25 +393,25 @@ func TestRunEventSinkUnserializableFallback(t *testing.T) {
 // sink so the healthy one still receives every event.
 type throwingSink struct{}
 
-func (throwingSink) Phase(domain.RunPhase)            { panic("boom") }
-func (throwingSink) AssistantStart()                  { panic("boom") }
-func (throwingSink) AssistantToken(string)            { panic("boom") }
-func (throwingSink) AssistantEnd(string, string)      { panic("boom") }
-func (throwingSink) AssistantCancelled(string)        { panic("boom") }
-func (throwingSink) Interjection(string)              { panic("boom") }
-func (throwingSink) RunbookLoaded([]string)             { panic("boom") }
+func (throwingSink) Phase(domain.RunPhase)                { panic("boom") }
+func (throwingSink) AssistantStart()                      { panic("boom") }
+func (throwingSink) AssistantToken(string)                { panic("boom") }
+func (throwingSink) AssistantEnd(string, string)          { panic("boom") }
+func (throwingSink) AssistantCancelled(string)            { panic("boom") }
+func (throwingSink) Interjection(string)                  { panic("boom") }
+func (throwingSink) RunbookLoaded([]string)               { panic("boom") }
 func (throwingSink) RunbookDecision(RunbookDecisionEvent) { panic("boom") }
-func (throwingSink) ToolBatch([]BatchedToolCall)      { panic("boom") }
-func (throwingSink) ToolState(string, ToolState)      { panic("boom") }
-func (throwingSink) ToolProgress(string, string)      { panic("boom") }
-func (throwingSink) ToolCall(ToolCallEvent)           { panic("boom") }
-func (throwingSink) ToolResult(ToolResultEvent)       { panic("boom") }
-func (throwingSink) Error(string)                     { panic("boom") }
-func (throwingSink) Warn(string)                      { panic("boom") }
-func (throwingSink) Info(string)                      { panic("boom") }
-func (throwingSink) Usage(UsageEvent)                 { panic("boom") }
-func (throwingSink) TurnPrompt(string)                { panic("boom") }
-func (throwingSink) ModelRateLimited()                { panic("boom") }
+func (throwingSink) ToolBatch([]BatchedToolCall)          { panic("boom") }
+func (throwingSink) ToolState(string, ToolState)          { panic("boom") }
+func (throwingSink) ToolProgress(string, string)          { panic("boom") }
+func (throwingSink) ToolCall(ToolCallEvent)               { panic("boom") }
+func (throwingSink) ToolResult(ToolResultEvent)           { panic("boom") }
+func (throwingSink) Error(string)                         { panic("boom") }
+func (throwingSink) Warn(string)                          { panic("boom") }
+func (throwingSink) Info(string)                          { panic("boom") }
+func (throwingSink) Usage(UsageEvent)                     { panic("boom") }
+func (throwingSink) TurnPrompt(string)                    { panic("boom") }
+func (throwingSink) ModelRateLimited()                    { panic("boom") }
 
 // recordingSink captures a flat string log of received events.
 type recordingSink struct {

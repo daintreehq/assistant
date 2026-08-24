@@ -297,11 +297,11 @@ func intPtrOrNil(n int) *int {
 }
 
 var (
-	_ memory.Store     = memoryStoreAdapter{}
+	_ memory.Store         = memoryStoreAdapter{}
 	_ runbook.RunbookStore = runbookStoreAdapter{}
-	_ timer.Store      = timerStoreAdapter{}
-	_ watcher.Store    = watcherStoreAdapter{}
-	_ workflow.Store   = workflowStoreAdapter{}
+	_ timer.Store          = timerStoreAdapter{}
+	_ watcher.Store        = watcherStoreAdapter{}
+	_ workflow.Store       = workflowStoreAdapter{}
 	// *storage.Store directly satisfies the agent distill-on-compact seam (no adapter
 	// needed — its no-ctx, record-returning InsertMemory + MemoryExists match exactly).
 	_ agent.MemoryStore = (*storage.Store)(nil)

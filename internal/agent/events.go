@@ -2,7 +2,8 @@
 // user (or autonomous) turn to completion: optional auto-compact → runbook
 // re-selection → assemble the three control messages → stream the large model →
 // dispatch tool calls → feed results back (looping until the model stops calling
-// tools; no per-turn round cap). It owns conversation
+// tools, or the convergence guard in stall.go closes a turn that has stopped making
+// progress). It owns conversation
 // persistence/rehydration, the repeated-failure circuit breaker, oversized-tool-
 // result truncation into session artifacts, and a liveness-rich structured event
 // stream.
@@ -225,25 +226,25 @@ type EventSink interface {
 // NoopEventSink discards every event. Default sink and test stand-in.
 type NoopEventSink struct{}
 
-func (NoopEventSink) Phase(domain.RunPhase)            {}
-func (NoopEventSink) AssistantStart()                  {}
-func (NoopEventSink) AssistantToken(string)            {}
-func (NoopEventSink) AssistantEnd(string, string)      {}
-func (NoopEventSink) AssistantCancelled(string)        {}
-func (NoopEventSink) Interjection(string)              {}
-func (NoopEventSink) RunbookLoaded([]string)             {}
+func (NoopEventSink) Phase(domain.RunPhase)                {}
+func (NoopEventSink) AssistantStart()                      {}
+func (NoopEventSink) AssistantToken(string)                {}
+func (NoopEventSink) AssistantEnd(string, string)          {}
+func (NoopEventSink) AssistantCancelled(string)            {}
+func (NoopEventSink) Interjection(string)                  {}
+func (NoopEventSink) RunbookLoaded([]string)               {}
 func (NoopEventSink) RunbookDecision(RunbookDecisionEvent) {}
-func (NoopEventSink) ToolBatch([]BatchedToolCall)      {}
-func (NoopEventSink) ToolState(string, ToolState)      {}
-func (NoopEventSink) ToolProgress(string, string)      {}
-func (NoopEventSink) ToolCall(ToolCallEvent)           {}
-func (NoopEventSink) ToolResult(ToolResultEvent)       {}
-func (NoopEventSink) Error(string)                     {}
-func (NoopEventSink) Warn(string)                      {}
-func (NoopEventSink) Info(string)                      {}
-func (NoopEventSink) Usage(UsageEvent)                 {}
-func (NoopEventSink) TurnPrompt(string)                {}
-func (NoopEventSink) ModelRateLimited()                {}
+func (NoopEventSink) ToolBatch([]BatchedToolCall)          {}
+func (NoopEventSink) ToolState(string, ToolState)          {}
+func (NoopEventSink) ToolProgress(string, string)          {}
+func (NoopEventSink) ToolCall(ToolCallEvent)               {}
+func (NoopEventSink) ToolResult(ToolResultEvent)           {}
+func (NoopEventSink) Error(string)                         {}
+func (NoopEventSink) Warn(string)                          {}
+func (NoopEventSink) Info(string)                          {}
+func (NoopEventSink) Usage(UsageEvent)                     {}
+func (NoopEventSink) TurnPrompt(string)                    {}
+func (NoopEventSink) ModelRateLimited()                    {}
 
 // MultiSink fans every event out to several sinks, each isolated by panic
 // recovery so one misbehaving sink (e.g. a UI bridge) can never break the loop or

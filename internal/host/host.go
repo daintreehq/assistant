@@ -372,13 +372,25 @@ func (h *Host) boot(desc SessionDescriptor) {
 	// Hand off from the boot guard to the steady-state fatal path.
 	h.guardActive = false
 	h.ready = true
+	rcfg := app.Config()
 	ev := EvReady{
 		ProtocolVersion: ProtocolVersion,
 		Version:         BuildVersion,
-		AutoApprove:     app.Config().AutoApprove,
+		AutoApprove:     rcfg.AutoApprove,
+		Tier:            string(rcfg.Tier),
+		TierGloss:       tierGloss(rcfg.Tier),
+		Backend:         mastheadBackend(rcfg.BackendURL),
+		Routing:         mastheadRouting(rcfg.Routing),
+		// Resolvable here because StartDebugLog ran above; "" when logging is off.
+		LogFile:  debuglog.CurrentDebugLogPath(),
+		Commands: app.CommandCatalog(),
 	}
 	if desc.ResumeSessionID != "" {
 		ev.ResumedSessionID = desc.ResumeSessionID
 	}
 	h.post(ev)
+	// AFTER host:ready, deliberately. A host cannot match events to a session until it
+	// has been told the session id, so anything emitted before ready is dropped — the
+	// startup status was going into exactly that gap and never arriving.
+	h.postMcpStatus()
 }

@@ -305,24 +305,24 @@ type ContextCheckpointRecord struct {
 
 // RunbookStepProgress is one step within a RunbookRunStateRecord (1-based index).
 type RunbookStepProgress struct {
-	Index  int             `json:"index"`
+	Index  int               `json:"index"`
 	Status RunbookStepStatus `json:"status"`
-	Notes  *string         `json:"notes,omitempty"`
-	Ts     int64           `json:"ts"`
+	Notes  *string           `json:"notes,omitempty"`
+	Ts     int64             `json:"ts"`
 }
 
 // RunbookRunStateRecord tracks a runbook's stepwise progress. Natural key
 // (sessionId, runbookId).
 type RunbookRunStateRecord struct {
-	ID          string         `json:"id"` // rrs_<uuid8>
-	SessionID   string         `json:"sessionId"`
-	RunbookID     string         `json:"runbookId"`
-	CurrentStep int            `json:"currentStep"` // 0 = not started
-	StepsJson   string         `json:"stepsJson"`   // JSON RunbookStepProgress[]
+	ID          string           `json:"id"` // rrs_<uuid8>
+	SessionID   string           `json:"sessionId"`
+	RunbookID   string           `json:"runbookId"`
+	CurrentStep int              `json:"currentStep"` // 0 = not started
+	StepsJson   string           `json:"stepsJson"`   // JSON RunbookStepProgress[]
 	Status      RunbookRunStatus `json:"status"`
-	StartedAt   int64          `json:"startedAt"`
-	UpdatedAt   int64          `json:"updatedAt"`
-	CompletedAt *int64         `json:"completedAt,omitempty"`
+	StartedAt   int64            `json:"startedAt"`
+	UpdatedAt   int64            `json:"updatedAt"`
+	CompletedAt *int64           `json:"completedAt,omitempty"`
 }
 
 // AgentLaunchRecord is the durable state of the idempotent agent-spawn saga.

@@ -14,7 +14,7 @@ import (
 // The workflow-intelligence graph tools (workflow.plan / getGraph / next /
 // attachResource / recordEvidence / reconcile / cancel). They extend — never
 // replace — the flat workflow.create/get/list/update ledger tools, and are
-// registered ONLY when Deps.Graph is wired (DAINTREE_WORKFLOW_INTELLIGENCE=1),
+// registered ONLY when Deps.Graph is wired (unless DAINTREE_WORKFLOW_INTELLIGENCE=0),
 // so a disabled build's toolset is byte-identical to before.
 
 const codeGraphNotFound = "WORKFLOW_GRAPH_NOT_FOUND"
@@ -51,7 +51,7 @@ type planArgs struct {
 	Scope              string   `json:"scope,omitempty"`
 	ExistingWorkflowID string   `json:"existingWorkflowId,omitempty"`
 	ForceReplan        bool     `json:"forceReplan,omitempty"`
-	ActiveRunbookIDs     []string `json:"activeRunbookIds,omitempty"`
+	ActiveRunbookIDs   []string `json:"activeRunbookIds,omitempty"`
 	Notes              []string `json:"notes,omitempty"`
 }
 
@@ -93,7 +93,7 @@ func newPlanTool(svc GraphService) *tools.Tool {
 				Scope:              a.Scope,
 				ExistingWorkflowID: a.ExistingWorkflowID,
 				ForceReplan:        a.ForceReplan,
-				ActiveRunbookIDs:     a.ActiveRunbookIDs,
+				ActiveRunbookIDs:   a.ActiveRunbookIDs,
 				Notes:              a.Notes,
 				Source:             workflowgraph.SourceUser,
 			})

@@ -170,7 +170,7 @@ func (f *fakeBackend) handleRespond(w http.ResponseWriter, r *http.Request) {
 		"protocol_version": 2,
 		"request_id":       "req_1",
 		"model":            "daintree-assistant",
-		"runbooks":           runbooks,
+		"runbooks":         runbooks,
 		"state":            "dst1.test",
 		"catalog_revision": "sha256:test",
 		"prompt_version":   "test",
@@ -273,7 +273,7 @@ func (f *fakeBackend) handleCapabilities(w http.ResponseWriter, _ *http.Request)
 			"streaming":                true,
 			"stream_events":            []string{"meta", "delta", "done", "error"},
 			"system_messages_accepted": false,
-			"max_active_runbooks":        3,
+			"max_active_runbooks":      3,
 			"metadata_transport":       "sse",
 			// Advertise the terminal-geometry contract so the PTY runs exercise the OPEN
 			// gate. A fake that withheld it would leave every end-to-end path testing only

@@ -388,7 +388,7 @@ func (a *App) checkRunbookStepConsistency(ctx context.Context, in runbook.Consis
 		requestedNext = itoa(*in.NextStep)
 	}
 	out, err := backend.RunRunbookStepConsistency(ctx, a.Backend, backend.RunbookStepConsistencyInput{
-		RunbookID:           in.RunbookID,
+		RunbookID:         in.RunbookID,
 		CompletedStep:     in.CompletedStep,
 		Status:            string(in.StepStatus),
 		RequestedNext:     requestedNext,

@@ -11,7 +11,7 @@ import (
 	"github.com/daintreehq/assistant/internal/workflowgraph"
 )
 
-// Workflow-intelligence wiring (DAINTREE_WORKFLOW_INTELLIGENCE=1): the
+// Workflow-intelligence wiring (on unless DAINTREE_WORKFLOW_INTELLIGENCE=0): the
 // workflowgraph.Service is constructed once in Create and threaded into four
 // seams — the workflow tool family (graph tools), the registry's dispatch
 // observer (automatic evidence capture), the async coordinator's WorkflowSink

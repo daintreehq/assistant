@@ -174,6 +174,46 @@ func proxyExceptLoopback(req *http.Request) (*url.URL, error) {
 	return http.ProxyFromEnvironment(req)
 }
 
+// errRedirectRefused is returned by noRedirects. A sentinel so the transport-error
+// mapping can classify it as final rather than as a retriable "connect" — replaying a
+// refused redirect nine times over a 75-second backoff only re-derives the same answer.
+var errRedirectRefused = errors.New("backend: refusing to follow a redirect")
+
+// noRedirects refuses EVERY redirect, on both clients.
+//
+// Without a CheckRedirect, Go follows redirects with the default policy, and a 307/308
+// REPLAYS the POST body at the new location. The body of a respond request is the whole
+// conversation — prose, file paths, tool arguments, results — so a backend answering
+// with a remote Location moves all of it off-box in one hop.
+//
+// That is not a hypothetical for this engine specifically. Daintree pins the assistant
+// to loopback precisely BECAUSE the native panel is unauthenticated and carries
+// everything in that request; a followed redirect walks straight through the pin, and
+// through the sibling defence next door (proxyExceptLoopback), both of which only ever
+// inspect the endpoint the session was CONFIGURED with.
+//
+// Refusing outright rather than validating each hop against isLoopbackHost, because the
+// assistant API has no legitimate reason to redirect at all: the client owns the full
+// URL, builds fixed paths against it, and speaks JSON and SSE — there is no HTML
+// navigation, no auth handshake, and no canonical-host normalisation for it to follow.
+// DefaultBaseURL is already https, so not even an http→https upgrade applies. "Follows
+// no redirects" is also a property a reader can verify by reading one function, where
+// "follows only safe ones" has to be re-verified against the loopback predicate every
+// time that predicate changes.
+func noRedirects(req *http.Request, _ []*http.Request) error {
+	return fmt.Errorf("%w to %s — the assistant API does not redirect, and following it would replay this request (the whole conversation, file paths and tool arguments) at an endpoint this session was never pointed at", errRedirectRefused, req.URL.Redacted())
+}
+
+// transportError maps a *http.Client.Do failure onto the wire error taxonomy. A refused
+// redirect gets its OWN code so the retry layer treats it as final: every code except
+// "connect" falls through isRetriable to false, the same trick doJSON uses for "timeout".
+func transportError(err error) *Error {
+	if errors.Is(err, errRedirectRefused) {
+		return &Error{Code: "redirect_refused", Message: "assistant backend redirected the request: " + err.Error()}
+	}
+	return &Error{Code: "connect", Message: "could not reach assistant backend: " + err.Error()}
+}
+
 // newTransport builds the structured default transport: bounded dial + TLS
 // handshake, keep-alives on (connection reuse matters — every turn round-trips),
 // and an optional response-header bound (0 = none).
@@ -214,8 +254,8 @@ func NewClient(cfg ClientConfig) *Client {
 	hc := cfg.HTTPClient
 	jc := cfg.HTTPClient
 	if hc == nil {
-		hc = &http.Client{Transport: newTransport(streamResponseHeaderTimeout)}
-		jc = &http.Client{Transport: newTransport(0)}
+		hc = &http.Client{Transport: newTransport(streamResponseHeaderTimeout), CheckRedirect: noRedirects}
+		jc = &http.Client{Transport: newTransport(0), CheckRedirect: noRedirects}
 	}
 	retry := cfg.Retry
 	if retry.MaxAttempts == 0 {
@@ -517,8 +557,7 @@ func (c *Client) respondStreamOnce(ctx context.Context, body []byte, cb StreamCa
 		// dying is a completely different diagnosis from a refused socket, and only the
 		// marks tell them apart. A truly refused connection records nothing, which is
 		// the honest answer rather than a row of zeroes.
-		return RespondResult{Transport: marks.result()},
-			&Error{Code: "connect", Message: "could not reach assistant backend: " + err.Error()}
+		return RespondResult{Transport: marks.result()}, transportError(err)
 	}
 	defer resp.Body.Close()
 
@@ -995,7 +1034,7 @@ func (c *Client) doJSONAttempt(attemptCtx context.Context, method, path string, 
 
 	resp, err := c.jsonHTTP.Do(req)
 	if err != nil {
-		return &Error{Code: "connect", Message: "could not reach assistant backend: " + err.Error()}
+		return transportError(err)
 	}
 	defer resp.Body.Close()
 

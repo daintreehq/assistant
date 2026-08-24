@@ -193,6 +193,7 @@ model writing, moved only by output length or a model change).
 | `tool.not_offered` | tool excluded by an explicit allowlist (dormant today) | `runId` `toolCallId` `tool` |
 | `tool.cancelled_stub` | calls given a synthetic CANCELLED result on abort | `runId` `count` |
 | `tool.repeat.warning` / `tool.repeat.abort` | circuit breaker fired on a repeated failing call | `runId` `tool` `count` `errorCode` `signature` |
+| `turn.stall.nudge` / `turn.stall.close` | convergence guard fired: the turn is repeating itself or has run out of round budget (`close` spends the last round with tools off, asking for a report) | `runId` `turnId` `round` `barren` |
 
 ### MCP
 | event | when | key fields |
@@ -227,7 +228,7 @@ stalled utility task are distinguishable),
 2. `grep <runId>` to pull that turn's whole timeline.
 3. Read its `backend.respond.request`/`raw_meta`/`runbook_cue`/`meta`/`done` per round: was the model shown the
    right context? did it load the right runbook? what did it choose?
-4. Inspect failed `tool.call` / `tool.args.invalid` / `tool.repeat.*` for that turn.
+4. Inspect failed `tool.call` / `tool.args.invalid` / `tool.repeat.*` / `turn.stall.*` for that turn.
 5. Follow a failing `tool.call` down to its `mcp.call` to see whether the fault was the
    tool, the args, or the MCP layer (throttle/transport).
 6. Decide the fix surface: bad args + ambiguous schema → local tool desc/schema or a

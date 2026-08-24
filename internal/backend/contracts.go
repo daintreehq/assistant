@@ -589,12 +589,12 @@ type RespondResponse struct {
 	Cost *TurnCost `json:"cost"`
 	// Timings is where the request's wall clock went, by phase. Absent ⇒ the backend
 	// does not report timings. See TurnTimings.
-	Timings         *TurnTimings `json:"timings"`
-	Runbooks          RunbooksBlock  `json:"runbooks"`
-	State           string       `json:"state"`
-	CatalogRevision string       `json:"catalog_revision"`
-	PromptVersion   string       `json:"prompt_version"`
-	Warnings        []string     `json:"warnings"`
+	Timings         *TurnTimings  `json:"timings"`
+	Runbooks        RunbooksBlock `json:"runbooks"`
+	State           string        `json:"state"`
+	CatalogRevision string        `json:"catalog_revision"`
+	PromptVersion   string        `json:"prompt_version"`
+	Warnings        []string      `json:"warnings"`
 }
 
 // RespondMessage is the assistant message in a non-streaming response.
@@ -796,14 +796,14 @@ func parseMillis(raw json.RawMessage) (int, bool) {
 // outcome (active set + newly-loaded titles the client surfaces), and version
 // markers.
 type StreamMeta struct {
-	ProtocolVersion int         `json:"protocol_version"`
-	RequestID       string      `json:"request_id"`
-	Model           string      `json:"model"`
-	Runbooks          RunbooksBlock `json:"runbooks"`
-	State           string      `json:"state"`
-	CatalogRevision string      `json:"catalog_revision"`
-	PromptVersion   string      `json:"prompt_version"`
-	Warnings        []string    `json:"warnings"`
+	ProtocolVersion int           `json:"protocol_version"`
+	RequestID       string        `json:"request_id"`
+	Model           string        `json:"model"`
+	Runbooks        RunbooksBlock `json:"runbooks"`
+	State           string        `json:"state"`
+	CatalogRevision string        `json:"catalog_revision"`
+	PromptVersion   string        `json:"prompt_version"`
+	Warnings        []string      `json:"warnings"`
 }
 
 // StreamDelta is one streamed chunk: visible content, chain-of-thought, and/or
@@ -994,8 +994,8 @@ func (c *ContextCompactionCaps) ReplayCompatible() bool {
 // the model as its body in a "# Loaded runbooks" system message (plain context),
 // so Prelude is now vestigial metadata the client neither replays nor renders.
 type RunbooksBlock struct {
-	Active      []RunbookRef   `json:"active"`
-	NewlyLoaded []RunbookRef   `json:"newly_loaded"`
+	Active      []RunbookRef `json:"active"`
+	NewlyLoaded []RunbookRef `json:"newly_loaded"`
 	Prelude     Prelude      `json:"prelude"`
 	Selector    SelectorMeta `json:"selector"`
 }
@@ -1148,8 +1148,8 @@ type Capabilities struct {
 	// cannot invent its own privacy wording — the difference between "does not train
 	// on" and "does not store" is a claim about the user's data, and only one of them
 	// is true under the default mode.
-	Routing RoutingCapsBlock `json:"routing"`
-	Runbooks  struct {
+	Routing  RoutingCapsBlock `json:"routing"`
+	Runbooks struct {
 		CatalogRevision string `json:"catalog_revision"`
 		ManualResolve   bool   `json:"manual_resolve"`
 		// PinnedRunbookIDs advertises that Selection.pinned_runbook_ids is accepted. It is
@@ -1217,7 +1217,7 @@ type RespondCapsBlock struct {
 	Streaming              bool     `json:"streaming"`
 	StreamEvents           []string `json:"stream_events"`
 	SystemMessagesAccepted bool     `json:"system_messages_accepted"`
-	MaxActiveRunbooks        int      `json:"max_active_runbooks"`
+	MaxActiveRunbooks      int      `json:"max_active_runbooks"`
 	MetadataTransport      string   `json:"metadata_transport"`
 	// CostReporting is present when this backend reports what each request charged the
 	// caller. Absent on an older deployment — which the CLI handles without needing to

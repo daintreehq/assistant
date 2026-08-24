@@ -44,8 +44,8 @@ type RunbookCatalogJSON struct {
 	// CatalogRevision is what a caching caller keys this list on. Conservative, not
 	// exact: the backend's revision hashes each runbook's body too, so it moves on an
 	// edit that leaves these ids and titles byte-identical.
-	CatalogRevision string             `json:"catalogRevision"`
-	Runbooks          []backend.RunbookRef `json:"runbooks"`
+	CatalogRevision string               `json:"catalogRevision"`
+	Runbooks        []backend.RunbookRef `json:"runbooks"`
 }
 
 // runbookCatalogErrorJSON is what a failure looks like under --json. A caller parsing
@@ -148,7 +148,7 @@ func runListRunbooks(ctx context.Context, opts Options, stdout, stderr io.Writer
 	if opts.JSON {
 		if err := writeIndentedJSON(stdout, RunbookCatalogJSON{
 			CatalogRevision: caps.Runbooks.CatalogRevision,
-			Runbooks:          refs,
+			Runbooks:        refs,
 		}); err != nil {
 			return fail("write_failed", err)
 		}

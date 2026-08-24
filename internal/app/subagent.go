@@ -41,9 +41,9 @@ import (
 // no-op — user.askMultipleChoice (ui) and runbook.step.advance (local) both looked
 // like they belonged and neither did.
 var subagentToolDenylist = map[string]struct{}{
-	"subagent.run":  {},
+	"subagent.run":    {},
 	"runbook.run.get": {},
-	"queue.digest":  {},
+	"queue.digest":    {},
 }
 
 // subagentToolNames is the sub-agent's inventory: every registered read-risk tool

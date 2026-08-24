@@ -13,12 +13,12 @@ import (
 // aliases must not creep back into persisted benchmark results.
 func TestLatencyJSONUsesCanonicalFields(t *testing.T) {
 	result := ScenarioResult{
-		FirstRawMetaMS:  600,
+		FirstRawMetaMS:    600,
 		FirstRunbookCueMS: 602,
-		FirstContentMS:  1400,
+		FirstContentMS:    1400,
 		RoundDetail: []scenario.RoundMetric{{
 			RawMetaMS:       590,
-			RunbookCueMS:      592,
+			RunbookCueMS:    592,
 			CommittedMetaMS: 1390,
 			FirstTokenMS:    1390,
 		}},

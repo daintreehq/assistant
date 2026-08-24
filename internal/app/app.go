@@ -149,7 +149,7 @@ type App struct {
 	asyncCoordinator *asyncwork.Coordinator
 
 	// workflowService is the workflow-intelligence graph layer (nil unless
-	// DAINTREE_WORKFLOW_INTELLIGENCE=1). See workflowintel.go for the four seams
+	// unless DAINTREE_WORKFLOW_INTELLIGENCE=0). See workflowintel.go for the four seams
 	// it feeds (graph tools, dispatch observer, async sink, turn digests).
 	workflowService *workflowgraph.Service
 
@@ -767,12 +767,12 @@ func Create(opts CreateOptions) (*App, error) {
 		// forbids. Nil pins make both inert.
 		PinnedRunbookIDs:               a.PinnedRunbookIDs(),
 		BackendAcceptsPinnedRunbookIDs: a.backendAcceptsPinnedRunbookIDs,
-		BackendContextCompaction:     a.backendContextCompaction,
+		BackendContextCompaction:       a.backendContextCompaction,
 		// Live async futures for the turn context's async-operations block, re-read
 		// every round so the model sees (and never re-issues) its in-flight work.
 		AsyncInvocationLister: store,
 		// Open workflow-graph digests for the turn context's workflow_state block
-		// (nil unless DAINTREE_WORKFLOW_INTELLIGENCE=1 — the wire then stays
+		// (nil when DAINTREE_WORKFLOW_INTELLIGENCE=0 — the wire then stays
 		// byte-identical to the pre-feature request).
 		WorkflowDigestLister: a.workflowDigestLister(),
 		// Per-turn open-terminal inventory (issue #286): a fresh terminal.list +

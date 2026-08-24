@@ -92,7 +92,7 @@ func (eagerRunbookBackend) RespondStream(_ context.Context, _ backend.RespondReq
 	refs := []backend.RunbookRef{
 		{ID: "multi_agent", Title: "Multi-agent orchestration"},
 		{ID: "fallback_runbook"}, // no title: the label falls back to the id
-		{},                     // malformed refs never produce a blank label
+		{},                       // malformed refs never produce a blank label
 	}
 	conf := 0.91
 	meta := backend.StreamMeta{

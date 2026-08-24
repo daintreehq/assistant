@@ -9,12 +9,23 @@ rendering. This document covers the CLI side (this repo). The backend side
 in `../assistant-backend` — see "Backend contract" below for exactly what this
 client expects.
 
-**Rollout flag:** `DAINTREE_WORKFLOW_INTELLIGENCE=1` (trusted-or-own env, like
-`DAINTREE_ASSISTANT_DEBUG_LOG`; never the project `.env`). Off by default.
-When off, the runtime is byte-identical to before the feature: no graph tools
-register, no observer installs, no `workflow_state` field is ever sent (the
-backend validates `TurnContext` with `extra="forbid"`, so a backend without
-the matching contract must never see the field).
+**Flag:** `DAINTREE_WORKFLOW_INTELLIGENCE` (trusted-or-own env, like
+`DAINTREE_ASSISTANT_DEBUG_LOG`; never the project `.env`). **ON by default**;
+set it to `0`/`false`/`no`/`off` for a backend that does not carry the matching
+contract. When off, the runtime is byte-identical to before the feature: no
+graph tools register, no observer installs, no `workflow_state` field is ever
+sent (the backend validates `TurnContext` with `extra="forbid"`, so a backend
+without the matching contract must never see the field).
+
+It defaulted OFF while the backend caught up, and stayed off after it had. What
+that looked like from the outside: `/v1/daintree/capabilities` advertises
+`workflow_plan`, `workflow_reconcile` and `workflow_resume_digest`, and the
+skill catalog ships `daintree.orchestration.execute-durable-workflow`, which the
+selector loads at high confidence for any large request — so the model was told
+to build a durable workflow while the client registered none of the tools that
+skill is written against. It announced the plan, found no tool, and announced it
+again. A rollout flag that is only ever read on the client cannot tell that the
+rollout finished.
 
 ## The graph
 

@@ -58,7 +58,7 @@ type Deps struct {
 // stays cheap, and uses plain domain values so the runbook package needs no model
 // imports.
 type ConsistencyCheckInput struct {
-	RunbookID         string
+	RunbookID       string
 	RunID           string
 	SessionID       string
 	CompletedStep   int
@@ -132,7 +132,7 @@ func newRunGetTool(deps Deps) *tools.Tool {
 // --- runbook.step.advance ---
 
 type stepAdvanceArgs struct {
-	RunbookID       string `json:"runbookId"`
+	RunbookID     string `json:"runbookId"`
 	CompletedStep int    `json:"completedStep"`
 	NextStep      *int   `json:"nextStep,omitempty"`
 	Status        string `json:"status,omitempty"` // done | skipped (default done)
@@ -247,7 +247,7 @@ func newStepAdvanceTool(deps Deps) *tools.Tool {
 			// write must not log an "advance occurred" event). `steps` is the post-upsert
 			// (after) state; beforeSteps holds the pre-upsert snapshot.
 			observeIn := ConsistencyCheckInput{
-				RunbookID:         id,
+				RunbookID:       id,
 				RunID:           tctx.RunID,
 				SessionID:       tctx.SessionID,
 				CompletedStep:   a.CompletedStep,
@@ -266,7 +266,7 @@ func newStepAdvanceTool(deps Deps) *tools.Tool {
 				rec := domain.RunbookRunStateRecord{
 					ID:          domain.NewID(domain.PrefixRunbookRun),
 					SessionID:   tctx.SessionID,
-					RunbookID:     id,
+					RunbookID:   id,
 					CurrentStep: currentStep,
 					StepsJson:   string(stepsJSON),
 					Status:      runStatus,
@@ -326,7 +326,7 @@ func observeStepAdvance(ctx context.Context, deps Deps, tctx *tools.ToolContext,
 	debuglog.LogDebug(cfg, "runbook.step.delta", map[string]any{
 		"runId":           in.RunID,
 		"sessionId":       in.SessionID,
-		"runbookId":         in.RunbookID,
+		"runbookId":       in.RunbookID,
 		"completedStep":   in.CompletedStep,
 		"nextStep":        nextStep,
 		"status":          string(in.StepStatus),
@@ -360,7 +360,7 @@ func logConsistencyCheck(ctx context.Context, cfg debuglog.Config, check func(co
 		if r := recover(); r != nil {
 			debuglog.LogDebug(cfg, "runbook.step.consistency", map[string]any{
 				"runId":         in.RunID,
-				"runbookId":       in.RunbookID,
+				"runbookId":     in.RunbookID,
 				"completedStep": in.CompletedStep,
 				"checkOk":       false,
 				"error":         fmt.Sprintf("panic: %v", r),
@@ -371,7 +371,7 @@ func logConsistencyCheck(ctx context.Context, cfg debuglog.Config, check func(co
 	if err != nil {
 		debuglog.LogDebug(cfg, "runbook.step.consistency", map[string]any{
 			"runId":         in.RunID,
-			"runbookId":       in.RunbookID,
+			"runbookId":     in.RunbookID,
 			"completedStep": in.CompletedStep,
 			"checkOk":       false,
 			"error":         err.Error(),
@@ -380,7 +380,7 @@ func logConsistencyCheck(ctx context.Context, cfg debuglog.Config, check func(co
 	}
 	debuglog.LogDebug(cfg, "runbook.step.consistency", map[string]any{
 		"runId":         in.RunID,
-		"runbookId":       in.RunbookID,
+		"runbookId":     in.RunbookID,
 		"completedStep": in.CompletedStep,
 		"checkOk":       true,
 		"flagged":       ans.Matched,
@@ -441,7 +441,7 @@ func runStateView(rec *domain.RunbookRunStateRecord) map[string]any {
 	view := map[string]any{
 		"id":          rec.ID,
 		"sessionId":   rec.SessionID,
-		"runbookId":     rec.RunbookID,
+		"runbookId":   rec.RunbookID,
 		"currentStep": rec.CurrentStep,
 		"steps":       steps,
 		"status":      rec.Status,

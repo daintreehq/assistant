@@ -28,7 +28,7 @@ func main() {
 	var (
 		out      = flag.String("o", "", "write to this file instead of stdout")
 		workflow = flag.Bool("workflow-intelligence", false,
-			"include the execution-graph tools that register only under DAINTREE_WORKFLOW_INTELLIGENCE=1")
+			"include the execution-graph tools, which register unless DAINTREE_WORKFLOW_INTELLIGENCE=0")
 	)
 	flag.Parse()
 

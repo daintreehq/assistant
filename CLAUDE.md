@@ -404,8 +404,9 @@ plus `DAINTREE_API_KEY` at boot on the rare install that sets one. Registration 
 registered, because a log line written under it is still on disk. Block values are capped
 at 64 KiB with a size + sha256 prefix. The same redactor also guards the durable audit
 rows (`tools.safeJSON`) and the `approval:requested` payloads the host protocol emits.
-The flag is read from the process env, the bound project's `.env`, or the assistant's
-own `.env` fallback. `debuglog.StartDebugLog(cfg, sessionId)` runs once per process at
+The flag is read from the process env or the assistant's own `.env` fallback — NEVER the
+bound project's `.env`, which is arbitrary repo content and must not be able to switch
+tracing on for a session that did not ask for it (`trustedOrOwnGet`, `internal/config`). `debuglog.StartDebugLog(cfg, sessionId)` runs once per process at
 boot: it deletes logs older than 7 days, opens a **per-session** `<date>-<sessionId>.log`
 (never clobbering a prior run, dir 0700 / file 0600), writes a `session.start` header,
 and returns the path so the caller can print `logging to <file>`. The `--json` session

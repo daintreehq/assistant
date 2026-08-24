@@ -316,7 +316,7 @@ func (s *Service) mirrorResourceLinks(g *Graph, p *Patch) {
 // slot for the mandatory local no-file-edit constraint Plan always prepends.
 const (
 	maxPlanRunbookIDs = 16
-	maxPlanNotes    = 24
+	maxPlanNotes      = 24
 )
 
 // PlanRequest is workflow.plan's input.
@@ -325,7 +325,7 @@ type PlanRequest struct {
 	Scope              string
 	ExistingWorkflowID string
 	ForceReplan        bool
-	ActiveRunbookIDs     []string
+	ActiveRunbookIDs   []string
 	Notes              []string
 	Source             Source
 }
@@ -390,8 +390,8 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (PlanResult, error)
 	}
 
 	input := backend.WorkflowPlanInput{
-		Goal:           goal,
-		Scope:          strings.TrimSpace(req.Scope),
+		Goal:             goal,
+		Scope:            strings.TrimSpace(req.Scope),
 		ActiveRunbookIDs: runbookIDs,
 		Constraints: append([]string{
 			"the assistant must never edit project files directly — file changes go through visible agents (agentTask.spawnForEdits)",

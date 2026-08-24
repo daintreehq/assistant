@@ -60,7 +60,7 @@ func TestBinaryListRunbooks(t *testing.T) {
 	}
 	var doc struct {
 		CatalogRevision string `json:"catalogRevision"`
-		Runbooks          []struct {
+		Runbooks        []struct {
 			ID    string `json:"id"`
 			Title string `json:"title"`
 		} `json:"runbooks"`

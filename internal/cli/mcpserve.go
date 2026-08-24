@@ -277,7 +277,7 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 			// Reported so a caller that inherited a server-level --runbook can see what this
 			// session REQUESTS on every turn (not what the backend honours — the pin
 			// warnings own that); the advisory rides SessionOutput.Warnings via describe.
-			PinnedRunbooks:        a.PinnedRunbookIDs(),
+			PinnedRunbooks:      a.PinnedRunbookIDs(),
 			PinPreflightWarning: pinNotice,
 		}
 		rt := mcpserver.NewAppRuntime(a, facts, approvals, questions, own.Release)

@@ -15,7 +15,9 @@ type keyedStore struct {
 	recs map[string]*domain.RunbookRunStateRecord
 }
 
-func newKeyedStore() *keyedStore { return &keyedStore{recs: map[string]*domain.RunbookRunStateRecord{}} }
+func newKeyedStore() *keyedStore {
+	return &keyedStore{recs: map[string]*domain.RunbookRunStateRecord{}}
+}
 
 func key(session, runbook string) string { return session + "\x00" + runbook }
 

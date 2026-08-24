@@ -234,25 +234,25 @@ func (p *eventProxy) sink() agent.EventSink {
 	return agent.NoopEventSink{}
 }
 
-func (p *eventProxy) Phase(ph domain.RunPhase)                  { p.sink().Phase(ph) }
-func (p *eventProxy) AssistantStart()                           { p.sink().AssistantStart() }
-func (p *eventProxy) AssistantToken(t string)                   { p.sink().AssistantToken(t) }
-func (p *eventProxy) AssistantEnd(c, r string)                  { p.sink().AssistantEnd(c, r) }
-func (p *eventProxy) AssistantCancelled(c string)               { p.sink().AssistantCancelled(c) }
-func (p *eventProxy) Interjection(t string)                     { p.sink().Interjection(t) }
-func (p *eventProxy) RunbookLoaded(t []string)                    { p.sink().RunbookLoaded(t) }
+func (p *eventProxy) Phase(ph domain.RunPhase)                      { p.sink().Phase(ph) }
+func (p *eventProxy) AssistantStart()                               { p.sink().AssistantStart() }
+func (p *eventProxy) AssistantToken(t string)                       { p.sink().AssistantToken(t) }
+func (p *eventProxy) AssistantEnd(c, r string)                      { p.sink().AssistantEnd(c, r) }
+func (p *eventProxy) AssistantCancelled(c string)                   { p.sink().AssistantCancelled(c) }
+func (p *eventProxy) Interjection(t string)                         { p.sink().Interjection(t) }
+func (p *eventProxy) RunbookLoaded(t []string)                      { p.sink().RunbookLoaded(t) }
 func (p *eventProxy) RunbookDecision(ev agent.RunbookDecisionEvent) { p.sink().RunbookDecision(ev) }
-func (p *eventProxy) ToolBatch(b []agent.BatchedToolCall)       { p.sink().ToolBatch(b) }
-func (p *eventProxy) ToolState(id string, s agent.ToolState)    { p.sink().ToolState(id, s) }
-func (p *eventProxy) ToolProgress(id, msg string)               { p.sink().ToolProgress(id, msg) }
-func (p *eventProxy) ToolCall(ev agent.ToolCallEvent)           { p.sink().ToolCall(ev) }
-func (p *eventProxy) ToolResult(ev agent.ToolResultEvent)       { p.sink().ToolResult(ev) }
-func (p *eventProxy) Error(m string)                            { p.sink().Error(m) }
-func (p *eventProxy) Warn(m string)                             { p.sink().Warn(m) }
-func (p *eventProxy) Info(m string)                             { p.sink().Info(m) }
-func (p *eventProxy) Usage(ev agent.UsageEvent)                 { p.sink().Usage(ev) }
-func (p *eventProxy) TurnPrompt(in string)                      { p.sink().TurnPrompt(in) }
-func (p *eventProxy) ModelRateLimited()                         { p.sink().ModelRateLimited() }
+func (p *eventProxy) ToolBatch(b []agent.BatchedToolCall)           { p.sink().ToolBatch(b) }
+func (p *eventProxy) ToolState(id string, s agent.ToolState)        { p.sink().ToolState(id, s) }
+func (p *eventProxy) ToolProgress(id, msg string)                   { p.sink().ToolProgress(id, msg) }
+func (p *eventProxy) ToolCall(ev agent.ToolCallEvent)               { p.sink().ToolCall(ev) }
+func (p *eventProxy) ToolResult(ev agent.ToolResultEvent)           { p.sink().ToolResult(ev) }
+func (p *eventProxy) Error(m string)                                { p.sink().Error(m) }
+func (p *eventProxy) Warn(m string)                                 { p.sink().Warn(m) }
+func (p *eventProxy) Info(m string)                                 { p.sink().Info(m) }
+func (p *eventProxy) Usage(ev agent.UsageEvent)                     { p.sink().Usage(ev) }
+func (p *eventProxy) TurnPrompt(in string)                          { p.sink().TurnPrompt(in) }
+func (p *eventProxy) ModelRateLimited()                             { p.sink().ModelRateLimited() }
 
 // --- toolRunner: the agent.ToolRunner over *tools.Registry + buildContext ---
 
