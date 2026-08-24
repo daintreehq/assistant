@@ -49,6 +49,13 @@ const (
 	// CodeDiscoveryUnavailable: the backend's auth manifest could not be fetched.
 	// Transient — the endpoint is down or unreachable.
 	CodeDiscoveryUnavailable = "auth_discovery_unavailable"
+	// CodeAccountsUnavailable: the backend answered, and says it has no account layer.
+	//
+	// Distinct from CodeDiscoveryInvalid because nothing is wrong. A deployment can
+	// legitimately run with no identity provider — that is what every install does today
+	// — and reporting it as a broken configuration would send someone looking for a fault
+	// that does not exist.
+	CodeAccountsUnavailable = "auth_accounts_unavailable"
 	// CodeDiscoveryInvalid: the manifest was fetched and REJECTED. Not transient, and
 	// not to be retried: the endpoint described an OAuth configuration this build will
 	// not use. See Validate for what that means and why each check exists.

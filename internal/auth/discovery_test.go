@@ -667,3 +667,76 @@ func asAuthError(err error, target **Error) bool {
 	}
 	return false
 }
+
+// A deployment with no accounts answers with only version/environment/configured/required
+// — no issuer, no client id, no endpoints. That is not a malformed manifest, and
+// reporting it as one sends someone hunting a fault that does not exist.
+//
+// Verified against the real backend's response shape (assistant-backend
+// api/daintree_auth.py), which returns exactly those four fields when
+// settings.auth_is_configured is false.
+func TestAnUnconfiguredDeploymentIsReportedAsSuchNotAsBroken(t *testing.T) {
+	no := false
+	m := Manifest{Version: 1, Environment: "development", Configured: &no}
+	err := m.Validate(RedirectURI())
+	if err == nil {
+		t.Fatal("an unconfigured manifest validated as usable")
+	}
+	if CodeOf(err) != CodeAccountsUnavailable {
+		t.Fatalf("code = %q, want %q — a deployment without accounts is not a broken one",
+			CodeOf(err), CodeAccountsUnavailable)
+	}
+}
+
+// An OLDER backend omits the field entirely. Treating that as unconfigured would
+// silently disable sign-in against every deployment predating the flag.
+func TestAnAbsentConfiguredFlagMeansConfigured(t *testing.T) {
+	m := validManifest() // no Configured field set
+	if m.Configured != nil {
+		t.Fatal("the fixture sets Configured; this test needs it absent")
+	}
+	if err := m.Validate(RedirectURI()); err != nil {
+		t.Fatalf("a manifest without the configured flag was rejected: %v", err)
+	}
+}
+
+// An explicitly configured deployment still validates normally.
+func TestAnExplicitlyConfiguredDeploymentValidates(t *testing.T) {
+	yes := true
+	m := validManifest()
+	m.Configured = &yes
+	if err := m.Validate(RedirectURI()); err != nil {
+		t.Fatalf("an explicitly configured manifest was rejected: %v", err)
+	}
+}
+
+// The real backend sends `configured` and `required`, which this build had no fields for
+// until now. An additive backend field must never break discovery.
+func TestTheRealBackendFieldsAreTolerated(t *testing.T) {
+	body := `{"version":1,"environment":"staging","configured":true,"required":false,
+		"issuer":"https://proj.supabase.co/auth/v1",
+		"authorization_endpoint":"https://proj.supabase.co/auth/v1/oauth/authorize",
+		"token_endpoint":"https://proj.supabase.co/auth/v1/oauth/token",
+		"jwks_uri":"https://proj.supabase.co/auth/v1/.well-known/jwks.json",
+		"client_id":"daintree-assistant-staging","redirect_uri":"` + RedirectURI() + `",
+		"scopes":["openid","email"],
+		"account_url":"https://staging.daintree.org/account",
+		"subscribe_url":"https://staging.daintree.org/subscribe",
+		"session_policy":{"access_token_seconds":3600,"session_max_age_seconds":2592000}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	m, err := NewDiscoverer(srv.URL, nil).Manifest(context.Background())
+	if err != nil {
+		t.Fatalf("the real backend's manifest was rejected: %v", err)
+	}
+	if m.ClientID != "daintree-assistant-staging" {
+		t.Fatalf("ClientID = %q", m.ClientID)
+	}
+	if m.SessionPolicy.SessionMaxAgeSeconds != 2592000 {
+		t.Fatalf("session policy did not decode: %+v", m.SessionPolicy)
+	}
+}

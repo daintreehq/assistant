@@ -225,6 +225,14 @@ func runAuthLogin(ctx context.Context, w authWriter, mgr *auth.Manager, opts Aut
 
 	res, err := mgr.Login(ctx, !opts.NoOpen, progress, manual)
 	if err != nil {
+		if auth.CodeOf(err) == auth.CodeAccountsUnavailable {
+			// Not a failure. This deployment simply has no accounts, and the assistant
+			// works without one — saying "sign-in failed" would send someone hunting a
+			// fault that is not there.
+			w.event(authEvent{Type: "auth:not_offered", Code: auth.CodeAccountsUnavailable})
+			w.human("This backend does not use accounts — there is nothing to sign in to.")
+			return 0
+		}
 		if auth.IsCancelled(err) {
 			w.event(authEvent{Type: "auth:cancelled"})
 			w.human("Sign-in cancelled.")

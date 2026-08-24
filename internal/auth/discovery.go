@@ -135,8 +135,23 @@ type SessionPolicy struct {
 
 // Manifest is the backend's non-secret OAuth environment description.
 type Manifest struct {
-	Version               int           `json:"version"`
-	Environment           string        `json:"environment"`
+	Version     int    `json:"version"`
+	Environment string `json:"environment"`
+	// Configured reports whether this deployment has accounts set up AT ALL.
+	//
+	// A backend with no identity provider configured answers with only version,
+	// environment, configured and required — no issuer, no client id, no endpoints.
+	// Without this field that body fails validation as "the backend named no issuer",
+	// which is both wrong and unhelpful: nothing is malformed, the deployment simply does
+	// not offer accounts, and the honest answer is to say so and carry on anonymously.
+	//
+	// It is a POINTER so an older backend that omits the field is treated as configured,
+	// which is what it is — a bare false would silently disable sign-in against every
+	// deployment predating the flag.
+	Configured *bool `json:"configured,omitempty"`
+	// Required reports whether this deployment refuses anonymous requests. Advisory: the
+	// backend answers 401 either way, and that answer is the authority.
+	Required              bool          `json:"required,omitempty"`
 	Issuer                string        `json:"issuer"`
 	AuthorizationEndpoint string        `json:"authorization_endpoint"`
 	TokenEndpoint         string        `json:"token_endpoint"`
@@ -171,6 +186,12 @@ func (m *Manifest) Validate(expectedRedirect string) error {
 	}
 	if !allowedEnvironments[m.Environment] {
 		return newError(CodeDiscoveryInvalid, fmt.Sprintf("unrecognised environment %q", safeEcho(m.Environment)))
+	}
+	// A deployment with no accounts is not a malformed one. Checked here — after the
+	// shape checks that apply to every body, before the ones that need an issuer.
+	if m.Configured != nil && !*m.Configured {
+		return newError(CodeAccountsUnavailable, "this backend does not offer account sign-in").
+			withHint("It serves requests without an account. Nothing needs to be done.")
 	}
 
 	// The issuer is the root of trust: every other endpoint is checked against it, so
