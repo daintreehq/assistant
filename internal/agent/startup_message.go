@@ -29,7 +29,7 @@ const (
 
 // buildStartupContext deterministically projects the stable splash-time snapshot onto
 // the backend's dedicated, cache-friendly startup channel. Unlike the former framed
-// user-role message, this value never enters visible history, persistence, or skill
+// user-role message, this value never enters visible history, persistence, or runbook
 // selection as user-authored text. Agent order and identifiers are retained exactly;
 // all other externally supplied strings are normalized and capped before strict backend
 // validation.

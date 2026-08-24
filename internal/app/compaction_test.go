@@ -65,7 +65,7 @@ func TestBackendContextCompactionOpensOnlyOnAVerifiedContract(t *testing.T) {
 	}
 }
 
-// The same endpoint pin the display and pinned-skill gates carry, and here it guards
+// The same endpoint pin the display and pinned-runbook gates carry, and here it guards
 // something worse than a failed request. A descriptor that arrives after the client was
 // replaced describes the OLD deployment; believed, it would authorise splicing the
 // user's own conversation using a contract the LIVE backend never agreed to — and a

@@ -15,9 +15,9 @@ import (
 
 // callableNote explains the per-result `callable` flag so the model treats a
 // callable:false entry as "known but not in this turn's tool spec", not "broken".
-// Loaded skills never narrow the toolset, so in normal operation every registered
+// Loaded runbooks never narrow the toolset, so in normal operation every registered
 // tool is callable.
-const callableNote = "`callable: false` means the tool exists but is not in this turn's tool spec — only `callable: true` tools can be invoked directly. (Loaded skills do NOT restrict this; the full toolset is normally callable.) An unwrapped tool may still be reachable via `daintree.call` when that escape hatch is offered."
+const callableNote = "`callable: false` means the tool exists but is not in this turn's tool spec — only `callable: true` tools can be invoked directly. (Loaded runbooks do NOT restrict this; the full toolset is normally callable.) An unwrapped tool may still be reachable via `daintree.call` when that escape hatch is offered."
 
 // discoveryNote is what list/search actually return: the callable explanation
 // plus a pointer to tool.schema. Shipping the schema lookup without pointing at
@@ -304,7 +304,7 @@ var wrappedMCPTools = map[string]string{
 	// The most-asked question in a CI fix-and-verify loop. Until forge.getChecks existed
 	// this was the one common read with no wrapper, so the base prompt's "prefer the
 	// typed wrapper" rule pointed the model at this confirmation-gated escape hatch on
-	// nearly every turn — and two skills grew prose documenting the exception.
+	// nearly every turn — and two runbooks grew prose documenting the exception.
 	"forge.getCIStatus": "forge.getChecks (typed wrapper — pass prNumber; it also flags the null-vs-no-checks and required-only-counts traps)",
 
 	// Issue #367: the observation/verification actions that used to be reachable ONLY

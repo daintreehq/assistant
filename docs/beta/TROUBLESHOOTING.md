@@ -166,7 +166,7 @@ determines who can fix it:
 
 | Bucket | Looks like | Fixed in |
 | --- | --- | --- |
-| **Selector / skill** | wrong or missing runbook, bad plan, stops early, dumps a speculative 60-step plan | the backend's prompts/skills |
+| **Selector / runbook** | wrong or missing runbook, bad plan, stops early, dumps a speculative 60-step plan | the backend's prompts/runbooks |
 | **Tool contract** | invalid arguments, a tool used for the wrong job, an unclear schema | this repo's tool definitions |
 | **Runtime** | backend, MCP, state, daemon, retries, lifecycle | this repo's runtime |
 | **UI / support** | rendering, cancellation, install, confusing messaging | this repo's attached session and CLI |

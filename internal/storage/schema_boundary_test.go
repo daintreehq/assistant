@@ -221,7 +221,7 @@ func TestFreshSchemaShape(t *testing.T) {
 		"workflow_runs": {"id", "issueNumber", "terminalIdsJson", "watcherIdsJson",
 			"queueEventIdsJson", "status", "nextActionJson", "notesJson",
 			"createdAt", "updatedAt", "completedAt"},
-		"skill_run_state": {"id", "sessionId", "skillId", "currentStep", "stepsJson",
+		"runbook_run_state": {"id", "sessionId", "runbookId", "currentStep", "stepsJson",
 			"status", "startedAt", "updatedAt", "completedAt"},
 		"agent_launches": {"id", "idempotencyKey", "agentId", "worktreeId", "mode",
 			"title", "name", "terminalId", "watcherId", "stage", "errorCode",
@@ -245,7 +245,7 @@ func TestFreshSchemaShape(t *testing.T) {
 		"run_events":      {"idx_run_events_run", "idx_run_events_ts"},
 		"conversation":    {"idx_conv_createdat"},
 		"workflow_runs":   {"idx_workflow_runs_status"},
-		"skill_run_state": {"idx_skill_run_state_key"},
+		"runbook_run_state": {"idx_runbook_run_state_key"},
 		"agent_launches":  {"idx_agent_launches_key"},
 		"artifacts":       {"idx_artifacts_session"},
 	}

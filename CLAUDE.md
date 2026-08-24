@@ -31,7 +31,7 @@ Powered by the **Daintree Assistant backend** (`../assistant-backend`,
 <https://github.com/daintreehq/assistant-backend>), a Daintree-native
 HTTP API — **not** OpenAI-compatible. The CLI is a thin local runtime: it sends only a
 structured stable startup snapshot + visible conversation + structured runtime/turn context + its tool inventory, and the
-backend owns the system prompt, developer instructions, **skill/runbook selection**, model
+backend owns the system prompt, developer instructions, **runbook selection**, model
 choice, prompt assembly, and the utility-model prompts. The CLI executes the local
 tool calls the backend asks for and streams the assistant's text. See `docs/BACKEND.md`.
 
@@ -45,10 +45,10 @@ process.
 
 > **You have standing permission to edit the backend at `../assistant-backend`.** Many
 > fixes here are really backend changes — the base/system prompt, developer instructions,
-> skill/runbook bodies, and the utility-model prompts all live in that repo
-> (`src/daintree_assistant_server/prompts/` and `.../skills/files/*.md`). When a model
-> behaviour, formatting, or skill bug traces to the prompt/skill rather than a local tool
-> shape, fix it directly in `../assistant-backend` (prompt/skill changes land there; local
+> runbook bodies, and the utility-model prompts all live in that repo
+> (`src/daintree_assistant_server/prompts/` and `.../runbooks/files/*.md`). When a model
+> behaviour, formatting, or runbook bug traces to the prompt/runbook rather than a local tool
+> shape, fix it directly in `../assistant-backend` (prompt/runbook changes land there; local
 > tool-shape changes land here) — no need to ask first.
 
 **Endpoint, and NO sign-in.** The default endpoint is the deployed backend,
@@ -132,7 +132,7 @@ go test ./internal/app -run TestGeneratedDocsAreCurrent -update
 go test ./internal/commands -run TestGeneratedCommandRefIsCurrent -update
 ```
 
-The backend pins a captured copy of our tool projection (its skills name the tools in
+The backend pins a captured copy of our tool projection (its runbooks name the tools in
 it), so after a tool add/remove/rename, export the refreshed inventory for it — the same
 JSON value we send as `input.tools` (indented; compacting it reproduces the wire bytes),
 taken from a real boot rather than re-derived, and needing no source edits:
@@ -191,14 +191,14 @@ internal/
                  ChatResult/Usage) — NOT a model client. The direct provider transport, Router,
                  SSE parser, retry layer and pricing table were deleted with the backend
                  migration; do not add a provider client back here (it would let a handler
-                 bypass the backend that owns prompts, skills, and credentials)
+                 bypass the backend that owns prompts, runbooks, and credentials)
   prompts/       MainPromptContext — the structured runtime facts the CLI collects
   mcp/           Daintree MCP client over the go-sdk (Streamable HTTP, SSE fallback)
   queue/         Queue — attention queue (Publish / Digest / Resolve)
   safety/        policy.go — Decide(risk, tier), tier gating, AlwaysConfirm, no-file-edit guard
   tools/         Registry (registry.go) + Dispatch (dispatch.go) + AssertSafe; tool families in
                  fsx/ mcpx/ mcpwrap/ contextx/ extractionx/ timer/ watcher/ queue/ grant/
-                 workflow/ skill/ auditx/ memory/ artifactx/ agenttaskx/ asyncx/
+                 workflow/ runbook/ auditx/ memory/ artifactx/ agenttaskx/ asyncx/
                  questionx/ scratchx/ subagentx/ (subagent.run — the delegation tool)
   agent/         Session (session.go) main turn loop + EventSink (events.go) + wake.go (autonomous wake)
   subagent/      the bounded READ-ONLY delegation loop: one brief → its own isolated
@@ -243,23 +243,23 @@ runs a turn: optional auto-compact → push user message → `Backend.RespondStr
 the visible conversation, the local tool inventory, and the opaque
 backend `state` token) with a
 token callback → the FIRST
-SSE `meta` event carries the refreshed state token + the server's `skills` block and is
-flushed as soon as selection finishes, before the upstream model connects. `OnSkillLoaded`
+SSE `meta` event carries the refreshed state token + the server's `runbooks` block and is
+flushed as soon as selection finishes, before the upstream model connects. `OnRunbookLoaded`
 carries the newly-loaded refs eagerly to the diagnostic sinks, while committed state
 handling stays on the retry-safe deferred `OnMeta` callback; a full-request retry adopts
-the eager meta's signed state so the backend reuses that selection. **Skill selection is
+the eager meta's signed state so the backend reuses that selection. **Runbook selection is
 server-owned**: the backend's selector picks/injects runbook bodies before it calls the
 upstream model, so the runbook is in hand for that same generation; the CLI just stores the
-state token. **Backend skill loads never enter the conversation** — no card, no cue, in the
+state token. **Backend runbook loads never enter the conversation** — no card, no cue, in the
 host stream or the line REPL. They are prompt
 assembly, not a step the operator takes, and the delta the old card showed was misleading
 besides (never what was retained, capped, or auto-paired as a foundation). There is **no
-`/skills` command** either — a standing "what's active?" reveal is the same information with
+`/runbooks` command** either — a standing "what's active?" reveal is the same information with
 the same missing affordance. The one place a load reaches a human is the explicit
 `/explain <run>` timeline, beside that run's tool calls; the debug trace, run log and
 `--json` stream keep the full signal, and `backend.respond.meta` is where selector tuning
-reads it. The "skill" VOCABULARY — a visible "Skill loaded" event, the `/skills` name — is
-held in reserve for future user-authored ASSISTANT skills, which are intent-driven. On tool calls, announce the whole batch
+reads it. The "runbook" VOCABULARY — a visible "Runbook loaded" event, the `/runbooks` name — is
+held in reserve for future user-authored ASSISTANT runbooks, which are intent-driven. On tool calls, announce the whole batch
 (`ToolBatch`) then `registry.Dispatch()` each in the safe sequence, feed results back and
 re-`RespondStream` (replaying the state token).
 `Dispatch` = validate args → tier gate (`safety.Decide`) → confirmation/grant → run handler →
@@ -302,7 +302,7 @@ sub-threads publish to the **attention queue** instead of interrupting the main 
   and consume grants keyed to the well-known actor id `wake` (else the call becomes a
   blocked pending-approval inbox item).
 - **Prompt assembly + caching are the BACKEND's job now.** The CLI sends NO system/developer
-  prompt; the backend owns the base prompt, skill bodies, prompt assembly, and the upstream
+  prompt; the backend owns the base prompt, runbook bodies, prompt assembly, and the upstream
   `prompt_cache_key`. The CLI's only contribution to cache stability is keeping the
   conversation prefix stable: no client-side control prefix
   (`domain.ControlMessageCount == 0`), only `user`/`assistant`/`tool` roles reach the wire,
@@ -459,15 +459,15 @@ reconstruct its timeline; see `docs/LOGGING.md` for the full event reference.
   `toolCallId`/`runId`/`risk`. (Rejections that never reach dispatch — bad-JSON args,
   not-offered — log as `tool.args.invalid` / `tool.not_offered` and carry the model's RAW
   args; a stuck loop logs `tool.repeat.warning` / `tool.repeat.abort`.)
-- `backend.respond.request` / `backend.respond.raw_meta` / `backend.respond.skill_cue` /
+- `backend.respond.request` / `backend.respond.raw_meta` / `backend.respond.runbook_cue` /
   `backend.respond.meta` / `backend.respond.done` / `backend.respond.error` — the
   backend-era successor to `model.request`/`model.response`
   (which no longer exist for the main loop — that path is `Backend.RespondStream`, not the
   vestigial Router). `request` summarizes what the backend was SHOWN (message count +
   role sequence + history hash + newest-message preview + tool inventory + runtime/turn
   context — bounded, not the full prompt); `raw_meta` timestamps actual SSE arrival,
-  `skill_cue` timestamps the optional eager user cue, `meta` is the retry-safe committed
-  backend report (model, prompt/catalog version, and skill-selection outcome — the surface
+  `runbook_cue` timestamps the optional eager user cue, `meta` is the retry-safe committed
+  backend report (model, prompt/catalog version, and runbook-selection outcome — the surface
   that says whether a fix belongs in the backend selector); `done` is what it PRODUCED
   (content preview, tool calls, finish reason, usage).
 - `mcp.call` — every MCP tool call with `callKind`, `attempts`, `durationMs`, and a
@@ -477,20 +477,20 @@ reconstruct its timeline; see `docs/LOGGING.md` for the full event reference.
 
 The fix philosophy — **fix the guidance, not just the symptom.** When the model misuses
 a tool, the root cause is almost always ambiguous or misleading instruction, NOT a dumb
-model. The model can only act on what the base prompt + skills (now **backend-owned**, in
-`../assistant-backend/src/daintree_assistant_server/prompts/` and `.../skills/files/*.md`)
+model. The model can only act on what the base prompt + runbooks (now **backend-owned**, in
+`../assistant-backend/src/daintree_assistant_server/prompts/` and `.../runbooks/files/*.md`)
 and the local tool `Description`/`Schema` told it. So a model mistake is usually a
 *documentation* bug in one of those surfaces — and the durable fix updates them in lockstep
-so the model can't repeat it. **A prompt/skill fix lands in the `../assistant-backend` repo;
+so the model can't repeat it. **A prompt/runbook fix lands in the `../assistant-backend` repo;
 a tool-shape fix lands here.** Prefer making the correct shape impossible to get wrong (show
 literal argument shapes, not prose abstractions) over adding lenient parsing.
 
 Worked example (2026-06-23): the model called `agentTask.spawnForEdits` with a flattened
 key `"watcher<arg_key>create": true` and the strict decoder rejected it
-(`json: unknown field`). Root cause: the prompt + skill described the arg in prose as the
+(`json: unknown field`). Root cause: the prompt + runbook described the arg in prose as the
 dotted path `watcher.create: true`, but the schema is a **nested object**
 `watcher: {create, goal, cadenceMs}`. The model encoded the dotted prose literally. Fix:
-the playbook and skill now show `watcher: {"create": true, "goal": "..."}` explicitly and
+the playbook and runbook now show `watcher: {"create": true, "goal": "..."}` explicitly and
 warn against a dotted/flattened key — no code change, a prose fix at the source of the
 confusion. (Editing the base prompt is free here: it just cache-misses on the changed
 tokens, never goes stale — see the prompt-cache invariant above.)
@@ -525,11 +525,11 @@ subdir when a project id is set).
 
 ## More docs
 
-`docs/BACKEND.md` (**the backend integration — read this for the model / skill / prompt
+`docs/BACKEND.md` (**the backend integration — read this for the model / runbook / prompt
 story**), `docs/SUPERVISOR.md` (the persistent supervisor daemon: leases, adoption,
 autonomous wake turns, credential lifecycle), `docs/SUBAGENTS.md` (**delegated research — the sub-agent loop, its bounds, the read-only
-guarantee, and sub-agent skill selection**),
-`docs/SKILLS.md` (how server-owned skills
+guarantee, and sub-agent runbook selection**),
+`docs/RUNBOOKS.md` (how server-owned runbooks
 work + the local run-tracking tools), `docs/WORKFLOW_INTELLIGENCE.md` (the flag-gated
 workflow execution-graph layer: graph model, tools, observer, async linking, and the
 backend contract it expects),
@@ -539,5 +539,5 @@ server, the flags, the `--json` event schema, exit codes, isolation**),
 `docs/ARCHITECTURE.md`, `docs/DAINTREE_MCP.md` (Daintree's MCP protocol),
 `docs/DAINTREE_HOST.md` (how Daintree launches / displays / hides / restarts this CLI),
 `docs/LOGGING.md` (the debug-log event reference), `docs/RUNTIME.md` (auto-compaction +
-model error behavior), `docs/TOOLS.md` (adding a tool). Skill authoring + the model live in `../assistant-backend`
-(its `skills/files/*.md` + `docs/DAINTREE_API.md`).
+model error behavior), `docs/TOOLS.md` (adding a tool). Runbook authoring + the model live in `../assistant-backend`
+(its `runbooks/files/*.md` + `docs/DAINTREE_API.md`).

@@ -150,7 +150,7 @@ func TestDirtyFreshStartSessionContinuesSeqPastDirtyRows(t *testing.T) {
 
 func TestRehydrateClearMarkerEmptiesHistory(t *testing.T) {
 	rows := []domain.ConversationMessageRecord{
-		msgRow(0, "system", "base"), msgRow(1, "system", "rt"), msgRow(2, "system", "skills"),
+		msgRow(0, "system", "base"), msgRow(1, "system", "rt"), msgRow(2, "system", "runbooks"),
 		msgRow(3, "user", "hello"), msgRow(4, "assistant", "hi"),
 		msgRow(5, "system", domain.ClearMarker),
 	}
@@ -168,7 +168,7 @@ func TestRehydrateClearMarkerEmptiesHistory(t *testing.T) {
 
 func TestRehydrateCompactMarkerKeepsAfter(t *testing.T) {
 	rows := []domain.ConversationMessageRecord{
-		msgRow(0, "system", "base"), msgRow(1, "system", "rt"), msgRow(2, "system", "skills"),
+		msgRow(0, "system", "base"), msgRow(1, "system", "rt"), msgRow(2, "system", "runbooks"),
 		msgRow(3, "user", "old"), msgRow(4, "assistant", "old reply"),
 		msgRow(5, "system", compactionMarker),
 		msgRow(6, "user", compactionNotePrefix(1)+"the summary"),
@@ -273,7 +273,7 @@ func TestRehydrateDroppedRowsAccumulatesAllKinds(t *testing.T) {
 func TestRehydrateCleanResumeNoDrops(t *testing.T) {
 	call := `[{"id":"call_1","type":"function","function":{"name":"fs.read","arguments":"{}"}}]`
 	rows := []domain.ConversationMessageRecord{
-		msgRow(0, "system", "base"), msgRow(1, "system", "rt"), msgRow(2, "system", "skills"),
+		msgRow(0, "system", "base"), msgRow(1, "system", "rt"), msgRow(2, "system", "runbooks"),
 		msgRow(3, "user", "hello"),
 		{Seq: 4, Role: "assistant", Content: "", ToolCallsJson: strp(call)},
 		{Seq: 5, Role: "tool", Content: "{}", ToolCallID: strp("call_1")},

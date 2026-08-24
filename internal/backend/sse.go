@@ -159,7 +159,7 @@ func readBoundedLine(r *bufio.Reader) ([]byte, error) {
 // StreamCallbacks receives streamed events as they arrive. All are optional. The
 // final assembled message + usage are returned by the stream parser regardless;
 // these callbacks exist for live UI (token streaming, surfacing newly-loaded
-// skills up front). They are invoked synchronously on the reader goroutine.
+// runbooks up front). They are invoked synchronously on the reader goroutine.
 type StreamCallbacks struct {
 	// OnRawMeta fires immediately when each HTTP attempt's SSE meta event is
 	// decoded. Unlike OnMeta, it is a transport-observation hook: retries can make
@@ -167,15 +167,15 @@ type StreamCallbacks struct {
 	// to adopt state or perform visible side effects. It exists so diagnostics can
 	// distinguish actual meta arrival from the retry-safe committed OnMeta callback.
 	OnRawMeta func(StreamMeta)
-	// OnMeta carries the refreshed state token, the skills outcome, and version
+	// OnMeta carries the refreshed state token, the runbooks outcome, and version
 	// markers. Client.RespondStream defers it until the attempt commits so retries
 	// cannot duplicate stateful side effects.
 	OnMeta func(StreamMeta)
-	// OnSkillLoaded fires as soon as a meta event reports newly-loaded skills,
+	// OnRunbookLoaded fires as soon as a meta event reports newly-loaded runbooks,
 	// before the upstream model needs to produce content. Client.RespondStream
 	// de-duplicates identical refs across retry attempts, so a retry cannot record the
 	// same load twice. DIAGNOSTIC ONLY — no consumer renders it in the transcript.
-	OnSkillLoaded func([]SkillRef)
+	OnRunbookLoaded func([]RunbookRef)
 	// OnContent fires for each visible content fragment, in order.
 	OnContent func(string)
 	// OnReasoning fires for each chain-of-thought fragment (DeepSeek thinking mode),
@@ -307,8 +307,8 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 			if cb.OnRawMeta != nil {
 				cb.OnRawMeta(m)
 			}
-			if cb.OnSkillLoaded != nil && len(m.Skills.NewlyLoaded) > 0 {
-				cb.OnSkillLoaded(m.Skills.NewlyLoaded)
+			if cb.OnRunbookLoaded != nil && len(m.Runbooks.NewlyLoaded) > 0 {
+				cb.OnRunbookLoaded(m.Runbooks.NewlyLoaded)
 			}
 			if cb.OnMeta != nil {
 				cb.OnMeta(m)

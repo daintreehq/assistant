@@ -84,7 +84,7 @@ attached session CRASH ──► kernel releases flock + conn drops → same pat
 | Watchers | **project** (was session) | adopted as-is by the next owner; each check reconciles against the LIVE terminal/PR state, so a stale row self-corrects |
 | Async futures | **project** (was session) | live rows re-enter the poll set (`Coordinator.Start` adoption); the FSM re-poll is idempotent |
 | Attention inbox | **project** (was wiped per open) | carries over; the next owner surfaces it |
-| Conversation | project | daemon continues the `runtime_state` current-session pointer; the backend state token is mirrored per session so skill-selection cadence survives the handover |
+| Conversation | project | daemon continues the `runtime_state` current-session pointer; the backend state token is mirrored per session so runbook-selection cadence survives the handover |
 
 **Exactly-once completion delivery.** The async coordinator finalizes rows under the
 live-claim, then publishes ONE group event, then stamps `queueEventId` on the whole

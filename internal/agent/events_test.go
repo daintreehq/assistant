@@ -112,28 +112,28 @@ func TestRunEventSinkTypedSeqOrderedRows(t *testing.T) {
 // The durable row carries the WHOLE decision, unfiltered — every committed round, clean
 // or not. /explain then decides what a human sees (today: only the degraded case); the log
 // itself is the record, so a later question about a run is answerable from it.
-func TestRunEventSinkPersistsFullSkillDecision(t *testing.T) {
+func TestRunEventSinkPersistsFullRunbookDecision(t *testing.T) {
 	store := &fakeRunEventStore{}
 	ref := &RunIDRef{}
 	ref.Set("run_1")
 	sink := NewRunEventSink(store, ref)
 
 	conf := 0.9
-	sink.SkillDecision(SkillDecisionEvent{
-		Active: []SkillRef{
+	sink.RunbookDecision(RunbookDecisionEvent{
+		Active: []RunbookRef{
 			{ID: "multi_agent", Title: "Multi-agent orchestration"},
 			{ID: "foundation", Title: "Daintree orchestration foundation"},
 		},
-		NewlyLoaded: []SkillRef{},
-		Selector: SkillSelectorOutcome{
+		NewlyLoaded: []RunbookRef{},
+		Selector: RunbookSelectorOutcome{
 			Ran: true, Degraded: true, TaskType: "orchestration",
 			Confidence: &conf, Reason: "reused the prior set",
 		},
 	})
 
 	rows := store.forRun("run_1")
-	if got := typesOf(rows); !equalStrings(got, []string{"skill:decision"}) {
-		t.Fatalf("types = %v want [skill:decision]", got)
+	if got := typesOf(rows); !equalStrings(got, []string{"runbook:decision"}) {
+		t.Fatalf("types = %v want [runbook:decision]", got)
 	}
 	var p map[string]any
 	mustUnmarshal(t, *rows[0].Payload, &p)
@@ -159,15 +159,15 @@ func TestRunEventSinkPersistsFullSkillDecision(t *testing.T) {
 
 // A clean decision is persisted just the same — the filter lives in the formatter, not
 // here, so the record never depends on what today's UI happens to render.
-func TestRunEventSinkPersistsCleanSkillDecisionToo(t *testing.T) {
+func TestRunEventSinkPersistsCleanRunbookDecisionToo(t *testing.T) {
 	store := &fakeRunEventStore{}
 	ref := &RunIDRef{}
 	ref.Set("run_1")
 	sink := NewRunEventSink(store, ref)
-	sink.SkillDecision(SkillDecisionEvent{
-		Active:      []SkillRef{{ID: "a", Title: "Alpha"}},
-		NewlyLoaded: []SkillRef{},
-		Selector:    SkillSelectorOutcome{Ran: true},
+	sink.RunbookDecision(RunbookDecisionEvent{
+		Active:      []RunbookRef{{ID: "a", Title: "Alpha"}},
+		NewlyLoaded: []RunbookRef{},
+		Selector:    RunbookSelectorOutcome{Ran: true},
 	})
 	if rows := store.forRun("run_1"); len(rows) != 1 {
 		t.Fatalf("rows = %d, want the clean decision persisted", len(rows))
@@ -399,8 +399,8 @@ func (throwingSink) AssistantToken(string)            { panic("boom") }
 func (throwingSink) AssistantEnd(string, string)      { panic("boom") }
 func (throwingSink) AssistantCancelled(string)        { panic("boom") }
 func (throwingSink) Interjection(string)              { panic("boom") }
-func (throwingSink) SkillLoaded([]string)             { panic("boom") }
-func (throwingSink) SkillDecision(SkillDecisionEvent) { panic("boom") }
+func (throwingSink) RunbookLoaded([]string)             { panic("boom") }
+func (throwingSink) RunbookDecision(RunbookDecisionEvent) { panic("boom") }
 func (throwingSink) ToolBatch([]BatchedToolCall)      { panic("boom") }
 func (throwingSink) ToolState(string, ToolState)      { panic("boom") }
 func (throwingSink) ToolProgress(string, string)      { panic("boom") }
@@ -423,8 +423,8 @@ func (r *recordingSink) TurnPrompt(p string)      { r.log = append(r.log, "promp
 func (r *recordingSink) AssistantStart()          { r.log = append(r.log, "start") }
 func (r *recordingSink) AssistantEnd(c, _ string) { r.log = append(r.log, "end:"+c) }
 func (r *recordingSink) Interjection(t string)    { r.log = append(r.log, "interject:"+t) }
-func (r *recordingSink) SkillDecision(SkillDecisionEvent) {
-	r.log = append(r.log, "skill:decision")
+func (r *recordingSink) RunbookDecision(RunbookDecisionEvent) {
+	r.log = append(r.log, "runbook:decision")
 }
 func (r *recordingSink) Warn(m string) { r.log = append(r.log, "warn:"+m) }
 func (r *recordingSink) Info(m string) { r.log = append(r.log, "info:"+m) }
@@ -435,10 +435,10 @@ func TestMultiSinkDeliversWhenOneThrows(t *testing.T) {
 	fan := NewMultiSink(throwingSink{}, healthy)
 	fan.TurnPrompt("p")
 	fan.AssistantStart()
-	fan.SkillDecision(SkillDecisionEvent{})
+	fan.RunbookDecision(RunbookDecisionEvent{})
 	fan.AssistantEnd("hi", "")
 	fan.Info("note")
-	want := []string{"prompt:p", "start", "skill:decision", "end:hi", "info:note"}
+	want := []string{"prompt:p", "start", "runbook:decision", "end:hi", "info:note"}
 	if !equalStrings(healthy.log, want) {
 		t.Fatalf("healthy log = %v want %v", healthy.log, want)
 	}

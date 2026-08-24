@@ -441,18 +441,18 @@ func TestAnOutOfRangeCursorIsNormalizedToTheTail(t *testing.T) {
 	}
 }
 
-// Event carries a Skills slice, which a plain struct copy leaves aliased to the retained
+// Event carries a Runbooks slice, which a plain struct copy leaves aliased to the retained
 // event — a caller could mutate the run's own history, and a JSON encode could race an
 // append.
-func TestSnapshotDeepCopiesEventSkills(t *testing.T) {
-	run := NewRun("mrun_skills", "ses", "p", func() {})
-	run.append(Event{Type: "skill:loaded", Skills: []string{"daintree.orchestration.edit"}})
+func TestSnapshotDeepCopiesEventRunbooks(t *testing.T) {
+	run := NewRun("mrun_runbooks", "ses", "p", func() {})
+	run.append(Event{Type: "runbook:loaded", Runbooks: []string{"daintree.orchestration.edit"}})
 
 	snap := run.SnapshotFull(0, 0)
-	snap.Events[0].Skills[0] = "clobbered"
+	snap.Events[0].Runbooks[0] = "clobbered"
 
 	fresh := run.SnapshotFull(0, 0)
-	if fresh.Events[0].Skills[0] == "clobbered" {
-		t.Error("Snapshot aliased Event.Skills; a caller mutated the run's retained history")
+	if fresh.Events[0].Runbooks[0] == "clobbered" {
+		t.Error("Snapshot aliased Event.Runbooks; a caller mutated the run's retained history")
 	}
 }

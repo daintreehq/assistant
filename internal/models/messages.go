@@ -7,7 +7,7 @@
 // they were deleted once the backend became the CLI's only model gateway
 // (internal/backend). Nothing in this package talks to a provider, and nothing
 // should: adding a transport back here would let a handler bypass the backend that
-// owns prompt assembly, skill selection, and the provider credentials.
+// owns prompt assembly, runbook selection, and the provider credentials.
 //
 // # Reading the "DeepSeek" comments in this repo
 //

@@ -98,7 +98,7 @@ func renderCostPanel(s costledger.Snapshot) string {
 const costFootnote = "These are OpenRouter's own reported figures, not estimates — but the OpenRouter\n" +
 	"dashboard is the authority on your bill. Use these for proportion and trend.\n" +
 	"Counted since this process launched, or since the last /clear; turns the supervisor\n" +
-	"daemon ran while detached are not included. Skill learning, when enabled, is billed\n" +
+	"daemon ran while detached are not included. Runbook learning, when enabled, is billed\n" +
 	"by OpenRouter but reported by nothing and so appears in no total here."
 
 // costLine renders one category's spend plus its call count.

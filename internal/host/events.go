@@ -616,7 +616,7 @@ func (e EvCost) encode(sid string, seq uint64) ([]byte, error) {
 }
 
 // EvNotice — notice. Non-fatal info/warning the runtime surfaces (a repeating tool
-// failure, a pinned skill the backend could not honour, a degraded MCP). v2 had no
+// failure, a pinned runbook the backend could not honour, a degraded MCP). v2 had no
 // channel for these at all, so they reached nobody once the local renderer was gone.
 type EvNotice struct {
 	Level   string // "info" | "warning"

@@ -210,13 +210,13 @@ func TestParseArgsRejectsMultiTurnMisuse(t *testing.T) {
 		{"with --prompt-file", []string{"--json", "--multi-turn", "--prompt-file", "/tmp/p.txt"}, "cannot be combined"},
 		// Command routes return EARLY, so validation placed after them was skipped
 		// entirely: the flag silently did nothing on a route that never runs a turn —
-		// the same "looks like it worked" failure --skill's route check exists to stop.
+		// the same "looks like it worked" failure --runbook's route check exists to stop.
 		{"with a command word", []string{"--json", "--multi-turn", "doctor"}, "cannot be combined"},
 		{"with a command and no --json", []string{"--multi-turn", "status"}, "--multi-turn requires --json"},
 		{"with a command and --prompt-file", []string{"--json", "--multi-turn", "--prompt-file", "/tmp/p.txt", "doctor"}, "cannot be combined"},
-		// --list-skills picks its route with a FLAG, not a positional, so the
+		// --list-runbooks picks its route with a FLAG, not a positional, so the
 		// prompt-source check cannot see it and it needs its own rejection.
-		{"with --list-skills", []string{"--json", "--multi-turn", "--list-skills"}, "do not go together"},
+		{"with --list-runbooks", []string{"--json", "--multi-turn", "--list-runbooks"}, "do not go together"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if _, err := parseArgs(tt.args); err == nil || !strings.Contains(err.Error(), tt.want) {
@@ -525,27 +525,27 @@ func TestParseArgsRunSchedulerTimeoutRuleIsRouteIndependent(t *testing.T) {
 	}
 }
 
-// --skill is the binary's only repeatable flag, so it is the only one whose accumulation
+// --runbook is the binary's only repeatable flag, so it is the only one whose accumulation
 // semantics are worth pinning. The failures below are all silent-underrun shapes: a pin
 // that vanished is indistinguishable from one that worked, which is the exact ambiguity
 // this flag was added to remove.
-func TestParseArgsCollectsRepeatedSkills(t *testing.T) {
+func TestParseArgsCollectsRepeatedRunbooks(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
 		want []string
 	}{
 		{name: "none", args: []string{"hi"}},
-		{name: "one", args: []string{"--skill", "a.one", "hi"}, want: []string{"a.one"}},
-		{name: "repeated, in order", args: []string{"--skill", "b.two", "--skill", "a.one", "hi"}, want: []string{"b.two", "a.one"}},
-		{name: "inline value spelling", args: []string{"--skill=a.one", "hi"}, want: []string{"a.one"}},
-		{name: "single-dash spelling", args: []string{"-skill", "a.one", "hi"}, want: []string{"a.one"}},
-		{name: "exact repeat collapses", args: []string{"--skill", "a.one", "--skill", "a.one", "hi"}, want: []string{"a.one"}},
-		{name: "surrounding space trimmed", args: []string{"--skill", "  a.one  ", "hi"}, want: []string{"a.one"}},
+		{name: "one", args: []string{"--runbook", "a.one", "hi"}, want: []string{"a.one"}},
+		{name: "repeated, in order", args: []string{"--runbook", "b.two", "--runbook", "a.one", "hi"}, want: []string{"b.two", "a.one"}},
+		{name: "inline value spelling", args: []string{"--runbook=a.one", "hi"}, want: []string{"a.one"}},
+		{name: "single-dash spelling", args: []string{"-runbook", "a.one", "hi"}, want: []string{"a.one"}},
+		{name: "exact repeat collapses", args: []string{"--runbook", "a.one", "--runbook", "a.one", "hi"}, want: []string{"a.one"}},
+		{name: "surrounding space trimmed", args: []string{"--runbook", "  a.one  ", "hi"}, want: []string{"a.one"}},
 		// A comma is a legal character in an opaque backend id, so inventing it as a
 		// separator would make such an id unnameable. One pin per occurrence.
-		{name: "commas are not a separator", args: []string{"--skill", "a,b", "hi"}, want: []string{"a,b"}},
-		{name: "interactive launch may pin", args: []string{"--skill", "a.one"}, want: []string{"a.one"}},
+		{name: "commas are not a separator", args: []string{"--runbook", "a,b", "hi"}, want: []string{"a,b"}},
+		{name: "interactive launch may pin", args: []string{"--runbook", "a.one"}, want: []string{"a.one"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -553,7 +553,7 @@ func TestParseArgsCollectsRepeatedSkills(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseArgs() error = %v", err)
 			}
-			pins := got.Options.PinnedSkillIDs
+			pins := got.Options.PinnedRunbookIDs
 			if len(pins) != len(tt.want) {
 				t.Fatalf("pins = %v, want %v", pins, tt.want)
 			}
@@ -567,9 +567,9 @@ func TestParseArgsCollectsRepeatedSkills(t *testing.T) {
 }
 
 // Every rejection here exists because the alternative is a launch that looks pinned and
-// is not — or, for --list-skills, a route that quietly swallowed something the caller
+// is not — or, for --list-runbooks, a route that quietly swallowed something the caller
 // meant.
-func TestParseArgsRejectsMeaninglessSkillCombinations(t *testing.T) {
+func TestParseArgsRejectsMeaninglessRunbookCombinations(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
@@ -577,22 +577,22 @@ func TestParseArgsRejectsMeaninglessSkillCombinations(t *testing.T) {
 	}{
 		// A harness expanding an unset shell variable produces exactly this, and running
 		// unpinned would be the worst possible interpretation of it.
-		{name: "empty value", args: []string{"--skill=", "hi"}, want: "empty value"},
-		{name: "blank value", args: []string{"--skill", "   ", "hi"}, want: "empty value"},
+		{name: "empty value", args: []string{"--runbook=", "hi"}, want: "empty value"},
+		{name: "blank value", args: []string{"--runbook", "   ", "hi"}, want: "empty value"},
 		// --timeout's "silently ignored elsewhere" is the wrong precedent for this flag.
-		{name: "pin on doctor", args: []string{"--skill", "a.one", "doctor"}, want: "never runs a turn"},
-		{name: "pin on status", args: []string{"--skill", "a.one", "status"}, want: "never runs a turn"},
-		{name: "pin on daemon", args: []string{"--skill", "a.one", "daemon"}, want: "never runs a turn"},
-		{name: "pin on daemon stop", args: []string{"--skill", "a.one", "daemon", "stop"}, want: "never runs a turn"},
-		{name: "pin on reset", args: []string{"--skill", "a.one", "reset", "project-state"}, want: "never runs a turn"},
-		{name: "pin on support-bundle", args: []string{"--skill", "a.one", "support-bundle"}, want: "never runs a turn"},
-		// A trailing --skill with nothing after it is caught by splitInterspersedArgs,
+		{name: "pin on doctor", args: []string{"--runbook", "a.one", "doctor"}, want: "never runs a turn"},
+		{name: "pin on status", args: []string{"--runbook", "a.one", "status"}, want: "never runs a turn"},
+		{name: "pin on daemon", args: []string{"--runbook", "a.one", "daemon"}, want: "never runs a turn"},
+		{name: "pin on daemon stop", args: []string{"--runbook", "a.one", "daemon", "stop"}, want: "never runs a turn"},
+		{name: "pin on reset", args: []string{"--runbook", "a.one", "reset", "project-state"}, want: "never runs a turn"},
+		{name: "pin on support-bundle", args: []string{"--runbook", "a.one", "support-bundle"}, want: "never runs a turn"},
+		// A trailing --runbook with nothing after it is caught by splitInterspersedArgs,
 		// before the value type ever sees it.
-		{name: "trailing skill with no value", args: []string{"hi", "--skill"}, want: "requires a value"},
-		{name: "list with a prompt", args: []string{"--list-skills", "hello"}, want: "does not take a prompt"},
-		{name: "list with a command", args: []string{"--list-skills", "doctor"}, want: "does not take a prompt"},
-		{name: "list plus pin", args: []string{"--list-skills", "--skill", "a.one"}, want: "do not go together"},
-		{name: "list with stdio", args: []string{"--list-skills", "--stdio"}, want: "--stdio is only valid"},
+		{name: "trailing runbook with no value", args: []string{"hi", "--runbook"}, want: "requires a value"},
+		{name: "list with a prompt", args: []string{"--list-runbooks", "hello"}, want: "does not take a prompt"},
+		{name: "list with a command", args: []string{"--list-runbooks", "doctor"}, want: "does not take a prompt"},
+		{name: "list plus pin", args: []string{"--list-runbooks", "--runbook", "a.one"}, want: "do not go together"},
+		{name: "list with stdio", args: []string{"--list-runbooks", "--stdio"}, want: "--stdio is only valid"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -609,33 +609,33 @@ func TestParseArgsRejectsMeaninglessSkillCombinations(t *testing.T) {
 
 // A pin IS meaningful on the two routes that serve turns; rejecting it there would break
 // the parity the issue asks for between argv and daintree.session.open.
-func TestParseArgsAllowsSkillsOnTurnServingRoutes(t *testing.T) {
+func TestParseArgsAllowsRunbooksOnTurnServingRoutes(t *testing.T) {
 	for _, args := range [][]string{
-		{"--skill", "a.one", "mcp"},
-		{"--skill", "a.one", "mcp", "--stdio"},
-		{"--skill", "a.one", "host", "--stdio"},
+		{"--runbook", "a.one", "mcp"},
+		{"--runbook", "a.one", "mcp", "--stdio"},
+		{"--runbook", "a.one", "host", "--stdio"},
 	} {
 		got, err := parseArgs(args)
 		if err != nil {
 			t.Fatalf("parseArgs(%v) error = %v", args, err)
 		}
-		if len(got.Options.PinnedSkillIDs) != 1 {
-			t.Fatalf("parseArgs(%v) dropped the pin: %v", args, got.Options.PinnedSkillIDs)
+		if len(got.Options.PinnedRunbookIDs) != 1 {
+			t.Fatalf("parseArgs(%v) dropped the pin: %v", args, got.Options.PinnedRunbookIDs)
 		}
 	}
 }
 
-// --list-skills is carved out AHEAD of the "--json requires a prompt" rule for the same
+// --list-runbooks is carved out AHEAD of the "--json requires a prompt" rule for the same
 // reason `doctor --json` is: a listing a script cannot parse is not one, and the whole
-// point of the catalog is to feed --skill from a script.
-func TestParseArgsRoutesListSkills(t *testing.T) {
-	for _, args := range [][]string{{"--list-skills"}, {"--list-skills", "--json"}, {"--json", "--list-skills"}} {
+// point of the catalog is to feed --runbook from a script.
+func TestParseArgsRoutesListRunbooks(t *testing.T) {
+	for _, args := range [][]string{{"--list-runbooks"}, {"--list-runbooks", "--json"}, {"--json", "--list-runbooks"}} {
 		got, err := parseArgs(args)
 		if err != nil {
 			t.Fatalf("parseArgs(%v) error = %v", args, err)
 		}
-		if got.Route != routeListSkills {
-			t.Fatalf("parseArgs(%v) route = %v, want routeListSkills", args, got.Route)
+		if got.Route != routeListRunbooks {
+			t.Fatalf("parseArgs(%v) route = %v, want routeListRunbooks", args, got.Route)
 		}
 	}
 	// The general rule it is carved out of must still hold for everyone else.
@@ -645,25 +645,25 @@ func TestParseArgsRoutesListSkills(t *testing.T) {
 
 	// A TRAILING terminator does not retroactively turn the flag into a prompt, matching
 	// how `status --` keeps its command.
-	if got, err := parseArgs([]string{"--list-skills", "--"}); err != nil || got.Route != routeListSkills {
-		t.Fatalf(`parseArgs("--list-skills", "--") = (%v, %v), want the list route`, got.Route, err)
+	if got, err := parseArgs([]string{"--list-runbooks", "--"}); err != nil || got.Route != routeListRunbooks {
+		t.Fatalf(`parseArgs("--list-runbooks", "--") = (%v, %v), want the list route`, got.Route, err)
 	}
-	// A LEADING terminator does: `-- --list-skills` is someone asking the assistant about
+	// A LEADING terminator does: `-- --list-runbooks` is someone asking the assistant about
 	// the flag, which is exactly what `--` is for. It never reaches the flag set, so the
 	// carve-out's indifference to forcePrompt is correct rather than a gap.
-	got, err := parseArgs([]string{"--", "--list-skills"})
+	got, err := parseArgs([]string{"--", "--list-runbooks"})
 	if err != nil {
-		t.Fatalf(`parseArgs("--", "--list-skills") error = %v`, err)
+		t.Fatalf(`parseArgs("--", "--list-runbooks") error = %v`, err)
 	}
-	if got.Route != routeDefault || got.Options.Prompt != "--list-skills" {
+	if got.Route != routeDefault || got.Options.Prompt != "--list-runbooks" {
 		t.Fatalf("a leading terminator must make it a prompt, got route %v prompt %q", got.Route, got.Options.Prompt)
 	}
 }
 
-func TestUsageDocumentsSkillFlags(t *testing.T) {
+func TestUsageDocumentsRunbookFlags(t *testing.T) {
 	var buf bytes.Buffer
 	writeUsage(&buf, "test")
-	for _, want := range []string{"--skill ID", "--list-skills", "repeatable"} {
+	for _, want := range []string{"--runbook ID", "--list-runbooks", "repeatable"} {
 		if !strings.Contains(buf.String(), want) {
 			t.Fatalf("usage does not mention %q:\n%s", want, buf.String())
 		}
@@ -672,7 +672,7 @@ func TestUsageDocumentsSkillFlags(t *testing.T) {
 
 // --allow-delegated-approvals decides whether the agent on the other end of an MCP pipe
 // may approve mutations. A flag that quietly does nothing on the route it was typed
-// against looks exactly like one that worked — which is the whole reason --skill does not
+// against looks exactly like one that worked — which is the whole reason --runbook does not
 // follow --timeout's "silently ignored elsewhere" precedent either.
 func TestAllowDelegatedApprovalsIsMCPOnly(t *testing.T) {
 	parsed, err := parseArgs([]string{"--allow-delegated-approvals", "mcp", "--stdio"})

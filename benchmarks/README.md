@@ -7,7 +7,7 @@ make **real, paid backend/model calls** and are run deliberately, not in CI.
 | --- | --- |
 | [`orchestration/`](orchestration/) | Does the assistant get real operator tasks to their final result against a scripted fake Daintree — and how long / how many rounds / how many tokens does it take? |
 
-The backend's own prompt-level benchmark (skill selection) lives in
+The backend's own prompt-level benchmark (runbook selection) lives in
 `../assistant-backend/benchmarks/`.
 
 ## Orchestration benchmark
@@ -79,8 +79,8 @@ reconstructs the turn timeline from the debug log and reports, per model round:
 - `gapBeforeMs` — prior round's done → this request (tool execution + CLI bookkeeping)
 - `rawMetaMs` — request → the SSE meta arriving at the client (selector + backend
   pre-stream work)
-- `skillCueMs` — request → the eager, de-duplicated skill-loaded event reaching the
-  output sinks (absent when the round loads no new skill). Nothing renders it to the
+- `runbookCueMs` — request → the eager, de-duplicated runbook-loaded event reaching the
+  output sinks (absent when the round loads no new runbook). Nothing renders it to the
   user; the mark exists to separate SELECTION latency from generation latency
 - `committedMetaMs` — request → retry-safe metadata/state adoption; this normally
   coincides with first content, or with successful completion on a tool-call-only round
@@ -94,7 +94,7 @@ go run ./benchmarks/orchestration -filter latency -trials 4 -parallel 1
 ```
 
 The results JSON carries the same fields (`roundDetail`, `firstRawMetaMs`,
-`firstSkillCueMs`, `firstContentMs`, `turnMs`) — diff two runs to see what a change did
+`firstRunbookCueMs`, `firstContentMs`, `turnMs`) — diff two runs to see what a change did
 to response speed. The backend logs the matching server-side split per request (`selector_ms`,
 `pre_upstream_ms`, `respond_upstream_open.upstream_first_event_ms`).
 
@@ -108,8 +108,8 @@ route serializes [all system messages] → [tools] → [conversation] regardless
 order. That measurement was taken against `deepseek/deepseek-v4-flash-0731` **through
 OpenRouter**; it is a property of that route, not of OpenRouter generally, so re-measure
 before assuming it transfers to another model the backend may select. The raw-meta /
-skill-cue / committed-meta / first-token split is also the
-measurement surface for prior-skill speculation: it shows separately when selection
+runbook-cue / committed-meta / first-token split is also the
+measurement surface for prior-runbook speculation: it shows separately when selection
 finishes, when the user sees the capability cue, and when kept generation becomes visible.
 
 Each trial is fully isolated: its own fake world, its own
@@ -132,7 +132,7 @@ Each result row links the trial's debug log for post-mortems (`backend.respond.*
 
 1. Run the suite → a scenario fails or a metric regresses.
 2. Read the trial's debug log — find where the model misjudged/misused a tool.
-3. Fix the **system**: backend prompt/skill (`../assistant-backend`) or local
+3. Fix the **system**: backend prompt/runbook (`../assistant-backend`) or local
    tool shape (this repo).
 4. Re-run the filter for that scenario, then the full suite.
 5. New real-world incident? Add it as a scenario — the log-archaeology loop
@@ -150,7 +150,7 @@ them. Register it in `All()`.
 - **`hung-agent-no-stall`** (first full run, 2026-07-07): the model's first
   `awaitAll` used a ~240s budget, then re-awaited "with a longer budget" and
   blew the 6-minute scenario bound. Root cause is guidance, not the model: the
-  backend prompt/skills cap the re-await **count** (max 2) but never the
+  backend prompt/runbooks cap the re-await **count** (max 2) but never the
   **total in-turn wait**, and `daintree.edits.spawn-visible-agent.md` +
   `daintree.orchestration.*.md` explicitly sanction `maxAttempts: 240` (~480s)
   per await — the letter of the rules allows ~20 min of blocking on a hung

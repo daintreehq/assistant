@@ -496,31 +496,31 @@ func TestServiceReconcileClearsLastErrorWithExplicitEmpty(t *testing.T) {
 }
 
 // The plan input clamps its unbounded request lists to the backend pydantic caps
-// (16 skill ids; 24 notes + the mandatory local constraint = 25) instead of
+// (16 runbook ids; 24 notes + the mandatory local constraint = 25) instead of
 // letting an over-cap list 422 the whole task.
-func TestServicePlanClampsSkillIDsAndNotes(t *testing.T) {
+func TestServicePlanClampsRunbookIDsAndNotes(t *testing.T) {
 	store := newMemGraphStore()
 	tasks := &fakeTasks{outputs: map[string]string{backend.TaskWorkflowPlan: validPlanJSON}}
 	svc := newTestService(t, store, tasks)
 
 	ids := make([]string, 20)
 	for i := range ids {
-		ids[i] = fmt.Sprintf("skill-%02d", i)
+		ids[i] = fmt.Sprintf("runbook-%02d", i)
 	}
 	notes := make([]string, 30)
 	for i := range notes {
 		notes[i] = fmt.Sprintf("note %02d", i)
 	}
 	if _, err := svc.Plan(context.Background(), PlanRequest{
-		Goal: "g", ActiveSkillIDs: ids, Notes: notes,
+		Goal: "g", ActiveRunbookIDs: ids, Notes: notes,
 	}); err != nil {
 		t.Fatal(err)
 	}
 
 	in := tasks.inputs[0]
-	gotIDs, _ := in["active_skill_ids"].([]any)
-	if len(gotIDs) != maxPlanSkillIDs || gotIDs[0] != "skill-00" || gotIDs[15] != "skill-15" {
-		t.Fatalf("active_skill_ids must head-truncate to %d, got %d: %v", maxPlanSkillIDs, len(gotIDs), gotIDs)
+	gotIDs, _ := in["active_runbook_ids"].([]any)
+	if len(gotIDs) != maxPlanRunbookIDs || gotIDs[0] != "runbook-00" || gotIDs[15] != "runbook-15" {
+		t.Fatalf("active_runbook_ids must head-truncate to %d, got %d: %v", maxPlanRunbookIDs, len(gotIDs), gotIDs)
 	}
 	gotCons, _ := in["constraints"].([]any)
 	if len(gotCons) != maxPlanNotes+1 { // + the mandatory local constraint

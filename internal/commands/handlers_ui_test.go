@@ -617,21 +617,21 @@ func TestUIClearRejectedDuringActiveTurn(t *testing.T) {
 	}
 }
 
-// There is no /skills command. Backend skill selection is prompt-assembly machinery the
+// There is no /runbooks command. Backend runbook selection is prompt-assembly machinery the
 // user neither approves nor steers, so the CLI reports it nowhere — not in the transcript,
-// not behind a command (see agent.Session.emitSkillLoads). The NAME is deliberately kept
-// free for future user-authored assistant skills, which are intent-driven and will want
+// not behind a command (see agent.Session.emitRunbookLoads). The NAME is deliberately kept
+// free for future user-authored assistant runbooks, which are intent-driven and will want
 // it for list/create/edit. Pinned so it is not re-added out of reflex.
-func TestUISkillsCommandDoesNotExist(t *testing.T) {
+func TestUIRunbooksCommandDoesNotExist(t *testing.T) {
 	a := newOfflineApp(t)
 	// An unrecognized command is still "handled" — as the Unknown-command card — so the
 	// assertion is on the TITLE, not on Handled.
-	if r := ui(a, "/skills"); r.Title != "Unknown command" {
-		t.Fatalf("/skills resolves to a real command again: %+v", r)
+	if r := ui(a, "/runbooks"); r.Title != "Unknown command" {
+		t.Fatalf("/runbooks resolves to a real command again: %+v", r)
 	}
 	for _, c := range COMMAND_REGISTRY {
-		if c.Name == "skills" {
-			t.Fatalf("the skills command is back in the registry: %+v", c)
+		if c.Name == "runbooks" {
+			t.Fatalf("the runbooks command is back in the registry: %+v", c)
 		}
 	}
 }

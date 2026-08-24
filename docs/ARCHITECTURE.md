@@ -28,7 +28,7 @@ internal/
                  Router, SSE parser, retry layer and pricing were deleted with the backend
                  migration. Do NOT add a provider client back here
   prompts/       MainPromptContext (structured runtime facts; the prompt-text +
-                 loaded-skills builders were deleted, the backend owns them)
+                 loaded-runbooks builders were deleted, the backend owns them)
   mcp/           Daintree MCP client (go-sdk: Streamable HTTP, SSE fallback) + typed wrappers
   safety/        policy.go — Decide(risk, tier), AlwaysConfirm, no-file-edit guard
   tools/
@@ -47,7 +47,7 @@ internal/
     queue/       queue.publish / queue.digest / queue.resolve
     grant/       grant.create / grant.list / grant.revoke
     workflow/    workflow.create / get / list / update
-    skill/       skill.run.get / skill.step.advance (stepwise run-tracking; selection is server-owned)
+    runbook/       runbook.run.get / runbook.step.advance (stepwise run-tracking; selection is server-owned)
     auditx/      audit.export
     memory/      memory.recall / list / save / forget / pin / unpin
     artifactx/   artifact.read
@@ -75,13 +75,13 @@ A turn runs through `agent.Session.Send()`:
 
 1. Phase `Received`; optional **auto-compact** of the conversation (threshold + behavior
    in [`RUNTIME.md`](RUNTIME.md)); push the user message.
-2. Project the FULL tool registry into the request inventory (skills never narrow it).
+2. Project the FULL tool registry into the request inventory (runbooks never narrow it).
 3. Loop:
    - Phase `Analyzing` / `Integrating`; `Backend.RespondStream(req, …)` with a token
      callback — sends structured stable startup data separately from the visible
      conversation, plus fresh runtime/turn context and the tool inventory
      + the opaque state token. The first SSE `meta` event carries the refreshed state +
-     the server's `skills` block (selection + injection are server-owned).
+     the server's `runbooks` block (selection + injection are server-owned).
    - Append the assistant message. **No tool calls** → phase `Complete`, return the answer.
    - Otherwise announce the whole tool batch (`ToolBatch`, all `queued`), then
      `registry.Dispatch()` each in the safe sequence, promoting and resolving each, feed
@@ -159,7 +159,7 @@ The `ToolContext` provides `Config`, `MCP`, `DB`, `Queue`, `Router`, `ProjectPat
   verb `terminal.focus` (ui). The five zero-arg focus CYCLERS
   (`agent.focusNext*`/`focusPreviousAgent`, `workflow.focusNextAttention`) were removed:
   they cost ~2 KB of the per-round tool inventory to expose UI navigation the model has
-  no reason to drive, and nothing in the prompts or skills referenced them.
+  no reason to drive, and nothing in the prompts or runbooks referenced them.
 - **mcpwrap** — typed wrappers over Daintree MCP actions; a raw `daintree.call` fails
   fast with `USE_TYPED_WRAPPER` when a typed equivalent exists (e.g. `agent.launch` →
   `agentTask.spawnForEdits`). Members: `forge.listIssues` / `getIssue` / `listPRs` /
@@ -183,7 +183,7 @@ The `ToolContext` provides `Config`, `MCP`, `DB`, `Queue`, `Router`, `ProjectPat
   grants that let non-interactive actors run mutating tools without an interactive confirm).
 - **workflow** — `workflow.create` / `get` / `list` / `update` (durable multi-step records
   advanced over turns).
-- **skill** — `skill.run.get` / `skill.step.advance` (stepwise run-tracking; selection is server-owned).
+- **runbook** — `runbook.run.get` / `runbook.step.advance` (stepwise run-tracking; selection is server-owned).
 - **auditx** — `audit.export` (read; the audit log of every dispatched tool call).
 - **memory** — `memory.recall` / `list` / `save` / `forget` / `pin` / `unpin` (durable
   cross-session memory).

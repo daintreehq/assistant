@@ -574,7 +574,7 @@ func TestAwaitCohort_NoInjectorNeverInterrupts(t *testing.T) {
 }
 
 // Issue #239: the tool surface itself must carry the re-await bound, so the ceiling is
-// visible at point-of-use even when no orchestration skill is loaded.
+// visible at point-of-use even when no orchestration runbook is loaded.
 //
 // Locked on the tool DESCRIPTION only. It was previously repeated verbatim in the
 // terminalIds schema too, and a rule stated twice is paid for on every model round —

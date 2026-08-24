@@ -201,11 +201,11 @@ CREATE TABLE IF NOT EXISTS agent_launches (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_launches_key ON agent_launches(idempotencyKey, stage, updatedAt);
 
--- 3.11 skill_run_state — stepwise skill progress (natural key sessionId+skillId).
-CREATE TABLE IF NOT EXISTS skill_run_state (
+-- 3.11 runbook_run_state — stepwise runbook progress (natural key sessionId+runbookId).
+CREATE TABLE IF NOT EXISTS runbook_run_state (
   id          TEXT PRIMARY KEY,
   sessionId   TEXT NOT NULL,
-  skillId     TEXT NOT NULL,
+  runbookId     TEXT NOT NULL,
   currentStep INTEGER NOT NULL DEFAULT 0,
   stepsJson   TEXT NOT NULL DEFAULT '[]',
   status      TEXT NOT NULL DEFAULT 'active',
@@ -213,7 +213,7 @@ CREATE TABLE IF NOT EXISTS skill_run_state (
   updatedAt   INTEGER NOT NULL,
   completedAt INTEGER
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_run_state_key ON skill_run_state(sessionId, skillId);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_runbook_run_state_key ON runbook_run_state(sessionId, runbookId);
 
 -- 3.12 memories + FTS5 external-content recall index.
 CREATE TABLE IF NOT EXISTS memories (
@@ -403,7 +403,7 @@ CREATE INDEX IF NOT EXISTS idx_workflow_reconcile_wf ON workflow_reconcile_runs(
 -- process boundaries for the persistent supervisor: the current conversation's
 -- session id (so a detached daemon continues the SAME transcript) and the
 -- per-session backend state token (opaque, server-signed; replaying it keeps
--- the backend's skill-selection cadence stable across a handover). NOT a config
+-- the backend's runbook-selection cadence stable across a handover). NOT a config
 -- store — config resolution stays in internal/config.
 CREATE TABLE IF NOT EXISTS runtime_state (
   key       TEXT PRIMARY KEY,

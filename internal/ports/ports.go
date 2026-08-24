@@ -62,7 +62,7 @@ func emitSafe(s EventSink, ev domain.AgentEvent) {
 
 // Store is the persistence seam the agent loop and daemon depend on. The full
 // surface (timers, watchers, events, audit, conversation, grants, memories,
-// workflow runs, skill state, agent launches) lives in internal/storage; the
+// workflow runs, runbook state, agent launches) lives in internal/storage; the
 // methods here are the minimum the loop needs to compile against.
 type Store interface {
 	// AppendRunEvent persists one durable replay event for a turn.

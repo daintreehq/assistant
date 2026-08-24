@@ -28,8 +28,8 @@ import (
 //     round budget into an unbounded tree, and nothing needs it — the orchestrator
 //     can fan out several peers in one batch, which is easier to reason about and
 //     to cost.
-//   - skill.run.get: skill-run bookkeeping for the orchestrator's own procedures.
-//     Skill selection does not even run for the sub-agent profile (the backend
+//   - runbook.run.get: runbook-run bookkeeping for the orchestrator's own procedures.
+//     Runbook selection does not even run for the sub-agent profile (the backend
 //     skips it), so there is no run for a sub-agent to inspect.
 //   - queue.digest: the attention inbox is the human's, read at the boundary
 //     between turns. A sub-agent reading it would pull unrelated pending work into
@@ -38,11 +38,11 @@ import (
 // It holds only tools the filter would OTHERWISE ADMIT, and a test enforces that
 // (TestSubagentDenylistEntriesAreLiveAndOtherwiseAdmissible). Listing an already
 // excluded tool here would read as a decision someone made when it is really a
-// no-op — user.askMultipleChoice (ui) and skill.step.advance (local) both looked
+// no-op — user.askMultipleChoice (ui) and runbook.step.advance (local) both looked
 // like they belonged and neither did.
 var subagentToolDenylist = map[string]struct{}{
 	"subagent.run":  {},
-	"skill.run.get": {},
+	"runbook.run.get": {},
 	"queue.digest":  {},
 }
 

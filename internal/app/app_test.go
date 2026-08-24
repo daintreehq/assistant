@@ -49,7 +49,7 @@ func strPtr(s string) *string { return &s }
 
 // TestCreateWiresEveryDependency asserts App.Create builds the full dependency
 // graph in the canonical order — config → store → mcp → queue → backend → registry
-// (AssertSafe already passed inside Create) → skills → session — with no nil seam.
+// (AssertSafe already passed inside Create) → runbooks → session — with no nil seam.
 func TestCreateWiresEveryDependency(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
@@ -87,9 +87,9 @@ func TestCreateWiresEveryDependency(t *testing.T) {
 // terminal.extract.json structured-extract tool, the five scratch.* session-scratch
 // tools, the four async-futures
 // tools — terminal.run.async / terminal.await.async / async.list / async.cancel — and
-// the user.askMultipleChoice question tool). The local skill.find / skill.load tools are
-// GONE — the backend now owns skill selection (the migration off the client-side
-// selector); skill.run.get / skill.step.advance remain. The three docs.* tools are GONE
+// the user.askMultipleChoice question tool). The local runbook.find / runbook.load tools are
+// GONE — the backend now owns runbook selection (the migration off the client-side
+// selector); runbook.run.get / runbook.step.advance remain. The three docs.* tools are GONE
 // too (issue #332): the backend searches the documentation MCP itself. We assert that
 // exact count so a silent family add/drop is caught.
 func TestCreateRegistersFullToolSet(t *testing.T) {
@@ -151,10 +151,10 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 	if !a.Registry.Has("terminal.moveToWorktree") {
 		t.Error("terminal.moveToWorktree must be registered")
 	}
-	// The local skill-selection tools were removed in the backend migration; assert
+	// The local runbook-selection tools were removed in the backend migration; assert
 	// their absence so a re-introduction (or a stale wiring) is caught here.
-	if a.Registry.Has("skill.find") || a.Registry.Has("skill.load") {
-		t.Error("skill.find/skill.load must NOT be registered (skill selection is backend-owned)")
+	if a.Registry.Has("runbook.find") || a.Registry.Has("runbook.load") {
+		t.Error("runbook.find/runbook.load must NOT be registered (runbook selection is backend-owned)")
 	}
 	if !a.Registry.Has("terminal.extract.json") {
 		t.Error("terminal.extract.json (structured extract) not registered")
@@ -333,7 +333,7 @@ func TestScratchToolsWired(t *testing.T) {
 
 // TestCreateStartsWithEmptyVisibleHistory asserts a fresh session boots with NO
 // client-side control prefix: the backend owns the system prompt, developer
-// instructions, and skill bodies, so domain.ControlMessageCount == 0 and the first
+// instructions, and runbook bodies, so domain.ControlMessageCount == 0 and the first
 // turn appends the user message at index 0. (Replaces the old three-control-message
 // seed test — that cached client-side prefix was removed in the backend migration.)
 func TestCreateStartsWithEmptyVisibleHistory(t *testing.T) {

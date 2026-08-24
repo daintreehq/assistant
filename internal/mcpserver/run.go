@@ -44,7 +44,7 @@ const (
 // It is a projection, not the same schema, and the difference is worth stating because
 // the comment here used to claim they were identical. This shape uses generic `text`,
 // `tool` and `callId` fields; it drops tool ARGUMENTS, the run phase, tool batch/state/
-// progress, and model rate-limit events; and it reduces a skill decision to titles plus
+// progress, and model rate-limit events; and it reduces a runbook decision to titles plus
 // a degraded flag. That is the right projection for a polling agent — those are the
 // live-footer events a human watches and a poller pays context for — but a caller told
 // the vocabularies were identical would go looking for fields that are not coming.
@@ -65,13 +65,13 @@ type Event struct {
 	// Async is the `asy_…` handle when a tool accepted work that settles later. A
 	// caller seeing this must NOT expect the result on this run.
 	Async string `json:"async,omitempty"`
-	// Skills are runbook titles: the ones newly loaded on a skill:loaded event, the
-	// whole ACTIVE set on a skill:decision event.
-	Skills []string `json:"skills,omitempty"`
-	// SkillsDegraded marks a skill:decision whose selector failed open and reused the
+	// Runbooks are runbook titles: the ones newly loaded on a runbook:loaded event, the
+	// whole ACTIVE set on a runbook:decision event.
+	Runbooks []string `json:"runbooks,omitempty"`
+	// RunbooksDegraded marks a runbook:decision whose selector failed open and reused the
 	// prior active set — the run carries a runbook it did not actually choose. Omitted
 	// everywhere else, including on a clean decision.
-	SkillsDegraded bool `json:"skillsDegraded,omitempty"`
+	RunbooksDegraded bool `json:"runbooksDegraded,omitempty"`
 }
 
 // Run is one turn: its prompt, its recorded events, and its outcome. It is written by
@@ -302,7 +302,7 @@ func (r *Run) SnapshotFull(sinceSeq, maxEvents int) RunSnapshot {
 	}
 	// COPIED, not aliased — the returned slice outlives this lock, and r.events grows by
 	// append, which can write into the same backing array a caller is still reading. The
-	// per-event clone covers Event.Skills, which a shallow slice copy leaves shared.
+	// per-event clone covers Event.Runbooks, which a shallow slice copy leaves shared.
 	evs := make([]Event, 0, len(window))
 	for _, e := range window {
 		evs = append(evs, e.clone())
@@ -327,12 +327,12 @@ func (r *Run) SnapshotFull(sinceSeq, maxEvents int) RunSnapshot {
 	}
 }
 
-// clone deep-copies the reference fields on an Event. Skills is a slice, so a plain
+// clone deep-copies the reference fields on an Event. Runbooks is a slice, so a plain
 // struct copy leaves it aliased to the retained event — a caller could mutate the run's
 // own history, and a JSON encode could race an append.
 func (e Event) clone() Event {
-	if e.Skills != nil {
-		e.Skills = append([]string(nil), e.Skills...)
+	if e.Runbooks != nil {
+		e.Runbooks = append([]string(nil), e.Runbooks...)
 	}
 	return e
 }
@@ -462,7 +462,7 @@ func (rec *Recorder) flush() {
 // Without it the buffer was simply dropped. The comment on `buffer` promised that a round
 // interrupted before assistant:end "still reports what it had said", and that was true
 // only for the paths that happened to call flush() — a new AssistantStart, an
-// interjection, a skill load. A turn cancelled or errored mid-sentence hit none of them,
+// interjection, a runbook load. A turn cancelled or errored mid-sentence hit none of them,
 // so the one case the buffer exists for was the one it did not cover.
 //
 // It runs on the turn goroutine after Send has returned, which is the same goroutine the
@@ -526,18 +526,18 @@ func (rec *Recorder) Interjection(text string) {
 	rec.run.append(Event{Type: "user:interjection", Text: text})
 }
 
-func (rec *Recorder) SkillLoaded(titles []string) {
+func (rec *Recorder) RunbookLoaded(titles []string) {
 	rec.flush()
-	rec.run.append(Event{Type: "skill:loaded", Skills: titles})
+	rec.run.append(Event{Type: "runbook:loaded", Runbooks: titles})
 }
 
-// SkillDecision records the committed per-round outcome. Only the active TITLES and the
+// RunbookDecision records the committed per-round outcome. Only the active TITLES and the
 // degraded flag are kept: this transcript is a digest an agent driving us reads back (it
 // already drops tool args for the same reason), and those two answer the question a
 // caller actually has — which runbook was in play, and was it really chosen. The ids,
 // the newly-loaded delta and the rest of the selector telemetry live on the --json
 // stream, which is the full diagnostic contract.
-func (rec *Recorder) SkillDecision(ev agent.SkillDecisionEvent) {
+func (rec *Recorder) RunbookDecision(ev agent.RunbookDecisionEvent) {
 	rec.flush()
 	titles := make([]string, 0, len(ev.Active))
 	for _, ref := range ev.Active {
@@ -550,7 +550,7 @@ func (rec *Recorder) SkillDecision(ev agent.SkillDecisionEvent) {
 		}
 		titles = append(titles, title)
 	}
-	rec.run.append(Event{Type: "skill:decision", Skills: titles, SkillsDegraded: ev.Selector.Degraded})
+	rec.run.append(Event{Type: "runbook:decision", Runbooks: titles, RunbooksDegraded: ev.Selector.Degraded})
 }
 
 func (rec *Recorder) ToolCall(ev agent.ToolCallEvent) {

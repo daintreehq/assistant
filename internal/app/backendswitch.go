@@ -145,7 +145,7 @@ func backendAliasList() string {
 //     knows for certain.
 //   - Dropping that state token. It is server-SIGNED and endpoint-specific, so carrying
 //     it across a switch hands the new backend a token it cannot verify. The conversation
-//     survives; only the server's skill-selection state is endpoint-bound, and the new
+//     survives; only the server's runbook-selection state is endpoint-bound, and the new
 //     backend simply re-runs selection.
 func (a *App) SetBackendURL(rawURL string) (string, error) {
 	target, err := ResolveBackendTarget(rawURL)

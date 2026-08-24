@@ -15,7 +15,7 @@ const (
 	// it so its autonomous wake turns continue the SAME transcript.
 	RuntimeKeyCurrentSession = "current_session_id"
 	// runtimeKeyBackendStatePrefix namespaces the per-session opaque backend
-	// state token (server-signed skill-selection state).
+	// state token (server-signed runbook-selection state).
 	runtimeKeyBackendStatePrefix = "backend_state:"
 	// RuntimeKeyDetachedActivity accumulates what the supervisor daemon did while
 	// no assistant was attached (wake-turn count + last reply preview, JSON).
@@ -77,7 +77,7 @@ func (s *Store) PutSessionBackendState(sessionID, token string) error {
 
 // GetSessionBackendState loads the persisted backend state token for a session;
 // "" when none — a perfectly valid starting point (the backend just re-runs
-// skill selection on the first respond).
+// runbook selection on the first respond).
 func (s *Store) GetSessionBackendState(sessionID string) (string, error) {
 	if sessionID == "" {
 		return "", nil

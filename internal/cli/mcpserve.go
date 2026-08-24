@@ -166,7 +166,7 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 		if err != nil {
 			return nil, err
 		}
-		a, err := app.Create(app.CreateOptions{Overrides: overrides, PinnedSkillIDs: sessionOpts.PinnedSkillIDs})
+		a, err := app.Create(app.CreateOptions{Overrides: overrides, PinnedRunbookIDs: sessionOpts.PinnedRunbookIDs})
 		if err != nil {
 			own.Release()
 			return nil, err
@@ -181,7 +181,7 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 		// current-session pointer and shutdown does not restore the previous value, so a
 		// session.open that FAILS its preflight would otherwise leave the supervisor
 		// resuming a conversation that never ran a turn.
-		pinNotice, perr := a.PreparePinnedSkills(bootstrap)
+		pinNotice, perr := a.PreparePinnedRunbooks(bootstrap)
 		if perr != nil {
 			_ = a.Shutdown()
 			own.Release()
@@ -274,10 +274,10 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 			ApprovalMode: string(mode),
 			MCPConnected: st.Connected,
 			MCPTransport: st.Transport,
-			// Reported so a caller that inherited a server-level --skill can see what this
+			// Reported so a caller that inherited a server-level --runbook can see what this
 			// session REQUESTS on every turn (not what the backend honours — the pin
 			// warnings own that); the advisory rides SessionOutput.Warnings via describe.
-			PinnedSkills:        a.PinnedSkillIDs(),
+			PinnedRunbooks:        a.PinnedRunbookIDs(),
 			PinPreflightWarning: pinNotice,
 		}
 		rt := mcpserver.NewAppRuntime(a, facts, approvals, questions, own.Release)
@@ -374,7 +374,7 @@ func sessionOptions(base Options, p mcpserver.OpenParams) Options {
 	applyIfSet(&o.LogDir, p.LogDir)
 	applyIfSet(&o.ProjectID, p.ProjectID)
 	applyIfSet(&o.WindowID, p.WindowID)
-	applySliceIfSet(&o.PinnedSkillIDs, p.Skills)
+	applySliceIfSet(&o.PinnedRunbookIDs, p.Runbooks)
 	return o
 }
 
@@ -401,7 +401,7 @@ func applyIfSet(dst *string, v string) {
 // applySliceIfSet is applyIfSet for a list argument, and it tests NIL rather than
 // length on purpose. For a string, "" is the only way to say "unset", so the two
 // coincide; for a slice they part company, and the difference is a real instruction: a
-// caller that sends `"skills": []` is explicitly clearing a server-level --skill for
+// caller that sends `"runbooks": []` is explicitly clearing a server-level --runbook for
 // this session, which length-testing would silently reverse into "inherit them".
 //
 // The copy is defensive — the session's decoded argument must not stay aliased into the

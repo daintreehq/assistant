@@ -32,10 +32,10 @@ func coreToolStubs() []*tools.Tool {
 	return stubs
 }
 
-// Skill requiredTools validation was REMOVED: skills are server-owned (the backend's
-// selector picks and injects runbooks), so the CLI no longer loads a local skill
+// Runbook requiredTools validation was REMOVED: runbooks are server-owned (the backend's
+// selector picks and injects runbooks), so the CLI no longer loads a local runbook
 // catalog to validate at boot. The two tests that exercised that validation
-// (TestBootValidatesSkillRequiredTools / TestBootCleanWithFullToolSet) were deleted.
+// (TestBootValidatesRunbookRequiredTools / TestBootCleanWithFullToolSet) were deleted.
 
 // Issue #213: agent.coreToolNames is hand-maintained and must stay in lockstep
 // with the registry. App.Create must HARD-FAIL boot if a core tool name is not

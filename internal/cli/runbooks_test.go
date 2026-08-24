@@ -16,7 +16,7 @@ import (
 	"github.com/daintreehq/assistant/internal/storage"
 )
 
-// capabilitiesServer serves one canned /v1/daintree/capabilities body. `--list-skills`
+// capabilitiesServer serves one canned /v1/daintree/capabilities body. `--list-runbooks`
 // must be exactly one GET against the configured endpoint — no lease, no database, no
 // MCP — so a bare httptest server is the whole world these tests need.
 func capabilitiesServer(t *testing.T, body string) string {
@@ -56,17 +56,17 @@ func boolp(b bool) *bool { return &b }
 func runList(t *testing.T, opts Options) (code int, stdout, stderr string) {
 	t.Helper()
 	var out, errOut bytes.Buffer
-	code = runListSkills(context.Background(), opts, &out, &errOut)
+	code = runListRunbooks(context.Background(), opts, &out, &errOut)
 	return code, out.String(), errOut.String()
 }
 
-const twoSkillCatalog = `{"skills":{"catalog_revision":"sha256:abc","manual_resolve":true,"pinned_skill_ids":true,
+const twoRunbookCatalog = `{"runbooks":{"catalog_revision":"sha256:abc","manual_resolve":true,"pinned_runbook_ids":true,
 	"catalog":[{"id":"daintree.foundation","title":"Foundation"},{"id":"a.short","title":"Short"}]}}`
 
-// The human listing puts the ID first because the id is what --skill takes; the title is
+// The human listing puts the ID first because the id is what --runbook takes; the title is
 // only the reminder of what it is.
-func TestListSkillsText(t *testing.T) {
-	code, stdout, stderr := runList(t, listOpts(t, capabilitiesServer(t, twoSkillCatalog), false))
+func TestListRunbooksText(t *testing.T) {
+	code, stdout, stderr := runList(t, listOpts(t, capabilitiesServer(t, twoRunbookCatalog), false))
 	if code != domain.OneShotExitCode.Success {
 		t.Fatalf("exit = %d, want 0 (stderr: %s)", code, stderr)
 	}
@@ -80,42 +80,42 @@ func TestListSkillsText(t *testing.T) {
 	if iShort < 0 || iFound < 0 || iShort > iFound {
 		t.Fatalf("listing is not sorted by id:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "--skill") {
+	if !strings.Contains(stdout, "--runbook") {
 		t.Fatalf("the listing must say what to do with an id:\n%s", stdout)
 	}
 }
 
 // One indented JSON document, deliberately not the one-shot JSONL event stream: there is
 // no run here to narrate, and the consumer wants a value it can pipe into jq.
-func TestListSkillsJSON(t *testing.T) {
-	code, stdout, _ := runList(t, listOpts(t, capabilitiesServer(t, twoSkillCatalog), true))
+func TestListRunbooksJSON(t *testing.T) {
+	code, stdout, _ := runList(t, listOpts(t, capabilitiesServer(t, twoRunbookCatalog), true))
 	if code != domain.OneShotExitCode.Success {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	var doc SkillCatalogJSON
+	var doc RunbookCatalogJSON
 	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
 		t.Fatalf("stdout is not one JSON document (%v):\n%s", err, stdout)
 	}
 	if doc.CatalogRevision != "sha256:abc" {
 		t.Fatalf("catalogRevision = %q; it is what a caching caller keys the list on", doc.CatalogRevision)
 	}
-	if len(doc.Skills) != 2 || doc.Skills[0].ID != "a.short" || doc.Skills[1].ID != "daintree.foundation" {
-		t.Fatalf("skills = %+v, want both, sorted by id", doc.Skills)
+	if len(doc.Runbooks) != 2 || doc.Runbooks[0].ID != "a.short" || doc.Runbooks[1].ID != "daintree.foundation" {
+		t.Fatalf("runbooks = %+v, want both, sorted by id", doc.Runbooks)
 	}
-	if doc.Skills[1].Title != "Foundation" {
-		t.Fatalf("title dropped: %+v", doc.Skills[1])
+	if doc.Runbooks[1].Title != "Foundation" {
+		t.Fatalf("title dropped: %+v", doc.Runbooks[1])
 	}
 }
 
 // An advertised EMPTY catalog is a successful answer to the question — "this backend
 // loads nothing" — and must not be reported as a failure.
-func TestListSkillsEmptyCatalogSucceeds(t *testing.T) {
-	body := `{"skills":{"catalog_revision":"r","catalog":[],"pinned_skill_ids":true}}`
+func TestListRunbooksEmptyCatalogSucceeds(t *testing.T) {
+	body := `{"runbooks":{"catalog_revision":"r","catalog":[],"pinned_runbook_ids":true}}`
 	code, stdout, _ := runList(t, listOpts(t, capabilitiesServer(t, body), false))
 	if code != domain.OneShotExitCode.Success {
 		t.Fatalf("exit = %d, want 0 — an empty catalog is an answer, not an error", code)
 	}
-	if !strings.Contains(stdout, "no skills") {
+	if !strings.Contains(stdout, "no runbooks") {
 		t.Fatalf("an empty listing must say so plainly:\n%s", stdout)
 	}
 
@@ -123,17 +123,17 @@ func TestListSkillsEmptyCatalogSucceeds(t *testing.T) {
 	if code != domain.OneShotExitCode.Success {
 		t.Fatalf("json exit = %d, want 0", code)
 	}
-	var doc SkillCatalogJSON
+	var doc RunbookCatalogJSON
 	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
 		t.Fatalf("stdout is not JSON: %v", err)
 	}
-	if len(doc.Skills) != 0 {
-		t.Fatalf("skills = %+v, want empty", doc.Skills)
+	if len(doc.Runbooks) != 0 {
+		t.Fatalf("runbooks = %+v, want empty", doc.Runbooks)
 	}
 	// An EMPTY ARRAY, never null. len() accepts both, which is exactly how a nil slice
-	// sneaks back in — and `jq '.skills[]'` fails on null while it happily yields nothing
+	// sneaks back in — and `jq '.runbooks[]'` fails on null while it happily yields nothing
 	// on []. Assert the raw bytes.
-	if !strings.Contains(stdout, `"skills": []`) {
+	if !strings.Contains(stdout, `"runbooks": []`) {
 		t.Fatalf("an advertised empty catalog must serialize as [], not null:\n%s", stdout)
 	}
 }
@@ -141,13 +141,13 @@ func TestListSkillsEmptyCatalogSucceeds(t *testing.T) {
 // A backend that OMITS the catalog cannot answer the question, which is a different
 // thing from answering "none" — and needs a different next action (upgrade the backend,
 // not "there is nothing to pin").
-func TestListSkillsReportsAnUnadvertisedCatalog(t *testing.T) {
-	body := `{"skills":{"catalog_revision":"r","manual_resolve":true}}`
+func TestListRunbooksReportsAnUnadvertisedCatalog(t *testing.T) {
+	body := `{"runbooks":{"catalog_revision":"r","manual_resolve":true}}`
 	code, _, stderr := runList(t, listOpts(t, capabilitiesServer(t, body), false))
 	if code != domain.OneShotExitCode.Error {
 		t.Fatalf("exit = %d, want 1", code)
 	}
-	if !strings.Contains(stderr, "does not advertise a skill catalog") {
+	if !strings.Contains(stderr, "does not advertise a runbook catalog") {
 		t.Fatalf("stderr does not name the cause: %q", stderr)
 	}
 }
@@ -155,8 +155,8 @@ func TestListSkillsReportsAnUnadvertisedCatalog(t *testing.T) {
 // Even a failure answers in JSON when JSON was asked for — the same rule `doctor --json`
 // follows. A consumer parsing stdout must never receive prose on the one path it cannot
 // handle.
-func TestListSkillsFailsInJSONWhenJSONWasAsked(t *testing.T) {
-	body := `{"skills":{"catalog_revision":"r"}}`
+func TestListRunbooksFailsInJSONWhenJSONWasAsked(t *testing.T) {
+	body := `{"runbooks":{"catalog_revision":"r"}}`
 	code, stdout, _ := runList(t, listOpts(t, capabilitiesServer(t, body), true))
 	if code != domain.OneShotExitCode.Error {
 		t.Fatalf("exit = %d, want 1", code)
@@ -170,8 +170,8 @@ func TestListSkillsFailsInJSONWhenJSONWasAsked(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
 		t.Fatalf("a --json failure wrote prose to stdout (%v): %s", err, stdout)
 	}
-	if doc.Error.Code != "skill_catalog_not_advertised" {
-		t.Fatalf("error code = %q, want skill_catalog_not_advertised", doc.Error.Code)
+	if doc.Error.Code != "runbook_catalog_not_advertised" {
+		t.Fatalf("error code = %q, want runbook_catalog_not_advertised", doc.Error.Code)
 	}
 	if doc.Error.Message == "" {
 		t.Fatal("a machine-readable code still needs a human sentence beside it")
@@ -180,7 +180,7 @@ func TestListSkillsFailsInJSONWhenJSONWasAsked(t *testing.T) {
 
 // An unreachable endpoint is a different failure from an old one, and the message must
 // name the endpoint — otherwise the reader has no idea which backend was asked.
-func TestListSkillsReportsAnUnreachableBackend(t *testing.T) {
+func TestListRunbooksReportsAnUnreachableBackend(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -209,7 +209,7 @@ func TestListSkillsReportsAnUnreachableBackend(t *testing.T) {
 
 // A cancelled listing is a cancellation (exit 2), not a failure (exit 1) — the one-shot
 // exit contract every scripted caller already keys on.
-func TestListSkillsReportsCancellation(t *testing.T) {
+func TestListRunbooksReportsCancellation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -218,7 +218,7 @@ func TestListSkillsReportsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var out, errOut bytes.Buffer
-	if code := runListSkills(ctx, listOpts(t, srv.URL, false), &out, &errOut); code != domain.OneShotExitCode.Cancelled {
+	if code := runListRunbooks(ctx, listOpts(t, srv.URL, false), &out, &errOut); code != domain.OneShotExitCode.Cancelled {
 		t.Fatalf("exit = %d, want 2 (cancelled)", code)
 	}
 }
@@ -227,20 +227,20 @@ func TestListSkillsReportsCancellation(t *testing.T) {
 // side effect nobody requested, and it turns an unwritable --state-dir into a failure of
 // something that never wanted a state dir — which is the difference between a listing
 // that works everywhere and one that works only where a session could have run.
-func TestListSkillsTouchesNoState(t *testing.T) {
-	opts := listOpts(t, capabilitiesServer(t, twoSkillCatalog), false)
+func TestListRunbooksTouchesNoState(t *testing.T) {
+	opts := listOpts(t, capabilitiesServer(t, twoRunbookCatalog), false)
 	code, _, stderr := runList(t, opts)
 	if code != domain.OneShotExitCode.Success {
 		t.Fatalf("exit = %d, want 0 (stderr: %s)", code, stderr)
 	}
 	if _, err := os.Stat(opts.StateDir); !os.IsNotExist(err) {
-		t.Fatalf("--list-skills created %s (stat err = %v); it must touch no state", opts.StateDir, err)
+		t.Fatalf("--list-runbooks created %s (stat err = %v); it must touch no state", opts.StateDir, err)
 	}
 }
 
 // The one-document contract has to hold on EVERY path or a parser cannot rely on it, and
 // an interrupted run that wrote nothing is the case a parser handles worst.
-func TestListSkillsCancellationStillAnswersInJSON(t *testing.T) {
+func TestListRunbooksCancellationStillAnswersInJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -249,7 +249,7 @@ func TestListSkillsCancellationStillAnswersInJSON(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var out, errOut bytes.Buffer
-	code := runListSkills(ctx, listOpts(t, srv.URL, true), &out, &errOut)
+	code := runListRunbooks(ctx, listOpts(t, srv.URL, true), &out, &errOut)
 	if code != domain.OneShotExitCode.Cancelled {
 		t.Fatalf("exit = %d, want 2 (cancelled)", code)
 	}
@@ -269,7 +269,7 @@ func TestListSkillsCancellationStillAnswersInJSON(t *testing.T) {
 // A caller-owned deadline is a "you stopped us", exactly like a SIGINT — not a failure of
 // the listing. Reporting it as an error (1) would send a script hunting a backend problem
 // that never happened.
-func TestListSkillsParentDeadlineIsCancellation(t *testing.T) {
+func TestListRunbooksParentDeadlineIsCancellation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -279,7 +279,7 @@ func TestListSkillsParentDeadlineIsCancellation(t *testing.T) {
 	defer cancel()
 	<-ctx.Done()
 	var out, errOut bytes.Buffer
-	if code := runListSkills(ctx, listOpts(t, srv.URL, false), &out, &errOut); code != domain.OneShotExitCode.Cancelled {
+	if code := runListRunbooks(ctx, listOpts(t, srv.URL, false), &out, &errOut); code != domain.OneShotExitCode.Cancelled {
 		t.Fatalf("exit = %d, want 2 — a caller's expired deadline is a cancellation", code)
 	}
 	// SILENT in human mode. A red "✗ context canceled" tells someone who just pressed
@@ -297,7 +297,7 @@ func TestListSkillsParentDeadlineIsCancellation(t *testing.T) {
 // not touch the project's durable current-session pointer.
 //
 // Adoption is not undone by shutdown, so running it before the preflight let a mistyped
-// `--skill` — a launch that never ran a single turn — permanently displace the real
+// `--runbook` — a launch that never ran a single turn — permanently displace the real
 // conversation. The supervisor's detached wake turns resume whatever that pointer names,
 // so the user's actual session would simply stop being continued.
 //
@@ -308,7 +308,7 @@ func TestFailedPinPreflightDoesNotDisplaceTheCurrentSession(t *testing.T) {
 	project := t.TempDir()
 	t.Setenv("DAINTREE_ASSISTANT_STATE_DIR", stateDir)
 	t.Setenv(NoDaemonEnv, "1")
-	t.Setenv("DAINTREE_BACKEND_URL", capabilitiesServer(t, twoSkillCatalog))
+	t.Setenv("DAINTREE_BACKEND_URL", capabilitiesServer(t, twoRunbookCatalog))
 
 	// Both launches run the line REPL, so give each one a closed stdin: it reads EOF
 	// and returns immediately, which is enough to reach (or fail before) adoption.
@@ -332,10 +332,10 @@ func TestFailedPinPreflightDoesNotDisplaceTheCurrentSession(t *testing.T) {
 	bad := Options{
 		Offline:        boolPtr(true),
 		Project:        project,
-		PinnedSkillIDs: []string{"daintree.foundatoin"},
+		PinnedRunbookIDs: []string{"daintree.foundatoin"},
 	}
 	if code := runInteractive(context.Background(), bad, true); code != domain.OneShotExitCode.Error {
-		t.Fatalf("a mistyped --skill launch exit = %d, want 1", code)
+		t.Fatalf("a mistyped --runbook launch exit = %d, want 1", code)
 	}
 	if got := currentSessionPointer(t, stateDir); got != adopted {
 		t.Fatalf("a failed launch displaced the current session: %q, want %q — the supervisor "+

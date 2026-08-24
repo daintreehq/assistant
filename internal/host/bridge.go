@@ -205,17 +205,17 @@ func (b *Bridge) Interjection(text string) {
 	b.post(EvTurnInterjection{TurnID: turnID, Text: text})
 }
 
-// SkillLoaded stays unforwarded. It is a per-ATTEMPT cue that fires on a delta, so a
+// RunbookLoaded stays unforwarded. It is a per-ATTEMPT cue that fires on a delta, so a
 // retried round can report a load the committed round did not repeat — reconstructing
-// the active set from it is wrong by construction. SkillDecision is the authority.
-func (b *Bridge) SkillLoaded([]string) {}
+// the active set from it is wrong by construction. RunbookDecision is the authority.
+func (b *Bridge) RunbookLoaded([]string) {}
 
-// SkillDecision is diagnostic, not conversational: backend skill selection is prompt
+// RunbookDecision is diagnostic, not conversational: backend runbook selection is prompt
 // assembly the user neither approves nor steers, and the runtime contract is that no
 // sink folds it into the transcript. It reaches a human only through an explicit
 // `/explain <run>` replay, which reads the durable run log — so the bridge still
 // drops it rather than putting prompt-assembly machinery on the conversation wire.
-func (b *Bridge) SkillDecision(agent.SkillDecisionEvent) {}
+func (b *Bridge) RunbookDecision(agent.RunbookDecisionEvent) {}
 
 // ToolBatch announces the WHOLE batch as queued before dispatch begins. Without it a
 // host can only reveal calls one at a time as each starts, which reads as the
@@ -328,7 +328,7 @@ func (b *Bridge) Error(message string) {
 }
 
 // Warn forwards a non-fatal warning (a tool loop repeating the same failure, a
-// pinned skill the backend could not honour). v2 dropped these, which meant that once
+// pinned runbook the backend could not honour). v2 dropped these, which meant that once
 // the local renderer was gone they reached nobody at all.
 func (b *Bridge) Warn(message string) { b.postNotice("warning", message) }
 

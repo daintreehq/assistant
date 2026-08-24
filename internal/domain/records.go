@@ -303,23 +303,23 @@ type ContextCheckpointRecord struct {
 	CreatedAt       int64  `json:"createdAt"`
 }
 
-// SkillStepProgress is one step within a SkillRunStateRecord (1-based index).
-type SkillStepProgress struct {
+// RunbookStepProgress is one step within a RunbookRunStateRecord (1-based index).
+type RunbookStepProgress struct {
 	Index  int             `json:"index"`
-	Status SkillStepStatus `json:"status"`
+	Status RunbookStepStatus `json:"status"`
 	Notes  *string         `json:"notes,omitempty"`
 	Ts     int64           `json:"ts"`
 }
 
-// SkillRunStateRecord tracks a skill's stepwise progress. Natural key
-// (sessionId, skillId).
-type SkillRunStateRecord struct {
+// RunbookRunStateRecord tracks a runbook's stepwise progress. Natural key
+// (sessionId, runbookId).
+type RunbookRunStateRecord struct {
 	ID          string         `json:"id"` // rrs_<uuid8>
 	SessionID   string         `json:"sessionId"`
-	SkillID     string         `json:"skillId"`
+	RunbookID     string         `json:"runbookId"`
 	CurrentStep int            `json:"currentStep"` // 0 = not started
-	StepsJson   string         `json:"stepsJson"`   // JSON SkillStepProgress[]
-	Status      SkillRunStatus `json:"status"`
+	StepsJson   string         `json:"stepsJson"`   // JSON RunbookStepProgress[]
+	Status      RunbookRunStatus `json:"status"`
 	StartedAt   int64          `json:"startedAt"`
 	UpdatedAt   int64          `json:"updatedAt"`
 	CompletedAt *int64         `json:"completedAt,omitempty"`

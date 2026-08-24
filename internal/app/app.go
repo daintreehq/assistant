@@ -1,6 +1,6 @@
 // Package app is the single composition root. App.Create
 // builds every dependency once in a fixed order — config → store → mcp → queue →
-// backend → tools registry → skills → agent session → (lazy) scheduler — exposes a
+// backend → tools registry → runbooks → agent session → (lazy) scheduler — exposes a
 // ToolContext factory, the main AgentSession, and drives both the CLI and the
 // (future Bubble Tea) attached session. Shutdown tears the dependencies down in reverse.
 package app
@@ -93,16 +93,16 @@ type CreateOptions struct {
 	// wake turns continue the SAME conversation the last attached session ran. A missing
 	// pointer still mints fresh. Ignored when SessionID is set explicitly.
 	ResumeCurrentSession bool
-	// PinnedSkillIDs names backend runbooks every turn of this session must load
-	// (`--skill`, or `skills` on daintree.session.open). Deliberately NOT a config
+	// PinnedRunbookIDs names backend runbooks every turn of this session must load
+	// (`--runbook`, or `runbooks` on daintree.session.open). Deliberately NOT a config
 	// value: it has no environment source and is a per-session execution control like
 	// Timeout, so routing it through config.AppConfig would also leak it into the
 	// supervisor's wake turns, which nobody asked to pin.
 	//
 	// Normalized on the way in. Naming pins here does NOT negotiate them — the caller
-	// must run App.PreparePinnedSkills before the first turn, which is where an
+	// must run App.PreparePinnedRunbooks before the first turn, which is where an
 	// unsupported backend or a mistyped id becomes a loud failure.
-	PinnedSkillIDs []string
+	PinnedRunbookIDs []string
 }
 
 // ToolBuilder returns the tools to register on the App's registry. It is a SEAM:
@@ -261,12 +261,12 @@ type App struct {
 	// endpoint, so a mismatched answer is simply not believed.
 	backendCaps atomic.Pointer[backendCapsSnapshot]
 
-	// pinnedSkillIDs are the runbooks the LAUNCH named (`--skill`, or `skills` on
+	// pinnedRunbookIDs are the runbooks the LAUNCH named (`--runbook`, or `runbooks` on
 	// daintree.session.open) and every turn of this session must load. Immutable after
 	// Create: argv and the session-open arguments are both session-constant, so there
-	// is no writer and callers get copies (see PinnedSkillIDs). Nil on every ordinary
+	// is no writer and callers get copies (see PinnedRunbookIDs). Nil on every ordinary
 	// launch, which is what keeps the capability preflight off the normal boot path.
-	pinnedSkillIDs []string
+	pinnedRunbookIDs []string
 
 	// reconcileLedgerMu/done guard the boot ledger reconcile. `done` is committed only
 	// after terminal.list returned a parseable inventory; launch cancellation or a transient
@@ -391,7 +391,7 @@ func (a *App) backendAcceptsDisplayContext() bool {
 // behaviour: full history, every round.
 //
 // KNOWN LIMIT, and deliberate. It reads only what an EXPLICIT handshake left behind —
-// the attached session's boot fetch, /doctor, /routing, or a pinned-skill negotiation. A classic
+// the attached session's boot fetch, /doctor, /routing, or a pinned-runbook negotiation. A classic
 // REPL, a one-shot, the embedded host, the MCP server and the supervisor daemon perform
 // none of those, so compaction stays off there, and it stays off after a /backend switch
 // until something negotiates with the new endpoint. That is invisible and costs only
@@ -400,7 +400,7 @@ func (a *App) backendAcceptsDisplayContext() bool {
 // long-running surfaces it was built for.
 //
 // Fixing it means an explicit negotiation step per surface, NOT a boot-time fetch here:
-// TestPreparePinnedSkillsMakesNoCallWithoutPins pins the cost contract that an ordinary
+// TestPreparePinnedRunbooksMakesNoCallWithoutPins pins the cost contract that an ordinary
 // launch adds no round trip, and a detached warm-up also races the first turn and any
 // concurrent switch. That is its own change, with its own decisions to make.
 func (a *App) backendContextCompaction() (backend.ContextCompactionCaps, bool) {
@@ -554,19 +554,19 @@ func Create(opts CreateOptions) (*App, error) {
 		dispatchActorID: dispatchActorID,
 		// Normalized once, here, so every consumer (the preflight, the Session, the
 		// MCP facts) sees the same trimmed, deduplicated, order-preserving list.
-		pinnedSkillIDs: NormalizePinnedSkillIDs(opts.PinnedSkillIDs),
+		pinnedRunbookIDs: NormalizePinnedRunbookIDs(opts.PinnedRunbookIDs),
 		// A fresh, empty scratch workspace for this session. Built before the tool
 		// registry so the scratch.* family can capture the concrete store directly.
 		scratchStore: scratchx.NewStore(),
 		terminalObs:  terminalobs.NewMemory(),
 	}
 
-	// mcp → queue → router → registry → skills.
+	// mcp → queue → router → registry → runbooks.
 	a.MCP = mcp.New(cfg, mcp.Options{ClientOverride: opts.MCPClientOverride})
 	a.Queue = queue.New(queueEventStore{s: store}, domain.NowMS)
 	// The native Daintree backend: the assistant turn engine + server-owned utility
 	// tasks. The CLI no longer talks to DeepSeek directly — the backend owns the model
-	// credentials, prompt assembly, and skill selection.
+	// credentials, prompt assembly, and runbook selection.
 	//
 	// The endpoint comes from the resolved config (internal/config) — app.Create never
 	// reads the environment itself, so every entry point (attached session, one-shot, host,
@@ -672,8 +672,8 @@ func Create(opts CreateOptions) (*App, error) {
 		a.Registry.SetDispatchObserver(workflowObserverAdapter{svc: a.workflowService})
 	}
 
-	// Skills are SERVER-OWNED: the backend's selector picks and injects runbooks. The
-	// CLI no longer loads a local skill catalog (no embedded skill files, no
+	// Runbooks are SERVER-OWNED: the backend's selector picks and injects runbooks. The
+	// CLI no longer loads a local runbook catalog (no embedded runbook files, no
 	// requiredTools validation) — see docs/BACKEND.md.
 
 	// Resume prior conversation if this session id has history.
@@ -756,7 +756,7 @@ func Create(opts CreateOptions) (*App, error) {
 		WorkflowRunLister: store,
 		// Durable mirror + seed for the opaque backend state token, so a session
 		// handed over between processes (attached session ↔ supervisor daemon) keeps the
-		// backend's skill-selection cadence. Seeded only on a genuine resume: a
+		// backend's runbook-selection cadence. Seeded only on a genuine resume: a
 		// fresh session id has no persisted token.
 		BackendStateStore:   store,
 		InitialBackendState: loadPersistedBackendState(store, sessionID, resumedSession),
@@ -765,8 +765,8 @@ func Create(opts CreateOptions) (*App, error) {
 		// endpoint that gave it and the delegate behind Backend can be replaced: reading
 		// it per round is what keeps a swapped endpoint from being sent a field it
 		// forbids. Nil pins make both inert.
-		PinnedSkillIDs:               a.PinnedSkillIDs(),
-		BackendAcceptsPinnedSkillIDs: a.backendAcceptsPinnedSkillIDs,
+		PinnedRunbookIDs:               a.PinnedRunbookIDs(),
+		BackendAcceptsPinnedRunbookIDs: a.backendAcceptsPinnedRunbookIDs,
 		BackendContextCompaction:     a.backendContextCompaction,
 		// Live async futures for the turn context's async-operations block, re-read
 		// every round so the model sees (and never re-issues) its in-flight work.
@@ -810,7 +810,7 @@ func Create(opts CreateOptions) (*App, error) {
 // to continue an existing transcript). A fresh session id never has a token, so
 // the read is skipped — and a stale token from an unrelated prior session can
 // never leak into a new conversation. Best-effort: any read failure just means
-// the backend re-runs skill selection.
+// the backend re-runs runbook selection.
 func loadPersistedBackendState(store *storage.Store, sessionID string, resumed bool) string {
 	if !resumed {
 		return ""

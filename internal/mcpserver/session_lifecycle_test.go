@@ -51,7 +51,7 @@ func TestARunWithNoTerminalEventFailsClosed(t *testing.T) {
 
 // The recorder's buffer promised that a round interrupted before assistant:end "still
 // reports what it had said". That was true only for the paths that happened to call
-// flush() — a new round, an interjection, a skill load. A turn cancelled mid-sentence hit
+// flush() — a new round, an interjection, a runbook load. A turn cancelled mid-sentence hit
 // none of them, so the one case the buffer exists for was the one it did not cover.
 func TestPartialProseSurvivesCancellation(t *testing.T) {
 	fake := newFakeRuntime("ses_partial")

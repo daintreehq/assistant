@@ -217,7 +217,7 @@ func ProjectIDToDir(rawID string) string {
 // env is the resolution context. All THREE sources are read into MAPS (godotenv.Read,
 // never godotenv.Load) so loading a project .env can NEVER mutate the real process env —
 // which would otherwise (a) pollute a later trusted snapshot and (b) let any os.Getenv
-// caller (e.g. the skills-dir override) silently read a project-controlled value.
+// caller (e.g. the runbooks-dir override) silently read a project-controlled value.
 type env struct {
 	trusted    map[string]string // os.Environ() snapshot — real, injected-by-Daintree env
 	projectEnv map[string]string // <projectPath>/.env (UNTRUSTED — arbitrary bound repo)
@@ -263,7 +263,7 @@ func LoadConfig(overrides ConfigOverrides) (AppConfig, error) {
 // the state directory.
 //
 // It exists for the read-only probes that need only the endpoint, the optional bearer
-// and the routing posture — `--list-skills` today. Those answer a question about the
+// and the routing posture — `--list-runbooks` today. Those answer a question about the
 // BACKEND, and creating a directory on the user's disk to ask it is both a side effect
 // nobody requested and a way to fail for a reason that has nothing to do with the
 // question: `--state-dir` pointing somewhere unwritable would abort a listing that never

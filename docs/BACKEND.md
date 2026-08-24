@@ -2,7 +2,7 @@
 
 The CLI is a **thin local runtime**. It no longer acts as a model client; instead it
 talks to the **Daintree Assistant backend** (a Daintree-native HTTP API — *not*
-OpenAI-compatible). The backend owns the system prompt, developer instructions, skill /
+OpenAI-compatible). The backend owns the system prompt, developer instructions, runbook /
 runbook selection, model choice, prompt assembly, the utility-model prompts, and prompt
 caching. The CLI owns the visible conversation, the local tool registry + execution,
 permissions, runtime / project context collection, memory + scheduler state, and the
@@ -13,7 +13,7 @@ rendering" were this document's description of a cockpit that no longer exists.
 
 ```
 User → Daintree CLI ──(structured startup + visible conversation + runtime/turn + tools)──► Daintree backend
-        │  stores conversation, exposes & runs local tools,                            owns prompts, skills,
+        │  stores conversation, exposes & runs local tools,                            owns prompts, runbooks,
         │  streams assistant text, persists backend state                              model routing
         ◄──(named-event SSE: meta / delta / done / error)────────────────────────────┘
                                                                                              │
@@ -32,7 +32,7 @@ checkpoint / workflow tasks — with a key the SERVER holds, and Daintree pays. 
 integrations, and where a comment names model-specific protocol behaviour it means "that
 model's behaviour when reached through the backend's upstream." The CLI carries no
 provider key, no provider client, and no pricing table; reintroducing one would let a
-handler bypass the backend that owns prompts, skills, and credentials.
+handler bypass the backend that owns prompts, runbooks, and credentials.
 
 ## Endpoint and credentials
 
@@ -202,9 +202,9 @@ The Go client mirrors it in `internal/backend`:
   `runtime`, `turn`, `selection`, `generation`, `client`), the response / stream payloads,
   the tasks envelope, and capabilities.
 - `sse.go` — the **named-event** SSE parser (`meta` → `delta` → `done` / `error`). `meta`
-  is always first (carries the refreshed `state` token + the first-class `skills` block)
+  is always first (carries the refreshed `state` token + the first-class `runbooks` block)
   and is flushed as soon as selection finishes, before the upstream model connects. The
-  client immediately emits de-duplicated `newly_loaded` refs through `OnSkillLoaded`, while
+  client immediately emits de-duplicated `newly_loaded` refs through `OnRunbookLoaded`, while
   deferring stateful `OnMeta` until an attempt commits. A retry after meta adopts its signed
   `state` in the next POST so the backend reuses the same selection. If a terminal retry
   then dies before its own meta, the last received/adopted meta is forwarded once so that
@@ -330,7 +330,7 @@ naming why. The ledger is deliberately unpersisted and counts from process launc
 last `/clear`; it deliberately outlives the client it measures, so anything that rebuilds
 that client mid-session cannot silently zero the bill.
 
-Not counted anywhere: **skill learning**, which runs fire-and-forget on a stronger model
+Not counted anywhere: **runbook learning**, which runs fire-and-forget on a stronger model
 after the response and can cost more than the turn that triggered it. It is off by
 default and forbidden in production, so no beta tester is exposed — but a local developer
 who enables it will see dashboard spend that no field here accounts for.
@@ -479,14 +479,14 @@ with something unparseable (usually a provider or compatibility problem).
 - **Worktree read state is explicit.** An omitted `runtime.worktree` means the live read was
   unavailable, `{current:null}` means Daintree definitively reports no current worktree,
   and a current object carries id/path/branch/issue/PR/status/last-commit fields.
-- **Skills are server-owned.** No `skill.find` / `skill.load` (reserved + rejected). The
-  backend's selector picks and injects runbooks and returns a `skills` block. The CLI
-  folds NONE of it into the conversation, and there is no `/skills` command. Backend skill
+- **Runbooks are server-owned.** No `runbook.find` / `runbook.load` (reserved + rejected). The
+  backend's selector picks and injects runbooks and returns a `runbooks` block. The CLI
+  folds NONE of it into the conversation, and there is no `/runbooks` command. Backend runbook
   selection is prompt-assembly machinery the user neither approves nor steers, so
   `newly_loaded` feeds the debug trace, the durable run log and the `--json` stream — and
   surfaces to a human only in an explicit `/explain <run>` replay. The CLI keeps only the
   local run-tracking tools
-  `skill.run.get` / `skill.step.advance` (the backend prompt drives them).
+  `runbook.run.get` / `runbook.step.advance` (the backend prompt drives them).
 - **Opaque state token.** `meta.state` is stored verbatim and replayed on the next request;
   the CLI never inspects, signs, or mutates it. A missing token is valid for a new session.
 - **One `turn_id` per user request** across the whole tool-call loop; `round` increments
@@ -494,7 +494,7 @@ with something unparseable (usually a provider or compatibility problem).
 - **Utility work is server-owned tasks** (`/v1/daintree/tasks`): `checkpoint`,
   `memory_distill`, `watcher_classify`, `terminal_judge`, `terminal_summarize`,
   `terminal_extract_text`, `terminal_extract_json`, `extraction_verdict`,
-  `skill_step_consistency`, plus the flag-gated `workflow_plan`,
+  `runbook_step_consistency`, plus the flag-gated `workflow_plan`,
   `workflow_reconcile`, `workflow_resume_digest`. The CLI sends task *data* only —
   never prompts.
 

@@ -101,7 +101,7 @@ func TestPlanToolShapesResult(t *testing.T) {
 	svc := &fakeGraphService{graph: testGraph()}
 	set := graphToolset(t, svc)
 	res := set["workflow.plan"].Handle(context.Background(),
-		json.RawMessage(`{"goal": "fix tests", "activeSkillIds": ["s1"]}`), &tools.ToolContext{})
+		json.RawMessage(`{"goal": "fix tests", "activeRunbookIds": ["s1"]}`), &tools.ToolContext{})
 	if !res.Ok {
 		t.Fatalf("plan should succeed, got %+v", res.Error)
 	}
@@ -109,7 +109,7 @@ func TestPlanToolShapesResult(t *testing.T) {
 	if out["workflowId"] != "wfg_11223344" {
 		t.Fatalf("result must carry the workflowId, got %v", out)
 	}
-	if svc.lastPlan.Source != workflowgraph.SourceUser || len(svc.lastPlan.ActiveSkillIDs) != 1 {
+	if svc.lastPlan.Source != workflowgraph.SourceUser || len(svc.lastPlan.ActiveRunbookIDs) != 1 {
 		t.Fatalf("plan request mis-mapped: %+v", svc.lastPlan)
 	}
 	// Missing goal is INVALID_ARGS via the strict decoder.

@@ -24,7 +24,7 @@
 
 The trace is the **ground truth** for how the model and tools actually behaved. The
 recurring dev loop here is: a real session misbehaves → you grep its log → you find
-where the model misjudged or misused a tool → you fix the *system* (prompt/skill in
+where the model misjudged or misused a tool → you fix the *system* (prompt/runbook in
 `../assistant-backend`, or a local tool shape) so it can't recur.
 
 The backend migration moved the model call behind `Backend.RespondStream`, which left
@@ -82,13 +82,13 @@ first-token timing + aggregate stats.
 |---|---|---|
 | `backend.respond.request` | before each round's stream | `round` `instructionRevision` `statePresent`/`stateBytes`; `startup` = `{sha, projectPresent, rosterPresent, instructionBytes, agent counts/completeness}` (never instruction contents); `input` = visible-history `{messageCount, messageRoles, messagesSha, toolCount, toolNames, toolsetSha, toolChoice, lastMessage}`; `runtime` (tier/MCP/typed worktree/open terminals/`display` = the `{columns, contentWidth}` the reply was shaped for, absent when unmeasured or withheld); `turn` (goal preview + memory/workflow counts) |
 | `backend.respond.raw_meta` | each HTTP attempt's SSE meta arrives | `backendRequestId` `model` `newlyLoadedCount`; transport observation only, so a retried logical round can contain more than one |
-| `backend.respond.skill_cue` | eager skill-loaded event reaches the sinks | `skills`; absent when the round loads no new skill, and de-duplicated across retries. Nothing renders this live (no card, no `/skills`) — its value is the TIMESTAMP, which separates selection latency from generation latency |
-| `backend.respond.meta` | retry-safe meta commits | `backendRequestId` `model` `promptVersion` `catalogRevision` `stateSha` `warnings`; `skills` = `{active, newlyLoaded, selector{ran,degraded,taskType,confidence,reason}}`; normally fires with first content or successful tool-only completion |
+| `backend.respond.runbook_cue` | eager runbook-loaded event reaches the sinks | `runbooks`; absent when the round loads no new runbook, and de-duplicated across retries. Nothing renders this live (no card, no `/runbooks`) — its value is the TIMESTAMP, which separates selection latency from generation latency |
+| `backend.respond.meta` | retry-safe meta commits | `backendRequestId` `model` `promptVersion` `catalogRevision` `stateSha` `warnings`; `runbooks` = `{active, newlyLoaded, selector{ran,degraded,taskType,confidence,reason}}`; normally fires with first content or successful tool-only completion |
 | `backend.respond.done` | round completed | `durationMs` `firstTokenMs` `retries` `contentChars` `contentPreview` `finishReason` `toolCallCount` `toolCalls[]` (id + name + args preview/hash) `usage` `cost` `reasoningPresent`; the backend's own phase breakdown as `server*Ms` and our transport marks as `client*Ms` (see below) |
 | `backend.respond.error` | non-cancel respond failure | `durationMs` `retries` `error`; whichever `client*Ms` transport marks the dead attempt got as far as taking (all absent ⇒ nothing reached the wire) |
 
 `request` = what the backend was **shown**; `meta` = what it **decided** (incl. which
-skill it loaded — the surface that says "fix the selector, not the tool"); `done` = what
+runbook it loaded — the surface that says "fix the selector, not the tool"); `done` = what
 it **produced**.
 
 `done`'s `cost` block (`{total, main, selector, complete}`, in USD, on whichever upstream
@@ -110,7 +110,7 @@ column.
 
 | key | meaning |
 |---|---|
-| `serverSelectionMs` | the skill-selector call, incl. a parse-repair round trip |
+| `serverSelectionMs` | the runbook-selector call, incl. a parse-repair round trip |
 | `serverDocsMs` | the documentation lookup, when the selector asked for one |
 | `serverPreparationMs` | request in → upstream request built (selection, docs, state, assembly) |
 | `serverUpstreamOpenMs` | request in → the model's first event. Mostly prefill |
@@ -219,18 +219,18 @@ model writing, moved only by output length or a model change).
 (`op` `attempt` `maxAttempts` `delayMs` `error` — fires per transient-failure replay on
 **any** backend call; `op` is `respond` or the JSON method+path, so a stalled turn and a
 stalled utility task are distinguishable),
-`watcher.*` / `spawn.*`, `skill.step.*`, `reconcile.*`, `session.checkpoint.resumed`.
+`watcher.*` / `spawn.*`, `runbook.step.*`, `reconcile.*`, `session.checkpoint.resumed`.
 
 ## Suggested analyzer workflow
 
 1. Scan `turn.end` for `status=failed|cancelled` (or a slow `durationMs`).
 2. `grep <runId>` to pull that turn's whole timeline.
-3. Read its `backend.respond.request`/`raw_meta`/`skill_cue`/`meta`/`done` per round: was the model shown the
-   right context? did it load the right skill? what did it choose?
+3. Read its `backend.respond.request`/`raw_meta`/`runbook_cue`/`meta`/`done` per round: was the model shown the
+   right context? did it load the right runbook? what did it choose?
 4. Inspect failed `tool.call` / `tool.args.invalid` / `tool.repeat.*` for that turn.
 5. Follow a failing `tool.call` down to its `mcp.call` to see whether the fault was the
    tool, the args, or the MCP layer (throttle/transport).
 6. Decide the fix surface: bad args + ambiguous schema → local tool desc/schema or a
-   backend skill; correct args + tool error → local tool impl or MCP; wrong/no skill →
+   backend runbook; correct args + tool error → local tool impl or MCP; wrong/no runbook →
    backend selector; missing context → CLI startup/runtime/turn assembly; backend 4xx →
    CLI/backend contract.

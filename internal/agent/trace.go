@@ -13,7 +13,7 @@ import (
 // log blind exactly where it used to be richest: there is no more
 // model.request/model.response, so a log reader could not see what the backend was
 // shown or what it chose. These helpers restore that — turn.start/turn.end bracket a
-// turn, and backend.respond.{request,raw_meta,skill_cue,meta,done,error} narrate each
+// turn, and backend.respond.{request,raw_meta,runbook_cue,meta,done,error} narrate each
 // round — while keeping payloads BOUNDED (previews + hashes, never the full prompt
 // every round, the O(turns²) trap). All debuglog usage in the agent package is
 // concentrated here; the rest of the turn loop only calls these s.traceXxx methods.
@@ -245,30 +245,30 @@ func (s *Session) traceBackendRawMeta(runID, turnID string, round int, m backend
 			"round":            round,
 			"backendRequestId": m.RequestID,
 			"model":            m.Model,
-			"newlyLoadedCount": len(m.Skills.NewlyLoaded),
+			"newlyLoadedCount": len(m.Runbooks.NewlyLoaded),
 		}
 	})
 }
 
-// traceBackendSkillCue records when the eager, de-duplicated skill-loaded event has
+// traceBackendRunbookCue records when the eager, de-duplicated runbook-loaded event has
 // actually been handed to the output sinks (none of which renders it live — see
-// EventSink.SkillLoaded). Timestamping it here is what lets a log separate SELECTION
-// latency from generation latency. Only exists for rounds with a newly-loaded skill.
-func (s *Session) traceBackendSkillCue(runID, turnID string, round int, refs []backend.SkillRef) {
-	s.safeTrace("backend.respond.skill_cue", func() map[string]any {
+// EventSink.RunbookLoaded). Timestamping it here is what lets a log separate SELECTION
+// latency from generation latency. Only exists for rounds with a newly-loaded runbook.
+func (s *Session) traceBackendRunbookCue(runID, turnID string, round int, refs []backend.RunbookRef) {
+	s.safeTrace("backend.respond.runbook_cue", func() map[string]any {
 		return map[string]any{
 			"runId":  runID,
 			"turnId": turnID,
 			"round":  round,
-			"skills": skillRefLabels(refs),
+			"runbooks": runbookRefLabels(refs),
 		}
 	})
 }
 
 // traceBackendMeta records the committed backend report: request id, chosen model,
-// prompt/catalog version markers, warnings, and the skill-selection outcome (active
+// prompt/catalog version markers, warnings, and the runbook-selection outcome (active
 // vs newly-loaded runbooks + the selector verdict). This is the surface that says
-// where a fix belongs — wrong/no skill loaded points at the backend selector, not a
+// where a fix belongs — wrong/no runbook loaded points at the backend selector, not a
 // local tool. Its timestamp is commit time, not raw SSE arrival time.
 func (s *Session) traceBackendMeta(runID, turnID string, round int, m backend.StreamMeta) {
 	s.safeTrace("backend.respond.meta", func() map[string]any {
@@ -285,7 +285,7 @@ func (s *Session) traceBackendMeta(runID, turnID string, round int, m backend.St
 		if len(m.Warnings) > 0 {
 			fields["warnings"] = m.Warnings
 		}
-		sel := m.Skills.Selector
+		sel := m.Runbooks.Selector
 		selector := map[string]any{"ran": sel.Ran, "degraded": sel.Degraded}
 		if sel.TaskType != "" {
 			selector["taskType"] = sel.TaskType
@@ -296,9 +296,9 @@ func (s *Session) traceBackendMeta(runID, turnID string, round int, m backend.St
 		if sel.Reason != "" {
 			selector["reason"] = sel.Reason
 		}
-		fields["skills"] = map[string]any{
-			"active":      skillRefLabels(m.Skills.Active),
-			"newlyLoaded": skillRefLabels(m.Skills.NewlyLoaded),
+		fields["runbooks"] = map[string]any{
+			"active":      runbookRefLabels(m.Runbooks.Active),
+			"newlyLoaded": runbookRefLabels(m.Runbooks.NewlyLoaded),
 			"selector":    selector,
 		}
 		return fields
@@ -551,9 +551,9 @@ func errCodeOf(res domain.ToolResult) string {
 	return ""
 }
 
-// skillRefLabels renders skill refs to compact "title" (or id fallback) labels for
+// runbookRefLabels renders runbook refs to compact "title" (or id fallback) labels for
 // the meta event — never the full runbook body (server-owned, never in the trace).
-func skillRefLabels(refs []backend.SkillRef) []string {
+func runbookRefLabels(refs []backend.RunbookRef) []string {
 	if len(refs) == 0 {
 		return nil
 	}
@@ -576,7 +576,7 @@ func skillRefLabels(refs []backend.SkillRef) []string {
 // which gate refused it.
 //
 // This is the ONLY place a compaction surfaces. There is no card, no cue, and
-// no /compaction command, for the same reason backend skill loads are invisible: it is
+// no /compaction command, for the same reason backend runbook loads are invisible: it is
 // prompt assembly, not a step the operator takes, and a per-turn notice about a
 // server-side optimisation would be noise on every turn once the feature is switched
 // on. When it goes wrong, the reason belongs where archaeology already looks — beside

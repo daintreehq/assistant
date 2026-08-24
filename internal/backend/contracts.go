@@ -4,7 +4,7 @@
 //
 // The CLI is a thin local runtime: it stores the visible conversation, exposes and
 // executes local function tools, and ships structured startup/runtime/turn context.
-// The backend owns the system prompt, developer instructions, skill/runbook
+// The backend owns the system prompt, developer instructions, runbook
 // selection, model choice, prompt assembly, and the utility-model prompts — and it
 // reaches every model THROUGH OPENROUTER, using the caller's own key on a per-request
 // basis. Model names that appear in this repo are OpenRouter route ids, never direct
@@ -25,7 +25,15 @@ import (
 // ProtocolVersion is the Daintree wire protocol the CLI speaks. The backend
 // advertises a supported range via /version and /v1/daintree/capabilities; a
 // mismatch yields HTTP 426.
-const ProtocolVersion = 2
+//
+// 3 is the runbook protocol, and it is a HARD break from 2 rather than an
+// addition: the response block, the selection field, the routes and the warning
+// codes all say "runbook" where 2 said "skill", and nothing answers to the old
+// spelling. The backend pins PROTOCOL_MIN to 3 for exactly that reason — a
+// protocol-2 client is refused at the door instead of being served a body it
+// would parse into an empty runbooks block and silently render as "no runbooks
+// loaded". Both halves move together; there is no version in between.
+const ProtocolVersion = 3
 
 // DefaultBaseURL is the deployed backend, and the endpoint a fresh install uses.
 //
@@ -77,11 +85,11 @@ func AllowsUnverifiedSignIn(baseURL string) bool {
 // and means ProfileAssistant — the CLI omits the field on every ordinary turn so an
 // orchestrator request is byte-identical to one sent before this field existed.
 const (
-	// ProfileAssistant is the orchestrator persona: the full base prompt, skill
+	// ProfileAssistant is the orchestrator persona: the full base prompt, runbook
 	// selection, and the whole runtime/turn context surface.
 	ProfileAssistant = "assistant"
 	// ProfileSubagent is the read-only worker persona: a short standalone prompt, NO
-	// skill selection, and only the startup block for context. See internal/subagent.
+	// runbook selection, and only the startup block for context. See internal/subagent.
 	ProfileSubagent = "subagent"
 )
 
@@ -98,7 +106,7 @@ type RespondRequest struct {
 	// "assistant" default) for the orchestrator the human talks to, ProfileSubagent
 	// for a bounded read-only worker running in its own isolated conversation
 	// (internal/subagent). The backend swaps the whole system prompt on it and skips
-	// skill selection entirely for a sub-agent, so it is NOT a hint — it selects
+	// runbook selection entirely for a sub-agent, so it is NOT a hint — it selects
 	// which of two different assembly paths runs. omitempty is load-bearing: every
 	// ordinary turn must stay byte-identical on the wire, or the prompt cache the
 	// stable prefix exists to protect splits in two.
@@ -159,7 +167,7 @@ type AgentSnapshot struct {
 	ToolbarVisible *bool  `json:"toolbar_visible,omitempty"`
 }
 
-// RespondSession identifies the conversation and turn so the backend's skill
+// RespondSession identifies the conversation and turn so the backend's runbook
 // state and selector cadence have a stable key. All four fields are accepted;
 // instruction_revision/round default to 0 and are omitted when zero.
 type RespondSession struct {
@@ -194,13 +202,13 @@ type Generation struct {
 	Stream         bool     `json:"stream"`
 }
 
-// Selection controls the backend's skill-selection cadence. policy
+// Selection controls the backend's runbook-selection cadence. policy
 // "new_instruction" (the default) re-runs selection on a new turn / interjection /
 // missing-state; "always" forces it every round.
 type Selection struct {
 	Policy string `json:"policy,omitempty"` // "new_instruction" | "always"
 	Force  bool   `json:"force,omitempty"`
-	// PinnedSkillIDs names runbooks the CALLER requires this turn, whatever the
+	// PinnedRunbookIDs names runbooks the CALLER requires this turn, whatever the
 	// backend's classifier picks. `Force` only means "re-run the selector this
 	// round", so before this field there was no way to say "load THIS one" — which
 	// is what makes a runbook under development testable: a failure is then the
@@ -209,14 +217,14 @@ type Selection struct {
 	// omitempty is LOAD-BEARING, not tidiness. Selection is validated with
 	// extra="forbid", so sending the key to a deployment that predates it 422s the
 	// whole turn before the model opens. Nothing may populate this without first
-	// seeing Capabilities.Skills.PinnedSkillIDs from the endpoint about to be
-	// called (App.backendAcceptsPinnedSkillIDs).
+	// seeing Capabilities.Runbooks.PinnedRunbookIDs from the endpoint about to be
+	// called (App.backendAcceptsPinnedRunbookIDs).
 	//
 	// Ids that are unknown, or not executable under this request's profile, are
 	// DROPPED and reported in the meta event's Warnings — never a 422, because
 	// whether a pin fits depends on the live catalog and the configured cap, which
 	// a request-shape validator cannot see.
-	PinnedSkillIDs []string `json:"pinned_skill_ids,omitempty"`
+	PinnedRunbookIDs []string `json:"pinned_runbook_ids,omitempty"`
 }
 
 // ClientInfo identifies the CLI build for the backend's telemetry.
@@ -551,7 +559,7 @@ type FunctionCall struct {
 
 // Tool is a function tool definition offered to the backend. The backend bounds
 // the total tool bytes, schema depth, and property count, and rejects reserved
-// names (skill__find/skill__load/daintree_internal__*).
+// names (runbook__find/runbook__load/daintree_internal__*).
 type Tool struct {
 	Type     string      `json:"type"` // "function"
 	Function FunctionDef `json:"function"`
@@ -565,7 +573,7 @@ type FunctionDef struct {
 }
 
 // --------------------------------------------------------------------------
-// Response: non-streaming body + the first-class skills block
+// Response: non-streaming body + the first-class runbooks block
 // --------------------------------------------------------------------------
 
 // RespondResponse is the non-streaming response body. (The CLI streams in normal
@@ -582,7 +590,7 @@ type RespondResponse struct {
 	// Timings is where the request's wall clock went, by phase. Absent ⇒ the backend
 	// does not report timings. See TurnTimings.
 	Timings         *TurnTimings `json:"timings"`
-	Skills          SkillsBlock  `json:"skills"`
+	Runbooks          RunbooksBlock  `json:"runbooks"`
 	State           string       `json:"state"`
 	CatalogRevision string       `json:"catalog_revision"`
 	PromptVersion   string       `json:"prompt_version"`
@@ -619,7 +627,7 @@ type Usage struct {
 }
 
 // TurnCost is what a whole /respond request charged the caller, in USD, across every
-// upstream call it made: the skill selector, its repair pass, a losing speculative
+// upstream call it made: the runbook selector, its repair pass, a losing speculative
 // generation, the main completion, and a re-rolled round the user never saw.
 //
 // Two rules a client must IMPLEMENT rather than infer, and both exist to stop a session
@@ -672,7 +680,7 @@ func (c *TurnCost) IsComplete() bool {
 // can cover the same wall clock. Read each as "how long did this part take", never as
 // a partition — and never render them as a stacked bar.
 type TurnTimings struct {
-	// SelectionMs is the skill-selector call, including a parse-repair round trip when
+	// SelectionMs is the runbook-selector call, including a parse-repair round trip when
 	// one ran. Absent on a tool-continuation round, where selection is skipped by
 	// design — so its absence across a turn's later rounds is the healthy shape.
 	SelectionMs *int `json:"selection_ms"`
@@ -784,14 +792,14 @@ func parseMillis(raw json.RawMessage) (int, bool) {
 // --------------------------------------------------------------------------
 
 // StreamMeta is the FIRST streamed event — always before any token. It carries
-// the refreshed opaque state token (resend on the next request), the skills
+// the refreshed opaque state token (resend on the next request), the runbooks
 // outcome (active set + newly-loaded titles the client surfaces), and version
 // markers.
 type StreamMeta struct {
 	ProtocolVersion int         `json:"protocol_version"`
 	RequestID       string      `json:"request_id"`
 	Model           string      `json:"model"`
-	Skills          SkillsBlock `json:"skills"`
+	Runbooks          RunbooksBlock `json:"runbooks"`
 	State           string      `json:"state"`
 	CatalogRevision string      `json:"catalog_revision"`
 	PromptVersion   string      `json:"prompt_version"`
@@ -972,41 +980,41 @@ func (c *ContextCompactionCaps) ReplayCompatible() bool {
 }
 
 // --------------------------------------------------------------------------
-// First-class skills block
+// First-class runbooks block
 // --------------------------------------------------------------------------
 
-// SkillsBlock is the dynamic-skill outcome for a turn. NONE of it is folded into the
-// conversation: NewlyLoaded rides the eager OnSkillLoaded callback to the diagnostic sinks
+// RunbooksBlock is the dynamic-runbook outcome for a turn. NONE of it is folded into the
+// conversation: NewlyLoaded rides the eager OnRunbookLoaded callback to the diagnostic sinks
 // (run log, --json, debug trace), while Active + NewlyLoaded + Selector ride the COMMITTED
-// OnMeta callback to the same sinks as one per-round skill:decision event — the
+// OnMeta callback to the same sinks as one per-round runbook:decision event — the
 // authoritative record of what the backend actually selected, and the only one that can
 // report the active set on a round that loaded nothing or a selector that failed open.
 // Prelude alone is decoded but unused. The backend no longer
-// injects anything into the upstream transcript — a newly-active skill reaches
-// the model as its body in a "# Loaded skills" system message (plain context),
+// injects anything into the upstream transcript — a newly-active runbook reaches
+// the model as its body in a "# Loaded runbooks" system message (plain context),
 // so Prelude is now vestigial metadata the client neither replays nor renders.
-type SkillsBlock struct {
-	Active      []SkillRef   `json:"active"`
-	NewlyLoaded []SkillRef   `json:"newly_loaded"`
+type RunbooksBlock struct {
+	Active      []RunbookRef   `json:"active"`
+	NewlyLoaded []RunbookRef   `json:"newly_loaded"`
 	Prelude     Prelude      `json:"prelude"`
 	Selector    SelectorMeta `json:"selector"`
 }
 
-// SkillRef identifies one active/loaded skill. Skills are UNVERSIONED by design
-// (change-busting rides the catalog content hash), so the backend's SkillRef
+// RunbookRef identifies one active/loaded runbook. Runbooks are UNVERSIONED by design
+// (change-busting rides the catalog content hash), so the backend's RunbookRef
 // carries only id + title — there is no version field to decode.
-type SkillRef struct {
+type RunbookRef struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
 }
 
-// Prelude is optional skill-load metadata the backend still emits. The client decodes
+// Prelude is optional runbook-load metadata the backend still emits. The client decodes
 // but never replays or renders it; it is vestigial pending a coordinated server-side drop.
 type Prelude struct {
 	ToolExecutions []PreludeExecution `json:"tool_executions"`
 }
 
-// PreludeExecution is one skill-load call + its result, with a display name. Part
+// PreludeExecution is one runbook-load call + its result, with a display name. Part
 // of the vestigial Prelude metadata — decoded but not rendered by the client.
 type PreludeExecution struct {
 	Call        PreludeToolCall   `json:"call"`
@@ -1014,7 +1022,7 @@ type PreludeExecution struct {
 	DisplayName string            `json:"display_name"`
 }
 
-// PreludeToolCall mirrors a ToolCall for the synthetic skill-load exchange.
+// PreludeToolCall mirrors a ToolCall for the synthetic runbook-load exchange.
 type PreludeToolCall struct {
 	ID       string `json:"id"`
 	Type     string `json:"type"`
@@ -1031,7 +1039,7 @@ type PreludeToolResult struct {
 	Content    string `json:"content"`
 }
 
-// SelectorMeta is the skill selector's telemetry for the turn.
+// SelectorMeta is the runbook selector's telemetry for the turn.
 type SelectorMeta struct {
 	Ran        bool     `json:"ran"`
 	Degraded   bool     `json:"degraded"`
@@ -1053,7 +1061,7 @@ const FinishReasonLength = "length"
 
 // RespondResult is the accumulated outcome of a streamed respond call: the meta
 // event, the assembled assistant message (content + tool calls), the finish
-// reason, and usage. The agent loop reads State/Skills off Meta and appends
+// reason, and usage. The agent loop reads State/Runbooks off Meta and appends
 // Message to history.
 type RespondResult struct {
 	Meta         StreamMeta
@@ -1141,19 +1149,19 @@ type Capabilities struct {
 	// on" and "does not store" is a claim about the user's data, and only one of them
 	// is true under the default mode.
 	Routing RoutingCapsBlock `json:"routing"`
-	Skills  struct {
+	Runbooks  struct {
 		CatalogRevision string `json:"catalog_revision"`
 		ManualResolve   bool   `json:"manual_resolve"`
-		// PinnedSkillIDs advertises that Selection.pinned_skill_ids is accepted. It is
+		// PinnedRunbookIDs advertises that Selection.pinned_runbook_ids is accepted. It is
 		// a GATE, in the same sense as Respond.DisplayContext: Selection is
 		// extra="forbid" server-side, so a client that guesses wrong loses the entire
 		// turn rather than one optional field.
-		PinnedSkillIDs bool `json:"pinned_skill_ids"`
-		// Catalog is every skill the backend can load, as the minimal {id, title}
+		PinnedRunbookIDs bool `json:"pinned_runbook_ids"`
+		// Catalog is every runbook the backend can load, as the minimal {id, title}
 		// reference, sorted by id. It is the CANONICAL full catalog rather than a
 		// profile's executable menu — capabilities carries neither a profile nor a tool
 		// inventory, so it cannot honestly narrow — which is why a locally-valid id can
-		// still come back `pinned_skill_not_executable`.
+		// still come back `pinned_runbook_not_executable`.
 		//
 		// nil means the backend does not advertise a catalog at all (it predates the
 		// field); a non-nil empty slice means an advertised, genuinely empty one. The
@@ -1161,10 +1169,10 @@ type Capabilities struct {
 		// cannot validate an id, the second knows every id is wrong.
 		//
 		// Key any cache on CatalogRevision above — same snapshot. That is conservative,
-		// not exact: the revision hashes each skill's body too, so it moves on an edit
+		// not exact: the revision hashes each runbook's body too, so it moves on an edit
 		// that leaves this list byte-identical.
-		Catalog []SkillRef `json:"catalog"`
-	} `json:"skills"`
+		Catalog []RunbookRef `json:"catalog"`
+	} `json:"runbooks"`
 	// ContextCompaction is the TOP-LEVEL server-side compaction contract (a sibling of
 	// `respond`, not a field within it — the backend serves it there). nil on a
 	// deployment that predates the feature; see ContextCompactionCaps.ReplayCompatible
@@ -1209,7 +1217,7 @@ type RespondCapsBlock struct {
 	Streaming              bool     `json:"streaming"`
 	StreamEvents           []string `json:"stream_events"`
 	SystemMessagesAccepted bool     `json:"system_messages_accepted"`
-	MaxActiveSkills        int      `json:"max_active_skills"`
+	MaxActiveRunbooks        int      `json:"max_active_runbooks"`
 	MetadataTransport      string   `json:"metadata_transport"`
 	// CostReporting is present when this backend reports what each request charged the
 	// caller. Absent on an older deployment — which the CLI handles without needing to

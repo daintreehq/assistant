@@ -87,13 +87,13 @@ func RunHost(ctx context.Context, opts Options) int {
 		a, err := app.Create(app.CreateOptions{
 			Overrides:      overrides,
 			SessionID:      params.SessionID, // appSessionId: resume id when resuming
-			PinnedSkillIDs: opts.PinnedSkillIDs,
+			PinnedRunbookIDs: opts.PinnedRunbookIDs,
 		})
 		if err != nil {
 			own.Release()
 			return nil, err
 		}
-		// Negotiate --skill before the host serves a frame, and before adopting: adoption
+		// Negotiate --runbook before the host serves a frame, and before adopting: adoption
 		// writes the project's durable current-session pointer and shutdown does not
 		// restore the previous value, so a failed preflight would leave the supervisor
 		// resuming a session that never ran a turn.
@@ -102,7 +102,7 @@ func RunHost(ctx context.Context, opts Options) int {
 		// the same channel the auto-approve notice below uses, and for the same reason: a
 		// condition that changes what every turn means must not be invisible just because
 		// the wire cannot carry it.
-		pinNotice, perr := a.PreparePinnedSkills(fctx)
+		pinNotice, perr := a.PreparePinnedRunbooks(fctx)
 		if perr != nil {
 			_ = a.Shutdown()
 			own.Release()

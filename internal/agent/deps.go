@@ -79,7 +79,7 @@ type TurnContext struct {
 // *backend.Client). The turn loop streams a respond round through RespondStream;
 // utility/compaction work runs server-owned tasks through RunTask. The CLI sends a
 // structured stable startup data, visible conversation, and structured runtime/turn
-// context; the backend owns the system prompt, skill selection, and model routing. A
+// context; the backend owns the system prompt, runbook selection, and model routing. A
 // narrow interface (no generic Chat/JSON) is deliberate: generic prompt calls are
 // exactly what this migration removed.
 type AssistantBackend interface {
@@ -188,7 +188,7 @@ type ArtifactPersister interface {
 }
 
 // BackendStateStore is the durable mirror for the opaque backend state token
-// (satisfied by *storage.Store). The token is server-signed skill-selection
+// (satisfied by *storage.Store). The token is server-signed runbook-selection
 // state, refreshed on every stream meta event; mirroring it lets a DIFFERENT
 // process (the supervisor daemon after an attached session detach, or vice versa) resume
 // the session with the backend's selector cadence intact instead of forcing a
@@ -235,21 +235,21 @@ type SessionDeps struct {
 	// InitialBackendState seeds the opaque token on construction — the persisted
 	// value from the previous owner of this session ("" for a fresh session).
 	InitialBackendState string
-	// PinnedSkillIDs are backend runbook ids the LAUNCH named (`--skill`) and every
+	// PinnedRunbookIDs are backend runbook ids the LAUNCH named (`--runbook`) and every
 	// round of this session must load. Session-constant, like InitialBackendState:
 	// argv cannot change mid-conversation. Nil (the default, and every ordinary run)
 	// leaves the request's selection block byte-identical to before the feature.
 	//
-	// The Session never validates these — app.PreparePinnedSkills already refused the
+	// The Session never validates these — app.PreparePinnedRunbooks already refused the
 	// launch over an unsupported backend or an unknown id. All that is left here is
 	// attaching them, and the gate below.
-	PinnedSkillIDs []string
-	// BackendAcceptsPinnedSkillIDs reports whether the endpoint about to be called
-	// advertises selection.pinned_skill_ids. Consulted EVERY round rather than once,
+	PinnedRunbookIDs []string
+	// BackendAcceptsPinnedRunbookIDs reports whether the endpoint about to be called
+	// advertises selection.pinned_runbook_ids. Consulted EVERY round rather than once,
 	// because the answer is pinned to an endpoint and the backend delegate is
 	// swappable: sending the field to a backend that forbids it 422s the whole turn.
 	// nil ⇒ fails closed (the default in tests), which with nil pins is a no-op.
-	BackendAcceptsPinnedSkillIDs func() bool
+	BackendAcceptsPinnedRunbookIDs func() bool
 	// BackendContextCompaction reports whether the endpoint about to be called
 	// advertises the EXACT server-side compaction contract this client implements, and
 	// hands back the descriptor (the byte cap the block is checked against lives on it).
@@ -341,7 +341,7 @@ type SessionDeps struct {
 
 	// Trace, when set, receives structured diagnostic events for the per-session debug
 	// log: the turn lifecycle (turn.start/turn.end) and the backend respond round
-	// (backend.respond.request/raw_meta/skill_cue/meta/done/error) — the trace gap the
+	// (backend.respond.request/raw_meta/runbook_cue/meta/done/error) — the trace gap the
 	// backend migration left where the legacy router's model.request/model.response
 	// used to be. The app
 	// wires it to debuglog.LogDebug, keeping the agent package free of any debuglog

@@ -6,7 +6,7 @@
 //	go run ./cmd/tooldump -workflow-intelligence   # …including the flag-gated graph tools
 //
 // It exists for the backend, which pins a captured copy of this payload and needs to
-// regenerate it in CI to catch catalog drift (a removed tool that its skills still name).
+// regenerate it in CI to catch catalog drift (a removed tool that its runbooks still name).
 // Refreshing that pin must not require editing this repo, which is why this is a
 // committed command and not a throwaway test. See internal/app/toolinventory.go.
 //

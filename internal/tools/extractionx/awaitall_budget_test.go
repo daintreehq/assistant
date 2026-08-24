@@ -163,7 +163,7 @@ func TestAwaitAll_UnbudgetedContextBehavesAsBefore(t *testing.T) {
 }
 
 // The tool surface itself must state the ENFORCED budget so the model learns the rule
-// at point-of-use even with no orchestration skill loaded (the same lock the re-await
+// at point-of-use even with no orchestration runbook loaded (the same lock the re-await
 // bound has).
 func TestAwaitAllTool_DocumentsEnforcedBudget(t *testing.T) {
 	tool := newAwaitAllTool(Deps{})

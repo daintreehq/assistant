@@ -98,7 +98,7 @@ type ClientConfig struct {
 
 // CostEvent is one billed backend REQUEST, reported to ClientConfig.OnCost.
 //
-// One event is not one provider call: a single turn can bill the skill selector, a
+// One event is not one provider call: a single turn can bill the runbook selector, a
 // repair pass, a losing speculative generation and the main completion. Amount is the
 // request's total across all of them, which is the number the caller is charged.
 //
@@ -144,7 +144,7 @@ const (
 	transportDialTimeout         = 5 * time.Second
 	transportTLSHandshakeTimeout = 5 * time.Second
 	// streamResponseHeaderTimeout bounds how long the respond POST may wait for the
-	// response headers. The backend commits the SSE response as soon as skill
+	// response headers. The backend commits the SSE response as soon as runbook
 	// selection completes (~1.5–2.5s), well before the upstream model produces
 	// anything, so 10s is generous headroom without letting a wedged backend pin a
 	// turn. doJSON's client deliberately has NO header timeout — a utility task runs
@@ -291,10 +291,10 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 	//   - OnRawMeta is intentionally observational and remains per-attempt. It may
 	//     fire more than once so latency/debug instrumentation sees the real transport
 	//     timeline; it must never adopt state or produce user-visible effects.
-	//   - OnSkillLoaded is intentionally EAGER: a selector result is worth recording before
+	//   - OnRunbookLoaded is intentionally EAGER: a selector result is worth recording before
 	//     the upstream model connects or emits a token, so a trace shows selection latency
 	//     separately from generation. The same request can be retried after receiving meta,
-	//     so identical skill refs are de-duplicated across attempts before reaching the
+	//     so identical runbook refs are de-duplicated across attempts before reaching the
 	//     caller — one load, one record. A failed attempt's signed state is
 	//     also adopted into the next POST so the backend reuses that selection instead of
 	//     paying for a second selector run that could land somewhere else.
@@ -316,9 +316,9 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 	var pendingMeta *StreamMeta
 	var lastReceivedMeta *StreamMeta
 	userOnMeta := cb.OnMeta
-	userOnSkillLoaded := cb.OnSkillLoaded
+	userOnRunbookLoaded := cb.OnRunbookLoaded
 	userOnContent := cb.OnContent
-	seenSkillLoads := make(map[string]struct{})
+	seenRunbookLoads := make(map[string]struct{})
 
 	flushMeta := func() {
 		if metaForwarded {
@@ -345,11 +345,11 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 		pendingMeta = &mm // captured; not forwarded until the attempt commits
 		lastReceivedMeta = &mm
 	}
-	if userOnSkillLoaded != nil {
-		cb.OnSkillLoaded = func(refs []SkillRef) {
-			unseen := make([]SkillRef, 0, len(refs))
+	if userOnRunbookLoaded != nil {
+		cb.OnRunbookLoaded = func(refs []RunbookRef) {
+			unseen := make([]RunbookRef, 0, len(refs))
 			for _, ref := range refs {
-				// The id is the stable skill identity. Fall back to the display title for
+				// The id is the stable runbook identity. Fall back to the display title for
 				// malformed refs, but do not let harmless title drift on a retry produce
 				// a duplicate card for the same id.
 				key := strings.TrimSpace(ref.ID)
@@ -359,14 +359,14 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 				if key == "" {
 					continue
 				}
-				if _, ok := seenSkillLoads[key]; ok {
+				if _, ok := seenRunbookLoads[key]; ok {
 					continue
 				}
-				seenSkillLoads[key] = struct{}{}
+				seenRunbookLoads[key] = struct{}{}
 				unseen = append(unseen, ref)
 			}
 			if len(unseen) > 0 {
-				userOnSkillLoaded(unseen)
+				userOnRunbookLoaded(unseen)
 			}
 		}
 	}
@@ -383,7 +383,7 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 	// this with their own key.
 	//
 	// abandonedSpend records that some earlier attempt reached the point of billing
-	// (it got a meta event, which means the skill selector already ran and charged)
+	// (it got a meta event, which means the runbook selector already ran and charged)
 	// and then failed. That money is invisible: a failed attempt never reaches its
 	// `done` event, and the succeeding attempt's `cost.total` covers only ITS OWN
 	// request — the backend aggregates re-rolls within one request, never across

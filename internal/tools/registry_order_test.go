@@ -7,7 +7,7 @@ import "testing"
 // List) reordered across runs — churning the prompt cache, a stability invariant.
 // Registration order must now be the deterministic projection order.
 func TestRegistrationOrderIsStable(t *testing.T) {
-	names := []string{"fs.read", "fs.list", "context.snapshot", "memory.recall", "skill.find"}
+	names := []string{"fs.read", "fs.list", "context.snapshot", "memory.recall", "runbook.find"}
 	build := func() *Registry {
 		r := NewRegistry()
 		for _, n := range names {
@@ -45,8 +45,8 @@ func TestRegistrationOrderIsStable(t *testing.T) {
 }
 
 // A narrowed (filtered) projection must follow filterNames order — coreTools then
-// each skill's requiredTools — de-duped, skipping unregistered names. That keeps
-// the per-turn toolset byte-stable across runs for the same loaded-skill set.
+// each runbook's requiredTools — de-duped, skipping unregistered names. That keeps
+// the per-turn toolset byte-stable across runs for the same loaded-runbook set.
 func TestFilteredProjectionFollowsFilterOrder(t *testing.T) {
 	r := NewRegistry()
 	// Register in one order...

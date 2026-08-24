@@ -27,7 +27,7 @@ func (c *countingTools) OpenAITools(filter []string) ([]models.ChatTool, error) 
 
 // TestToolProjectionCachedAcrossIterations: three iterations of one turn ⇒ the projection
 // is built once and reused for every iteration (the offered toolset never changes —
-// skills no longer narrow it, so the projection key is stable).
+// runbooks no longer narrow it, so the projection key is stable).
 func TestToolProjectionCachedAcrossIterations(t *testing.T) {
 	r := &fakeRouter{results: []models.ChatResult{
 		{ToolCalls: []models.ToolCallRequest{toolCall("c1", "fs__read", `{}`)}},
@@ -35,7 +35,7 @@ func TestToolProjectionCachedAcrossIterations(t *testing.T) {
 		{Content: "done"},
 	}}
 	tr := &countingTools{fakeTools: &fakeTools{result: domain.Ok("ok", nil)}}
-	s := skillSession(t, r, tr)
+	s := runbookSession(t, r, tr)
 
 	if _, err := s.Send(context.Background(), "go", SendOptions{}); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -53,7 +53,7 @@ func TestToolProjectionReusedAcrossTurns(t *testing.T) {
 		{Content: "second"}, // turn 2: immediate answer
 	}}
 	tr := &countingTools{fakeTools: &fakeTools{result: domain.Ok("ok", nil)}}
-	s := skillSession(t, r, tr)
+	s := runbookSession(t, r, tr)
 
 	if _, err := s.Send(context.Background(), "one", SendOptions{}); err != nil {
 		t.Fatalf("Send 1: %v", err)
@@ -72,7 +72,7 @@ func TestToolProjectionReusedAcrossTurns(t *testing.T) {
 // directly under the lock it requires.
 func TestProjectToolsNilVsEmptyDistinctIdentity(t *testing.T) {
 	tr := &countingTools{fakeTools: &fakeTools{result: domain.Ok("ok", nil)}}
-	s := skillSession(t, plainRouter(), tr)
+	s := runbookSession(t, plainRouter(), tr)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

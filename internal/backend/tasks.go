@@ -21,7 +21,7 @@ const (
 	TaskTerminalExtractText  = "terminal_extract_text"
 	TaskTerminalExtractJSON  = "terminal_extract_json"
 	TaskExtractionVerdict    = "extraction_verdict"
-	TaskSkillStepConsistency = "skill_step_consistency"
+	TaskRunbookStepConsistency = "runbook_step_consistency"
 )
 
 // coreTaskIDs is the frozen wire contract: every task id this CLI will ever ask a
@@ -45,7 +45,7 @@ var coreTaskIDs = []string{
 	TaskTerminalExtractText,
 	TaskTerminalExtractJSON,
 	TaskExtractionVerdict,
-	TaskSkillStepConsistency,
+	TaskRunbookStepConsistency,
 }
 
 // CoreTaskIDs returns the always-required task ids (a copy — callers must not
@@ -178,9 +178,9 @@ type ExtractionVerdictInput struct {
 	Condition string `json:"condition"`
 }
 
-// SkillStepConsistencyInput judges whether one skill-step advance is consistent.
-type SkillStepConsistencyInput struct {
-	SkillID           string           `json:"skill_id"`
+// RunbookStepConsistencyInput judges whether one runbook-step advance is consistent.
+type RunbookStepConsistencyInput struct {
+	RunbookID           string           `json:"runbook_id"`
 	CompletedStep     int              `json:"completed_step"`
 	Status            string           `json:"status,omitempty"`
 	RequestedNext     string           `json:"requested_next,omitempty"`
@@ -238,7 +238,7 @@ type WatcherClassifyOutput struct {
 	RecommendedAction string   `json:"recommendedAction"`
 }
 
-// JudgeOutput is the yes/no judge verdict (terminal_judge + skill consistency).
+// JudgeOutput is the yes/no judge verdict (terminal_judge + runbook consistency).
 type JudgeOutput struct {
 	Reason     string  `json:"reason"`
 	Confidence float64 `json:"confidence"`
@@ -423,7 +423,7 @@ func RunWatcherClassify(ctx context.Context, r TaskRunner, in WatcherClassifyInp
 // reason to "" and matched to false, so {matched:false, confidence:0, reason:""}
 // is a schema-valid NEGATIVE verdict — rejecting it client-side would turn a
 // legitimate "no" into a task error. Only the no-output-at-all wire round is
-// rejected (by runTyped). Same posture for skill_step_consistency below.
+// rejected (by runTyped). Same posture for runbook_step_consistency below.
 func RunTerminalJudge(ctx context.Context, r TaskRunner, in TerminalJudgeInput) (JudgeOutput, error) {
 	in.Tail = clampTailRunes(in.Tail, maxTaskTailRunes)
 	var out JudgeOutput
@@ -478,11 +478,11 @@ func RunExtractionVerdict(ctx context.Context, r TaskRunner, in ExtractionVerdic
 	return out, err
 }
 
-// RunSkillStepConsistency judges whether one skill-step advance is consistent.
+// RunRunbookStepConsistency judges whether one runbook-step advance is consistent.
 // No validate hook — same reasoning as RunTerminalJudge (shared JudgeOutput schema).
-func RunSkillStepConsistency(ctx context.Context, r TaskRunner, in SkillStepConsistencyInput) (JudgeOutput, error) {
+func RunRunbookStepConsistency(ctx context.Context, r TaskRunner, in RunbookStepConsistencyInput) (JudgeOutput, error) {
 	var out JudgeOutput
-	err := runTyped(ctx, r, TaskSkillStepConsistency, in, nil, &out)
+	err := runTyped(ctx, r, TaskRunbookStepConsistency, in, nil, &out)
 	return out, err
 }
 

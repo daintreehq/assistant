@@ -8,35 +8,35 @@ import (
 	"github.com/daintreehq/assistant/internal/domain"
 )
 
-// ---- skill_run_state ----
+// ---- runbook_run_state ----
 
-const skillRunCols = `id,sessionId,skillId,currentStep,stepsJson,status,startedAt,updatedAt,completedAt`
+const runbookRunCols = `id,sessionId,runbookId,currentStep,stepsJson,status,startedAt,updatedAt,completedAt`
 
-func scanSkillRunState(sc scanner) (domain.SkillRunStateRecord, error) {
-	var r domain.SkillRunStateRecord
+func scanRunbookRunState(sc scanner) (domain.RunbookRunStateRecord, error) {
+	var r domain.RunbookRunStateRecord
 	var status string
 	var completedAt sql.NullInt64
-	if err := sc.Scan(&r.ID, &r.SessionID, &r.SkillID, &r.CurrentStep, &r.StepsJson,
+	if err := sc.Scan(&r.ID, &r.SessionID, &r.RunbookID, &r.CurrentStep, &r.StepsJson,
 		&status, &r.StartedAt, &r.UpdatedAt, &completedAt); err != nil {
-		return domain.SkillRunStateRecord{}, err
+		return domain.RunbookRunStateRecord{}, err
 	}
-	r.Status = domain.SkillRunStatus(status)
+	r.Status = domain.RunbookRunStatus(status)
 	r.CompletedAt = i64FromNull(completedAt)
 	return r, nil
 }
 
-// InsertSkillRunState inserts skill run state (id rrs_, currentStep 0, stepsJson
+// InsertRunbookRunState inserts runbook run state (id rrs_, currentStep 0, stepsJson
 // '[]', status 'active', startedAt/updatedAt now when zero). Natural-key
-// (sessionId, skillId) is unique-indexed; a duplicate insert errors.
-func (s *Store) InsertSkillRunState(rec domain.SkillRunStateRecord) (domain.SkillRunStateRecord, error) {
+// (sessionId, runbookId) is unique-indexed; a duplicate insert errors.
+func (s *Store) InsertRunbookRunState(rec domain.RunbookRunStateRecord) (domain.RunbookRunStateRecord, error) {
 	if rec.ID == "" {
-		rec.ID = domain.NewID(domain.PrefixSkillRun)
+		rec.ID = domain.NewID(domain.PrefixRunbookRun)
 	}
 	if rec.StepsJson == "" {
 		rec.StepsJson = "[]"
 	}
 	if rec.Status == "" {
-		rec.Status = domain.SkillRunActive
+		rec.Status = domain.RunbookRunActive
 	}
 	now := s.now()
 	if rec.StartedAt == 0 {
@@ -46,36 +46,36 @@ func (s *Store) InsertSkillRunState(rec domain.SkillRunStateRecord) (domain.Skil
 		rec.UpdatedAt = now
 	}
 	_, err := s.db.Exec(`
-		INSERT INTO skill_run_state
-		  (id,sessionId,skillId,currentStep,stepsJson,status,startedAt,updatedAt,completedAt)
+		INSERT INTO runbook_run_state
+		  (id,sessionId,runbookId,currentStep,stepsJson,status,startedAt,updatedAt,completedAt)
 		VALUES (?,?,?,?,?,?,?,?,?)`,
-		rec.ID, rec.SessionID, rec.SkillID, rec.CurrentStep, rec.StepsJson,
+		rec.ID, rec.SessionID, rec.RunbookID, rec.CurrentStep, rec.StepsJson,
 		string(rec.Status), rec.StartedAt, rec.UpdatedAt, nullI64(rec.CompletedAt))
 	if err != nil {
-		return domain.SkillRunStateRecord{}, fmt.Errorf("insert skill run state: %w", err)
+		return domain.RunbookRunStateRecord{}, fmt.Errorf("insert runbook run state: %w", err)
 	}
 	return rec, nil
 }
 
-// GetSkillRunState looks up by the natural key (sessionId, skillId).
-func (s *Store) GetSkillRunState(sessionID, skillID string) (*domain.SkillRunStateRecord, error) {
+// GetRunbookRunState looks up by the natural key (sessionId, runbookId).
+func (s *Store) GetRunbookRunState(sessionID, runbookID string) (*domain.RunbookRunStateRecord, error) {
 	row := s.db.QueryRow(
-		"SELECT "+skillRunCols+" FROM skill_run_state WHERE sessionId = ? AND skillId = ?",
-		sessionID, skillID)
-	r, err := scanSkillRunState(row)
+		"SELECT "+runbookRunCols+" FROM runbook_run_state WHERE sessionId = ? AND runbookId = ?",
+		sessionID, runbookID)
+	r, err := scanRunbookRunState(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get skill run state: %w", err)
+		return nil, fmt.Errorf("get runbook run state: %w", err)
 	}
 	return &r, nil
 }
 
-// ListSkillRunStates returns all states (sessionID=="") or by session, ORDER BY
+// ListRunbookRunStates returns all states (sessionID=="") or by session, ORDER BY
 // updatedAt DESC.
-func (s *Store) ListSkillRunStates(sessionID string) ([]domain.SkillRunStateRecord, error) {
-	q := "SELECT " + skillRunCols + " FROM skill_run_state"
+func (s *Store) ListRunbookRunStates(sessionID string) ([]domain.RunbookRunStateRecord, error) {
+	q := "SELECT " + runbookRunCols + " FROM runbook_run_state"
 	var args []any
 	if sessionID != "" {
 		q += " WHERE sessionId = ?"
@@ -84,12 +84,12 @@ func (s *Store) ListSkillRunStates(sessionID string) ([]domain.SkillRunStateReco
 	q += " ORDER BY updatedAt DESC"
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list skill run states: %w", err)
+		return nil, fmt.Errorf("list runbook run states: %w", err)
 	}
 	defer rows.Close()
-	var out []domain.SkillRunStateRecord
+	var out []domain.RunbookRunStateRecord
 	for rows.Next() {
-		r, err := scanSkillRunState(rows)
+		r, err := scanRunbookRunState(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -98,17 +98,17 @@ func (s *Store) ListSkillRunStates(sessionID string) ([]domain.SkillRunStateReco
 	return out, rows.Err()
 }
 
-var skillRunUpdateCols = newColSet("currentStep", "stepsJson", "status", "completedAt")
-var skillRunUpdateColsWithTime = unionColSet(skillRunUpdateCols, "updatedAt")
+var runbookRunUpdateCols = newColSet("currentStep", "stepsJson", "status", "completedAt")
+var runbookRunUpdateColsWithTime = unionColSet(runbookRunUpdateCols, "updatedAt")
 
-// UpdateSkillRunState force-sets updatedAt = now and applies the allowlisted patch.
-func (s *Store) UpdateSkillRunState(id string, patch map[string]any) error {
+// UpdateRunbookRunState force-sets updatedAt = now and applies the allowlisted patch.
+func (s *Store) UpdateRunbookRunState(id string, patch map[string]any) error {
 	merged := make(map[string]any, len(patch)+1)
 	for k, v := range patch {
 		merged[k] = v
 	}
 	merged["updatedAt"] = s.now()
-	return s.applyUpdate("skill_run_state", skillRunUpdateColsWithTime, id, merged)
+	return s.applyUpdate("runbook_run_state", runbookRunUpdateColsWithTime, id, merged)
 }
 
 // ---- agent_launches ----

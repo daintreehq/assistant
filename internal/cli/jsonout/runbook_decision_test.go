@@ -9,7 +9,7 @@ import (
 	"github.com/daintreehq/assistant/internal/agent"
 )
 
-// skill_decision_test.go pins the WIRE SHAPE of the skill:decision line, which is the
+// runbook_decision_test.go pins the WIRE SHAPE of the runbook:decision line, which is the
 // whole point of the event: it exists so a scripted run can assert which runbook was
 // active and whether the selector actually chose it. A consumer's assertion breaks on a
 // renamed key just as hard as on a missing event, so the keys are pinned literally here
@@ -28,19 +28,19 @@ func decodeOne(t *testing.T, buf *bytes.Buffer) map[string]any {
 func confidence(f float64) *float64 { return &f }
 
 // A round that loaded something: ids AND titles, the whole active set (not just the
-// delta), and the selector's verdict — the three things the titles-only skill:loaded
+// delta), and the selector's verdict — the three things the titles-only runbook:loaded
 // line could not answer.
-func TestSkillDecisionLineShape(t *testing.T) {
+func TestRunbookDecisionLineShape(t *testing.T) {
 	var buf bytes.Buffer
 	s := New(&buf, fixedClock)
 
-	s.SkillDecision(agent.SkillDecisionEvent{
-		Active: []agent.SkillRef{
+	s.RunbookDecision(agent.RunbookDecisionEvent{
+		Active: []agent.RunbookRef{
 			{ID: "multi_agent", Title: "Multi-agent orchestration"},
 			{ID: "daintree_foundation", Title: "Daintree orchestration foundation"},
 		},
-		NewlyLoaded: []agent.SkillRef{{ID: "multi_agent", Title: "Multi-agent orchestration"}},
-		Selector: agent.SkillSelectorOutcome{
+		NewlyLoaded: []agent.RunbookRef{{ID: "multi_agent", Title: "Multi-agent orchestration"}},
+		Selector: agent.RunbookSelectorOutcome{
 			Ran:        true,
 			Degraded:   false,
 			TaskType:   "orchestration",
@@ -50,8 +50,8 @@ func TestSkillDecisionLineShape(t *testing.T) {
 	})
 
 	line := decodeOne(t, &buf)
-	if line["type"] != "skill:decision" {
-		t.Fatalf("type = %v, want skill:decision", line["type"])
+	if line["type"] != "runbook:decision" {
+		t.Fatalf("type = %v, want runbook:decision", line["type"])
 	}
 
 	active, ok := line["active"].([]any)
@@ -95,13 +95,13 @@ func TestSkillDecisionLineShape(t *testing.T) {
 // The stream is camelCase throughout; the backend's own wire tags are snake_case. Emitting
 // the backend struct verbatim would have leaked task_type/newly_loaded into a stream where
 // every other line reads auditId/exitCode, so the snake_case spellings are pinned ABSENT.
-func TestSkillDecisionUsesCamelCaseNotBackendWireKeys(t *testing.T) {
+func TestRunbookDecisionUsesCamelCaseNotBackendWireKeys(t *testing.T) {
 	var buf bytes.Buffer
 	s := New(&buf, fixedClock)
-	s.SkillDecision(agent.SkillDecisionEvent{
-		Active:      []agent.SkillRef{},
-		NewlyLoaded: []agent.SkillRef{},
-		Selector:    agent.SkillSelectorOutcome{Ran: true, TaskType: "supervise"},
+	s.RunbookDecision(agent.RunbookDecisionEvent{
+		Active:      []agent.RunbookRef{},
+		NewlyLoaded: []agent.RunbookRef{},
+		Selector:    agent.RunbookSelectorOutcome{Ran: true, TaskType: "supervise"},
 	})
 
 	line := decodeOne(t, &buf)
@@ -124,17 +124,17 @@ func TestSkillDecisionUsesCamelCaseNotBackendWireKeys(t *testing.T) {
 	}
 }
 
-// An empty set must marshal as [] and not null: a consumer distinguishing "no skills
+// An empty set must marshal as [] and not null: a consumer distinguishing "no runbooks
 // active" from "this field failed to serialize" should not have to guess. Confidence is
 // the deliberate exception — it is a pointer so "the selector reported none" is null
 // rather than a misleading 0.0.
-func TestSkillDecisionEmptySetsAreArraysAndConfidenceIsNull(t *testing.T) {
+func TestRunbookDecisionEmptySetsAreArraysAndConfidenceIsNull(t *testing.T) {
 	var buf bytes.Buffer
 	s := New(&buf, fixedClock)
-	s.SkillDecision(agent.SkillDecisionEvent{
-		Active:      []agent.SkillRef{},
-		NewlyLoaded: []agent.SkillRef{},
-		Selector:    agent.SkillSelectorOutcome{}, // zero value: every field must still appear
+	s.RunbookDecision(agent.RunbookDecisionEvent{
+		Active:      []agent.RunbookRef{},
+		NewlyLoaded: []agent.RunbookRef{},
+		Selector:    agent.RunbookSelectorOutcome{}, // zero value: every field must still appear
 	})
 
 	raw := buf.String()
@@ -206,13 +206,13 @@ func keysOf(m map[string]any) []string {
 // The degraded case is the one this event exists for. A selector that fails open reuses
 // the PRIOR active set, so `active` looks completely healthy — only this flag says the
 // round never actually decided on it.
-func TestSkillDecisionReportsDegradedSelector(t *testing.T) {
+func TestRunbookDecisionReportsDegradedSelector(t *testing.T) {
 	var buf bytes.Buffer
 	s := New(&buf, fixedClock)
-	s.SkillDecision(agent.SkillDecisionEvent{
-		Active:      []agent.SkillRef{{ID: "multi_agent", Title: "Multi-agent orchestration"}},
-		NewlyLoaded: []agent.SkillRef{}, // nothing new: the prior set was reused wholesale
-		Selector: agent.SkillSelectorOutcome{
+	s.RunbookDecision(agent.RunbookDecisionEvent{
+		Active:      []agent.RunbookRef{{ID: "multi_agent", Title: "Multi-agent orchestration"}},
+		NewlyLoaded: []agent.RunbookRef{}, // nothing new: the prior set was reused wholesale
+		Selector: agent.RunbookSelectorOutcome{
 			Ran:      true,
 			Degraded: true,
 			Reason:   "selector timed out; reused the prior active set",
@@ -229,16 +229,16 @@ func TestSkillDecisionReportsDegradedSelector(t *testing.T) {
 	}
 }
 
-// skill:loaded keeps its exact prior shape. That is what makes this an ADDITIVE change
+// runbook:loaded keeps its exact prior shape. That is what makes this an ADDITIVE change
 // needing no JSONOutputSchemaVersion bump, and it is why an existing consumer keeps
 // working — so it is pinned rather than assumed.
-func TestSkillLoadedShapeUnchangedAlongsideDecision(t *testing.T) {
+func TestRunbookLoadedShapeUnchangedAlongsideDecision(t *testing.T) {
 	var buf bytes.Buffer
 	s := New(&buf, fixedClock)
-	s.SkillLoaded([]string{"Multi-agent orchestration"})
+	s.RunbookLoaded([]string{"Multi-agent orchestration"})
 
 	line := decodeOne(t, &buf)
-	if line["type"] != "skill:loaded" {
+	if line["type"] != "runbook:loaded" {
 		t.Fatalf("type = %v", line["type"])
 	}
 	titles, ok := line["titles"].([]any)
@@ -247,30 +247,30 @@ func TestSkillLoadedShapeUnchangedAlongsideDecision(t *testing.T) {
 	}
 	// Strictly titles + framing: no ids leaked onto the eager cue, which would invite a
 	// consumer to treat a per-attempt delta as authoritative.
-	for _, k := range []string{"active", "newlyLoaded", "selector", "skills"} {
+	for _, k := range []string{"active", "newlyLoaded", "selector", "runbooks"} {
 		if _, present := line[k]; present {
-			t.Fatalf("skill:loaded gained key %q; it must stay titles-only", k)
+			t.Fatalf("runbook:loaded gained key %q; it must stay titles-only", k)
 		}
 	}
 }
 
 // Ordering: a decision arriving mid-stream flushes buffered prose first, so the line lands
 // at the round boundary it describes instead of inside the previous round's text.
-func TestSkillDecisionFlushesBufferedProseFirst(t *testing.T) {
+func TestRunbookDecisionFlushesBufferedProseFirst(t *testing.T) {
 	var buf bytes.Buffer
 	s := New(&buf, fixedClock)
 	s.AssistantToken("thinking about it")
-	s.SkillDecision(agent.SkillDecisionEvent{
-		Active:      []agent.SkillRef{},
-		NewlyLoaded: []agent.SkillRef{},
+	s.RunbookDecision(agent.RunbookDecisionEvent{
+		Active:      []agent.RunbookRef{},
+		NewlyLoaded: []agent.RunbookRef{},
 	})
 
 	lines := decodeLines(t, &buf)
 	if len(lines) != 2 {
 		t.Fatalf("expected content then decision, got %d lines: %v", len(lines), lines)
 	}
-	if lines[0]["type"] != "assistant:content" || lines[1]["type"] != "skill:decision" {
-		t.Fatalf("order = %v, %v; want assistant:content then skill:decision",
+	if lines[0]["type"] != "assistant:content" || lines[1]["type"] != "runbook:decision" {
+		t.Fatalf("order = %v, %v; want assistant:content then runbook:decision",
 			lines[0]["type"], lines[1]["type"])
 	}
 	// seq stays monotonic across the inserted line.
@@ -282,13 +282,13 @@ func TestSkillDecisionFlushesBufferedProseFirst(t *testing.T) {
 // Every field of a fully-populated event reaches the wire under its documented key.
 // Deliberately NOT a round trip through the same tagged struct: that would pass even if
 // every tag were renamed in a coordinated way, since the same tags would decode it back.
-func TestSkillDecisionEmitsEveryFieldByDocumentedKey(t *testing.T) {
+func TestRunbookDecisionEmitsEveryFieldByDocumentedKey(t *testing.T) {
 	var buf bytes.Buffer
 	s := New(&buf, fixedClock)
-	s.SkillDecision(agent.SkillDecisionEvent{
-		Active:      []agent.SkillRef{{ID: "a", Title: "Alpha"}},
-		NewlyLoaded: []agent.SkillRef{{ID: "n", Title: "Newly"}},
-		Selector: agent.SkillSelectorOutcome{
+	s.RunbookDecision(agent.RunbookDecisionEvent{
+		Active:      []agent.RunbookRef{{ID: "a", Title: "Alpha"}},
+		NewlyLoaded: []agent.RunbookRef{{ID: "n", Title: "Newly"}},
+		Selector: agent.RunbookSelectorOutcome{
 			Ran: true, Degraded: true, TaskType: "review",
 			Confidence: confidence(0.5), Reason: "why",
 		},
@@ -323,11 +323,11 @@ func TestSkillDecisionEmitsEveryFieldByDocumentedKey(t *testing.T) {
 // failure path than emit's. NaN is reachable: confidence comes off the wire as a float.
 // The line must stay valid JSON and keep its seq, so a consumer's parser does not choke
 // and the monotonic-seq contract survives.
-func TestSkillDecisionUnserializableDegradesWithoutBreakingTheStream(t *testing.T) {
+func TestRunbookDecisionUnserializableDegradesWithoutBreakingTheStream(t *testing.T) {
 	var buf bytes.Buffer
 	s := New(&buf, fixedClock)
-	s.SkillDecision(agent.SkillDecisionEvent{
-		Selector: agent.SkillSelectorOutcome{Confidence: confidence(math.NaN())},
+	s.RunbookDecision(agent.RunbookDecisionEvent{
+		Selector: agent.RunbookSelectorOutcome{Confidence: confidence(math.NaN())},
 	})
 	s.Info("still streaming")
 
@@ -335,7 +335,7 @@ func TestSkillDecisionUnserializableDegradesWithoutBreakingTheStream(t *testing.
 	if len(lines) != 2 {
 		t.Fatalf("expected the degraded line then info, got %d: %v", len(lines), lines)
 	}
-	if lines[0]["type"] != "skill:decision" {
+	if lines[0]["type"] != "runbook:decision" {
 		t.Fatalf("type = %v, want the event type preserved", lines[0]["type"])
 	}
 	if lines[0]["serializationError"] != true {

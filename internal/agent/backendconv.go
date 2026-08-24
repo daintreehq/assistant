@@ -17,13 +17,13 @@ import (
 // failure instead of a backend 400.
 const backendToolNamePattern = `^[A-Za-z0-9_-]{1,64}$`
 
-// reservedBackendTools are tool names the backend rejects outright: skill
+// reservedBackendTools are tool names the backend rejects outright: runbook
 // find/load (selection is server-owned) in both dotted and wire forms.
 var reservedBackendTools = map[string]struct{}{
-	"skill.find":  {},
-	"skill.load":  {},
-	"skill__find": {},
-	"skill__load": {},
+	"runbook.find":  {},
+	"runbook.load":  {},
+	"runbook__find": {},
+	"runbook__load": {},
 }
 
 // reservedBackendToolPrefix is the reserved internal-tool prefix the backend
@@ -189,7 +189,7 @@ func validateBackendTools(tools []backend.Tool) error {
 	for _, t := range tools {
 		name := t.Function.Name
 		if _, reserved := reservedBackendTools[name]; reserved {
-			return fmt.Errorf("forbidden backend tool exposed: %s (skill selection is server-owned)", name)
+			return fmt.Errorf("forbidden backend tool exposed: %s (runbook selection is server-owned)", name)
 		}
 		if strings.HasPrefix(name, reservedBackendToolPrefix) {
 			return fmt.Errorf("reserved backend tool exposed: %s", name)

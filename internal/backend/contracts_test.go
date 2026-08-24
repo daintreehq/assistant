@@ -172,16 +172,16 @@ func keysOf(m map[string]any) []string {
 }
 
 // THE pre-#54 safety regression. Selection is validated with extra="forbid" server-side,
-// so a `pinned_skill_ids` key on a deployment that predates the field 422s the whole turn
+// so a `pinned_runbook_ids` key on a deployment that predates the field 422s the whole turn
 // before the model opens. omitempty is what keeps an unpinned turn's bytes identical to
 // what every existing backend already accepts — if this ever regresses, every session
 // against an older deployment breaks at once, and the CLI has no way to tell why.
-func TestSelectionOmitsPinnedSkillIDsWhenUnpinned(t *testing.T) {
+func TestSelectionOmitsPinnedRunbookIDsWhenUnpinned(t *testing.T) {
 	b, err := json.Marshal(Selection{Policy: "new_instruction"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(b), "pinned_skill_ids") {
+	if strings.Contains(string(b), "pinned_runbook_ids") {
 		t.Fatalf("an unpinned selection must not mention the field at all: %s", b)
 	}
 	if got, want := string(b), `{"policy":"new_instruction"}`; got != want {
@@ -190,23 +190,23 @@ func TestSelectionOmitsPinnedSkillIDsWhenUnpinned(t *testing.T) {
 	// An EMPTY list is the same statement as no list, and must serialize the same way:
 	// a caller who normalized their pins down to nothing must not accidentally probe a
 	// capability they are not using.
-	empty, err := json.Marshal(Selection{Policy: "new_instruction", PinnedSkillIDs: []string{}})
+	empty, err := json.Marshal(Selection{Policy: "new_instruction", PinnedRunbookIDs: []string{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(empty), "pinned_skill_ids") {
+	if strings.Contains(string(empty), "pinned_runbook_ids") {
 		t.Fatalf("an empty pin list must be omitted too: %s", empty)
 	}
 }
 
 // Order is part of the request. The backend admits pins in the order given and budgets
-// them against max_active_skills, so a re-ordered list is a genuinely different ask.
-func TestSelectionSerializesPinnedSkillIDsInOrder(t *testing.T) {
-	b, err := json.Marshal(Selection{Policy: "new_instruction", PinnedSkillIDs: []string{"b.two", "a.one"}})
+// them against max_active_runbooks, so a re-ordered list is a genuinely different ask.
+func TestSelectionSerializesPinnedRunbookIDsInOrder(t *testing.T) {
+	b, err := json.Marshal(Selection{Policy: "new_instruction", PinnedRunbookIDs: []string{"b.two", "a.one"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), `"pinned_skill_ids":["b.two","a.one"]`) {
+	if !strings.Contains(string(b), `"pinned_runbook_ids":["b.two","a.one"]`) {
 		t.Fatalf("pins missing or reordered on the wire: %s", b)
 	}
 }
@@ -214,38 +214,38 @@ func TestSelectionSerializesPinnedSkillIDsInOrder(t *testing.T) {
 // nil and empty are DIFFERENT answers from the capability endpoint and nothing may
 // collapse them: nil means the deployment cannot answer what it can load, empty means it
 // answered "nothing". The first cannot validate an id; the second knows every id is wrong.
-func TestCapabilitiesDistinguishesAbsentFromEmptySkillCatalog(t *testing.T) {
+func TestCapabilitiesDistinguishesAbsentFromEmptyRunbookCatalog(t *testing.T) {
 	var absent Capabilities
-	if err := json.Unmarshal([]byte(`{"skills":{"catalog_revision":"r","manual_resolve":true}}`), &absent); err != nil {
+	if err := json.Unmarshal([]byte(`{"runbooks":{"catalog_revision":"r","manual_resolve":true}}`), &absent); err != nil {
 		t.Fatal(err)
 	}
-	if absent.Skills.Catalog != nil {
-		t.Fatalf("a backend that omits the catalog must decode to nil, got %#v", absent.Skills.Catalog)
+	if absent.Runbooks.Catalog != nil {
+		t.Fatalf("a backend that omits the catalog must decode to nil, got %#v", absent.Runbooks.Catalog)
 	}
-	if absent.Skills.PinnedSkillIDs {
-		t.Fatal("an absent pinned_skill_ids capability must decode false — the gate fails closed")
+	if absent.Runbooks.PinnedRunbookIDs {
+		t.Fatal("an absent pinned_runbook_ids capability must decode false — the gate fails closed")
 	}
 
 	var empty Capabilities
-	if err := json.Unmarshal([]byte(`{"skills":{"catalog":[],"pinned_skill_ids":true}}`), &empty); err != nil {
+	if err := json.Unmarshal([]byte(`{"runbooks":{"catalog":[],"pinned_runbook_ids":true}}`), &empty); err != nil {
 		t.Fatal(err)
 	}
-	if empty.Skills.Catalog == nil {
+	if empty.Runbooks.Catalog == nil {
 		t.Fatal("an advertised empty catalog must decode to a non-nil empty slice")
 	}
-	if !empty.Skills.PinnedSkillIDs {
-		t.Fatal("pinned_skill_ids:true must decode true")
+	if !empty.Runbooks.PinnedRunbookIDs {
+		t.Fatal("pinned_runbook_ids:true must decode true")
 	}
 
 	var full Capabilities
 	if err := json.Unmarshal([]byte(
-		`{"skills":{"catalog":[{"id":"a.one","title":"One"}],"catalog_revision":"sha256:x","pinned_skill_ids":true}}`), &full); err != nil {
+		`{"runbooks":{"catalog":[{"id":"a.one","title":"One"}],"catalog_revision":"sha256:x","pinned_runbook_ids":true}}`), &full); err != nil {
 		t.Fatal(err)
 	}
-	if len(full.Skills.Catalog) != 1 || full.Skills.Catalog[0].ID != "a.one" || full.Skills.Catalog[0].Title != "One" {
-		t.Fatalf("catalog entry decoded wrong: %#v", full.Skills.Catalog)
+	if len(full.Runbooks.Catalog) != 1 || full.Runbooks.Catalog[0].ID != "a.one" || full.Runbooks.Catalog[0].Title != "One" {
+		t.Fatalf("catalog entry decoded wrong: %#v", full.Runbooks.Catalog)
 	}
-	if full.Skills.CatalogRevision != "sha256:x" {
-		t.Fatalf("catalog revision = %q, want sha256:x (it is what a cache keys the list on)", full.Skills.CatalogRevision)
+	if full.Runbooks.CatalogRevision != "sha256:x" {
+		t.Fatalf("catalog revision = %q, want sha256:x (it is what a cache keys the list on)", full.Runbooks.CatalogRevision)
 	}
 }

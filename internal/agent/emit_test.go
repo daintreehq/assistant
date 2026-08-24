@@ -24,10 +24,10 @@ func (s *orderSink) AssistantToken(t string)     { s.log = append(s.log, "tok:"+
 func (s *orderSink) AssistantEnd(c, _ string)    { s.log = append(s.log, "end:"+c) }
 func (s *orderSink) AssistantCancelled(c string) { s.log = append(s.log, "cancelled:"+c) }
 func (s *orderSink) Interjection(t string)       { s.log = append(s.log, "interject:"+t) }
-func (s *orderSink) SkillLoaded(titles []string) {
-	s.log = append(s.log, "skill:"+strings.Join(titles, ","))
+func (s *orderSink) RunbookLoaded(titles []string) {
+	s.log = append(s.log, "runbook:"+strings.Join(titles, ","))
 }
-func (s *orderSink) SkillDecision(ev SkillDecisionEvent) {
+func (s *orderSink) RunbookDecision(ev RunbookDecisionEvent) {
 	ids := make([]string, 0, len(ev.Active))
 	for _, ref := range ev.Active {
 		ids = append(ids, ref.ID)
@@ -75,8 +75,8 @@ func TestEmitStreamsTokensThenEnds(t *testing.T) {
 	//
 	// The bare decision in the middle is deliberate: EVERY committed round reports one,
 	// including this one, where the backend selected nothing at all. Suppressing the
-	// empty case would make the event's absence ambiguous — "no skills were active" and
-	// "this build does not report skills" would look identical to a consumer — and
+	// empty case would make the event's absence ambiguous — "no runbooks were active" and
+	// "this build does not report runbooks" would look identical to a consumer — and
 	// selector.ran=false is itself the answer to "did selection even run".
 	want := []string{"prompt:hi", "start", "decision::degraded=false", "tok:Hel", "tok:lo", "end:Hello"}
 	if !equalStrings(sink.log, want) {
@@ -84,24 +84,24 @@ func TestEmitStreamsTokensThenEnds(t *testing.T) {
 	}
 }
 
-// eagerSkillBackend mirrors the production callback order: raw SSE meta is observed,
-// then the newly-loaded skill notification arrives before committed meta and content.
-type eagerSkillBackend struct{}
+// eagerRunbookBackend mirrors the production callback order: raw SSE meta is observed,
+// then the newly-loaded runbook notification arrives before committed meta and content.
+type eagerRunbookBackend struct{}
 
-func (eagerSkillBackend) RespondStream(_ context.Context, _ backend.RespondRequest, cb backend.StreamCallbacks) (backend.RespondResult, error) {
-	refs := []backend.SkillRef{
+func (eagerRunbookBackend) RespondStream(_ context.Context, _ backend.RespondRequest, cb backend.StreamCallbacks) (backend.RespondResult, error) {
+	refs := []backend.RunbookRef{
 		{ID: "multi_agent", Title: "Multi-agent orchestration"},
-		{ID: "fallback_skill"}, // no title: the label falls back to the id
+		{ID: "fallback_runbook"}, // no title: the label falls back to the id
 		{},                     // malformed refs never produce a blank label
 	}
 	conf := 0.91
 	meta := backend.StreamMeta{
 		Model: "daintree-assistant",
-		State: "dst1.skill",
-		Skills: backend.SkillsBlock{
-			// Active is a SUPERSET of the delta: the retained foundation skill is
+		State: "dst1.runbook",
+		Runbooks: backend.RunbooksBlock{
+			// Active is a SUPERSET of the delta: the retained foundation runbook is
 			// exactly what the eager titles-only cue could never report.
-			Active: []backend.SkillRef{
+			Active: []backend.RunbookRef{
 				{ID: "multi_agent", Title: "Multi-agent orchestration"},
 				{ID: "daintree_foundation", Title: "Daintree orchestration foundation"},
 			},
@@ -114,8 +114,8 @@ func (eagerSkillBackend) RespondStream(_ context.Context, _ backend.RespondReque
 	if cb.OnRawMeta != nil {
 		cb.OnRawMeta(meta)
 	}
-	if cb.OnSkillLoaded != nil {
-		cb.OnSkillLoaded(refs)
+	if cb.OnRunbookLoaded != nil {
+		cb.OnRunbookLoaded(refs)
 	}
 	if cb.OnMeta != nil {
 		cb.OnMeta(meta)
@@ -129,20 +129,20 @@ func (eagerSkillBackend) RespondStream(_ context.Context, _ backend.RespondReque
 	}, nil
 }
 
-func (eagerSkillBackend) RunTask(context.Context, backend.TaskRequest) (backend.TaskResult, error) {
+func (eagerRunbookBackend) RunTask(context.Context, backend.TaskRequest) (backend.TaskResult, error) {
 	return backend.TaskResult{}, nil
 }
 
-// The skill event still fires BEFORE the first token, even though nothing renders it.
+// The runbook event still fires BEFORE the first token, even though nothing renders it.
 // The contract is now DIAGNOSTIC rather than visual: it is what lets a debug log time
-// selection separately from generation (backend.respond.skill_cue landing ahead of the
+// selection separately from generation (backend.respond.runbook_cue landing ahead of the
 // content stream), which is the trace a selector regression is read from. Emitting it
 // late would collapse those two costs into one indistinguishable span.
-func TestEmitSkillLoadBeforeFirstToken(t *testing.T) {
+func TestEmitRunbookLoadBeforeFirstToken(t *testing.T) {
 	sink := &orderSink{}
 	r := &fakeRouter{results: []models.ChatResult{{Content: "unused"}}}
 	deps := baseDeps(r, &fakeTools{})
-	deps.Backend = eagerSkillBackend{}
+	deps.Backend = eagerRunbookBackend{}
 	deps.Events = sink
 	cap := &traceCapture{}
 	deps.Trace = cap.record
@@ -162,7 +162,7 @@ func TestEmitSkillLoadBeforeFirstToken(t *testing.T) {
 		// after it and still ahead of the first token — so a trace can time selection
 		// separately from generation, and a consumer sees the authoritative record
 		// before any of the round's output.
-		"skill:Multi-agent orchestration,fallback_skill",
+		"runbook:Multi-agent orchestration,fallback_runbook",
 		"decision:multi_agent,daintree_foundation:degraded=false",
 		"tok:answer",
 		"end:answer",
@@ -178,7 +178,7 @@ func TestEmitSkillLoadBeforeFirstToken(t *testing.T) {
 		}
 		return -1
 	}
-	raw, cue, committed := traceIndex("backend.respond.raw_meta"), traceIndex("backend.respond.skill_cue"), traceIndex("backend.respond.meta")
+	raw, cue, committed := traceIndex("backend.respond.raw_meta"), traceIndex("backend.respond.runbook_cue"), traceIndex("backend.respond.meta")
 	if raw < 0 || cue <= raw || committed <= cue {
 		t.Fatalf("trace callback order raw=%d cue=%d committed=%d; events=%+v", raw, cue, committed, cap.events)
 	}

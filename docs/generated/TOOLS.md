@@ -173,6 +173,13 @@ already drifted out of agreement with each other and with the binary.
 | `recipe.list` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | List the Daintree recipes available in this project — the worktree/operation templates that recipe.run and worktree.c… |
 | `recipe.run` | project | operator | yes | grantable | `daintree-mcp` | serial | — | Run a Daintree recipe by recipeId, forwarding the recipe-defined `arguments` record verbatim |
 
+### `runbook.*`
+
+| Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
+|---|---|---|---|---|---|---|---|---|
+| `runbook.run.get` | read | supervisor | — | not needed | — | serial | — | Read your stepwise progress through a loaded runbook in THIS session: currentStep, per-step status (done\|skipped) wit… |
+| `runbook.step.advance` | local | supervisor | — | not needed | — | serial | — | Record that step N of a loaded runbook is done (or skipped) and move to nextStep; OMIT nextStep to finish the run |
+
 ### `scratch.*`
 
 | Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
@@ -182,13 +189,6 @@ already drifted out of agreement with each other and with the binary.
 | `scratch.get` | read | supervisor | — | not needed | — | serial | — | Read from a scratch store |
 | `scratch.delete` | local | supervisor | — | not needed | — | serial | — | Delete ONE key from a scratch store (storeId + key) |
 | `scratch.drop` | local | supervisor | — | not needed | — | serial | — | Discard an ENTIRE scratch store and every key in it, freeing one of the 20 per-session store slots (drop a finished s… |
-
-### `skill.*`
-
-| Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
-|---|---|---|---|---|---|---|---|---|
-| `skill.run.get` | read | supervisor | — | not needed | — | serial | — | Read your stepwise progress through a loaded skill's runbook in THIS session: currentStep, per-step status (done\|skip… |
-| `skill.step.advance` | local | supervisor | — | not needed | — | serial | — | Record that step N of a loaded skill's runbook is done (or skipped) and move to nextStep; OMIT nextStep to finish the… |
 
 ### `subagent.*`
 

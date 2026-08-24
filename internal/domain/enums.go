@@ -234,13 +234,13 @@ const (
 	JsonlToolResult         JsonlEventType = "tool:result"
 	JsonlError              JsonlEventType = "error"
 	JsonlInfo               JsonlEventType = "info"
-	JsonlSkillLoaded        JsonlEventType = "skill:loaded" // server-side runbook load; payload {titles:[]}
-	// JsonlSkillDecision is the committed per-round skill outcome: the whole active set
+	JsonlRunbookLoaded        JsonlEventType = "runbook:loaded" // server-side runbook load; payload {titles:[]}
+	// JsonlRunbookDecision is the committed per-round runbook outcome: the whole active set
 	// (id + title), the newly-loaded delta, and the selector's verdict including the
 	// degraded/fail-open flag. Emitted every round that reaches committed meta, so it
 	// reports the active set even when nothing new loaded. This is the line a scripted
-	// consumer asserts on; skill:loaded is an earlier, titles-only, per-attempt cue.
-	JsonlSkillDecision JsonlEventType = "skill:decision"
+	// consumer asserts on; runbook:loaded is an earlier, titles-only, per-attempt cue.
+	JsonlRunbookDecision JsonlEventType = "runbook:decision"
 	JsonlWarning       JsonlEventType = "warning" // non-fatal; does NOT change the terminal status
 	JsonlInterjection  JsonlEventType = "user:interjection"
 	// JsonlSession is the one-time header line: sessionId, project, tier, backend
@@ -385,21 +385,21 @@ func (s AsyncStatus) IsTerminal() bool {
 	return false
 }
 
-// SkillRunStatus tracks a skill run.
-type SkillRunStatus string
+// RunbookRunStatus tracks a runbook run.
+type RunbookRunStatus string
 
 const (
-	SkillRunActive    SkillRunStatus = "active"
-	SkillRunCompleted SkillRunStatus = "completed"
-	SkillRunAbandoned SkillRunStatus = "abandoned"
+	RunbookRunActive    RunbookRunStatus = "active"
+	RunbookRunCompleted RunbookRunStatus = "completed"
+	RunbookRunAbandoned RunbookRunStatus = "abandoned"
 )
 
-// SkillStepStatus marks how a skill step resolved.
-type SkillStepStatus string
+// RunbookStepStatus marks how a runbook step resolved.
+type RunbookStepStatus string
 
 const (
-	SkillStepDone    SkillStepStatus = "done"
-	SkillStepSkipped SkillStepStatus = "skipped"
+	RunbookStepDone    RunbookStepStatus = "done"
+	RunbookStepSkipped RunbookStepStatus = "skipped"
 )
 
 // AgentLaunchStage is a stage of the idempotent agent-spawn saga. Only

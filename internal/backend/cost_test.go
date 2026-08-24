@@ -219,7 +219,7 @@ func TestCostHookPanicDoesNotFailTheCall(t *testing.T) {
 // A RETRIED turn under-reports unless the client says so. Each attempt bills
 // independently — the backend aggregates re-rolls WITHIN a request, never across HTTP
 // attempts — so the succeeding attempt's `cost.total` omits everything the failed one
-// spent. The failed attempt got a meta event, which means its skill selector already ran
+// spent. The failed attempt got a meta event, which means its runbook selector already ran
 // and charged. Reporting that total as exact would show a number below the real bill.
 func TestRetriedTurnIsReportedAsIncomplete(t *testing.T) {
 	fail := "event: meta\ndata: {\"protocol_version\":2,\"request_id\":\"r1\",\"model\":\"m\",\"state\":\"dst1.a\"}\n\n" +

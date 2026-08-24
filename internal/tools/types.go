@@ -383,7 +383,7 @@ type ToolContext struct {
 	ReportProgress func(ToolProgress)
 
 	// --- optional (per-turn / per-actor / test-stripped) ---
-	SessionID string // skill step-progress checkpoints
+	SessionID string // runbook step-progress checkpoints
 	// ActorID is the wch_…/tmr_… of the non-interactive actor — REQUIRED for the
 	// grant lookup in dispatch Branch A.
 	ActorID string

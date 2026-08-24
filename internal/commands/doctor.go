@@ -79,7 +79,7 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 		return "MISSING"
 	}
 
-	// backend — the CLI's model gateway (owns the model credentials + prompts + skills).
+	// backend — the CLI's model gateway (owns the model credentials + prompts + runbooks).
 	//
 	// Every backend probe below runs one-shot. A turn PATIENTLY retries a transient
 	// failure (up to ~a minute, to ride out a restart), but a diagnostic must answer
@@ -165,7 +165,7 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 				"not advertised by this backend — /cost will have nothing to total", "")
 		}
 	}
-	// forbidden tools must never be exposed to the backend (skill find/load are reserved).
+	// forbidden tools must never be exposed to the backend (runbook find/load are reserved).
 	exposed, forbidden := exposedAndForbiddenTools(a)
 	push("backend tools", len(forbidden) == 0, fmt.Sprintf("%d exposed", exposed),
 		"a reserved tool is exposed: "+joinNames(forbidden))
@@ -328,14 +328,14 @@ func errDetail(err error, ok string) string {
 }
 
 // exposedAndForbiddenTools returns the count of tools the CLI would offer the backend
-// and any reserved names that must never be exposed (skill find/load, or the
+// and any reserved names that must never be exposed (runbook find/load, or the
 // daintree_internal prefix). The registry holds internal dotted names.
 func exposedAndForbiddenTools(a *app.App) (count int, forbidden []string) {
 	list := a.Registry.List()
 	count = len(list)
 	for _, t := range list {
 		switch t.Name {
-		case "skill.find", "skill.load":
+		case "runbook.find", "runbook.load":
 			forbidden = append(forbidden, t.Name)
 		}
 		if strings.HasPrefix(t.Name, "daintree_internal.") {

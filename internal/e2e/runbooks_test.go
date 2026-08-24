@@ -7,13 +7,13 @@ import (
 	"testing"
 )
 
-// skills_test.go drives `--list-skills` and `--skill` through the REAL binary against the
+// runbooks_test.go drives `--list-runbooks` and `--runbook` through the REAL binary against the
 // fake backend. The unit tests prove each layer; this proves the argv surface, the route,
 // the capability read and the wire field are actually connected to each other — which is
 // where a feature threaded through five packages usually breaks.
 
-// runSkillsCLI invokes the built binary against a fake backend with an isolated state dir.
-func runSkillsCLI(t *testing.T, backendURL string, args ...string) (string, string, int) {
+// runRunbooksCLI invokes the built binary against a fake backend with an isolated state dir.
+func runRunbooksCLI(t *testing.T, backendURL string, args ...string) (string, string, int) {
 	t.Helper()
 	cmd := exec.Command(buildBinary(t), args...)
 	cmd.Env = append(cmd.Environ(),
@@ -37,12 +37,12 @@ func runSkillsCLI(t *testing.T, backendURL string, args ...string) (string, stri
 	return stdout.String(), stderr.String(), code
 }
 
-// The listing is what makes --skill usable at all: you cannot name an id you cannot
+// The listing is what makes --runbook usable at all: you cannot name an id you cannot
 // enumerate. It must work with no project lease and no MCP.
-func TestBinaryListSkills(t *testing.T) {
+func TestBinaryListRunbooks(t *testing.T) {
 	be := newFakeBackend(t)
 
-	stdout, stderr, code := runSkillsCLI(t, be.baseURL(), "--list-skills")
+	stdout, stderr, code := runRunbooksCLI(t, be.baseURL(), "--list-runbooks")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 (stderr %q)", code, stderr)
 	}
@@ -52,24 +52,24 @@ func TestBinaryListSkills(t *testing.T) {
 		}
 	}
 
-	// --json must put ONE parseable document on stdout, because feeding ids into --skill
+	// --json must put ONE parseable document on stdout, because feeding ids into --runbook
 	// from a script is the whole reason the JSON form exists.
-	stdout, stderr, code = runSkillsCLI(t, be.baseURL(), "--list-skills", "--json")
+	stdout, stderr, code = runRunbooksCLI(t, be.baseURL(), "--list-runbooks", "--json")
 	if code != 0 {
 		t.Fatalf("json exit = %d, want 0 (stderr %q)", code, stderr)
 	}
 	var doc struct {
 		CatalogRevision string `json:"catalogRevision"`
-		Skills          []struct {
+		Runbooks          []struct {
 			ID    string `json:"id"`
 			Title string `json:"title"`
-		} `json:"skills"`
+		} `json:"runbooks"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
 		t.Fatalf("stdout is not one JSON document (%v):\n%s", err, stdout)
 	}
-	if len(doc.Skills) != 2 {
-		t.Fatalf("skills = %+v, want the fake's two entries", doc.Skills)
+	if len(doc.Runbooks) != 2 {
+		t.Fatalf("runbooks = %+v, want the fake's two entries", doc.Runbooks)
 	}
 	if doc.CatalogRevision != "sha256:test" {
 		t.Fatalf("catalogRevision = %q, want sha256:test", doc.CatalogRevision)
@@ -79,11 +79,11 @@ func TestBinaryListSkills(t *testing.T) {
 // The end-to-end proof that a pin actually reaches the backend: the fake records every
 // /respond body, so this asserts on what the SERVER saw rather than on what the client
 // believes it sent.
-func TestBinaryPinnedSkillReachesTheWire(t *testing.T) {
+func TestBinaryPinnedRunbookReachesTheWire(t *testing.T) {
 	be := newFakeBackend(t, sseRound{contentTokens: []string{"ok"}})
 
-	stdout, stderr, code := runSkillsCLI(t, be.baseURL(),
-		"--json", "--skill", "daintree.foundation", "hello")
+	stdout, stderr, code := runRunbooksCLI(t, be.baseURL(),
+		"--json", "--runbook", "daintree.foundation", "hello")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 (stdout %q stderr %q)", code, stdout, stderr)
 	}
@@ -96,9 +96,9 @@ func TestBinaryPinnedSkillReachesTheWire(t *testing.T) {
 	if sel == nil {
 		t.Fatalf("no selection block on the wire: %+v", req)
 	}
-	raw, _ := sel["pinned_skill_ids"].([]any)
+	raw, _ := sel["pinned_runbook_ids"].([]any)
 	if len(raw) != 1 || raw[0] != "daintree.foundation" {
-		t.Fatalf("selection.pinned_skill_ids = %v, want [daintree.foundation]", raw)
+		t.Fatalf("selection.pinned_runbook_ids = %v, want [daintree.foundation]", raw)
 	}
 }
 
@@ -109,7 +109,7 @@ func TestBinaryPinnedSkillReachesTheWire(t *testing.T) {
 func TestBinaryUnpinnedRunOmitsThePinField(t *testing.T) {
 	be := newFakeBackend(t, sseRound{contentTokens: []string{"ok"}})
 
-	if _, stderr, code := runSkillsCLI(t, be.baseURL(), "--json", "hello"); code != 0 {
+	if _, stderr, code := runRunbooksCLI(t, be.baseURL(), "--json", "hello"); code != 0 {
 		t.Fatalf("exit = %d, want 0 (stderr %q)", code, stderr)
 	}
 	req := be.request(0)
@@ -120,30 +120,30 @@ func TestBinaryUnpinnedRunOmitsThePinField(t *testing.T) {
 	if sel == nil {
 		t.Fatalf("no selection block on the wire: %+v", req)
 	}
-	if _, present := sel["pinned_skill_ids"]; present {
+	if _, present := sel["pinned_runbook_ids"]; present {
 		t.Fatalf("an unpinned run put the field on the wire: %+v", sel)
 	}
 }
 
 // The fatal preflight, end to end and asserted on the SERVER: a mistyped id must cost
 // zero turns. This is the test that catches the preflight being skipped, or moved after
-// the first /respond — at which point --skill would still "work" in every other test
+// the first /respond — at which point --runbook would still "work" in every other test
 // while quietly having spent a turn to discover the typo.
-func TestBinaryUnknownPinnedSkillSpendsNoTurn(t *testing.T) {
+func TestBinaryUnknownPinnedRunbookSpendsNoTurn(t *testing.T) {
 	be := newFakeBackend(t, sseRound{contentTokens: []string{"ok"}})
 
 	// Human mode first: the message belongs on stderr, and stdout — the ANSWER channel —
 	// must stay empty so a caller capturing it gets nothing rather than an error rendered
 	// as the reply.
-	stdout, stderr, code := runSkillsCLI(t, be.baseURL(), "--skill", "daintree.foundatoin", "hello")
+	stdout, stderr, code := runRunbooksCLI(t, be.baseURL(), "--runbook", "daintree.foundatoin", "hello")
 	if code == 0 {
-		t.Fatalf("a mistyped --skill must fail the launch (stdout %q)", stdout)
+		t.Fatalf("a mistyped --runbook must fail the launch (stdout %q)", stdout)
 	}
 	if strings.TrimSpace(stdout) != "" {
 		t.Fatalf("stdout must stay empty on a failed human run, got %q", stdout)
 	}
 	// The near miss is the whole point: "unknown id" alone leaves you re-reading the
-	// backend's source, which is what --list-skills and this check exist to end.
+	// backend's source, which is what --list-runbooks and this check exist to end.
 	if !strings.Contains(stderr, "daintree.foundation") {
 		t.Fatalf("stderr does not offer the near miss: %q", stderr)
 	}
@@ -152,9 +152,9 @@ func TestBinaryUnknownPinnedSkillSpendsNoTurn(t *testing.T) {
 	// only channel a scripted caller reads. The message must survive the change of
 	// channel — a machine-readable failure that dropped the near miss would be strictly
 	// worse than the human one.
-	stdout, _, code = runSkillsCLI(t, be.baseURL(), "--json", "--skill", "daintree.foundatoin", "hello")
+	stdout, _, code = runRunbooksCLI(t, be.baseURL(), "--json", "--runbook", "daintree.foundatoin", "hello")
 	if code == 0 {
-		t.Fatal("a mistyped --skill must fail the launch under --json too")
+		t.Fatal("a mistyped --runbook must fail the launch under --json too")
 	}
 	var sawError bool
 	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
@@ -185,31 +185,31 @@ func TestBinaryUnknownPinnedSkillSpendsNoTurn(t *testing.T) {
 
 // The round trip, in one invocation: the pin goes out on the wire AND the committed
 // decision comes back on stdout naming it. Both halves already have a test —
-// TestBinaryPinnedSkillReachesTheWire watches the request, TestBinaryJSONOneShot watches
+// TestBinaryPinnedRunbookReachesTheWire watches the request, TestBinaryJSONOneShot watches
 // the stream for the backend's own unforced selection — and both would keep passing if
-// the two ends came apart, because neither one ever pins a skill and then reads what the
-// transcript said about it. That correlation is what every future skill test stands on:
-// a harness asserts "the runbook under development was active" by reading skill:decision
-// after naming it with --skill, and nothing else proves those are the same skill.
-func TestBinaryPinnedSkillRoundTripsThroughJSON(t *testing.T) {
+// the two ends came apart, because neither one ever pins a runbook and then reads what the
+// transcript said about it. That correlation is what every future runbook test stands on:
+// a harness asserts "the runbook under development was active" by reading runbook:decision
+// after naming it with --runbook, and nothing else proves those are the same runbook.
+func TestBinaryPinnedRunbookRoundTripsThroughJSON(t *testing.T) {
 	const (
-		skillID    = "daintree.foundation"
-		skillTitle = "Foundation"
+		runbookID    = "daintree.foundation"
+		runbookTitle = "Foundation"
 	)
-	// The fake does not honour pins — it replays a script — so the round's skills block
+	// The fake does not honour pins — it replays a script — so the round's runbooks block
 	// stands in for a backend that did. That is the right seam: what is under test is the
 	// CLI's two ends, not the backend's obedience, which its own suite owns.
 	be := newFakeBackend(t, sseRound{
 		contentTokens: []string{"ok"},
-		skills: skillsBlock(false,
-			[]string{skillID, skillTitle},
-			[]string{skillID, skillTitle}),
+		runbooks: runbooksBlock(false,
+			[]string{runbookID, runbookTitle},
+			[]string{runbookID, runbookTitle}),
 	})
 
-	// runSkillsCLI passes argv through verbatim, so --json is the caller's job; without it
+	// runRunbooksCLI passes argv through verbatim, so --json is the caller's job; without it
 	// the answer channel carries prose and there is no decision to read.
-	stdout, stderr, code := runSkillsCLI(t, be.baseURL(),
-		"--json", "--skill", skillID, "hello")
+	stdout, stderr, code := runRunbooksCLI(t, be.baseURL(),
+		"--json", "--runbook", runbookID, "hello")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 (stdout %q stderr %q)", code, stdout, stderr)
 	}
@@ -223,9 +223,9 @@ func TestBinaryPinnedSkillRoundTripsThroughJSON(t *testing.T) {
 	if sel == nil {
 		t.Fatalf("no selection block on the wire: %+v", req)
 	}
-	pinned, _ := sel["pinned_skill_ids"].([]any)
-	if len(pinned) != 1 || pinned[0] != skillID {
-		t.Fatalf("selection.pinned_skill_ids = %v, want [%s]", pinned, skillID)
+	pinned, _ := sel["pinned_runbook_ids"].([]any)
+	if len(pinned) != 1 || pinned[0] != runbookID {
+		t.Fatalf("selection.pinned_runbook_ids = %v, want [%s]", pinned, runbookID)
 	}
 
 	// Inbound: the committed decision on the real --json stream. Parsed as generic JSON so
@@ -239,12 +239,12 @@ func TestBinaryPinnedSkillRoundTripsThroughJSON(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &raw); err != nil {
 			t.Fatalf("stdout is not JSONL (%v): %q", err, line)
 		}
-		if raw["type"] == "skill:decision" {
+		if raw["type"] == "runbook:decision" {
 			decisions = append(decisions, raw)
 		}
 	}
 	if len(decisions) != 1 {
-		t.Fatalf("skill:decision count = %d, want one for the single scripted round:\n%s",
+		t.Fatalf("runbook:decision count = %d, want one for the single scripted round:\n%s",
 			len(decisions), stdout)
 	}
 
@@ -253,10 +253,10 @@ func TestBinaryPinnedSkillRoundTripsThroughJSON(t *testing.T) {
 	// the pin on every round after the first.
 	active, _ := decisions[0]["active"].([]any)
 	if len(active) != 1 {
-		t.Fatalf("skill:decision active = %#v, want the pinned skill", decisions[0]["active"])
+		t.Fatalf("runbook:decision active = %#v, want the pinned runbook", decisions[0]["active"])
 	}
 	entry, _ := active[0].(map[string]any)
-	if entry["id"] != skillID || entry["title"] != skillTitle {
-		t.Fatalf("active[0] = %#v, want id %q title %q", entry, skillID, skillTitle)
+	if entry["id"] != runbookID || entry["title"] != runbookTitle {
+		t.Fatalf("active[0] = %#v, want id %q title %q", entry, runbookID, runbookTitle)
 	}
 }

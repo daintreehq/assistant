@@ -153,7 +153,7 @@ call that carries its own deadline (a boot handshake, a scheduler item) never ou
 
 ## See also
 
-- The backend integration — model, skills, prompt assembly — [`BACKEND.md`](BACKEND.md).
+- The backend integration — model, runbooks, prompt assembly — [`BACKEND.md`](BACKEND.md).
 - Environment variables (tier, offline, state dir) — [`README.md`](../README.md#environment-variables).
 - Full-fidelity tracing for debugging — set `DAINTREE_ASSISTANT_DEBUG_LOG=1`
   ([`LOGGING.md`](LOGGING.md) is the event reference).

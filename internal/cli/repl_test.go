@@ -90,16 +90,16 @@ func newSink(tty bool) (*consoleSink, *bytes.Buffer) {
 	return &consoleSink{r: r, diagnostics: r, tty: tty}, &buf
 }
 
-// Backend skill selection writes NOTHING to the console transcript, matching the attached session.
+// Backend runbook selection writes NOTHING to the console transcript, matching the attached session.
 // It is prompt-assembly machinery, not a step in the operator's narrative; the run log /
 // --json stream / debug trace keep the signal. Pinned so the cue is not reintroduced by
 // reflex.
-func TestConsoleSinkSkillLoadedIsSilent(t *testing.T) {
+func TestConsoleSinkRunbookLoadedIsSilent(t *testing.T) {
 	s, buf := newSink(false)
-	s.SkillLoaded([]string{"Orchestrate agents"})
-	s.SkillLoaded([]string{"Orchestrate agents", "Plain worktree"})
+	s.RunbookLoaded([]string{"Orchestrate agents"})
+	s.RunbookLoaded([]string{"Orchestrate agents", "Plain worktree"})
 	if got := buf.String(); got != "" {
-		t.Fatalf("skill loads must print nothing, got %q", got)
+		t.Fatalf("runbook loads must print nothing, got %q", got)
 	}
 }
 
@@ -110,41 +110,41 @@ func TestConsoleSinkSkillLoadedIsSilent(t *testing.T) {
 // The committed per-round decision is silent for the same reason, and more so: it fires
 // on EVERY round, so even a muted cue would print a line per round for prompt-assembly
 // machinery the operator cannot act on.
-func TestConsoleSinkSkillDecisionIsSilent(t *testing.T) {
+func TestConsoleSinkRunbookDecisionIsSilent(t *testing.T) {
 	s, buf := newSink(false)
 	s.AssistantToken("before ")
-	s.SkillDecision(agent.SkillDecisionEvent{
-		Active:   []agent.SkillRef{{ID: "orchestrate", Title: "Orchestrate agents"}},
-		Selector: agent.SkillSelectorOutcome{Ran: true, Degraded: true},
+	s.RunbookDecision(agent.RunbookDecisionEvent{
+		Active:   []agent.RunbookRef{{ID: "orchestrate", Title: "Orchestrate agents"}},
+		Selector: agent.RunbookSelectorOutcome{Ran: true, Degraded: true},
 	})
 	if !s.answerOpen {
-		t.Fatal("a silent skill decision closed the open answer")
+		t.Fatal("a silent runbook decision closed the open answer")
 	}
 	s.AssistantToken("after")
 	s.AssistantEnd("", "")
 
 	got := buf.String()
 	if strings.Contains(got, "Orchestrate agents") || strings.Contains(got, "degraded") {
-		t.Fatalf("skill decisions must print nothing, got %q", got)
+		t.Fatalf("runbook decisions must print nothing, got %q", got)
 	}
 	if !strings.Contains(got, "before after") {
-		t.Fatalf("the answer was split by a mid-stream skill decision: %q", got)
+		t.Fatalf("the answer was split by a mid-stream runbook decision: %q", got)
 	}
 }
 
-func TestConsoleSinkSkillLoadedDoesNotSplitAnswer(t *testing.T) {
+func TestConsoleSinkRunbookLoadedDoesNotSplitAnswer(t *testing.T) {
 	s, buf := newSink(false)
 	s.AssistantToken("before ")
-	s.SkillLoaded([]string{"Orchestrate agents"})
+	s.RunbookLoaded([]string{"Orchestrate agents"})
 	if !s.answerOpen {
-		t.Fatal("a silent skill load closed the open answer")
+		t.Fatal("a silent runbook load closed the open answer")
 	}
 	s.AssistantToken("after")
 	s.AssistantEnd("", "")
 
 	got := buf.String()
 	if !strings.Contains(got, "before after") {
-		t.Fatalf("the answer was split by a mid-stream skill load: %q", got)
+		t.Fatalf("the answer was split by a mid-stream runbook load: %q", got)
 	}
 }
 

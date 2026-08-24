@@ -97,19 +97,19 @@ func (s *consoleSink) Interjection(text string) {
 	s.r.Info("you (mid-turn): " + text)
 }
 
-// SkillLoaded is DELIBERATELY silent, matching the attached session: which runbooks the backend
+// RunbookLoaded is DELIBERATELY silent, matching the attached session: which runbooks the backend
 // selected is prompt-assembly machinery, not a step in the operator's narrative. See
-// Session.emitSkillLoads.
+// Session.emitRunbookLoads.
 //
 // Note it does NOT call closeAnswer. The old visible cue had to, to terminate the open
 // answer paragraph before printing; doing it for a silent event would split one streamed
 // answer into two paragraphs for no visible reason.
-func (s *consoleSink) SkillLoaded([]string) {}
+func (s *consoleSink) RunbookLoaded([]string) {}
 
-// SkillDecision is silent for the same reason, and more so: it fires on EVERY round,
+// RunbookDecision is silent for the same reason, and more so: it fires on EVERY round,
 // including ones that changed nothing. It exists for the --json stream and the durable
 // run log, not for a person reading an answer scroll past.
-func (s *consoleSink) SkillDecision(agent.SkillDecisionEvent) {}
+func (s *consoleSink) RunbookDecision(agent.RunbookDecisionEvent) {}
 
 // ToolBatch / ToolState / ToolProgress are live-footer-only; the console prints
 // concrete tool calls + results, not the per-call substep stream.

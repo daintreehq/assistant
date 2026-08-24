@@ -16,7 +16,7 @@ import (
 	"github.com/daintreehq/assistant/internal/tools/contextx"
 	"github.com/daintreehq/assistant/internal/tools/extractionx"
 	"github.com/daintreehq/assistant/internal/tools/mcpx"
-	"github.com/daintreehq/assistant/internal/tools/skill"
+	"github.com/daintreehq/assistant/internal/tools/runbook"
 )
 
 // This file holds the small integrator adapters that bridge each tool family's
@@ -343,7 +343,7 @@ func (a mcpwrapWorkflowStoreAdapter) UpdateWorkflowRun(_ context.Context, id str
 	return a.s.UpdateWorkflowRun(id, patch)
 }
 
-/* ----------------------------- Skill adapters ---------------------------- */
+/* ----------------------------- Runbook adapters ---------------------------- */
 
 // artifactStoreAdapter resolves an overflow artifact, hot cache first then the
 // durable table. It reads the session's in-memory store LAZILY: the tool builder
@@ -370,14 +370,14 @@ func (a artifactStoreAdapter) Get(id string) (string, bool) {
 	return "", false
 }
 
-// checkSkillStepConsistency is the decision-correctness judge wired into
-// skill.step.advance: it asks the backend's skill_step_consistency task whether a
+// checkRunbookStepConsistency is the decision-correctness judge wired into
+// runbook.step.advance: it asks the backend's runbook_step_consistency task whether a
 // recorded step advance looks like a mistake (a bad jump, a regression, an impossible
 // sequence, a premature finish) and returns the {reason,confidence,matched} verdict —
 // matched=true ⇒ the advance is FLAGGED as likely-wrong. A backend error returns the
 // fallback verdict AND the error, so the caller (observeStepAdvance) logs checkOk=false
 // truthfully rather than masking a failed check as a passing one.
-func (a *App) checkSkillStepConsistency(ctx context.Context, in skill.ConsistencyCheckInput) (domain.ModelJudgeAnswer, error) {
+func (a *App) checkRunbookStepConsistency(ctx context.Context, in runbook.ConsistencyCheckInput) (domain.ModelJudgeAnswer, error) {
 	fallback := domain.ModelJudgeAnswer{
 		Reason:     "Could not evaluate step consistency.",
 		Confidence: 0.3,
@@ -387,8 +387,8 @@ func (a *App) checkSkillStepConsistency(ctx context.Context, in skill.Consistenc
 	if in.NextStep != nil {
 		requestedNext = itoa(*in.NextStep)
 	}
-	out, err := backend.RunSkillStepConsistency(ctx, a.Backend, backend.SkillStepConsistencyInput{
-		SkillID:           in.SkillID,
+	out, err := backend.RunRunbookStepConsistency(ctx, a.Backend, backend.RunbookStepConsistencyInput{
+		RunbookID:           in.RunbookID,
 		CompletedStep:     in.CompletedStep,
 		Status:            string(in.StepStatus),
 		RequestedNext:     requestedNext,
@@ -406,10 +406,10 @@ func (a *App) checkSkillStepConsistency(ctx context.Context, in skill.Consistenc
 	return domain.ModelJudgeAnswer{Reason: out.Reason, Confidence: out.Confidence, Matched: out.Matched}, nil
 }
 
-// stepsToMaps renders a SkillStepProgress[] as the []map[string]any the backend task
+// stepsToMaps renders a RunbookStepProgress[] as the []map[string]any the backend task
 // input carries (a JSON round-trip preserves the progress shape); a marshal failure
 // drops that step rather than failing the check.
-func stepsToMaps(steps []domain.SkillStepProgress) []map[string]any {
+func stepsToMaps(steps []domain.RunbookStepProgress) []map[string]any {
 	out := make([]map[string]any, 0, len(steps))
 	for _, s := range steps {
 		b, err := json.Marshal(s)

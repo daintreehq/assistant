@@ -61,7 +61,7 @@ type WorkflowPlanInput struct {
 	Scope            string             `json:"scope,omitempty"`
 	RuntimeSummary   map[string]any     `json:"runtime_summary,omitempty"`
 	ToolInventory    []WorkflowToolInfo `json:"tool_inventory,omitempty"`
-	ActiveSkillIDs   []string           `json:"active_skill_ids,omitempty"`
+	ActiveRunbookIDs   []string           `json:"active_runbook_ids,omitempty"`
 	ExistingWorkflow *WorkflowSnapshot  `json:"existing_workflow,omitempty"`
 	RelevantMemories []string           `json:"relevant_memories,omitempty"`
 	OpenResources    []map[string]any   `json:"open_resources,omitempty"`

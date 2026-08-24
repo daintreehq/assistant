@@ -283,18 +283,18 @@ authorization, which is why it does not claim any.
 - Unlike a one-shot's default, an MCP session **does** run the scheduler, so watchers,
   timers and async futures actually settle while it is open. A one-shot can opt into the
   same shape with `--run-scheduler`.
-- **`skills` pins runbooks for the session**, the MCP twin of `--skill` (see below for
+- **`runbooks` pins runbooks for the session**, the MCP twin of `--runbook` (see below for
   the full semantics — they are identical, deliberately: the two headless surfaces must
-  not drift). Omitting it inherits whatever `--skill` this server process was launched
+  not drift). Omitting it inherits whatever `--runbook` this server process was launched
   with; passing an explicit `[]` clears those defaults for this session. An **unknown** id fails
   the **open**, not the first turn, so the failure lands where the caller is looking —
   when there is a catalog to check it against. A backend that accepts pins but advertises
   no catalog opens with a warning instead, and reports the bad id on the first turn; a
   backend that does not accept pins at all fails the open whatever the ids are. A
-  catalogued id that this profile cannot execute also opens fine and warns per turn. `facts.pinnedSkills` reports what the session REQUESTS on
+  catalogued id that this profile cannot execute also opens fine and warns per turn. `facts.pinnedRunbooks` reports what the session REQUESTS on
   every turn — the only way a caller that inherited a server-level default can see them.
   It is not a claim the backend honoured each one: an id can be in the catalog and still
-  come back `pinned_skill_not_executable` or `pinned_skill_over_cap`.
+  come back `pinned_runbook_not_executable` or `pinned_runbook_over_cap`.
 
 ### Diagnosing a run
 
@@ -402,7 +402,7 @@ that is the signal that the stream ended abnormally.
 (see [Multi-turn](#multi-turn)) — there is no JSONL *interactive* mode. A prompt that begins
 with a dash needs `--` first (`daintree-assistant --json -- "--summarize this"`), or the
 parser reads it as an option. The two exceptions are `doctor --json` and
-`--list-skills --json`: both are reads that answer with ONE document rather than a run,
+`--list-runbooks --json`: both are reads that answer with ONE document rather than a run,
 and a gate or a catalog a script cannot parse is not one.
 
 ### Configuration
@@ -428,8 +428,8 @@ Every knob is a flag, and every flag shadows a trusted env var and wins over it.
 | `--project-instructions-file PATH` | — | the file's CONTENT becomes `DAINTREE.md`. Capped at 16 KiB |
 | `--timeout DURATION` | — | one-shot only; `0` means no limit |
 | `--run-scheduler` | — | one-shot only; run the scheduler and await this run's async work. Requires a positive `--timeout` |
-| `--skill ID` | — | pin a backend runbook for every turn; repeatable. See below |
-| `--list-skills` | — | print the runbooks this backend can load, then exit |
+| `--runbook ID` | — | pin a backend runbook for every turn; repeatable. See below |
+| `--list-runbooks` | — | print the runbooks this backend can load, then exit |
 
 `--timeout` and `--run-scheduler` are only ever *read* on the one-shot route — the
 interactive routes already run a scheduler of their own, and `daemon` / `doctor` have no
@@ -456,7 +456,7 @@ than a setting:
   input that never sends EOF cannot be preempted by `--timeout` or by Ctrl-C, because
   neither interrupts a read already in flight. Close the stream to finish the prompt.
 - **`--project-instructions-file PATH`** puts that file's content where the project's own
-  `DAINTREE.md` would go, so a skill can be tested against a synthetic brief without
+  `DAINTREE.md` would go, so a runbook can be tested against a synthetic brief without
   writing one into the repo under test. It WINS over any discovered `DAINTREE.md`
   (including the one the embedded host loads per boot); without the flag, discovery is
   unchanged. Unlike discovery, a named file that is missing, empty, or oversized is
@@ -480,55 +480,55 @@ when isolation has to be guaranteed. Both it
 and `--window-id` are also accepted by `daintree.session.open` as `projectId`/`windowId`,
 since that surface exists to repoint a process a client cannot restart.
 
-### Naming a skill: `--skill` and `--list-skills`
+### Naming a runbook: `--runbook` and `--list-runbooks`
 
 The backend picks which runbooks a turn loads. That is right for ordinary use and wrong
 for developing a runbook: when the turn goes badly you cannot tell whether the runbook is
-bad or the selector simply did not pick it. `--skill` removes that ambiguity by naming
+bad or the selector simply did not pick it. `--runbook` removes that ambiguity by naming
 one.
 
 ```bash
-daintree-assistant --list-skills                       # what can this backend load?
-daintree-assistant --list-skills --json | jq -r '.skills[].id'
-daintree-assistant --skill daintree.orchestration.multi-agent "spin up two reviewers"
-daintree-assistant --skill a.one --skill b.two "..."   # repeat for more than one
+daintree-assistant --list-runbooks                       # what can this backend load?
+daintree-assistant --list-runbooks --json | jq -r '.runbooks[].id'
+daintree-assistant --runbook daintree.orchestration.multi-agent "spin up two reviewers"
+daintree-assistant --runbook a.one --runbook b.two "..."   # repeat for more than one
 ```
 
-`--list-skills` is the lightest route in the binary: one capability read against the
+`--list-runbooks` is the lightest route in the binary: one capability read against the
 configured endpoint. It takes no project lease, opens no database and connects no MCP, so
 it answers while another assistant owns the project. Text by default; `--json` writes one
-indented document, `{"catalogRevision": "...", "skills": [{"id", "title"}]}`, sorted by
+indented document, `{"catalogRevision": "...", "runbooks": [{"id", "title"}]}`, sorted by
 id. Exit `0` on a catalog read — **including an advertised empty one**, which is a real
 answer — `1` on a config/fetch failure or a backend that advertises no catalog at all,
 `2` on cancellation. A `--json` failure is still JSON:
 `{"error": {"code": "...", "message": "..."}}`.
 
-`--skill` is repeatable, one id per occurrence — commas are not a separator, because a
+`--runbook` is repeatable, one id per occurrence — commas are not a separator, because a
 comma is legal inside an opaque backend id. Order matters: the backend admits pins in the
-order given and budgets them against its active-skill cap. Exact repeats collapse; an
-empty value (`--skill=`, which is what an unset shell variable expands to) is rejected
+order given and budgets them against its active-runbook cap. Exact repeats collapse; an
+empty value (`--runbook=`, which is what an unset shell variable expands to) is rejected
 rather than run unpinned. Pins are rejected on routes that never run a turn
 (`doctor`, `status`, `daemon`, `reset`, `support-bundle`) instead of being silently
 ignored.
 
-**Nothing about `--skill` is allowed to fail quietly**, because a run that silently did
+**Nothing about `--runbook` is allowed to fail quietly**, because a run that silently did
 not load the runbook looks exactly like one that did:
 
-- The backend must advertise `skills.pinned_skill_ids`. The field is validated with
+- The backend must advertise `runbooks.pinned_runbook_ids`. The field is validated with
   `extra="forbid"`, so sending it to a deployment that predates it would 422 the whole
   turn — and withholding it would run unpinned. An unaware or unreachable backend
   therefore **fails the launch before a turn is spent**.
 - An id that is not in the advertised catalog fails the launch too, with a near miss
-  (`unknown skill id "daintree.foundatoin"; did you mean "daintree.foundation"?`).
+  (`unknown runbook id "daintree.foundatoin"; did you mean "daintree.foundation"?`).
 - A backend that accepts pins but advertises no catalog cannot be checked locally. That
   is a `warning`, not a failure, and the server-side codes below are the backstop.
 - A pin the backend accepted but could not honour arrives as an ordinary `warning` event
-  carrying its code: `unknown_skill_id_ignored`, `pinned_skill_not_executable` (the id
-  exists but is outside this profile's menu), or `pinned_skill_over_cap`. Each is
+  carrying its code: `unknown_runbook_id_ignored`, `pinned_runbook_not_executable` (the id
+  exists but is outside this profile's menu), or `pinned_runbook_over_cap`. Each is
   reported once per session — the pin list cannot change mid-conversation, so repeating
   it every round would only bury the tool activity.
 
-A pinned skill never narrows the tool inventory. It rides alongside the backend's own
+A pinned runbook never narrows the tool inventory. It rides alongside the backend's own
 selection rather than replacing it, so the turn still loads whatever else it needs.
 
 Four rules worth knowing before you script against them:
@@ -587,8 +587,8 @@ from 0. Types:
 | `assistant:end` | `content` | final answer (authoritative) |
 | `assistant:cancelled` | `content` | aborted; the streamed buffer is dropped |
 | `user:interjection` | `text` | a prompt folded into the running turn |
-| `skill:loaded` | `titles[]` | the backend's selector loaded runbooks (early cue, not authoritative) |
-| `skill:decision` | `active[]`, `newlyLoaded[]`, `selector` | the committed skill outcome for a round |
+| `runbook:loaded` | `titles[]` | the backend's selector loaded runbooks (early cue, not authoritative) |
+| `runbook:decision` | `active[]`, `newlyLoaded[]`, `selector` | the committed runbook outcome for a round |
 | `tool:call` | `id`, `name`, `args` | a call is starting |
 | `tool:result` | `id`, `name`, `ok`, `summary`, `error`, `auditId?`, `async?` | settled |
 | `info` / `warning` | `message` | non-fatal; **neither changes the exit code** |
@@ -601,12 +601,12 @@ from 0. Types:
 **Do not treat a `warning` as failure, and do not decide the outcome from an `error`
 line.** Gate on the terminal `result` envelope — it is the only authority.
 
-`skill:decision` is what a skill test asserts on. It is emitted once per round that
+`runbook:decision` is what a runbook test asserts on. It is emitted once per round that
 reaches committed metadata — **including rounds where nothing new loaded**, so the active
 set is reported even when it did not change:
 
 ```json
-{"type":"skill:decision","ts":1787300000002,"seq":9,
+{"type":"runbook:decision","ts":1787300000002,"seq":9,
  "active":[{"id":"multi_agent","title":"Multi-agent orchestration"},
            {"id":"daintree_foundation","title":"Daintree orchestration foundation"}],
  "newlyLoaded":[{"id":"multi_agent","title":"Multi-agent orchestration"}],
@@ -623,8 +623,8 @@ are `""` rather than absent.
 the previous round's active set, so a run can carry precisely the right runbook for
 entirely the wrong reason — `active` alone cannot tell you that happened.
 
-`skill:loaded` still fires, unchanged, and remains titles-only. Its value is *timing*: it
-is the only skill signal available before the upstream model connects. It is **not**
+`runbook:loaded` still fires, unchanged, and remains titles-only. Its value is *timing*: it
+is the only runbook signal available before the upstream model connects. It is **not**
 authoritative — it fires per attempt on a delta, so a retried round can report a load that
 the committed round did not repeat. Never reconstruct the active set from it.
 
@@ -856,10 +856,10 @@ An empty script — stdin with no prompt on it at all, only blank lines or comma
 run **failure** (exit 1, reported on the stream), not a quiet success. It is nearly
 always a harness mistake, and a transcript of nothing should not look like a clean run.
 
-## Skill-authoring test loop
+## Runbook-authoring test loop
 
 Developing a runbook has two halves that fail differently, and the loop below exists to
-keep them apart. The **backend** owns skills — it loads them from disk, selects them, and
+keep them apart. The **backend** owns runbooks — it loads them from disk, selects them, and
 injects the body — so an authoring mistake shows up there as a catalog that will not load.
 The **CLI** is what makes a run repeatable and readable: the same prompt every time, state
 that shares nothing with your cockpit, and a JSONL transcript that says which runbook was
@@ -871,37 +871,37 @@ tree — so the backend merges a second directory on top of it. Point it there i
 `../assistant-backend/.env`, where `.env.example` already carries the line commented out,
 rather than as a command prefix: `./dev` sources `.env` with `set -a` and deliberately
 overwrites the inherited environment, so a prefixed value loses to any line the file sets.
-(A direct `DAINTREE_SKILLS_OVERLAY_DIR=… python -m daintree_assistant_server` does honour
+(A direct `DAINTREE_RUNBOOKS_OVERLAY_DIR=… python -m daintree_assistant_server` does honour
 the prefix — process environment outranks dotenv — but `./dev` is the usual way in.)
 
 ```ini
 # ../assistant-backend/.env
-DAINTREE_SKILLS_OVERLAY_DIR=/tmp/skill-harness/skills
+DAINTREE_RUNBOOKS_OVERLAY_DIR=/tmp/runbook-harness/runbooks
 ```
 
 Then, from a first terminal, create the directory and start the server — leave it running:
 
 ```bash
-mkdir -p /tmp/skill-harness/skills
+mkdir -p /tmp/runbook-harness/runbooks
 cd ../assistant-backend && ./dev
 ```
 
 It binds the `HOST`/`PORT` from `.env`, which is `127.0.0.1:8473` only if you started from
 the scaffold. Empty is the deliberate starting state: the overlay is loaded during startup,
-so a skill that fails to parse there is a **readiness** failure rather than a reload
+so a runbook that fails to parse there is a **readiness** failure rather than a reload
 failure — the server boots but stays unready, and the reload route below is
 readiness-gated, so it answers `503` and cannot dig you out. Boot empty and the first draft
 is recoverable without a restart.
 
-**2. Write the skill.** The filename stem MUST equal the frontmatter `id` — the loader
+**2. Write the runbook.** The filename stem MUST equal the frontmatter `id` — the loader
 passes `path.stem` as the expected id and rejects the file otherwise — so this one goes to
-`/tmp/skill-harness/skills/daintree.example.skill-under-test.md`. Only top-level `*.md`
+`/tmp/runbook-harness/runbooks/daintree.example.runbook-under-test.md`. Only top-level `*.md`
 files in the directory are read; subdirectories are ignored.
 
 ```markdown
 ---
-id: daintree.example.skill-under-test
-title: Skill under test
+id: daintree.example.runbook-under-test
+title: Runbook under test
 summary: One line the selector reads to decide whether this runbook fits.
 whenToUse: The situations this runbook is for, and the ones it is not.
 risk: read
@@ -922,7 +922,7 @@ misbehaving. `requiredTools` names dotted CLI tools, but the names are only synt
 on load: a typo neither fails the reload nor creates a tool, so check them against the
 inventory yourself.
 
-An overlay skill whose `id` matches a packaged one **replaces** it; a new id is **added**.
+An overlay runbook whose `id` matches a packaged one **replaces** it; a new id is **added**.
 That is what lets you iterate on a shipped runbook and develop a new one with the same
 mechanism, without editing the server's tree either way. Give the overlay its own
 directory: pointing it at the packaged one is a no-op, and a path that exists but is not a
@@ -931,15 +931,15 @@ directory fails the load outright.
 **3. Reload, from a second terminal.**
 
 ```bash
-curl --fail-with-body -sS -X POST http://127.0.0.1:8473/v1/daintree/skills/reload
+curl --fail-with-body -sS -X POST http://127.0.0.1:8473/v1/daintree/runbooks/reload
 ```
 
 The **path** is captured once at startup, so moving the overlay needs a restart; its
 **contents** are re-read here, which is the whole point — edit, POST, run, without losing
 the process. Once the server is ready this is validate-before-swap: the entire replacement
-catalog is built and checked before it rebinds, so a skill caught half-written answers
+catalog is built and checked before it rebinds, so a runbook caught half-written answers
 `409` and leaves the previous catalog serving. Fix the file and POST again; from that
-point on a malformed skill costs a request, not a restart.
+point on a malformed runbook costs a request, not a restart.
 
 Both the variable and the route are development-only by construction: the route is mounted
 only when an overlay is configured on a non-hardened server, and a hardened deployment that
@@ -951,27 +951,27 @@ take, or an id that does not match its filename, is cheaper to find in a catalog
 in a spent turn:
 
 ```bash
-daintree-assistant --backend-url http://127.0.0.1:8473 --list-skills --json
+daintree-assistant --backend-url http://127.0.0.1:8473 --list-runbooks --json
 ```
 
-Then pin the runbook. `--skill` is what removes the ambiguity that makes runbook
+Then pin the runbook. `--runbook` is what removes the ambiguity that makes runbook
 development frustrating: without it, a bad turn could mean a bad runbook *or* a selector
-that never picked it. See [Naming a skill](#naming-a-skill---skill-and---list-skills) for
+that never picked it. See [Naming a runbook](#naming-a-runbook---runbook-and---list-runbooks) for
 pin ordering, the preflight, and the warning codes a backend can answer with — a pin rides
 alongside the backend's own selection and can still be refused, which is why step 5 reads
 back what was active rather than assuming.
 
 ```bash
-mkdir -p /tmp/skill-harness/case-001/run-01
-echo "the prompt this case exercises" > /tmp/skill-harness/case-001/prompt.txt
+mkdir -p /tmp/runbook-harness/case-001/run-01
+echo "the prompt this case exercises" > /tmp/runbook-harness/case-001/prompt.txt
 
 daintree-assistant \
   --backend-url http://127.0.0.1:8473 \
-  --skill daintree.example.skill-under-test \
-  --prompt-file /tmp/skill-harness/case-001/prompt.txt \
-  --state-dir /tmp/skill-harness/case-001/run-01/state \
-  --project-id skill-harness-case-001 \
-  --json > /tmp/skill-harness/case-001/run-01/run.jsonl
+  --runbook daintree.example.runbook-under-test \
+  --prompt-file /tmp/runbook-harness/case-001/prompt.txt \
+  --state-dir /tmp/runbook-harness/case-001/run-01/state \
+  --project-id runbook-harness-case-001 \
+  --json > /tmp/runbook-harness/case-001/run-01/run.jsonl
 ```
 
 `--prompt-file` keeps the prompt in a file under the case directory rather than in shell
@@ -986,14 +986,14 @@ test. `--project-id` here is identity rather than isolation, since an explicit
 `--state-dir` outranks its scoping; it is also only the *fallback* project id — a connected
 Daintree supplies its own.
 
-**5. Read the transcript.** `skill:decision` is the committed answer to "which runbook was
+**5. Read the transcript.** `runbook:decision` is the committed answer to "which runbook was
 active", and `selector.degraded` is the field to gate on alongside it — see
 [The event stream](#the-event-stream) for why, and for the full shape.
 
 ```bash
-cd /tmp/skill-harness/case-001/run-01
+cd /tmp/runbook-harness/case-001/run-01
 
-jq -c 'select(.type == "skill:decision")
+jq -c 'select(.type == "runbook:decision")
        | {active: [.active[].id], degraded: .selector.degraded}' run.jsonl
 jq -c 'select(.type == "tool:call")   | {name, args}'            run.jsonl
 jq -c 'select(.type == "tool:result") | {name, ok, summary}'     run.jsonl
@@ -1025,4 +1025,4 @@ Two limits are worth knowing before you script a case against this loop:
 `session` line tells you exactly which file. It is the ground truth for what the model
 and tools actually did; grep it by `runId`/`turnId`/`round`. See `docs/LOGGING.md` for
 the event reference and the fix philosophy (a model mistake is usually a *documentation*
-bug in the prompt, skill, or tool schema — not a dumb model).
+bug in the prompt, runbook, or tool schema — not a dumb model).

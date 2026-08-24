@@ -4,14 +4,14 @@ The CLI connects to Daintree's **local MCP server** as an external client. In pr
 Daintree launches the CLI and passes the connection details via environment / flags.
 
 > **Source of truth.** There is no longer a local prompt surface here — the base prompt,
-> the developer instructions, and every skill body are **backend-owned**
+> the developer instructions, and every runbook body are **backend-owned**
 > (`../assistant-backend/src/daintree_assistant_server/prompts/` and
-> `.../skills/files/*.md`), so what the model reasons against is authored over there.
+> `.../runbooks/files/*.md`), so what the model reasons against is authored over there.
 > The CLI-side verified contract is
 > [`DocumentedMcpToolNames`](../internal/mcp/tools.go) — the exact, ordered, test-pinned
 > drift baseline the CLI checks against the live server at startup. This doc is the
 > human-facing companion to that list; if they disagree, `internal/mcp/tools.go` wins.
-> A prompt or skill that describes an MCP tool wrongly is fixed in the **backend** repo,
+> A prompt or runbook that describes an MCP tool wrongly is fixed in the **backend** repo,
 > not here.
 
 ## Connection

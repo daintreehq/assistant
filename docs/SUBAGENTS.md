@@ -85,27 +85,27 @@ invent a message for. A backend failure *after* some reading has happened is
 salvaged with a wrap-up round on the history it already has; only a failure on
 round 0 has nothing to sell.
 
-## Skills for sub-agents
+## Runbooks for sub-agents
 
-A sub-agent selects skills too — from a menu narrowed to the ones it can actually
+A sub-agent selects runbooks too — from a menu narrowed to the ones it can actually
 execute. This is the reason it is given a real tool inventory rather than a fixed
 handful: a sub-agent sent to find one issue among thousands should get the
 issue-searching runbook, not rediscover it every run.
 
-The gate is `requiredTools`, which skills already declare and the tool projection
-already trusts. `Catalog.executable_with(tools)` keeps a skill only when every
+The gate is `requiredTools`, which runbooks already declare and the tool projection
+already trusts. `Catalog.executable_with(tools)` keeps a runbook only when every
 tool it declares is one the caller holds. So:
 
 - a runbook needing `agentTask.spawnForEdits` is filtered out — a read-only worker
   cannot follow it, and handing it over would spend context and then steer the
   model toward calls that can only fail;
-- a research-shaped skill written tomorrow becomes available to sub-agents the day
+- a research-shaped runbook written tomorrow becomes available to sub-agents the day
   it lands, with no second list to keep in step.
 
-Measured against the real 36-tool inventory today: **2 of 39** skills pass, and one
+Measured against the real 36-tool inventory today: **2 of 39** runbooks pass, and one
 of them is `daintree.workflow.find-issue-work` — the motivating case. That ratio is
 an honest statement about the catalog, not the mechanism: it is currently almost
-entirely orchestration runbooks. It should rise as research-shaped skills get
+entirely orchestration runbooks. It should rise as research-shaped runbooks get
 written, and nothing needs changing here when they do.
 
 The active-set cap is tighter for a sub-agent (2, vs the orchestrator's setting):
@@ -116,12 +116,12 @@ two 5k-token runbooks would cost more than they buy.
 
 A delegation primitive is worth nothing if it is reached for after the expensive
 search has already happened. The bias is split across two surfaces, following the
-base prompt's own rule (a rule that can fire on a turn loading NO skill stays in
-base; elaboration moves to the foundation skill):
+base prompt's own rule (a rule that can fire on a turn loading NO runbook stays in
+base; elaboration moves to the foundation runbook):
 
 | Surface | Carries |
 |---|---|
-| `main/base/20-tool-discipline.md` | One bullet: when to delegate, what never to delegate, relay a partial as partial. Fires even on a degraded zero-skill turn — which is exactly the turn where searching in the main thread does most damage. |
+| `main/base/20-tool-discipline.md` | One bullet: when to delegate, what never to delegate, relay a partial as partial. Fires even on a degraded zero-runbook turn — which is exactly the turn where searching in the main thread does most damage. |
 | `daintree.foundation` (item 8) | Fan-out batching, brief-writing, what not to delegate, how to relay a finding. |
 | `daintree.explore.repository` | Rewritten around three tiers: one call yourself → **`subagent.run` (the default)** → a full explore agent for large-surface synthesis. |
 
@@ -129,7 +129,7 @@ That third one mattered most. The runbook previously said *"POINTER — do it
 yourself"*, and the only delegate it knew was the heavyweight visible agent. A
 measured run of "where is prompt-cache stability enforced? I have no idea where to
 look" took **7 rounds, 15 tool calls, and grew the main context by 14,311 tokens**
-— with that skill loaded, instructing exactly that. A loaded skill body sits closer
+— with that runbook loaded, instructing exactly that. A loaded runbook body sits closer
 to the conversation than the base prompt and wins; fixing the base bullet alone
 would not have moved it.
 
@@ -137,7 +137,7 @@ would not have moved it.
 its `requiredTools`. The backend pins a snapshot of the CLI tool inventory
 (`tests/fixtures/cli_tool_names.txt`, keyed to the `cli/` submodule commit), and
 that snapshot cannot name a tool until the CLI change lands and the pin moves. The
-skill BODY drives the behaviour and is already updated; refresh the fixtures with
+runbook BODY drives the behaviour and is already updated; refresh the fixtures with
 `go run ./cmd/tooldump` and add the entry once the pin moves.
 
 ## Backend: the `subagent` profile
@@ -149,10 +149,10 @@ a hint — it selects which of two assembly paths runs:
 | | `assistant` | `subagent` |
 |---|---|---|
 | System prompt | `prompts/main/base/` | `prompts/main/subagent/` |
-| Skill selection | full catalog | **menu narrowed to executable skills** |
+| Runbook selection | full catalog | **menu narrowed to executable runbooks** |
 | Active-set cap | settings default | `min(default, 2)` |
 | Docs lookup | on | off (it researches the project, not Daintree) |
-| Step tracking in the skill render | on | off — `skill.step.advance` / `skill.run.get` are denylisted from its inventory |
+| Step tracking in the runbook render | on | off — `runbook.step.advance` / `runbook.run.get` are denylisted from its inventory |
 | Runtime / turn / display context | rendered | dropped |
 | Startup block | yes | yes |
 
@@ -240,20 +240,20 @@ defects. Recorded because each is a trap the next change could re-lay:
   unintended prompt-cache bust. Putting the `endif` at the end of the paragraph
   line makes the enabled variant byte-identical; the golden tests catch it either
   way, which is exactly what they are for.
-- **Generations must not mix.** Skill learning can swap the live catalog while the
+- **Generations must not mix.** Runbook learning can swap the live catalog while the
   selector is awaiting. The assistant path resolves bodies from the *post*-await
   snapshot so bodies, metadata and the state token describe one generation; the
   sub-agent's narrowed catalog must be derived from that same snapshot. Deriving it
   from the pre-await one handed the model generation A's runbook while stamping
   generation B's revision — so the next round saw a matching revision and never
   reselected.
-- **`filter_known` is not `selectable`.** A server-pinned skill (the docs runbook)
+- **`filter_known` is not `selectable`.** A server-pinned runbook (the docs runbook)
   is hidden from selection but still *known*, and it declares no required tools, so
   it survives every narrowing. Carrying prior ids with `filter_known` would let a
   replayed assistant state inject it into a profile whose docs lookup is off. Same
   root cause made the "empty menu" check use `len()`, which never reaches zero.
 - **A capped list is not an inventory.** `_available_tool_names` truncates at 100
-  for selector *evidence*; using it to decide which skills are executable would let
+  for selector *evidence*; using it to decide which runbooks are executable would let
   tool ORDER change the menu once a request carries more than 100 tools.
 - **A caller-keyed cache needs a bound.** `Catalog._executable_cache` is keyed by
   the caller's tool names, so it is capped and evicted oldest-first.
