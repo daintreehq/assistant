@@ -512,11 +512,19 @@ func criticalFrame(ev HostEvent) bool {
 // failSend trips the parent-gone hook exactly once, from a producer rather than from a
 // write error. Used when a control frame cannot be delivered — see send.
 //
+// It sets sendFailed too, same as fail(): a queue that never had room, or a
+// priority frame the writer never confirmed within its budget, is exactly as dead
+// as a write error from the perspective of anyone checking whether the transport
+// is still good — most importantly a caller that just called sendSync and wants a
+// SYNCHRONOUS answer to "did that actually go out" without waiting on the async
+// onSendFail hook, which may not have run yet.
+//
 // It shares failOnce with the write-failure path (see fail), so a wedged consumer that
 // later also produces a write error does not cancel twice. The hook runs on its own
 // goroutine for the same reason fail's does: it only signals cancellation, and
 // re-entering send from here would deadlock against the caller that is still inside it.
 func (t *transport) failSend(reason error) {
+	t.sendFailed.Store(true)
 	t.wedgedOnce.Do(func() { close(t.wedged) })
 	t.failOnce.Do(func() {
 		if t.onSendFail != nil {
@@ -670,9 +678,18 @@ func (t *transport) sendPriority(sessionID string, ev HostEvent, terminal bool) 
 	t.seqMu.Unlock()
 	if err != nil {
 		t.diag(fmt.Sprintf("host: failed to encode event: %v", err))
+		// A producer-side encoding bug, not evidence the consumer is gone — this does
+		// NOT call fail()/failSend() (which would trip onSendFail's "parent is gone,
+		// cancel everything" cancellation, the wrong signal for a bug in our own
+		// event). It still marks sendFailed: the priority frame was never delivered
+		// either way, and a caller checking "did that go out" (teardown's exit-code
+		// decision) must see the same honest answer regardless of WHY it didn't.
+		t.sendFailed.Store(true)
 		return
 	}
 	if data == nil {
+		// Refused as unshrinkable — same reasoning as the encode-error case above.
+		t.sendFailed.Store(true)
 		return
 	}
 

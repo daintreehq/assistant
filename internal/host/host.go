@@ -1,6 +1,7 @@
 package host
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -81,6 +82,8 @@ type Host struct {
 	// their contexts are cancelled (a Send that ignores cancellation must not
 	// wedge shutdown). Tests shrink it.
 	turnJoinTimeout time.Duration
+	// appShutdownTimeout bounds teardown's wait for App.Shutdown. Tests shrink it.
+	appShutdownTimeout time.Duration
 
 	// errorGuard phase: before host:ready a panic reports "bootstrap-error" + exit
 	// 1; after ready the steady-state path reports "uncaught" + teardown error.
@@ -105,6 +108,7 @@ func NewHost(factory AppFactory, in io.Reader, out, errw io.Writer) *Host {
 		summarizedTerminals: map[string]struct{}{},
 		guardActive:         true,
 		turnJoinTimeout:     defaultTurnJoinTimeout,
+		appShutdownTimeout:  defaultAppShutdownTimeout,
 	}
 }
 
@@ -202,9 +206,8 @@ func (h *Host) Run(parent context.Context) {
 				return
 			}
 			if msg.err != nil {
-				// EOF / read failure / oversize: parent closed the stream.
 				h.cancelTurn()
-				h.teardown(ShutdownExit, "")
+				h.teardownForReadError(msg.err)
 				return
 			}
 			h.onLine(msg.line)
@@ -219,6 +222,40 @@ func (h *Host) shutdownReason() HostShutdownReason {
 		return ShutdownError
 	}
 	return ShutdownExit
+}
+
+// teardownForReadError classifies why the stdin reader stopped and tears down with
+// the matching reason — collapsing every cause into `exit` (as this used to)
+// reported a protocol violation identically to the parent closing stdin on
+// purpose, which made support reports useless: nothing distinguished "the session
+// ended normally" from "the parent sent something we could not read."
+func (h *Host) teardownForReadError(err error) {
+	switch {
+	case errors.Is(err, io.EOF):
+		// Clean EOF: the parent closed stdin on purpose. An ordinary, expected exit.
+		h.teardown(ShutdownExit, "")
+	case errors.Is(err, bufio.ErrTooLong):
+		// The line exceeded maxFrameBytes — a protocol violation (or a hostile
+		// peer), not a session ending normally.
+		h.report("bad-frame", fmt.Sprintf("inbound line exceeded the %d byte frame cap", maxFrameBytes))
+		h.teardown(ShutdownError, "")
+	case h.runCtx.Err() != nil:
+		// This read error is a side effect of OUR OWN context cancellation —
+		// closeOnContext closes stdin to unblock a stuck reader, which can make the
+		// scanner surface an error (a closed-pipe shape) at roughly the same instant
+		// Run()'s own select observes <-h.runCtx.Done(). Which branch wins is
+		// scheduler luck, and the two must not disagree about the outcome: the
+		// runCtx.Done() branch already decides via shutdownReason() (transportFailed
+		// → error, otherwise a normal exit), so route through the identical decision
+		// here instead of hardcoding `error` — the same real-world cancellation must
+		// not report a different exit reason depending on which case happened to fire.
+		h.teardown(h.shutdownReason(), "")
+	default:
+		// Any other read failure (broken pipe, closed fd, …) NOT caused by our own
+		// cancellation: the transport did not end cleanly.
+		h.tr.diag(fmt.Sprintf("host: stdin read error: %v", err))
+		h.teardown(ShutdownError, "")
+	}
 }
 
 // onLine drives the descriptor/command state machine.
@@ -362,6 +399,18 @@ func (h *Host) boot(desc SessionDescriptor) {
 			return
 		}
 		h.turnMu.Lock()
+		// Teardown has already latched `closing` and/or run its one durable
+		// re-arm sweep (`wakeSweepDone`): a burst landing here after that point
+		// would otherwise sit in pendingWake forever — reactWake bails immediately
+		// on `closing`, and nothing runs a second sweep. The scheduler already
+		// marked these events notified before invoking this callback, so without a
+		// durable re-arm here they are lost across a process restart too, not just
+		// this run. Mirrors reactWake's own post-join requeue-vs-rearm check.
+		if h.closing || h.wakeSweepDone {
+			h.turnMu.Unlock()
+			h.rearmWakeEvents(actionable)
+			return
+		}
 		if len(h.pendingWake) == 0 {
 			h.wakeRetried = false
 		}
@@ -370,9 +419,16 @@ func (h *Host) boot(desc SessionDescriptor) {
 		go h.reactWake()
 	})
 
-	// Hand off from the boot guard to the steady-state fatal path.
+	// Hand off from the boot guard to the steady-state fatal path. h.ready is set
+	// under turnMu (not just guardActive, which only the single command-loop
+	// goroutine ever touches): reactWake reads h.ready under the same lock from a
+	// goroutine the scheduler callback above can spawn concurrently with this line,
+	// and an unsynchronized write on one side of that pair is a real data race
+	// regardless of which value either side happens to observe in practice.
 	h.guardActive = false
+	h.turnMu.Lock()
 	h.ready = true
+	h.turnMu.Unlock()
 	rcfg := app.Config()
 	ev := EvReady{
 		ProtocolVersion: ProtocolVersion,
@@ -394,4 +450,24 @@ func (h *Host) boot(desc SessionDescriptor) {
 	// has been told the session id, so anything emitted before ready is dropped — the
 	// startup status was going into exactly that gap and never arriving.
 	h.postMcpStatus()
+
+	h.checkPendingWakeAfterReady()
+}
+
+// checkPendingWakeAfterReady re-triggers the wake reactor for a burst that landed
+// in pendingWake before h.ready was set. StartScheduler's callback (above, in
+// boot) can invoke synchronously (or fast enough to win the race), appending to
+// pendingWake and firing reactWake before h.ready flips true a few lines earlier
+// in boot — reactWake bails on !h.ready and, without this check, nothing
+// re-triggered it afterward, so that burst sat queued until unrelated later
+// activity happened to call reactWake again. The supervisor already has this
+// exact pattern; the native host needs the same one. Factored out so it can be
+// exercised directly (see the wake-before-ready regression test).
+func (h *Host) checkPendingWakeAfterReady() {
+	h.turnMu.Lock()
+	hasPending := len(h.pendingWake) > 0
+	h.turnMu.Unlock()
+	if hasPending {
+		go h.reactWake()
+	}
 }

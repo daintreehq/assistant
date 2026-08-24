@@ -18,6 +18,19 @@ import (
 // turn can't hang shutdown.
 const defaultTurnJoinTimeout = 5 * time.Second
 
+// defaultAppShutdownTimeout bounds teardown's WAIT for App.Shutdown, which today
+// takes no context of its own (internal/app.App.Shutdown() is a plain
+// error-returning call, and cancelling this wait cannot interrupt whatever it is
+// doing partway through — closing that gap end to end would mean threading a
+// context through every subsystem's own Close/Drain, which is real future work,
+// not this). What this bound DOES guarantee: teardown itself never hangs forever
+// on a stuck subsystem. If App.Shutdown does not return in time, teardown logs it,
+// reports a non-zero exit, and proceeds — the same backstop the transport's write
+// path relies on for an uninterruptible Write(): process exit is what actually
+// releases the flock and any other held OS resource, not a clean goroutine join.
+// Tests shrink it (Host.appShutdownTimeout).
+const defaultAppShutdownTimeout = 10 * time.Second
+
 // handleCommand dispatches one validated command. It must NOT
 // block the command loop on a running Send — prompt/wake run on worker goroutines
 // while interrupt/approval:decide keep being serviced.
@@ -471,13 +484,19 @@ func (h *Host) teardown(reason HostShutdownReason, resumeSessionID string) {
 			ev.ResumeSessionID = resumeSessionID
 		}
 		h.tr.sendSync(h.sessionID, ev)
+		// sendSync's own priority-frame delivery can itself fail (queue never had
+		// room, or the writer never confirmed within its budget) — sendFailed is set
+		// synchronously by fail()/failSend() either way, so it can be read right
+		// here rather than racing the async onSendFail hook. A host:shutdown that
+		// never actually reached the parent must not be reported as a clean exit.
+		transportFailedToDeliver := h.tr.sendFailed.Load()
 		h.tr.Close()
 
 		// Bounded join: wait for the cancelled workers to actually unwind before
 		// app.Shutdown closes the store/MCP under them. Bounded so a Send that
 		// ignores cancellation cannot wedge shutdown (we then proceed and accept
 		// the abandonment — the process is exiting anyway).
-		h.joinTurns(h.turnJoinTimeout)
+		turnJoinTimedOut := h.joinTurns(h.turnJoinTimeout)
 
 		// DURABLE wake re-arm: any burst still in pendingWake dies with this
 		// process — a queued burst that never started, or one a cancelled wake
@@ -496,21 +515,61 @@ func (h *Host) teardown(reason HostShutdownReason, resumeSessionID string) {
 		h.turnMu.Unlock()
 		h.rearmWakeEvents(leftover)
 
+		// Bounded WAIT (see appShutdownTimeout): App.Shutdown itself has no context
+		// of its own to cancel, so a stuck subsystem still runs to completion in the
+		// background, but teardown does not wait for it past the bound — the
+		// process exit below is what actually releases the flock either way.
+		appShutdownTimedOut := false
+		appShutdownFailed := false
 		if h.app != nil {
-			func() {
-				defer func() { _ = recover() }()
-				_ = h.app.Shutdown(context.Background())
+			done := make(chan struct{})
+			// shutdownErr/shutdownPanicked are written by this goroutine and read
+			// ONLY inside the <-done case below — never on the timeout branch, where
+			// the goroutine may still be running and writing them. Go's channel-close
+			// happens-before guarantee is what makes that read race-free; reading them
+			// unconditionally after the select (even one only reached via a boolean
+			// short-circuit) would not be.
+			var shutdownErr error
+			var shutdownPanicked bool
+			go func() {
+				defer close(done)
+				defer func() {
+					if r := recover(); r != nil {
+						shutdownPanicked = true
+					}
+				}()
+				shutdownErr = h.app.Shutdown(context.Background())
 			}()
+			select {
+			case <-done:
+				appShutdownFailed = shutdownErr != nil || shutdownPanicked
+			case <-time.After(h.appShutdownTimeout):
+				h.tr.diag("host: app shutdown did not complete within " + h.appShutdownTimeout.String() +
+					"; exiting anyway so the process (and its flock) releases")
+				appShutdownTimedOut = true
+			}
 		}
-		// Flush stdout, then exit (deferred so the final write lands first).
-		h.exit(0)
+
+		// Exit code is HONEST: a fatal reason, a shutdown frame that never reached
+		// the parent, a subsystem that never confirmed it closed cleanly (timed out,
+		// errored, or panicked doing so), or a turn that never unwound within its
+		// own bound are each a reason a supervisor or a person reading the exit
+		// status should be told something did not go cleanly — not folded into the
+		// same 0 a normal exit reports. Flush stdout, then exit (deferred so the
+		// final write lands first).
+		code := 0
+		if reason == ShutdownError || transportFailedToDeliver || appShutdownTimedOut || appShutdownFailed || turnJoinTimedOut {
+			code = 1
+		}
+		h.exit(code)
 	})
 }
 
-// joinTurns waits (bounded) for every live prompt/wake worker to unwind. The
-// WaitGroup is raced-free against new Adds because teardown latched `closing`
+// joinTurns waits (bounded) for every live prompt/wake worker to unwind, and
+// reports whether the bound was hit rather than every worker actually settling.
+// The WaitGroup is raced-free against new Adds because teardown latched `closing`
 // under turnMu before calling this (workers Add under the same mutex).
-func (h *Host) joinTurns(timeout time.Duration) {
+func (h *Host) joinTurns(timeout time.Duration) (timedOut bool) {
 	done := make(chan struct{})
 	go func() {
 		h.turnWG.Wait()
@@ -518,8 +577,10 @@ func (h *Host) joinTurns(timeout time.Duration) {
 	}()
 	select {
 	case <-done:
+		return false
 	case <-time.After(timeout):
 		h.tr.diag("host: teardown timed out waiting for an in-flight turn to unwind; proceeding")
+		return true
 	}
 }
 
@@ -529,7 +590,14 @@ func (h *Host) joinTurns(timeout time.Duration) {
 func (h *Host) onPanic(r any) {
 	msg := fmt.Sprintf("%v\n%s", r, debug.Stack())
 	if h.guardActive || !h.ready {
-		h.report("bootstrap-error", msg)
+		// reportSync, not report: this branch calls exit(1) immediately afterward,
+		// with no teardown/sendSync in between to guarantee ordering the way the
+		// steady-state path's shutdown-first sequencing does. report() only
+		// ENQUEUES the frame — flushExit's Sync() flushes the OS-level file, not the
+		// writer goroutine's queue, so the queued error could easily never reach the
+		// parent before the process exits. reportSync waits (bounded) for actual
+		// delivery, exactly like every other fatal pre-app path.
+		h.reportSync("bootstrap-error", msg)
 		h.exit(1)
 		return
 	}
