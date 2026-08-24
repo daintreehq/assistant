@@ -183,3 +183,27 @@ func RequestShutdown(ctx context.Context, stateDir string) error {
 	defer client.Close()
 	return client.Call(ctx, ipc.ReqShutdown, nil, nil)
 }
+
+// NotifyAuthChanged tells a running daemon for this project that the account credential
+// changed, carrying only the new revision marker.
+//
+// Best effort by design, and the caller ignores the error. The daemon already polls the
+// shared marker before every wake, so one that is stopped, wedged, or simply not running
+// stops on its own within a tick — this only removes the delay for the daemon that is
+// reachable, which is the common case and the one where someone watching their terminal
+// expects logout to take effect immediately.
+//
+// It sends a MARKER, never a token. See ipc.Credentials for why the daemon is never
+// handed a credential.
+func NotifyAuthChanged(ctx context.Context, stateDir, revision string) error {
+	socketPath, err := ipc.SocketPathFor(stateDir)
+	if err != nil {
+		return err
+	}
+	client, err := ipc.Dial(socketPath, 2*time.Second)
+	if err != nil {
+		return err // no daemon listening: nothing to tell, and nothing to report
+	}
+	defer client.Close()
+	return client.Call(ctx, ipc.ReqAuthChanged, ipc.AuthChangedRequest{Revision: revision}, nil)
+}

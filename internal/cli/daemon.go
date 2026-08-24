@@ -154,6 +154,16 @@ func RunStatus(ctx context.Context, opts Options) int {
 			(time.Duration(domain.NowMS()-st.LastWakeAtMs) * time.Millisecond).Round(time.Second))
 	}
 	r.Line("  wake turns     : " + wake)
+	// The account row. Without it a daemon PAUSED by a logout looks identical to an idle
+	// one, and the user has no way to learn why nothing is happening — which is the exact
+	// question `status` exists to answer.
+	if st.AuthState != "" {
+		account := st.AuthState
+		if st.AuthRequired {
+			account += " — unattended work is PAUSED; run `daintree-assistant auth login`"
+		}
+		r.Line("  account        : " + account)
+	}
 	if st.LastError != "" {
 		r.Line("  last error     : " + st.LastError)
 	}

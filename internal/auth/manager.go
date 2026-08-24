@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -678,12 +679,8 @@ func (m *Manager) Logout(ctx context.Context) (revokedRemotely bool, err error) 
 	// could clear only its own memory while the keychain entry survived and every daemon
 	// kept spending. Making the ability to sign out conditional on a network call hands
 	// that decision to whoever runs the server.
-	var key CredentialKey
-	if man, manErr := m.Manifest(ctx); manErr == nil {
-		key = m.key(man)
-	} else if recorded, ok := loadKeyRef(m.authDir); ok {
-		key = recorded
-	} else {
+	key, ok := m.currentKey(ctx)
+	if !ok {
 		// Nothing was ever stored on this machine under a key we can name. Dropping the
 		// in-memory token is all there is to do, and it is enough.
 		m.mu.Lock()
@@ -731,15 +728,25 @@ func (m *Manager) Logout(ctx context.Context) (revokedRemotely bool, err error) 
 //
 // It is separate from AccessToken because it must NOT refresh: someone asking about their
 // account should not spend a rotating one-time-use token to be told what it is.
-func (m *Manager) Hydrate(ctx context.Context) {
-	key, ok := m.currentKey(ctx)
-	if !ok {
+func (m *Manager) Hydrate(ctx context.Context) (resolved bool) {
+	key, resolution := m.resolveKey(ctx)
+	switch resolution {
+	case keyAbsent:
+		// Definitively no login on this machine. Set UNCONDITIONALLY rather than only
+		// downgrading from Unknown — that guard was the bug the daemon exposed: a daemon
+		// that had marked itself active kept believing so after a logout elsewhere
+		// removed the descriptor, which is exactly the case Hydrate re-reads for.
 		m.mu.Lock()
-		if m.state == StateUnknown {
-			m.state = StateSignedOut
-		}
+		m.access = TokenSet{}
+		m.state = StateSignedOut
 		m.mu.Unlock()
-		return
+		return true
+	case keyUnresolved:
+		// "I could not work out which credential this is" is not "you are signed out".
+		// Signing someone out over a backend outage is the failure this branch exists to
+		// prevent.
+		m.recordUnavailable(newError(CodeDiscoveryUnavailable, "could not determine which account this backend uses"))
+		return false
 	}
 	store := m.ensureStore(ctx)
 	stored, err := store.Load(ctx, key)
@@ -760,12 +767,14 @@ func (m *Manager) Hydrate(ctx context.Context) {
 	case errors.Is(err, ErrStoreLocked), errors.Is(err, ErrStoreUnavailable):
 		// "We could not read it" is not "there is nothing there".
 		m.recordUnavailable(err)
+		return false
 	case errors.Is(err, ErrStoreCorrupt):
 		m.mu.Lock()
 		m.lastErr = err
 		m.state = StateSignedOut
 		m.mu.Unlock()
 	}
+	return true
 }
 
 // Revision exposes the shared marker, for the daemon's status and its stop-work check.
@@ -862,11 +871,67 @@ func (m *Manager) clearSession(ctx context.Context) {
 
 // currentKey resolves the credential key, preferring live discovery and falling back to
 // the descriptor written at login so this works offline.
+// currentKey resolves the credential key.
+//
+// The RECORDED descriptor is preferred over live discovery, and the order matters: it is
+// a local file read against a network round trip, on a path that runs before every
+// status check and every daemon decision. Discovery is the fallback for a machine that
+// has a credential but no descriptor (an older build, a partially-cleared state dir).
 func (m *Manager) currentKey(ctx context.Context) (CredentialKey, bool) {
-	if man, err := m.Manifest(ctx); err == nil {
-		return m.key(man), true
+	key, resolution := m.resolveKey(ctx)
+	return key, resolution == keyResolved
+}
+
+// keyResolution distinguishes the three answers currentKey used to collapse into a bool.
+//
+// The collapse was a real bug: "there is definitely no login here" and "I could not work
+// out which credential this is" are opposite facts, and Hydrate treated both as a
+// definitive sign-out. A transient backend outage on an install whose descriptor predates
+// this build would therefore report the user signed out when they are not.
+type keyResolution int
+
+const (
+	// keyResolved: the credential key is known.
+	keyResolved keyResolution = iota
+	// keyAbsent: there is definitively no credential on this machine.
+	keyAbsent
+	// keyUnresolved: there may be one, but which is unknown right now.
+	keyUnresolved
+)
+
+// resolveKey works out which credential this manager is responsible for.
+func (m *Manager) resolveKey(ctx context.Context) (CredentialKey, keyResolution) {
+	recorded, ok := loadKeyRef(m.authDir)
+	if ok {
+		// The descriptor is a SINGLE file per state root, so it can describe a credential
+		// for a different backend than this manager is configured for — after a
+		// `/backend` switch, for instance. Using it unchecked would make `auth status`
+		// for B report A's session, and `auth logout` for B DELETE A's credential.
+		if m.backendOriginMatches(recorded) {
+			return recorded, keyResolved
+		}
+		// It belongs to another endpoint. This one's key can still be derived if
+		// discovery works.
+		if man, err := m.Manifest(ctx); err == nil {
+			return m.key(man), keyResolved
+		}
+		return CredentialKey{}, keyUnresolved
 	}
-	return loadKeyRef(m.authDir)
+	if man, err := m.Manifest(ctx); err == nil {
+		return m.key(man), keyResolved
+	}
+	// No descriptor AND no manifest. A descriptor is written on every successful login,
+	// so its absence is strong evidence of no login — but not proof, since persistence is
+	// best effort and an older build wrote none. Reporting "unresolved" keeps a
+	// transient outage from signing someone out.
+	return CredentialKey{}, keyUnresolved
+}
+
+// backendOriginMatches reports whether a recorded descriptor belongs to this manager's
+// endpoint and state root.
+func (m *Manager) backendOriginMatches(k CredentialKey) bool {
+	return k.BackendOrigin == strings.TrimRight(strings.TrimSpace(m.backendURL), "/") &&
+		k.StateRoot == strings.TrimRight(strings.TrimSpace(m.stateRoot), "/")
 }
 
 // MarkActive records a confirmed, entitled session, if the confirmation is still current.
@@ -886,3 +951,23 @@ var (
 	_ backend.TokenSource   = (*Manager)(nil)
 	_ backend.TokenScrubber = (*Manager)(nil)
 )
+
+// SeedForTest installs a credential and its descriptor without running a browser flow.
+//
+// Exported because the supervisor package needs a signed-in Manager to test its spend
+// gate, and the alternative — reimplementing the store write and the descriptor format
+// over there — would let the two drift apart silently. It is deliberately narrow: it
+// cannot mint an access token, so a caller still cannot fake an authorized session.
+func (m *Manager) SeedForTest(ctx context.Context, man *Manifest, refreshToken string) error {
+	key := m.key(man)
+	if err := m.ensureStore(ctx).Save(ctx, key, StoredSession{
+		Version:      storedSessionVersion,
+		RefreshToken: refreshToken,
+		Issuer:       man.Issuer,
+		ClientID:     man.ClientID,
+		Environment:  man.Environment,
+	}); err != nil {
+		return err
+	}
+	return saveKeyRef(m.authDir, key)
+}

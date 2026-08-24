@@ -12,6 +12,7 @@ import (
 
 	"github.com/daintreehq/assistant/internal/auth"
 	"github.com/daintreehq/assistant/internal/config"
+	"github.com/daintreehq/assistant/internal/supervisor"
 )
 
 // auth.go is the `auth login|status|logout|disconnect` command surface.
@@ -160,7 +161,7 @@ func RunAuth(ctx context.Context, opts Options, authOpts AuthOptions) int {
 	case AuthStatus:
 		return runAuthStatus(ctx, w, mgr, cfg, authOpts)
 	case AuthLogout:
-		return runAuthLogout(ctx, w, mgr)
+		return runAuthLogout(ctx, w, mgr, cfg)
 	case AuthDisconnect:
 		return runAuthDisconnect(ctx, w, mgr, authOpts)
 	}
@@ -397,13 +398,21 @@ func roundDuration(d time.Duration) string {
 	return d.Round(time.Second).String()
 }
 
-func runAuthLogout(ctx context.Context, w authWriter, mgr *auth.Manager) int {
+func runAuthLogout(ctx context.Context, w authWriter, mgr *auth.Manager, cfg config.AppConfig) int {
 	revoked, err := mgr.Logout(ctx)
 	if err != nil {
 		// The local credential may still be gone even on an error path, so this reports
 		// the failure without claiming the user is still signed in.
 		return authFail(w, "Sign-out", err)
 	}
+	// Tell a running daemon NOW rather than leaving it to notice on its next poll. It
+	// would stop either way — the marker check is the mechanism — but a user who just
+	// signed out should not have to wonder whether background work is still spending.
+	// Failure is ignored: no daemon listening is the ordinary case.
+	nctx, ncancel := context.WithTimeout(ctx, 2*time.Second)
+	_ = supervisor.NotifyAuthChanged(nctx, cfg.StateDir, mgr.Revision().Current().String())
+	ncancel()
+
 	w.event(authEvent{Type: "auth:signed_out"})
 	w.human("Signed out on this machine.")
 	if !revoked {

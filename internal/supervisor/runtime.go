@@ -25,10 +25,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/daintreehq/assistant/internal/app"
+	"github.com/daintreehq/assistant/internal/auth"
 	"github.com/daintreehq/assistant/internal/config"
 	"github.com/daintreehq/assistant/internal/debuglog"
 	"github.com/daintreehq/assistant/internal/domain"
@@ -113,12 +115,22 @@ type Runtime struct {
 	state        ipc.DaemonState
 	attachConnID uint64
 	creds        ipc.Credentials
-	app          *app.App           // non-nil while supervising
-	cancelSup    context.CancelFunc // cancels the active supervision span
-	handoverDone chan struct{}      // closed when the span fully released the lease
-	lastError    string
-	wakeTurns    int
-	lastWakeAt   int64
+	// auth is the account authority, or nil when no account layer applies (a
+	// deprecated caller key is set, or the auth directory could not be created). It is
+	// the daemon's ONLY view of whether it may still spend.
+	auth *auth.Manager
+	// authBlocked de-dupes the "paused, sign in again" report so a signed-out daemon
+	// does not write it on every 3s tick.
+	authBlocked bool
+	// authJustBlocked carries "announce this transition" out to a caller that has
+	// released r.mu, because the logger must not run under it.
+	authJustBlocked bool
+	app             *app.App           // non-nil while supervising
+	cancelSup       context.CancelFunc // cancels the active supervision span
+	handoverDone    chan struct{}      // closed when the span fully released the lease
+	lastError       string
+	wakeTurns       int
+	lastWakeAt      int64
 
 	// wake reactor state (guarded by mu; the reactor goroutine is single-flight).
 	// closing latches during span teardown so no reactor can wakeWG.Add while the
@@ -169,6 +181,19 @@ func Run(ctx context.Context, opts Options) int {
 		resumeCh:   make(chan struct{}, 1),
 		stopCh:     make(chan struct{}),
 		summarized: map[string]struct{}{},
+	}
+	// The account authority. Built here rather than lazily so the daemon can answer
+	// "may I spend?" on its very first wake — a daemon that had to construct one
+	// mid-decision would either block the decision or default to yes.
+	//
+	// A nil manager (no auth directory, or a deprecated caller key in play) means the
+	// open door applies and unattended work proceeds, which is what every install does
+	// today.
+	if strings.TrimSpace(cfg.APIKey) == "" {
+		if mgr, aerr := auth.NewManager(auth.Options{StateRoot: cfg.StateRoot, BackendURL: cfg.BackendURL}); aerr == nil {
+			r.auth = mgr
+			r.auth.Revision().MarkObserved(r.auth.Revision().Current())
+		}
 	}
 	if opts.Log == nil {
 		r.opts.Log = logf
@@ -425,6 +450,10 @@ func (r *Runtime) supervise(sctx context.Context) superviseReason {
 			return reasonStop
 		case <-ticker.C:
 			r.monitorMcp(sctx, a)
+			// Bounds how long a signed-out daemon can keep spending mid-turn, and picks
+			// up queued work after a sign-in. The one-shot gate in reactWake cannot do
+			// either: it runs once, before a turn that issues many paid rounds.
+			r.enforceAuthPosture(sctx)
 			if r.idleExitDue(a) {
 				return reasonIdle
 			}
@@ -597,6 +626,11 @@ func (r *Runtime) HandleRequest(ctx context.Context, req ipc.Request, conn *ipc.
 		if err := json.Unmarshal(req.Payload, &c); err != nil {
 			return errResponse("malformed credentials payload")
 		}
+		// A new endpoint means a new credential identity (see auth.CredentialKey), so the
+		// account authority is rebuilt too. Without this the gate and the status rows
+		// keep answering for the PREVIOUS backend — reporting one account's posture while
+		// turns run against another.
+		r.rebuildAuthForBackend(ctx, c.BackendURL)
 		if r.storeCreds(c) {
 			// Fresh credentials while a span runs on the OLD (likely revoked)
 			// token: rebuild the span. The runLoop re-acquires immediately and
@@ -604,6 +638,23 @@ func (r *Runtime) HandleRequest(ctx context.Context, req ipc.Request, conn *ipc.
 			// race (docs/DAINTREE_HOST.md one-backend rule) heals here.
 			r.interruptSupervision()
 		}
+		return ipc.Response{OK: true}
+
+	case ipc.ReqAuthChanged:
+		// Carries a marker, never a credential. The daemon re-reads the shared state and
+		// wakes its loop so a logout takes effect NOW rather than at the next poll.
+		var a ipc.AuthChangedRequest
+		if len(req.Payload) > 0 {
+			if err := json.Unmarshal(req.Payload, &a); err != nil {
+				return errResponse("malformed auth_changed payload")
+			}
+		}
+		// Hydrate performs I/O, so it runs OFF the runtime mutex — holding it here would
+		// block the control socket behind a keychain read.
+		r.refreshAuthPosture(ctx)
+		r.mu.Lock()
+		r.authBlocked = false // report the new posture once, whichever way it went
+		r.mu.Unlock()
 		return ipc.Response{OK: true}
 
 	case ipc.ReqAttach:
@@ -732,6 +783,10 @@ func (r *Runtime) ConnClosed(conn *ipc.ServerConn) {
 
 func (r *Runtime) statusReply() ipc.StatusReply {
 	r.mu.Lock()
+	// Snapshot the account posture ONCE. Reading Manager.State() twice let a hydrate
+	// running outside r.mu change it between the calls, producing the nonsensical pair
+	// AuthState:"signed_out" with AuthRequired:false.
+	authState, authPaused, authRevision := r.authPostureLocked()
 	rep := ipc.StatusReply{
 		State:        r.state,
 		Pid:          os.Getpid(),
@@ -742,6 +797,12 @@ func (r *Runtime) statusReply() ipc.StatusReply {
 		DBPath:       r.cfg.DBPath,
 		LastError:    r.lastError,
 		WakeTurnsRun: r.wakeTurns,
+		// The account posture, so `status` can explain a daemon that is alive and
+		// deliberately doing nothing. Without it, a paused daemon looks identical to an
+		// idle one and the user has no way to tell that a logout is the reason.
+		AuthState:    authState,
+		AuthRequired: authPaused,
+		AuthRevision: authRevision,
 		LastWakeAtMs: r.lastWakeAt,
 		McpBlocked:   r.blockedEventID != "",
 	}
@@ -893,4 +954,84 @@ func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
 	case <-time.After(d):
 		return false
 	}
+}
+
+// authPostureLocked snapshots the account posture from ONE read of the state, so the
+// three status fields cannot contradict each other. Must be called with r.mu held.
+//
+// It reports the STATE and never the email, the subject, or anything else identifying.
+// The control socket's authorization model is filesystem permissions on the state dir,
+// which is the right boundary for coordination and the wrong one for personal data —
+// Daintree reads account display data through `auth status --json` instead, a process the
+// user's own session owns.
+func (r *Runtime) authPostureLocked() (state string, paused bool, revision string) {
+	if r.auth == nil {
+		return "", false, ""
+	}
+	st := r.auth.State()
+	paused = st == auth.StateRevoked || st == auth.StateSignedOut
+	return string(st), paused, r.auth.Revision().Observed().String()
+}
+
+// authStateForStatus reports the daemon's account state. Must be called with r.mu held.
+//
+// It reports the STATE and never the email, the subject, or anything else identifying.
+// The control socket's authorization model is filesystem permissions on the state dir,
+// which is the right boundary for coordination and the wrong one for personal data —
+// Daintree reads account display data through `auth status --json` instead, a process
+// the user's own session owns.
+func (r *Runtime) authStateForStatus() string {
+	if r.auth == nil {
+		return ""
+	}
+	return string(r.auth.State())
+}
+
+// authPausedForStatus reports whether unattended work is paused pending a sign-in.
+func (r *Runtime) authPausedForStatus() bool {
+	if r.auth == nil {
+		return false
+	}
+	switch r.auth.State() {
+	case auth.StateRevoked, auth.StateSignedOut:
+		return true
+	}
+	return false
+}
+
+// authRevisionForStatus reports the observed marker (a nonce and a counter, never a
+// credential), so a support report can line up what a daemon believes against what a
+// terminal believes.
+func (r *Runtime) authRevisionForStatus() string {
+	if r.auth == nil {
+		return ""
+	}
+	return r.auth.Revision().Observed().String()
+}
+
+// rebuildAuthForBackend swaps the account authority when the endpoint changes.
+//
+// Built OFF r.mu because auth.NewManager touches the filesystem. A no-op when the URL is
+// empty (the field means "leave unchanged") or already current.
+func (r *Runtime) rebuildAuthForBackend(ctx context.Context, backendURL string) {
+	next := strings.TrimSpace(backendURL)
+	if next == "" {
+		return
+	}
+	r.mu.Lock()
+	cur := r.cfg.BackendURL
+	hasKey := strings.TrimSpace(r.cfg.APIKey) != ""
+	r.mu.Unlock()
+	if next == cur || hasKey {
+		return
+	}
+	mgr, err := auth.NewManager(auth.Options{StateRoot: r.cfg.StateRoot, BackendURL: next})
+	if err != nil {
+		return
+	}
+	mgr.Hydrate(ctx)
+	r.mu.Lock()
+	r.auth = mgr
+	r.authBlocked = false
+	r.mu.Unlock()
 }
