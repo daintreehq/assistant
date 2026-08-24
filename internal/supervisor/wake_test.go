@@ -31,7 +31,7 @@ var noteProhibitions = []string{
 // Every daemon wake sends BuildWakePrompt's output PLUS unattendedWakeNote (reactWake),
 // so the note is part of the autonomous wake prompt and inherits the same rule: a tool
 // it tells the model to call must be in coreToolNames, because an unattended wake runs
-// with nobody present and may carry no relevant skill to reintroduce a missing tool.
+// with nobody present and may carry no relevant runbook to reintroduce a missing tool.
 // The agent-side test covers BuildWakePrompt's branches; this covers the assembled text.
 func TestUnattendedWakeNoteNamesOnlyCoreTools(t *testing.T) {
 	// Dot-free fixture: event fields render verbatim, so a tool-shaped value here would

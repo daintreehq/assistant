@@ -116,9 +116,9 @@ func TestJudgeAndVerdictZeroValuesAreLegitimateNegatives(t *testing.T) {
 		t.Fatalf("terminal judge zero verdict: out=%+v err=%v, want accepted negative", judge, err)
 	}
 
-	skill, err := RunSkillStepConsistency(context.Background(), withOutput(zeroJudge), SkillStepConsistencyInput{SkillID: "s"})
-	if err != nil || skill.Matched {
-		t.Fatalf("skill consistency zero verdict: out=%+v err=%v, want accepted negative", skill, err)
+	runbook, err := RunRunbookStepConsistency(context.Background(), withOutput(zeroJudge), RunbookStepConsistencyInput{RunbookID: "s"})
+	if err != nil || runbook.Matched {
+		t.Fatalf("runbook consistency zero verdict: out=%+v err=%v, want accepted negative", runbook, err)
 	}
 
 	verdict, err := RunExtractionVerdict(context.Background(), withOutput(`{"pass":false,"reason":""}`),
@@ -132,8 +132,8 @@ func TestJudgeAndVerdictZeroValuesAreLegitimateNegatives(t *testing.T) {
 	if _, err := RunTerminalJudge(context.Background(), r, TerminalJudgeInput{Question: "q"}); err == nil {
 		t.Fatal("terminal judge with no output must stay rejected")
 	}
-	if _, err := RunSkillStepConsistency(context.Background(), r, SkillStepConsistencyInput{SkillID: "s"}); err == nil {
-		t.Fatal("skill consistency with no output must stay rejected")
+	if _, err := RunRunbookStepConsistency(context.Background(), r, RunbookStepConsistencyInput{RunbookID: "s"}); err == nil {
+		t.Fatal("runbook consistency with no output must stay rejected")
 	}
 	_, err = RunExtractionVerdict(context.Background(), r, ExtractionVerdictInput{Result: "r", Condition: "c"})
 	assertTaskOutputError(t, err, TaskExtractionVerdict)

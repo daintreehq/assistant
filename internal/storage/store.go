@@ -1,7 +1,7 @@
 // Package storage is the durable SQLite store of the assistant: timers, watchers,
 // the attention-queue inbox (events), the tool-dispatch audit trail, per-run event
 // logs, the conversation transcript, automation
-// grants, the workflow ledger, agent-launch sagas, skill run state, and
+// grants, the workflow ledger, agent-launch sagas, runbook run state, and
 // cross-session project memories (with an FTS5 recall index).
 //
 // Uses modernc.org/sqlite (pure Go, CGO-free) directly. The store is
@@ -53,7 +53,9 @@ const (
 	// when memories gained expiresAt/runId/kind/sessionId (TTL + provenance + episodic);
 	// to 6 when the context_checkpoints table was added (durable compaction checkpoint
 	// reloaded on resume); to 7 when the dead skill_selection_log table was DROPPED
-	// (skill selection is server-owned now — the CLI never logged selections); to 8 when
+	// (named as it actually was — this line is a statement about the past, and the
+	// skill -> runbook rename came later)
+	// (runbook selection is server-owned now — the CLI never logged selections); to 8 when
 	// conversation gained reasoningContent (persist DeepSeek thinking-mode chain-of-thought
 	// for verbatim replay); to 9 when the runtime_state key/value table was added (the
 	// persistent-supervisor handoff surface: current session id + backend state token
@@ -62,8 +64,13 @@ const (
 	// workflow_reconcile_runs); to 11 when conversation gained `name` (the reserved
 	// `daintree_compaction` marker on a server-delivered compacted context block, which
 	// has to survive a restart or the next request re-sends history the server already
-	// froze) — a schema change is a hard-reset (make db-reset), not a migration.
-	schemaUserVersion = 11
+	// froze); to 12 when `skill_run_state` was renamed to `runbook_run_state` (with its
+	// `skillId` column and unique index) for protocol 3 — the rename is why the bump is
+	// REQUIRED rather than cosmetic: the schema is all `CREATE TABLE IF NOT EXISTS`, so an
+	// existing file left at 11 would keep the old table, never create the new one, and
+	// every step-advance would fail against a table that is present but not the one the
+	// code now names — a schema change is a hard-reset (make db-reset), not a migration.
+	schemaUserVersion = 12
 )
 
 // SchemaVersion exposes the on-disk schema baseline to callers that need to REPORT it

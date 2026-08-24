@@ -78,17 +78,68 @@ func marshalEvent(typ, sessionID string, seq uint64, fields map[string]any) ([]b
 // (DAINTREE_ASSISTANT_AUTO_APPROVE). It was previously mentioned only on stderr, which
 // a protocol-only consumer never reads — so a host had no way to show that approvals
 // are switched off, which is exactly the state a user most needs to see.
+// The masthead fields below carry what the cockpit's own masthead stated, already
+// resolved (see masthead.go). They exist for the same reason AutoApprove does: they are
+// session facts that a protocol-only consumer has no other way to learn. Tier and
+// TierGloss say what this session is permitted to do; Backend says which endpoint
+// answers a turn, and is the ONLY readout of that since sign-in went away; Routing says
+// what privacy/selection policy was requested; LogFile says where the trace goes, which
+// is unanswerable from outside because the engine picks the filename. Empty means "the
+// default, which needs no announcement" — except LogFile, where empty means logging is
+// off.
 type EvReady struct {
 	ProtocolVersion  int
 	ResumedSessionID string
 	Version          string
 	AutoApprove      bool
+	Tier             string
+	TierGloss        string
+	Backend          string
+	Routing          string
+	LogFile          string
+	// Commands is the engine's command catalog, so an embedded surface can offer the
+	// SAME set the CLI documents. Sent once, at ready: a host that hardcoded its own
+	// list would drift the first time a command was added or renamed, and would offer
+	// the user something the engine refuses.
+	Commands []CommandMeta
+}
+
+// CommandMeta is one entry in the command catalog.
+type CommandMeta struct {
+	Name    string
+	Syntax  string
+	Palette string
 }
 
 func (e EvReady) encode(sid string, seq uint64) ([]byte, error) {
 	f := map[string]any{
 		"protocolVersion": e.ProtocolVersion,
 		"autoApprove":     e.AutoApprove,
+	}
+	// Omitted when empty rather than sent as "": an absent key is how a consumer tells
+	// "the default" from "a value that happens to be blank", and it keeps the frame
+	// small for the common case where every one of these is the default.
+	for k, v := range map[string]string{
+		"tier":      e.Tier,
+		"tierGloss": e.TierGloss,
+		"backend":   e.Backend,
+		"routing":   e.Routing,
+		"logFile":   e.LogFile,
+	} {
+		if v != "" {
+			f[k] = v
+		}
+	}
+	if len(e.Commands) > 0 {
+		cmds := make([]map[string]any, 0, len(e.Commands))
+		for _, c := range e.Commands {
+			cmds = append(cmds, map[string]any{
+				"name":    c.Name,
+				"syntax":  c.Syntax,
+				"palette": c.Palette,
+			})
+		}
+		f["commands"] = cmds
 	}
 	if e.ResumedSessionID != "" {
 		f["resumedSessionId"] = e.ResumedSessionID
@@ -104,14 +155,26 @@ type EvTurnStart struct {
 	TurnID    string
 	Role      TurnRole
 	StartedAt int64
+	// Wake marks a turn the assistant started on its OWN, from an attention burst
+	// rather than from something the user sent.
+	//
+	// A host needs it because such a turn is not interruptible: `interrupt` aborts
+	// command turns only, since a wake has already claimed its attention events and
+	// aborting would strand them. Without this the host offers a Stop control that
+	// cannot do anything.
+	Wake bool
 }
 
 func (e EvTurnStart) encode(sid string, seq uint64) ([]byte, error) {
-	return marshalEvent("turn:start", sid, seq, map[string]any{
+	f := map[string]any{
 		"turnId":    e.TurnID,
 		"role":      string(e.Role),
 		"startedAt": e.StartedAt,
-	})
+	}
+	if e.Wake {
+		f["wake"] = true
+	}
+	return marshalEvent("turn:start", sid, seq, f)
 }
 
 // EvTurnToken — turn:token.
@@ -244,6 +307,19 @@ type EvToolSettled struct {
 	// render it as a finished success (the host shows it as a distinct yellow
 	// pending state). Empty for every ordinary synchronous result.
 	AsyncID string
+	// AsyncTitle names the work an accepted async call handed off ("migrate the
+	// schema in wt_db"), so a host can say WHAT is running in the background rather
+	// than only that something is.
+	AsyncTitle string
+	// Summary is the tool's OWN human-readable line for what it did ("Pushed 3
+	// commits to origin/main"). Engine-authored, never raw arguments, so it is safe to
+	// carry across a UI boundary — and it is what the terminal cockpit showed instead
+	// of a bare tool id. Without it a host can only display the identifier and hope
+	// the user knows what it means.
+	Summary string
+	// ErrorMessage is the human sentence behind ErrorCode. A code alone tells a user
+	// that something failed, not what.
+	ErrorMessage string
 }
 
 func (e EvToolSettled) encode(sid string, seq uint64) ([]byte, error) {
@@ -263,12 +339,89 @@ func (e EvToolSettled) encode(sid string, seq uint64) ([]byte, error) {
 	if e.AsyncID != "" {
 		f["asyncId"] = e.AsyncID
 	}
+	if e.AsyncTitle != "" {
+		f["asyncTitle"] = e.AsyncTitle
+	}
+	if e.Summary != "" {
+		f["summary"] = e.Summary
+	}
+	if e.ErrorMessage != "" {
+		f["errorMessage"] = e.ErrorMessage
+	}
 	return marshalEvent("tool:settled", sid, seq, f)
 }
 
 // EvApprovalRequested — approval:requested. turnId optional. riskClass,
 // consequence, and argsSummary are optional display context (parity with a local
 // host approval); each is omitted from the wire object when empty.
+// EvMcpStatus — mcp:status. Whether the Daintree control plane is reachable, and how
+// many tools it is offering.
+//
+// Emitted at boot and again after any reconnect. Without it a host can only report
+// that the ENGINE is up, which says nothing about whether it can actually do anything:
+// a session that answers questions but cannot spawn an agent, while its status line
+// reads "Connected", is the most misleading state this protocol can produce.
+type EvMcpStatus struct {
+	Connected bool
+	// ToolCount is nil when the catalog has not been fetched yet.
+	ToolCount *int
+	// Error is the reason it is not connected, when there is one.
+	Error string
+}
+
+func (e EvMcpStatus) encode(sid string, seq uint64) ([]byte, error) {
+	f := map[string]any{"connected": e.Connected}
+	if e.ToolCount != nil {
+		f["toolCount"] = *e.ToolCount
+	}
+	if e.Error != "" {
+		f["error"] = e.Error
+	}
+	return marshalEvent("mcp:status", sid, seq, f)
+}
+
+// EvCommandResult — command:result. The output of a slash command the host routed
+// through the engine, as plain text.
+//
+// Commands are not conversation. Sending `/status` to the model as prose produces an
+// answer about the WORD status, spends a turn doing it, and leaves the user believing
+// they ran something. This event is how an embedded surface gets the same answer the
+// REPL prints.
+type EvCommandResult struct {
+	Command string
+	Text    string
+	// Quit reports that the command asked the session to end (/quit, /exit).
+	Quit bool
+	// Unknown reports that the line looked like a command but names none that exists,
+	// so the host can say so instead of silently doing nothing.
+	Unknown bool
+	// ConversationCleared is the AUTHORITATIVE outcome of /clear: true only when the
+	// engine actually cleared. A host must gate its transcript reset on this and never
+	// on the command text — see CommandOutcome.ConversationCleared for what happens
+	// when it does not. Same name and JSON key as the --multi-turn surface's
+	// domain.JsonCommandResultPayload, so the two protocols cannot drift.
+	ConversationCleared bool
+	TurnID              string
+}
+
+func (e EvCommandResult) encode(sid string, seq uint64) ([]byte, error) {
+	// ALWAYS present, unlike the omit-when-false booleans below. This one gates a
+	// destructive UI action, so an absent field has to mean "an engine too old to know"
+	// and nothing else; leaving it out on the false path would make the safe answer and
+	// the unknown answer identical on the wire.
+	f := map[string]any{"command": e.Command, "text": e.Text, "conversationCleared": e.ConversationCleared}
+	if e.Quit {
+		f["quit"] = true
+	}
+	if e.Unknown {
+		f["unknown"] = true
+	}
+	if e.TurnID != "" {
+		f["turnId"] = e.TurnID
+	}
+	return marshalEvent("command:result", sid, seq, f)
+}
+
 type EvApprovalRequested struct {
 	ApprovalID  string
 	ToolID      string
@@ -288,6 +441,19 @@ type EvApprovalRequested struct {
 	// in the permissive direction. safety.NeedsTypedConfirm stays the single source of
 	// truth; this field is its answer.
 	NeedsTypedConfirm bool
+	// Rememberable is the engine's verdict that this risk class MAY be added to a
+	// session "don't ask again" list. The highest classes (git, system) never can.
+	//
+	// Carried rather than left for the host to re-derive, for the same reason
+	// NeedsTypedConfirm is: a host that reimplements "which risks are safe to remember"
+	// has forked a security rule into a second codebase, where it can drift silently
+	// and in the permissive direction.
+	Rememberable bool
+	// ToolKey is the effective identity the gates were applied to — a composite id for
+	// a dynamic tool. A host that remembers an approval must key on THIS, not on
+	// ToolID: two different actions can present the same display name, and a standing
+	// approval given for one would otherwise cover the other.
+	ToolKey string
 }
 
 func (e EvApprovalRequested) encode(sid string, seq uint64) ([]byte, error) {
@@ -312,6 +478,12 @@ func (e EvApprovalRequested) encode(sid string, seq uint64) ([]byte, error) {
 	// Always present, never omitted-when-false: a host must be able to tell "this
 	// action does not need typed confirmation" from "this peer is too old to say".
 	f["needsTypedConfirm"] = e.NeedsTypedConfirm
+	if e.Rememberable {
+		f["rememberable"] = true
+	}
+	if e.ToolKey != "" {
+		f["toolKey"] = e.ToolKey
+	}
 	return marshalEvent("approval:requested", sid, seq, f)
 }
 
@@ -452,12 +624,23 @@ func (e EvShutdown) encode(sid string, seq uint64) ([]byte, error) {
 type EvTurnPhase struct {
 	TurnID string
 	Phase  string
+	// Wake marks a phase belonging to a turn the assistant started ITSELF.
+	//
+	// Carried here as well as on turn:start because a wake emits its first phase
+	// BEFORE the turn opens (the session reports "analyzing" while it decides what to
+	// do). A host that learned this only from turn:start therefore had a window where
+	// it knew work was happening but not that Stop could not reach it, and offered the
+	// control anyway.
+	Wake bool
 }
 
 func (e EvTurnPhase) encode(sid string, seq uint64) ([]byte, error) {
 	f := map[string]any{"phase": e.Phase}
 	if e.TurnID != "" {
 		f["turnId"] = e.TurnID
+	}
+	if e.Wake {
+		f["wake"] = true
 	}
 	return marshalEvent("turn:phase", sid, seq, f)
 }
@@ -476,6 +659,29 @@ func (e EvTurnReasoning) encode(sid string, seq uint64) ([]byte, error) {
 		"turnId": e.TurnID,
 		"text":   e.Text,
 	})
+}
+
+// EvInterjectRetracted — interject:retracted. Answers an interject:retract command
+// with the text taken back, so the host can put it where the user can edit it.
+//
+// The cockpit bound this to Escape on an empty composer: a follow-up typed mid-turn is
+// BUFFERED, not sent, until the running turn folds it in at its next tool boundary, so
+// there is a real window in which it can still be pulled back. `retracted` is false when
+// that window has closed — already folded in, or nothing was typed — and the host must
+// then leave the running turn alone rather than pretending it took something back.
+type EvInterjectRetracted struct {
+	Retracted bool
+	Text      string
+}
+
+func (e EvInterjectRetracted) encode(sid string, seq uint64) ([]byte, error) {
+	f := map[string]any{"retracted": e.Retracted}
+	if e.Retracted {
+		// Echoed verbatim: it is the user's own text coming back to their composer, and
+		// redacting it would hand them a masked version of what they just typed.
+		f["text"] = e.Text
+	}
+	return marshalEvent("interject:retracted", sid, seq, f)
 }
 
 // EvTurnInterjection — turn:interjection. A message the user typed WHILE the turn
@@ -501,6 +707,15 @@ type BatchedCall struct {
 	ToolID      string `json:"toolId"`
 	ArgsSummary string `json:"argsSummary"`
 	Danger      bool   `json:"danger"`
+	// Verb is the settled human label ("Read", "Delegated"); ActiveVerb is its
+	// in-progress form ("Delegating") for the tools that visibly block for many
+	// seconds, empty when the settled label reads correctly either way. Target is the
+	// verb's object, pulled from the raw args and redacted. All three are empty for a
+	// tool the presentation table does not know, which is the signal to fall back to
+	// the raw tool id — never to invent a label. See presentation.go.
+	Verb       string `json:"verb,omitempty"`
+	ActiveVerb string `json:"activeVerb,omitempty"`
+	Target     string `json:"target,omitempty"`
 }
 
 // EvToolBatch — tool:batch. The WHOLE batch announced as queued before sequential
@@ -616,7 +831,7 @@ func (e EvCost) encode(sid string, seq uint64) ([]byte, error) {
 }
 
 // EvNotice — notice. Non-fatal info/warning the runtime surfaces (a repeating tool
-// failure, a pinned skill the backend could not honour, a degraded MCP). v2 had no
+// failure, a pinned runbook the backend could not honour, a degraded MCP). v2 had no
 // channel for these at all, so they reached nobody once the local renderer was gone.
 type EvNotice struct {
 	Level   string // "info" | "warning"

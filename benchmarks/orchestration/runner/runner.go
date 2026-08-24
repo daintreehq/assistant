@@ -76,11 +76,11 @@ type ScenarioResult struct {
 	Error        string         `json:"error,omitempty"`
 
 	// Latency decomposition (see scenario.RoundMetric).
-	TurnMS          int64                  `json:"turnMs,omitempty"`
-	FirstRawMetaMS  int64                  `json:"firstRawMetaMs,omitempty"`
-	FirstSkillCueMS int64                  `json:"firstSkillCueMs,omitempty"`
-	FirstContentMS  int64                  `json:"firstContentMs,omitempty"`
-	RoundDetail     []scenario.RoundMetric `json:"roundDetail,omitempty"`
+	TurnMS            int64                  `json:"turnMs,omitempty"`
+	FirstRawMetaMS    int64                  `json:"firstRawMetaMs,omitempty"`
+	FirstRunbookCueMS int64                  `json:"firstRunbookCueMs,omitempty"`
+	FirstContentMS    int64                  `json:"firstContentMs,omitempty"`
+	RoundDetail       []scenario.RoundMetric `json:"roundDetail,omitempty"`
 }
 
 // RunScenario executes one trial of one scenario.
@@ -216,7 +216,7 @@ func RunScenario(ctx context.Context, bin string, sc scenario.Scenario, opts Opt
 	res.DebugLog = rr.DebugLogPath
 	res.TurnMS = rr.TurnMS
 	res.FirstRawMetaMS = rr.FirstRawMetaMS
-	res.FirstSkillCueMS = rr.FirstSkillCueMS
+	res.FirstRunbookCueMS = rr.FirstRunbookCueMS
 	res.FirstContentMS = rr.FirstContentMS
 	res.RoundDetail = rr.RoundDetail
 	return res
@@ -279,7 +279,7 @@ type roundTimeline struct {
 	round           int
 	requestTS       time.Time
 	rawMetaTS       time.Time
-	skillCueTS      time.Time
+	runbookCueTS    time.Time
 	committedMetaTS time.Time
 	doneTS          time.Time
 	totalMS         int64
@@ -290,7 +290,7 @@ type roundTimeline struct {
 }
 
 // parseDebugLog reconstructs the turn's timeline from the trace events:
-// turn.start → per-round backend.respond.{request,raw_meta,skill_cue,meta,done}
+// turn.start → per-round backend.respond.{request,raw_meta,runbook_cue,meta,done}
 // → turn.end. It fills round counts + usage totals (as before) AND the per-round
 // latency decomposition. Format
 // (debuglog.formatLine): "<ISO-ts>  <event>[  k=v ...]" lines with ms-precision
@@ -394,11 +394,11 @@ func parseDebugLog(rr *scenario.RunResult) {
 					}
 				}
 				curDone = nil
-			case "backend.respond.skill_cue":
+			case "backend.respond.runbook_cue":
 				if n, ok := intField(rest, "round"); ok && tsErr == nil {
 					rt := ensure(n)
-					if rt.skillCueTS.IsZero() {
-						rt.skillCueTS = ts
+					if rt.runbookCueTS.IsZero() {
+						rt.runbookCueTS = ts
 					}
 				}
 				curDone = nil
@@ -497,8 +497,8 @@ func parseDebugLog(rr *scenario.RunResult) {
 			if !rt.rawMetaTS.IsZero() {
 				rm.RawMetaMS = rt.rawMetaTS.Sub(rt.requestTS).Milliseconds()
 			}
-			if !rt.skillCueTS.IsZero() {
-				rm.SkillCueMS = rt.skillCueTS.Sub(rt.requestTS).Milliseconds()
+			if !rt.runbookCueTS.IsZero() {
+				rm.RunbookCueMS = rt.runbookCueTS.Sub(rt.requestTS).Milliseconds()
 			}
 			if !rt.committedMetaTS.IsZero() {
 				rm.CommittedMetaMS = rt.committedMetaTS.Sub(rt.requestTS).Milliseconds()
@@ -529,8 +529,8 @@ func parseDebugLog(rr *scenario.RunResult) {
 		var firstCue, firstContent time.Time
 		for _, n := range nums {
 			rt := rounds[n]
-			if !rt.skillCueTS.IsZero() && (firstCue.IsZero() || rt.skillCueTS.Before(firstCue)) {
-				firstCue = rt.skillCueTS
+			if !rt.runbookCueTS.IsZero() && (firstCue.IsZero() || rt.runbookCueTS.Before(firstCue)) {
+				firstCue = rt.runbookCueTS
 			}
 			if rt.firstTokMS > 0 && !rt.requestTS.IsZero() {
 				ts := rt.requestTS.Add(time.Duration(rt.firstTokMS) * time.Millisecond)
@@ -540,7 +540,7 @@ func parseDebugLog(rr *scenario.RunResult) {
 			}
 		}
 		if !firstCue.IsZero() {
-			rr.FirstSkillCueMS = firstCue.Sub(turnStart).Milliseconds()
+			rr.FirstRunbookCueMS = firstCue.Sub(turnStart).Milliseconds()
 		}
 		if !firstContent.IsZero() {
 			rr.FirstContentMS = firstContent.Sub(turnStart).Milliseconds()

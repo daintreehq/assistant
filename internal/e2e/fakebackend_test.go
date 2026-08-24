@@ -6,7 +6,7 @@
 // test covers (jsonout_test.go exercises the sink in isolation, not the wired binary).
 //
 // The CLI no longer talks to DeepSeek directly: it speaks the Daintree-native wire
-// protocol to the backend, which owns the system prompt, skill selection, model
+// protocol to the backend, which owns the system prompt, runbook selection, model
 // routing, and the upstream model credentials. So the fake here is a fake BACKEND, not
 // a fake DeepSeek — it serves named-event SSE on /v1/daintree/respond and JSON utility
 // results on /v1/daintree/tasks. The binary is pointed at it via DAINTREE_BACKEND_URL
@@ -44,11 +44,11 @@ type sseRound struct {
 	toolArgs string
 	// usage, when non-nil, rides the terminal `done` event.
 	usage *fakeUsage
-	// skills, when non-nil, replaces the default empty skills block on this round's
+	// runbooks, when non-nil, replaces the default empty runbooks block on this round's
 	// `meta` event. It is the WIRE shape (snake_case, as the backend really sends it),
 	// so a test exercises the client's decode and the session's projection rather than
 	// a pre-shaped struct.
-	skills map[string]any
+	runbooks map[string]any
 	// errorMessage, when non-empty, ends the round with a terminal `error` event instead
 	// of `done` — a backend-side failure mid-stream, which is how a real turn fails. The
 	// meta event still goes out first, because the client requires it before anything
@@ -56,9 +56,9 @@ type sseRound struct {
 	errorMessage string
 }
 
-// defaultSkillsBlock is the "selector did not run" block every round sends unless the
+// defaultRunbooksBlock is the "selector did not run" block every round sends unless the
 // round scripts its own.
-func defaultSkillsBlock() map[string]any {
+func defaultRunbooksBlock() map[string]any {
 	return map[string]any{
 		"active":       []any{},
 		"newly_loaded": []any{},
@@ -67,9 +67,9 @@ func defaultSkillsBlock() map[string]any {
 	}
 }
 
-// skillsBlock builds a wire-shaped skills block. active/newlyLoaded are id→title pairs
+// runbooksBlock builds a wire-shaped runbooks block. active/newlyLoaded are id→title pairs
 // given as flat [id, title, id, title, …] so a round stays readable at the call site.
-func skillsBlock(degraded bool, active []string, newlyLoaded []string) map[string]any {
+func runbooksBlock(degraded bool, active []string, newlyLoaded []string) map[string]any {
 	refs := func(flat []string) []any {
 		out := make([]any, 0, len(flat)/2)
 		for i := 0; i+1 < len(flat); i += 2 {
@@ -160,17 +160,17 @@ func (f *fakeBackend) handleRespond(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// meta ALWAYS first, before any token — carries the opaque state token, the skills
+	// meta ALWAYS first, before any token — carries the opaque state token, the runbooks
 	// outcome (empty here), and version markers. The client errors if it never arrives.
-	skills := round.skills
-	if skills == nil {
-		skills = defaultSkillsBlock()
+	runbooks := round.runbooks
+	if runbooks == nil {
+		runbooks = defaultRunbooksBlock()
 	}
 	writeEvent("meta", map[string]any{
-		"protocol_version": 2,
+		"protocol_version": 3,
 		"request_id":       "req_1",
 		"model":            "daintree-assistant",
-		"skills":           skills,
+		"runbooks":         runbooks,
 		"state":            "dst1.test",
 		"catalog_revision": "sha256:test",
 		"prompt_version":   "test",
@@ -273,21 +273,21 @@ func (f *fakeBackend) handleCapabilities(w http.ResponseWriter, _ *http.Request)
 			"streaming":                true,
 			"stream_events":            []string{"meta", "delta", "done", "error"},
 			"system_messages_accepted": false,
-			"max_active_skills":        3,
+			"max_active_runbooks":      3,
 			"metadata_transport":       "sse",
 			// Advertise the terminal-geometry contract so the PTY runs exercise the OPEN
 			// gate. A fake that withheld it would leave every end-to-end path testing only
 			// the fail-closed branch, which is the branch that cannot regress.
 			"display_context": true,
 		},
-		"skills": map[string]any{
+		"runbooks": map[string]any{
 			"catalog_revision": "sha256:test",
 			"manual_resolve":   false,
 			// Advertised for the same reason display_context above is: a fake that withheld
 			// it would leave every end-to-end path exercising only the fail-closed branch,
-			// which is the branch that cannot regress. With it on, an e2e --skill run
+			// which is the branch that cannot regress. With it on, an e2e --runbook run
 			// actually reaches the wire.
-			"pinned_skill_ids": true,
+			"pinned_runbook_ids": true,
 			"catalog": []map[string]any{
 				{"id": "daintree.foundation", "title": "Foundation"},
 				{"id": "daintree.orchestration.multi-agent", "title": "Multi-agent orchestration"},
@@ -296,7 +296,7 @@ func (f *fakeBackend) handleCapabilities(w http.ResponseWriter, _ *http.Request)
 		"tasks": []string{
 			"checkpoint", "memory_distill", "watcher_classify", "terminal_judge",
 			"terminal_summarize", "terminal_extract_text", "terminal_extract_json",
-			"extraction_verdict", "skill_step_consistency",
+			"extraction_verdict", "runbook_step_consistency",
 		},
 		"limits": map[string]any{"request_bytes": 1 << 20, "tools": 256},
 	})

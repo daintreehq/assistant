@@ -1,7 +1,7 @@
 // Package prompts holds MainPromptContext — the structured runtime/environment facts
 // the CLI collects and hands to the agent session.
 //
-// The backend owns the system prompt, developer instructions, skill bodies, and fresh
+// The backend owns the system prompt, developer instructions, runbook bodies, and fresh
 // runtime/turn rendering. The CLI renders no system message; it projects this carrier
 // into the backend's structured request.startup and request.runtime blocks.
 package prompts

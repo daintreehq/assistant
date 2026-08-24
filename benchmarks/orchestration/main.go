@@ -232,7 +232,7 @@ func printLatency(results []runner.ScenarioResult) {
 			continue
 		}
 		if !any {
-			fmt.Printf("\nLATENCY (per round, request-relative: rawMeta / skillCue / commitMeta / firstTok; cache = cached/prompt tokens)\n")
+			fmt.Printf("\nLATENCY (per round, request-relative: rawMeta / runbookCue / commitMeta / firstTok; cache = cached/prompt tokens)\n")
 			any = true
 		}
 		metric := func(ms int64) string {
@@ -242,11 +242,11 @@ func printLatency(results []runner.ScenarioResult) {
 			return fmt.Sprintf("%5dms", ms)
 		}
 		fmt.Printf("%-22s t%-3d firstRaw=%s  firstCue=%s  firstContent=%s  turn=%6dms  rounds=%d\n",
-			r.ID, r.Trial, metric(r.FirstRawMetaMS), metric(r.FirstSkillCueMS),
+			r.ID, r.Trial, metric(r.FirstRawMetaMS), metric(r.FirstRunbookCueMS),
 			metric(r.FirstContentMS), r.TurnMS, r.Rounds)
 		for _, m := range r.RoundDetail {
-			fmt.Printf("    r%-2d gap %6dms   rawMeta %s   skillCue %s   commitMeta %s   firstTok %s   total %6dms   %6d tok (%3.0f%% cached)  %s\n",
-				m.Round, m.GapBeforeMS, metric(m.RawMetaMS), metric(m.SkillCueMS),
+			fmt.Printf("    r%-2d gap %6dms   rawMeta %s   runbookCue %s   commitMeta %s   firstTok %s   total %6dms   %6d tok (%3.0f%% cached)  %s\n",
+				m.Round, m.GapBeforeMS, metric(m.RawMetaMS), metric(m.RunbookCueMS),
 				metric(m.CommittedMetaMS), metric(m.FirstTokenMS), m.TotalMS,
 				m.PromptTokens, m.CacheHitPct(), m.FinishReason)
 		}

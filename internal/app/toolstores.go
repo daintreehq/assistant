@@ -10,7 +10,7 @@ import (
 
 	"github.com/daintreehq/assistant/internal/tools/memory"
 	queuetools "github.com/daintreehq/assistant/internal/tools/queue"
-	"github.com/daintreehq/assistant/internal/tools/skill"
+	"github.com/daintreehq/assistant/internal/tools/runbook"
 	"github.com/daintreehq/assistant/internal/tools/timer"
 	"github.com/daintreehq/assistant/internal/tools/watcher"
 	"github.com/daintreehq/assistant/internal/tools/workflow"
@@ -106,26 +106,26 @@ func (a queueToolAdapter) Format(events []domain.QueueEvent) string {
 
 var _ queuetools.Queue = queueToolAdapter{}
 
-/* --------------------------------- skill --------------------------------- */
+/* --------------------------------- runbook --------------------------------- */
 
-type skillStoreAdapter struct{ s *storage.Store }
+type runbookStoreAdapter struct{ s *storage.Store }
 
-func (a skillStoreAdapter) GetSkillRunState(_ context.Context, sessionID, skillID string) (*domain.SkillRunStateRecord, error) {
-	return a.s.GetSkillRunState(sessionID, skillID)
+func (a runbookStoreAdapter) GetRunbookRunState(_ context.Context, sessionID, runbookID string) (*domain.RunbookRunStateRecord, error) {
+	return a.s.GetRunbookRunState(sessionID, runbookID)
 }
 
-func (a skillStoreAdapter) InsertSkillRunState(_ context.Context, rec domain.SkillRunStateRecord) (string, error) {
-	out, err := a.s.InsertSkillRunState(rec)
+func (a runbookStoreAdapter) InsertRunbookRunState(_ context.Context, rec domain.RunbookRunStateRecord) (string, error) {
+	out, err := a.s.InsertRunbookRunState(rec)
 	if err != nil {
 		return "", err
 	}
 	return out.ID, nil
 }
 
-// UpdateSkillRunState projects the family's full-record update onto the storage
+// UpdateRunbookRunState projects the family's full-record update onto the storage
 // patch-map update (the allowlisted run-state columns: currentStep/stepsJson/
 // status/completedAt; updatedAt is store-forced).
-func (a skillStoreAdapter) UpdateSkillRunState(_ context.Context, rec domain.SkillRunStateRecord) error {
+func (a runbookStoreAdapter) UpdateRunbookRunState(_ context.Context, rec domain.RunbookRunStateRecord) error {
 	patch := map[string]any{
 		"currentStep": rec.CurrentStep,
 		"stepsJson":   rec.StepsJson,
@@ -134,7 +134,7 @@ func (a skillStoreAdapter) UpdateSkillRunState(_ context.Context, rec domain.Ski
 	if rec.CompletedAt != nil {
 		patch["completedAt"] = *rec.CompletedAt
 	}
-	return a.s.UpdateSkillRunState(rec.ID, patch)
+	return a.s.UpdateRunbookRunState(rec.ID, patch)
 }
 
 /* --------------------------------- timer --------------------------------- */
@@ -297,11 +297,11 @@ func intPtrOrNil(n int) *int {
 }
 
 var (
-	_ memory.Store     = memoryStoreAdapter{}
-	_ skill.SkillStore = skillStoreAdapter{}
-	_ timer.Store      = timerStoreAdapter{}
-	_ watcher.Store    = watcherStoreAdapter{}
-	_ workflow.Store   = workflowStoreAdapter{}
+	_ memory.Store         = memoryStoreAdapter{}
+	_ runbook.RunbookStore = runbookStoreAdapter{}
+	_ timer.Store          = timerStoreAdapter{}
+	_ watcher.Store        = watcherStoreAdapter{}
+	_ workflow.Store       = workflowStoreAdapter{}
 	// *storage.Store directly satisfies the agent distill-on-compact seam (no adapter
 	// needed — its no-ctx, record-returning InsertMemory + MemoryExists match exactly).
 	_ agent.MemoryStore = (*storage.Store)(nil)

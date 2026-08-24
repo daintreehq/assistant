@@ -14,7 +14,7 @@ import (
 // The workflow-intelligence graph tools (workflow.plan / getGraph / next /
 // attachResource / recordEvidence / reconcile / cancel). They extend — never
 // replace — the flat workflow.create/get/list/update ledger tools, and are
-// registered ONLY when Deps.Graph is wired (DAINTREE_WORKFLOW_INTELLIGENCE=1),
+// registered ONLY when Deps.Graph is wired (unless DAINTREE_WORKFLOW_INTELLIGENCE=0),
 // so a disabled build's toolset is byte-identical to before.
 
 const codeGraphNotFound = "WORKFLOW_GRAPH_NOT_FOUND"
@@ -51,7 +51,7 @@ type planArgs struct {
 	Scope              string   `json:"scope,omitempty"`
 	ExistingWorkflowID string   `json:"existingWorkflowId,omitempty"`
 	ForceReplan        bool     `json:"forceReplan,omitempty"`
-	ActiveSkillIDs     []string `json:"activeSkillIds,omitempty"`
+	ActiveRunbookIDs   []string `json:"activeRunbookIds,omitempty"`
 	Notes              []string `json:"notes,omitempty"`
 }
 
@@ -71,7 +71,7 @@ var planSchema = json.RawMessage(`{
     "scope": { "type": "string", "description": "Optional bounds/constraints on the work." },
     "existingWorkflowId": { "type": "string", "description": "wfg_… id of a prior graph this goal relates to." },
     "forceReplan": { "type": "boolean", "description": "Replace the existing (non-terminal) workflow with a fresh plan. Without it, planning over a live workflow is refused — reconcile instead." },
-    "activeSkillIds": { "type": "array", "items": { "type": "string" }, "description": "Currently-loaded skill ids, so the plan follows their playbooks." },
+    "activeRunbookIds": { "type": "array", "items": { "type": "string" }, "description": "Currently-loaded runbook ids, so the plan follows their playbooks." },
     "notes": { "type": "array", "items": { "type": "string" }, "description": "Extra constraints or facts the planner should honour." }
   }
 }`)
@@ -93,7 +93,7 @@ func newPlanTool(svc GraphService) *tools.Tool {
 				Scope:              a.Scope,
 				ExistingWorkflowID: a.ExistingWorkflowID,
 				ForceReplan:        a.ForceReplan,
-				ActiveSkillIDs:     a.ActiveSkillIDs,
+				ActiveRunbookIDs:   a.ActiveRunbookIDs,
 				Notes:              a.Notes,
 				Source:             workflowgraph.SourceUser,
 			})

@@ -27,6 +27,7 @@ const (
 	codeInvalidArgs    = "INVALID_ARGS"
 	codeNotInteractive = "QUESTION_NOT_INTERACTIVE"
 	codeUnavailable    = "QUESTION_UNAVAILABLE"
+	codeDismissed      = "QUESTION_DISMISSED"
 	codeCancelled      = "QUESTION_CANCELLED"
 )
 
@@ -200,6 +201,14 @@ func handleAsk(ctx context.Context, raw json.RawMessage, tctx *tools.ToolContext
 		// A cancelled turn (Esc / Ctrl+C / shutdown) unblocks the tool with a cancel.
 		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 			return tools.Fail(codeCancelled, "The user cancelled before answering the question.", tools.Unrecoverable())
+		}
+		// Asked and declined. Not an availability problem, and not a cancellation of
+		// the whole turn — the user simply chose not to choose, so say that rather
+		// than reporting the surface as broken.
+		if errors.Is(err, tools.ErrQuestionDismissed) {
+			return tools.Fail(codeDismissed,
+				"The user closed the question without choosing an option. Decide without asking, or ask differently.",
+				tools.Unrecoverable())
 		}
 		// Any other error means the surface couldn't ask (e.g. ErrNoAskChoiceHook in a
 		// one-shot / host run that offered the tool but has no interactive sheet).

@@ -23,7 +23,7 @@ import (
 // The one thing they must NOT do is push a load-bearing rule out of the description and
 // into nowhere. A rule about ONE tool belongs in that tool's description, where the model
 // sees it beside the thing it governs; a rule spanning several tools belongs in a
-// backend-owned skill. Deleting it because of a byte count is the failure mode, and no
+// backend-owned runbook. Deleting it because of a byte count is the failure mode, and no
 // test can catch that — only review can.
 
 const (
@@ -79,7 +79,7 @@ func TestToolDescriptionsAreWithinBudget(t *testing.T) {
 	}
 	sort.Slice(violations, func(i, j int) bool { return violations[i].chars > violations[j].chars })
 	for _, v := range violations {
-		t.Errorf("%s: description is %d chars, over its %d budget — compact it, or move a cross-tool rule into a backend skill. "+
+		t.Errorf("%s: description is %d chars, over its %d budget — compact it, or move a cross-tool rule into a backend runbook. "+
 			"If it genuinely needs the room, add it to orchestratorTools with a reason.",
 			v.name, v.chars, v.limit)
 	}
@@ -132,7 +132,7 @@ func TestParameterDescriptionsAreWithinBudget(t *testing.T) {
 				continue
 			}
 			if n := utf8.RuneCountInString(d.Text); n > maxParameterDescription {
-				t.Errorf("%s %s: parameter description is %d chars, over the %d budget — state the SHAPE here and put the workflow in the tool description or a skill",
+				t.Errorf("%s %s: parameter description is %d chars, over the %d budget — state the SHAPE here and put the workflow in the tool description or a runbook",
 					tool.Name, d.Path, n, maxParameterDescription)
 			}
 		}

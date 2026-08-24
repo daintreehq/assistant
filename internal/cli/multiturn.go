@@ -22,7 +22,7 @@ var errNoPrompts = errors.New("--multi-turn: no prompts on stdin (one prompt per
 // REPL does, and runs each non-command line as its own turn.
 //
 // It deliberately does NOT own any setup or teardown. Everything that is
-// process-scoped — the ownership lease, app.Create, the MCP connect, the skill pin
+// process-scoped — the ownership lease, app.Create, the MCP connect, the runbook pin
 // negotiation, the scheduler, the async barrier, Shutdown and the sink's terminal
 // line — already happens once in RunOneShot and is correct as-is for a run of any
 // number of turns. This function replaces exactly one statement there: the single Send.

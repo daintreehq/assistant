@@ -156,7 +156,7 @@ var forgeCIStates = map[string]bool{
 // workflow, and it was the ONE common question with no typed wrapper — so the base
 // prompt's "prefer the typed wrapper over the raw daintree.call escape hatch" pointed the
 // model straight at the system-tier, confirmation-gated path, on nearly every turn of a
-// fix-and-verify loop. Two skills had grown prose documenting that exception, which is a
+// fix-and-verify loop. Two runbooks had grown prose documenting that exception, which is a
 // sign the tool surface was missing something rather than that the runbooks needed better
 // wording.
 //

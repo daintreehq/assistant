@@ -90,7 +90,7 @@ func backendClientConfig(cfg config.AppConfig, ledger *costledger.Ledger) backen
 }
 
 // NewProbeBackendClient builds an App-free, UNBILLED client for a read-only probe of
-// the configured endpoint — today, `--list-skills`.
+// the configured endpoint — today, `--list-runbooks`.
 //
 // It resolves the endpoint, the optional caller key and the routing posture exactly the
 // way the session client does, so a probe can never report on a different deployment

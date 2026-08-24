@@ -21,13 +21,13 @@ import (
 
 // coreToolNames are the essential tools asserted to be registered at boot
 // (app.go's AssertRegistered("core tools")). EVERY turn now offers the FULL registry
-// — a loaded skill never narrows the toolset (see buildToolFilterLocked) — so this is
+// — a loaded runbook never narrows the toolset (see buildToolFilterLocked) — so this is
 // no longer a per-turn projection key; it is just the always-must-exist set. Internal
 // dotted names.
 //
 // It is ALSO the floor the autonomous wake prompt is pinned against
 // (TestBuildWakePromptNamesOnlyCoreTools): a wake turn must be able to call every tool
-// its prompt TELLS IT TO CALL, and it may run with no relevant skill active. That pin is
+// its prompt TELLS IT TO CALL, and it may run with no relevant runbook active. That pin is
 // LOCAL —
 // nothing transports this list to the backend, so it does not itself constrain the
 // backend's tool projection; it is the CLI-side declaration such a floor would adopt.
@@ -40,8 +40,8 @@ var coreToolNames = []string{
 	// queue.resolve is core: the autonomous wake prompt tells the reactor to clear a
 	// handled inbox item with it — the watcher branch's hygiene line, the async
 	// completion guidance, and the daemon's unattended note all name it literally. A
-	// wake must work with NO relevant skill active, so the prompt cannot lean on a
-	// skill to reintroduce it; without it a handled item keeps the attention badge lit
+	// wake must work with NO relevant runbook active, so the prompt cannot lean on a
+	// runbook to reintroduce it; without it a handled item keeps the attention badge lit
 	// until some other path resolves or clears it. RiskLocal, so every tier allows it and
 	// it needs no confirmation.
 	"queue.resolve",
@@ -56,7 +56,7 @@ var coreToolNames = []string{
 	// finished agent's output (raw scrollback may be garbled, repainted TUI output), in
 	// both the watcher
 	// and the async branch. It is the first read an autonomous wake is told to reach for,
-	// and that wake must work with no relevant skill active. RiskRead, so no confirmation
+	// and that wake must work with no relevant runbook active. RiskRead, so no confirmation
 	// gate.
 	"terminal.summarize",
 	"terminal.extract",
@@ -76,8 +76,8 @@ var coreToolNames = []string{
 	// boot. The per-call confirm/tier gate still governs it. (terminal.kill — permanent
 	// delete — stays behind daintree.call.)
 	"terminal.close",
-	"skill.step.advance",
-	"skill.run.get",
+	"runbook.step.advance",
+	"runbook.run.get",
 	"memory.recall",
 	"memory.list",
 	"artifact.read",
@@ -96,7 +96,7 @@ var ErrTurnInProgress = errors.New("agent: a turn is already in progress")
 
 // Session is the turn engine (was AgentSession). It runs one user/autonomous turn
 // to completion, owns the live model history (user/assistant/tool only — no client
-// control prefix; skill selection is server-owned), conversation persistence, the
+// control prefix; runbook selection is server-owned), conversation persistence, the
 // opaque backend state token, and the event stream.
 type Session struct {
 	deps SessionDeps
@@ -116,10 +116,10 @@ type Session struct {
 	artifacts *ArtifactStore
 	runRef    *RunIDRef
 
-	// backendState is the opaque, server-signed skill-state token returned in the
+	// backendState is the opaque, server-signed runbook-state token returned in the
 	// stream's meta event. The CLI NEVER inspects, signs, or mutates it — it stores
 	// the latest token and replays it on the next /respond request (a missing token
-	// is valid for a new session, and just makes the backend re-run skill selection).
+	// is valid for a new session, and just makes the backend re-run runbook selection).
 	// Guarded by s.mu (the meta callback writes it; the next round reads it).
 	backendState string
 	// catalogRevision / promptVersion are the backend's last-reported version markers
@@ -188,7 +188,7 @@ type Session struct {
 
 	// toolProj memoizes the OpenAITools projection across the iterations of a turn
 	// AND across turns. The projection is pure work keyed by the offered toolset
-	// (allowedNames). Since skills are server-owned and never narrow the local
+	// (allowedNames). Since runbooks are server-owned and never narrow the local
 	// toolset (buildToolFilterLocked always returns nil — the FULL registry), the
 	// cache identity is permanently "unconstrained" and is built ONCE then reused
 	// for the whole process. Guarded by s.mu (read in resolveTurnTools) for
@@ -346,7 +346,7 @@ type toolProjCache struct {
 }
 
 // NewSession builds a Session. The CLI holds NO client-side control prefix — the
-// backend owns the system prompt, developer instructions, and skill bodies — so a
+// backend owns the system prompt, developer instructions, and runbook bodies — so a
 // fresh session starts with an EMPTY visible history (index 0). On resume
 // (deps.RestoredMessages != nil) the restored working history (user/assistant/tool
 // only) is the starting history and seq continues from InitialSeq.
@@ -365,7 +365,7 @@ func NewSession(deps SessionDeps) *Session {
 		bgCtx:            deps.BackgroundCtx,
 		pendingDropCount: deps.DroppedRehydrateRows,
 		// A resumed session replays the persisted opaque token so the backend's
-		// skill selector continues where the previous owner left off ("" ⇒ fresh,
+		// runbook selector continues where the previous owner left off ("" ⇒ fresh,
 		// the backend just re-runs selection).
 		backendState: deps.InitialBackendState,
 	}
@@ -519,11 +519,11 @@ func (s *Session) clearLocked() {
 	s.compactFailures = 0
 	s.lastPromptTokens = 0
 	s.compactionDepth = 0
-	// Drop the opaque backend skill-state token: /clear is a BRAND-NEW chat, so the
-	// server's stateful skill selector must re-decide from scratch. Left set, the next
+	// Drop the opaque backend runbook-state token: /clear is a BRAND-NEW chat, so the
+	// server's stateful runbook selector must re-decide from scratch. Left set, the next
 	// turn replays the pre-clear token and the backend treats the fresh chat as a
 	// continuation — it never re-injects the runbook the cleared conversation no longer
-	// carries, so the model starts a skill-shaped task (e.g. multi-agent orchestration)
+	// carries, so the model starts a runbook-shaped task (e.g. multi-agent orchestration)
 	// with no runbook and, thinking-off, does nothing. Nothing from before /clear may
 	// persist, and this token is the one piece that leaked. Clear the durable mirror
 	// too, or a post-/clear handover would resurrect the dropped token.
@@ -542,7 +542,7 @@ func (s *Session) clearLocked() {
 // turn after an endpoint switch fails on a token the user has no way to see, and keeps
 // failing until /clear. The conversation itself is fine and must survive: only the
 // server-side selection state is endpoint-bound, and dropping it just makes the new
-// backend re-run skill selection from scratch, which is exactly right for a backend that
+// backend re-run runbook selection from scratch, which is exactly right for a backend that
 // has never seen this conversation.
 //
 // The durable mirror goes with it, for the same reason /clear clears it: a handover to
@@ -823,7 +823,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	turn := TurnContext{RunID: runID}
 
 	// One backend turn_id spans the whole tool-call loop (every round shares it so the
-	// backend keeps the same skill state and does not re-run selection on a plain
+	// backend keeps the same runbook state and does not re-run selection on a plain
 	// continuation round); it is created at the top of runTurn so the turn.start/turn.end
 	// trace events carry it too. instructionRevision bumps whenever a mid-turn injection
 	// is folded in — a fresh instruction the backend's selector should react to.
@@ -833,19 +833,25 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	coarseCounts := make(map[string]int)
 	stuckNudged := false
 
-	// The agentic loop. `iter` counts model rounds purely to drive the phase display
-	// (Analyzing on the first round, Integrating thereafter) — there is deliberately NO
-	// per-turn round ceiling. A long-running autonomous workflow (e.g. orchestrating a
-	// multi-round game across several agent terminals) legitimately needs many rounds
-	// and must be free to keep going; the genuine runaway guard is the per-tool failure
-	// breaker in runToolBatch (the same call failing the same way aborts at
-	// RepeatFailureAbort), not a blunt round cap. A message the human typed mid-turn
+	// The agentic loop. `iter` counts model rounds; it drives the phase display
+	// (Analyzing on the first round, Integrating thereafter) and feeds the convergence
+	// guard below. A long-running autonomous workflow (e.g. orchestrating a multi-round
+	// game across several agent terminals) legitimately needs many rounds, so there is
+	// no hard mid-loop kill — but "many" is not "unbounded". The per-tool failure
+	// breakers in runToolBatch only ever count FAILURES, which leaves a model whose
+	// calls all succeed free to loop forever without answering; turnStall (stall.go) is
+	// the missing progress measure, and it converges the turn by spending the last round
+	// on a tools-off report rather than by killing it. A message the human typed mid-turn
 	// (InjectPrompt) is folded into history at the TOP of a round (foldInInjections), so
 	// the very next model snapshot includes it — "between tasks" pickup. A fresh user
 	// instruction is legitimate new work, so folding one in RESETS the per-turn failure
-	// breaker (a redirect must not be aborted by the PRIOR tool's failures) and re-shows
-	// the Analyzing phase.
+	// breaker (a redirect must not be aborted by the PRIOR tool's failures) and the
+	// convergence tally with it, and re-shows the Analyzing phase.
 	iter := 0
+	stall := newTurnStall()
+	// closing latches the final, tools-off round: the guard has asked for a report, so
+	// this round sends tool_choice "none" and seals whatever prose comes back.
+	closing := false
 	resetForInjection := func() {
 		iter = 0
 		// A folded-in injection is a new active instruction: bump the revision so the
@@ -854,6 +860,8 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		failureCounts = make(map[string]int)
 		coarseCounts = make(map[string]int)
 		stuckNudged = false
+		stall.reset()
+		closing = false
 	}
 	for {
 		// 10a. Cancel check at the top of each round. A cancel always wins over a
@@ -888,8 +896,31 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			}
 		}
 
-		// 5/9. Project the full tool registry for this round. Skills no longer narrow
-		//      the toolset (the backend owns skill selection; the CLI always offers the
+		// 10b. Convergence guard. Consulted BEFORE the snapshot below so a nudge or a
+		//      closing brief is part of the history this round actually sends. It fires
+		//      on two shapes the failure breakers cannot see: consecutive rounds that
+		//      learn nothing new, and a turn that has simply run too many rounds without
+		//      answering. Neither is fatal — a nudge gives the model one chance to
+		//      correct, and a close spends the last round with tools off asking for the
+		//      plan, so the user gets a report instead of an unbounded spend (stall.go).
+		//
+		//      It is handed roundsRun+1 — the round about to stream, counted over the
+		//      WHOLE turn — not iter, which an injection rewinds to 0. The budget has to
+		//      be the one thing a mid-turn message cannot negotiate away.
+		act := stall.step(roundsRun + 1)
+		if act.step != convergenceContinue {
+			event := "turn.stall.nudge"
+			if act.step == convergenceClose {
+				closing = true
+				event = "turn.stall.close"
+			}
+			s.pushMessage(models.TextMessage("user", act.instruction))
+			s.events.Warn(act.warning)
+			s.traceTurnStall(event, runID, turnID, roundsRun, stall.barren)
+		}
+
+		// 5/9. Project the full tool registry for this round. Runbooks no longer narrow
+		//      the toolset (the backend owns runbook selection; the CLI always offers the
 		//      whole registry), so this is a stable projection — a cache HIT every round.
 		//      Computed under s.mu and released before the (long) stream.
 		allowedNames, allowedSet, tools, err := s.resolveTurnTools()
@@ -913,7 +944,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		// 10d. Stream the backend. Stable discovery travels through request.startup;
 		//      input.messages contains visible conversation only. Runtime + per-turn
 		//      context travel through request.runtime / request.turn. The backend owns
-		//      every system prompt, skill selection, and final assembly, and streams
+		//      every system prompt, runbook selection, and final assembly, and streams
 		//      named SSE events.
 		gotToken := false
 		// Read an immutable SNAPSHOT of the history under the lock, then stream with the
@@ -971,9 +1002,13 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			Startup: buildStartupContext(promptContext),
 			State:   s.backendStatePtr(),
 			Input: backend.RespondInput{
-				Messages:   bmsgs,
-				Tools:      btools,
-				ToolChoice: "auto",
+				Messages: bmsgs,
+				Tools:    btools,
+				// The closing round forbids tools at the wire rather than merely asking
+				// for prose: a model that has spent the whole turn reaching for tools
+				// will reach for one more if it is allowed to, and the point of the
+				// round is to end the turn with a report.
+				ToolChoice: toolChoiceFor(closing),
 			},
 			Runtime:    s.buildRuntimeContext(promptContext, openTerminals),
 			Turn:       s.buildTurnContext(userInput, isWake, recalledMemories, resumedWatchers),
@@ -1002,8 +1037,12 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		retryNoticeShown := false
 		retryCount := 0
 		thinkingShown := false
+		// preambleShown suppresses the thinking cue for the same reason gotToken does:
+		// once visible prose is on screen, flipping the footer back to "Thinking"
+		// reads as the answer having been retracted.
+		preambleShown := false
 		markThinking := func() {
-			if thinkingShown || gotToken {
+			if thinkingShown || gotToken || preambleShown {
 				return
 			}
 			thinkingShown = true
@@ -1030,19 +1069,19 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 				retryNoticeShown = true
 				s.events.Warn(retryNotice(info))
 			},
-			OnSkillLoaded: func(refs []backend.SkillRef) {
-				if s.emitSkillLoads(refs) {
-					s.traceBackendSkillCue(runID, turnID, iter, refs)
+			OnRunbookLoaded: func(refs []backend.RunbookRef) {
+				if s.emitRunbookLoads(refs) {
+					s.traceBackendRunbookCue(runID, turnID, iter, refs)
 				}
 			},
 			OnMeta: func(m backend.StreamMeta) {
 				s.applyStreamMeta(m)
-				// The committed round's skill outcome. Emitted here rather than inside
+				// The committed round's runbook outcome. Emitted here rather than inside
 				// applyStreamMeta so that function stays about state persistence, and
 				// emitted unconditionally so a consumer sees the active set on a round
-				// that loaded nothing — the eager OnSkillLoaded cue above fires only on a
+				// that loaded nothing — the eager OnRunbookLoaded cue above fires only on a
 				// delta, and can report a load the committed attempt did not repeat.
-				s.events.SkillDecision(skillDecisionFrom(m.Skills))
+				s.events.RunbookDecision(runbookDecisionFrom(m.Runbooks))
 				s.traceBackendMeta(runID, turnID, iter, m)
 			},
 			OnStatus: func(st backend.StreamStatus) {
@@ -1063,6 +1102,25 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 				// NEVER surfaced to the user (no AssistantToken, no event carries
 				// it); the parser still accumulates it for the final message.
 				markThinking()
+			},
+			OnPreamble: func(p backend.StreamPreamble) {
+				// Rendered live and PROVISIONALLY: nothing is committed here. The
+				// backend's joined text arrives as result.Message.Content and the
+				// sink drops this streamed buffer in favour of it, so emitting the
+				// separator too keeps the live view byte-identical to what commits.
+				//
+				// Deliberately does NOT set gotToken/firstTokenMS: those measure the
+				// EXECUTOR's first output, and the whole point of this stage is that
+				// the two numbers differ. The backend reports both.
+				preambleShown = true
+				s.events.Phase(domain.PhaseGenerating)
+				// Its OWN channel, never AssistantToken. A token buffers, and every
+				// durable flush below it (the runbook decision on the first executor
+				// token, a usage row, an error) would promote this provisional text
+				// into a permanent row — twice on a good turn, and at all on a failed
+				// one. Screen-painting sinks show it; record-keeping sinks ignore it
+				// and get these bytes from the joined final message instead.
+				s.events.AssistantPreamble(p.Content)
 			},
 			OnContent: func(tok string) {
 				if !gotToken {
@@ -1117,7 +1175,33 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			s.traceServerCompaction(runID, turnID, iter, result.Compaction, len(bmsgs), applied, reason)
 		}
 
-		// 10f. Append the assistant message (content null on a pure tool-call turn).
+		// 10f. Append the assistant message (content null on a pure tool-call turn). The
+		//      closing round is the exception: tools were forbidden at the wire, so a
+		//      batch that came back anyway is DROPPED rather than dispatched — and the
+		//      message must then be pushed without it, since an assistant tool_call with
+		//      no matching tool reply makes the transcript unreplayable (DeepSeek 400s).
+		if closing {
+			content := trimSpace(result.Message.Content)
+			if content == "" {
+				// A closing round that produced nothing at all still has to say
+				// something: the turn must never end on a blank bubble.
+				content = stalledReply(roundsRun)
+			}
+			s.pushMessage(models.TextMessage("assistant", content))
+			// A message the user typed during this round is new work and outranks a
+			// STALL close: fold it in, drop the latch and keep going — the same posture
+			// as the final-answer boundary in 10g. A BUDGET close is final, because
+			// yielding to an injection there is exactly how a caller with inject access
+			// would keep one turn running forever; the message stays buffered and the
+			// next turn picks it up.
+			if !stall.budgetClosed && s.foldInInjections() > 0 {
+				resetForInjection()
+				continue
+			}
+			s.events.Phase(domain.PhaseComplete)
+			s.events.AssistantEnd(content, "")
+			return content
+		}
 		s.pushMessage(backendAssistantMessage(result.Message))
 
 		// 10g. No tool calls ⇒ the model thinks it's done. But if the user slipped a
@@ -1149,6 +1233,14 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			}
 			return reply
 		}
+
+		// 10h′. Fold the SETTLED batch into the convergence tally. After dispatch, not
+		//       before: the novelty signature includes a digest of what each call
+		//       returned, which is what stops a legitimate poll of a mutable read
+		//       (watcher.list, agentTask.status) from reading as repetition. A batch the
+		//       breaker or a cancel ended never reaches here, which is harmless — those
+		//       paths have already ended the turn.
+		stall.observe(s.roundSignatures(calls))
 
 		iter++
 	}
@@ -1332,11 +1424,11 @@ func (s *Session) runToolBatch(ctx context.Context, calls []models.ToolCallReque
 			// tool.call audit event — trace it here or it is invisible in the log.
 			s.traceToolGap("tool.args.invalid", turn.RunID, call.ID, internalName, call.Function.Arguments)
 		case allowedSet != nil && !setHas(allowedSet, internalName):
-			// Defensive only: allowedSet is now ALWAYS nil (skills never narrow the
+			// Defensive only: allowedSet is now ALWAYS nil (runbooks never narrow the
 			// toolset — every turn offers the full registry; see buildToolFilterLocked),
-			// so this branch cannot fire from a loaded skill. It survives purely as a
+			// so this branch cannot fire from a loaded runbook. It survives purely as a
 			// guard in case a future caller ever passes an explicit allow-list; it is NOT
-			// a skill capability gate, and a skill must never be the reason a tool is
+			// a runbook capability gate, and a runbook must never be the reason a tool is
 			// unavailable.
 			res = domain.Fail("TOOL_NOT_OFFERED",
 				internalName+" is not offered in this turn's tool spec.",
@@ -1916,6 +2008,21 @@ func (s *Session) classifyBackendError(err error) string {
 		s.events.Error(msg)
 		return msg
 	}
+	if errors.As(err, &be) && be.IsProtocolMismatch() {
+		// A 426 is a VERSION problem between two programs we ship together, and it
+		// has one fix: update. Left to the generic branch it read as "Model error:
+		// backend: http 426 unsupported_daintree_pr…" — a compatibility failure
+		// dressed as a model failure, truncated before the one word that identified
+		// it, and pointing at the model, which is the one component that is fine.
+		//
+		// It is not retriable (backend.retry) and never becomes so on its own, so
+		// naming the action is the whole value of the message.
+		msg := "Daintree assistant backend is a different version of the Daintree protocol than this CLI (backend refused protocol " +
+			strconv.Itoa(backend.ProtocolVersion) + "). Update both to the same release — /doctor reports the versions each side speaks."
+		s.events.Phase(domain.PhaseFailed)
+		s.events.Error(msg)
+		return msg
+	}
 	if errors.As(err, &be) {
 		if msg := upstreamFailureAdvice(be); msg != "" {
 			s.events.Phase(domain.PhaseFailed)
@@ -2051,10 +2158,10 @@ func (s *Session) backendStatePtr() *string {
 // (store-and-replay only). The token is also mirrored to durable storage
 // (best-effort) so a DIFFERENT process — the supervisor daemon picking this session
 // up after a detach, or the next attached session after the daemon — replays the same token
-// instead of forcing the backend to re-run skill selection from scratch
-// mid-conversation. The round's skill outcome (meta.Skills) is deliberately NOT retained
+// instead of forcing the backend to re-run runbook selection from scratch
+// mid-conversation. The round's runbook outcome (meta.Runbooks) is deliberately NOT retained
 // as session state: it is reported per round as it arrives (the caller emits
-// SkillDecision from the same OnMeta callback) and logged by the debug trace, so there is
+// RunbookDecision from the same OnMeta callback) and logged by the debug trace, so there is
 // nothing for a later round to read back.
 func (s *Session) applyStreamMeta(m backend.StreamMeta) {
 	s.mu.Lock()
@@ -2066,25 +2173,25 @@ func (s *Session) applyStreamMeta(m backend.StreamMeta) {
 		// Side-channel: a persistence failure must never break the live stream.
 		_ = s.deps.BackendStateStore.PutSessionBackendState(s.deps.SessionID, m.State)
 	}
-	s.reportPinnedSkillWarnings(m.Warnings)
+	s.reportPinnedRunbookWarnings(m.Warnings)
 }
 
-// pinnedSkillWarnings maps the backend's pin-refusal codes to what an operator needs
-// told. It is an ALLOWLIST, and that is the whole design: backend skill loading is
-// deliberately invisible in this CLI — no card, no cue, no /skills — because the delta
+// pinnedRunbookWarnings maps the backend's pin-refusal codes to what an operator needs
+// told. It is an ALLOWLIST, and that is the whole design: backend runbook loading is
+// deliberately invisible in this CLI — no card, no cue, no /runbooks — because the delta
 // a load card showed was misleading about what was retained, capped, or auto-paired.
 // A pin refusal is the one narrow carve-out, because the operator asked for a specific
-// runbook by name and a `--skill` that quietly did nothing is the exact failure the flag
+// runbook by name and a `--runbook` that quietly did nothing is the exact failure the flag
 // exists to prevent. Every other warning code the backend may add stays diagnostic-only
 // (the debug trace and --json already carry the raw list); widening this map would
 // resurrect the surfacing that was removed on purpose.
-var pinnedSkillWarnings = map[string]string{
-	"unknown_skill_id_ignored":    "the backend did not recognise a pinned skill id and ignored it — run `daintree-assistant --list-skills` to see what it can load",
-	"pinned_skill_not_executable": "a pinned skill exists but is not executable in this session's profile, so it was not loaded",
-	"pinned_skill_over_cap":       "a pinned skill did not fit the backend's active-skill limit and was dropped",
+var pinnedRunbookWarnings = map[string]string{
+	"unknown_runbook_id_ignored":    "the backend did not recognise a pinned runbook id and ignored it — run `daintree-assistant --list-runbooks` to see what it can load",
+	"pinned_runbook_not_executable": "a pinned runbook exists but is not executable in this session's profile, so it was not loaded",
+	"pinned_runbook_over_cap":       "a pinned runbook did not fit the backend's active-runbook limit and was dropped",
 }
 
-// reportPinnedSkillWarnings surfaces the pin-refusal codes from a COMMITTED meta event,
+// reportPinnedRunbookWarnings surfaces the pin-refusal codes from a COMMITTED meta event,
 // once per cause per session.
 //
 // Fed from applyStreamMeta (the retry-safe OnMeta path) rather than OnRawMeta on
@@ -2092,20 +2199,20 @@ var pinnedSkillWarnings = map[string]string{
 // refusal reads as two refusals.
 //
 // It also stays silent when nothing was pinned. The backend can only raise these codes
-// in response to selection.pinned_skill_ids, but a client that reports a pin failure to
+// in response to selection.pinned_runbook_ids, but a client that reports a pin failure to
 // someone who never pinned anything is reporting a bug it cannot explain.
-func (s *Session) reportPinnedSkillWarnings(warnings []string) {
-	if len(warnings) == 0 || len(s.deps.PinnedSkillIDs) == 0 {
+func (s *Session) reportPinnedRunbookWarnings(warnings []string) {
+	if len(warnings) == 0 || len(s.deps.PinnedRunbookIDs) == 0 {
 		return
 	}
 	for _, code := range warnings {
-		msg, ok := pinnedSkillWarnings[code]
+		msg, ok := pinnedRunbookWarnings[code]
 		if !ok {
 			continue
 		}
 		s.mu.Lock()
 		if s.pinWarningsSeen == nil {
-			s.pinWarningsSeen = make(map[string]struct{}, len(pinnedSkillWarnings))
+			s.pinWarningsSeen = make(map[string]struct{}, len(pinnedRunbookWarnings))
 		}
 		_, dup := s.pinWarningsSeen[code]
 		if !dup {
@@ -2125,7 +2232,7 @@ func (s *Session) reportPinnedSkillWarnings(warnings []string) {
 // turn are unchanged by this feature.
 //
 // With pins it attaches them only while the live endpoint still advertises the
-// capability. app.PreparePinnedSkills already proved that before the first turn, so a
+// capability. app.PreparePinnedRunbooks already proved that before the first turn, so a
 // closed gate here means the endpoint CHANGED underneath us — in practice `/backend`,
 // which swaps the client in place and deliberately does no network work, leaving the
 // cached capability answer pinned to the endpoint that is no longer being called.
@@ -2136,25 +2243,25 @@ func (s *Session) reportPinnedSkillWarnings(warnings []string) {
 // deliberate act and the conversation should survive it.
 func (s *Session) selectionForRound() *backend.Selection {
 	sel := &backend.Selection{Policy: "new_instruction"}
-	if len(s.deps.PinnedSkillIDs) == 0 {
+	if len(s.deps.PinnedRunbookIDs) == 0 {
 		return sel
 	}
-	if s.deps.BackendAcceptsPinnedSkillIDs == nil || !s.deps.BackendAcceptsPinnedSkillIDs() {
+	if s.deps.BackendAcceptsPinnedRunbookIDs == nil || !s.deps.BackendAcceptsPinnedRunbookIDs() {
 		s.reportPinGateClosed()
 		return sel
 	}
-	sel.PinnedSkillIDs = append([]string(nil), s.deps.PinnedSkillIDs...)
+	sel.PinnedRunbookIDs = append([]string(nil), s.deps.PinnedRunbookIDs...)
 	return sel
 }
 
 // pinGateClosedCode is a CLIENT-side pseudo-code, kept in the same one-per-session
 // ledger as the backend's own so the two cannot each report the same silent unpinning.
-const pinGateClosedCode = "pinned_skills_withheld"
+const pinGateClosedCode = "pinned_runbooks_withheld"
 
 func (s *Session) reportPinGateClosed() {
 	s.mu.Lock()
 	if s.pinWarningsSeen == nil {
-		s.pinWarningsSeen = make(map[string]struct{}, len(pinnedSkillWarnings)+1)
+		s.pinWarningsSeen = make(map[string]struct{}, len(pinnedRunbookWarnings)+1)
 	}
 	_, dup := s.pinWarningsSeen[pinGateClosedCode]
 	if !dup {
@@ -2167,14 +2274,14 @@ func (s *Session) reportPinGateClosed() {
 	// Names the CAUSE, not just the effect. "This backend does not support pinning"
 	// would be a guess and usually a wrong one: the pins were negotiated successfully at
 	// launch, so what changed is which endpoint is being called.
-	s.events.Warn("the backend endpoint changed after --skill was negotiated, so this turn ran WITHOUT the pinned runbooks; " +
-		"restart with --skill against the new endpoint to pin them there (" + pinGateClosedCode + ")")
+	s.events.Warn("the backend endpoint changed after --runbook was negotiated, so this turn ran WITHOUT the pinned runbooks; " +
+		"restart with --runbook against the new endpoint to pin them there (" + pinGateClosedCode + ")")
 }
 
-// skillLabels renders skill refs to display labels, preferring the title and falling
+// runbookLabels renders runbook refs to display labels, preferring the title and falling
 // back to the id. A ref with NEITHER is malformed — dropped rather than surfaced as a
 // blank row.
-func skillLabels(refs []backend.SkillRef) []string {
+func runbookLabels(refs []backend.RunbookRef) []string {
 	if len(refs) == 0 {
 		return nil
 	}
@@ -2192,22 +2299,22 @@ func skillLabels(refs []backend.SkillRef) []string {
 	return labels
 }
 
-// skillDecisionFrom projects the committed stream meta's skills block onto the
+// runbookDecisionFrom projects the committed stream meta's runbooks block onto the
 // backend-independent event DTO the sinks consume.
 //
 // Refs are copied VERBATIM — same order, no title fallback, no dropping of malformed
 // entries — because this event is the machine-facing record of what the backend actually
 // decided, and laundering it would hide exactly the selector bug a consumer is looking
-// for. (skillLabels' cosmetic fallback stays on the human-readable SkillLoaded path.)
+// for. (runbookLabels' cosmetic fallback stays on the human-readable RunbookLoaded path.)
 // Both slices are allocated even when empty so they marshal as [] rather than null.
 //
 // Selector.Usage and the vestigial Prelude are intentionally dropped; see
-// SkillSelectorOutcome for why usage does not belong on this seam.
-func skillDecisionFrom(b backend.SkillsBlock) SkillDecisionEvent {
-	return SkillDecisionEvent{
-		Active:      copySkillRefs(b.Active),
-		NewlyLoaded: copySkillRefs(b.NewlyLoaded),
-		Selector: SkillSelectorOutcome{
+// RunbookSelectorOutcome for why usage does not belong on this seam.
+func runbookDecisionFrom(b backend.RunbooksBlock) RunbookDecisionEvent {
+	return RunbookDecisionEvent{
+		Active:      copyRunbookRefs(b.Active),
+		NewlyLoaded: copyRunbookRefs(b.NewlyLoaded),
+		Selector: RunbookSelectorOutcome{
 			Ran:        b.Selector.Ran,
 			Degraded:   b.Selector.Degraded,
 			TaskType:   b.Selector.TaskType,
@@ -2217,32 +2324,32 @@ func skillDecisionFrom(b backend.SkillsBlock) SkillDecisionEvent {
 	}
 }
 
-// copySkillRefs converts wire refs to event refs, always returning a non-nil slice.
-func copySkillRefs(refs []backend.SkillRef) []SkillRef {
-	out := make([]SkillRef, 0, len(refs))
+// copyRunbookRefs converts wire refs to event refs, always returning a non-nil slice.
+func copyRunbookRefs(refs []backend.RunbookRef) []RunbookRef {
+	out := make([]RunbookRef, 0, len(refs))
 	for _, ref := range refs {
-		out = append(out, SkillRef{ID: ref.ID, Title: ref.Title})
+		out = append(out, RunbookRef{ID: ref.ID, Title: ref.Title})
 	}
 	return out
 }
 
-// emitSkillLoads surfaces newly-loaded runbooks as a dedicated SkillLoaded event, fed
-// by StreamCallbacks.OnSkillLoaded as soon as the SSE meta arrives. Its distinct value is
-// TIMING — it is the only skill signal available before the upstream model connects, so a
+// emitRunbookLoads surfaces newly-loaded runbooks as a dedicated RunbookLoaded event, fed
+// by StreamCallbacks.OnRunbookLoaded as soon as the SSE meta arrives. Its distinct value is
+// TIMING — it is the only runbook signal available before the upstream model connects, so a
 // trace separates selection latency from generation. It is NOT authoritative: it fires per
 // attempt on a delta, so a retried round can report a load the committed attempt never
-// repeated. SkillDecision (from the committed meta) is the record a consumer asserts on.
+// repeated. RunbookDecision (from the committed meta) is the record a consumer asserts on.
 // It is a
 // DIAGNOSTIC/AUTOMATION signal only — the durable run log, the --json stream, and the
 // debug trace consume it; nothing folds it into the live conversation, and the one place
 // it reaches a human is an explicit `/explain <run>` replay of that run's timeline.
 //
-// In an /explain replay these rows are SUPERSEDED by the committed skill:decision rows
+// In an /explain replay these rows are SUPERSEDED by the committed runbook:decision rows
 // whenever the run recorded any; they still render for runs from before that event
-// existed, which would otherwise lose their skill story entirely.
+// existed, which would otherwise lose their runbook story entirely.
 //
-// It used to draw an inline "Skill loaded" card, and there used to be a /skills command.
-// Both were removed: backend skill selection is prompt-assembly machinery, not a decision
+// It used to draw an inline "Runbook loaded" card, and there used to be a /runbooks command.
+// Both were removed: backend runbook selection is prompt-assembly machinery, not a decision
 // the user takes or can reverse, so there is no affordance to attach the information to.
 // The card named only the NewlyLoaded delta (never what was retained, dropped by the cap,
 // or paired in as a domain foundation), so across rounds it read as the assistant changing
@@ -2251,14 +2358,17 @@ func copySkillRefs(refs []backend.SkillRef) []SkillRef {
 //
 // The "skill" VOCABULARY — a visible "Skill loaded" event, the /skills command — is
 // deliberately left free for user-authored *assistant* skills, which are intent-driven
-// and will want it. Selector tuning reads the debug trace (backend.respond.meta logs the
-// active and newly-loaded sets per round), not the product UI.
-func (s *Session) emitSkillLoads(refs []backend.SkillRef) bool {
-	titles := skillLabels(refs)
+// and will want it. That reservation SURVIVED the protocol-3 rename on purpose: what the
+// backend selects is now a runbook, which is exactly what frees "skill" for the
+// project-level, user-authored, model-invoked thing it has always been reserved for.
+// Selector tuning reads the debug trace (backend.respond.meta logs the active and
+// newly-loaded sets per round), not the product UI.
+func (s *Session) emitRunbookLoads(refs []backend.RunbookRef) bool {
+	titles := runbookLabels(refs)
 	if len(titles) == 0 {
 		return false
 	}
-	s.events.SkillLoaded(titles)
+	s.events.RunbookLoaded(titles)
 	return true
 }
 
@@ -2598,7 +2708,7 @@ func workflowRunStrings(runs []domain.WorkflowRunRecord) []string {
 // before the (long) model stream. The lock keeps this read consistent with any
 // concurrent UI slash command that touches session state. Returns nil
 // allowedNames/allowedSet for an unconstrained (full-registry) turn — which, with
-// server-owned skills, is ALWAYS the case (skills never narrow the toolset).
+// server-owned runbooks, is ALWAYS the case (runbooks never narrow the toolset).
 func (s *Session) resolveTurnTools() ([]string, map[string]struct{}, []models.ChatTool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2607,7 +2717,7 @@ func (s *Session) resolveTurnTools() ([]string, map[string]struct{}, []models.Ch
 	// Preserve nil semantics: an unconstrained turn (nil) offers the FULL registry,
 	// and both the tool-not-offered refusal in runToolBatch and the dispatch gate key
 	// off allowedSet being nil ⇒ "all tools callable". Materialize the set only when
-	// the turn is actually narrowed (never, with server-owned skills — kept for safety).
+	// the turn is actually narrowed (never, with server-owned runbooks — kept for safety).
 	var allowedSet map[string]struct{}
 	if allowedNames != nil {
 		allowedSet = make(map[string]struct{}, len(allowedNames))
@@ -2623,13 +2733,13 @@ func (s *Session) resolveTurnTools() ([]string, map[string]struct{}, []models.Ch
 }
 
 // buildToolFilterLocked returns the per-turn tool projection. It ALWAYS returns nil
-// (the FULL registry): a loaded skill must NEVER limit which tools the model can call.
-// Skills are GUIDANCE — their body suggests which tools to focus on and how to use
+// (the FULL registry): a loaded runbook must NEVER limit which tools the model can call.
+// Runbooks are GUIDANCE — their body suggests which tools to focus on and how to use
 // them — never a capability gate. Narrowing the toolset to core ∪ requiredTools (the
-// old behaviour) silently made legitimate tools un-callable while a skill was loaded
-// (e.g. a relay skill couldn't attach a watcher; a watcher skill couldn't read a
+// old behaviour) silently made legitimate tools un-callable while a runbook was loaded
+// (e.g. a relay runbook couldn't attach a watcher; a watcher runbook couldn't read a
 // terminal), which is exactly wrong: the right tool for the next step must always be
-// reachable. A skill's `requiredTools` is now metadata only (a focus hint + a
+// reachable. A runbook's `requiredTools` is now metadata only (a focus hint + a
 // startup sanity check that the named tools exist) — it does not constrain the turn.
 // Caller MUST hold s.mu (kept for call-site symmetry; this body reads no shared state).
 func (s *Session) buildToolFilterLocked() []string {
@@ -2640,7 +2750,7 @@ func (s *Session) buildToolFilterLocked() []string {
 // reusing the cached projection when the offered toolset is unchanged since the last
 // build. allowedNames==nil is the full (unconstrained) registry — a distinct cache
 // identity from any narrowed set, tracked via the unconstrained flag because
-// slices.Equal treats nil and []string{} as equal. With server-owned skills the
+// slices.Equal treats nil and []string{} as equal. With server-owned runbooks the
 // offered toolset is the full registry on EVERY turn, so in practice the cache is
 // populated once (the unconstrained branch) and reused for the process — this skips
 // re-projecting every tool spec and rebuilding the registry's wire-name maps each
@@ -3713,13 +3823,26 @@ func failureSignature(name, rawArgs, errCode string) string {
 // calls that differ only in key order or whitespace hash the same: parse then
 // re-marshal (Go's encoder sorts object keys). Non-JSON input passes through
 // unchanged. This keeps the circuit breaker counting a repeated-same-way failure
-// even when the model re-emits the call with reordered keys.
+// even when the model re-emits the call with reordered keys, and is the same
+// normalization the convergence guard's novelty signature is built on.
+//
+// Blank canonicalizes to "{}" because that is what the rest of the batch path already
+// treats it as (callBatchable, argsEmpty, dispatchCall): a no-arg call the model emits
+// as "" one round and "{}" the next is ONE repeated call, and hashing the two
+// differently made a repeated no-arg poll read as new work.
+//
+// Numbers are decoded with UseNumber so they survive as their literal text. Through
+// `any` they would land in float64, where every integer past 2^53 rounds to the same
+// value — two genuinely different ids hashing alike, which for a signature whose whole
+// job is "is this the same call?" is a false MATCH, the direction that costs a turn.
 func canonicalJSON(raw string) string {
-	if raw == "" {
-		return ""
+	if trimSpace(raw) == "" {
+		return "{}"
 	}
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
 	var v any
-	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+	if err := dec.Decode(&v); err != nil {
 		return raw
 	}
 	b, err := json.Marshal(v)

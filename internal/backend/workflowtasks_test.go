@@ -71,13 +71,13 @@ func TestWorkflowTaskWireShapes(t *testing.T) {
 	})
 
 	_, _ = RunWorkflowPlan(context.Background(), runner, WorkflowPlanInput{
-		Goal: "g", ActiveSkillIDs: []string{"s1"},
+		Goal: "g", ActiveRunbookIDs: []string{"s1"},
 		ToolInventory: []WorkflowToolInfo{{Name: "fs.read", Risk: "read"}},
 	})
 	if got.Task != TaskWorkflowPlan {
 		t.Fatalf("want %s, got %s", TaskWorkflowPlan, got.Task)
 	}
-	if _, ok := got.Input["active_skill_ids"]; !ok {
+	if _, ok := got.Input["active_runbook_ids"]; !ok {
 		t.Fatalf("plan input must use snake_case keys, got %v", got.Input)
 	}
 

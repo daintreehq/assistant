@@ -13,7 +13,12 @@ const (
 
 	// JSONOutputSchemaVersion is the one-shot --json line schema version. Plain
 	// monotonic int; bump only on a breaking line-shape change.
-	JSONOutputSchemaVersion = 1
+	//
+	// 2: protocol 3 renamed the runbook events — `skill:loaded` -> `runbook:loaded`
+	// and `skill:decision` -> `runbook:decision`. Automation keyed on the old names
+	// stops matching, which is a breaking line-shape change however mechanical it
+	// looks; leaving the version at 1 would have told a consumer nothing had moved.
+	JSONOutputSchemaVersion = 2
 )
 
 // OneShotExitCode is the one-shot exit-code mapping.
@@ -63,8 +68,34 @@ const (
 	// produces. Both breakers now trip MID-batch, so a single huge batch aborts after a
 	// handful of calls rather than dispatching them all first.
 	CoarseRepeatFailureAbort = 6
+	// TurnStallWarn / TurnStallAbort bound CONSECUTIVE model rounds that issue no
+	// tool call this turn has not already made. The failure breakers above only ever
+	// count FAILURES, so a model that keeps calling tools successfully — re-listing
+	// the same directory, re-reading the same file, re-planning out loud between each
+	// — never trips them and the turn runs forever. A round that asks for nothing new
+	// cannot have learned anything new, so a short run of them is the cheapest honest
+	// "no progress" signal available to the loop. Warn nudges; abort closes the turn
+	// with a forced report (see turnStall.step). Deliberately small: a legitimate
+	// round almost always calls something new, and a foreground poll loop is already
+	// bounded by the per-turn wait budget.
+	TurnStallWarn  = 2
+	TurnStallAbort = 4
+	// TurnRoundWarn / TurnRoundBudget bound the TOTAL model rounds one turn may run.
+	// This is the backstop the stall counter cannot provide: a model that keeps
+	// issuing genuinely new calls (reading a different file every round) while never
+	// converging is novel on every round and would otherwise loop without limit.
+	//
+	// The budget bounds a TURN, not the work. Hitting it does not kill the session or
+	// discard anything already set running — the loop spends its last round asking the
+	// model to report its plan and state (tools off), and the user can simply say
+	// "continue", which starts a fresh turn with a fresh budget. That is why the
+	// ceiling can sit well below what a very long autonomous workflow might want:
+	// the cost of being wrong is one extra user message, while the cost of no ceiling
+	// at all is an unbounded spend that never answers.
+	TurnRoundWarn   = 24
+	TurnRoundBudget = 32
 	// ControlMessageCount is 0: the CLI no longer holds any client-side control
-	// prefix. The backend owns the system prompt, developer instructions, and skill
+	// prefix. The backend owns the system prompt, developer instructions, and runbook
 	// bodies; the CLI's visible conversation begins at index 0 with only
 	// user/assistant/tool messages. The constant is retained (rather than deleted) so
 	// the history-slicing call sites stay self-documenting — "everything after the

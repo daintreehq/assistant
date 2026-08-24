@@ -83,8 +83,8 @@ func main() {
 		code = cli.RunReset(ctx, opts, parsed.ResetScope, parsed.ResetOptions)
 	case routeSupportBundle:
 		code = cli.RunSupportBundle(ctx, opts, parsed.SupportBundle)
-	case routeListSkills:
-		code = cli.RunListSkills(ctx, opts)
+	case routeListRunbooks:
+		code = cli.RunListRunbooks(ctx, opts)
 	default:
 		code = cli.Run(ctx, opts)
 	}
@@ -106,7 +106,7 @@ const (
 	routeStatus
 	routeReset
 	routeSupportBundle
-	routeListSkills
+	routeListRunbooks
 )
 
 // parsedArgs is the pure result of command-line parsing. main is the only place
@@ -167,7 +167,7 @@ func parseArgsInto(args []string) (parsedArgs, *flag.FlagSet, error) {
 		// argv instead of having to rewrite the process environment.
 		backendURL = fs.String("backend-url", "", "")
 		apiKeyFile = fs.String("api-key-file", "", "")
-		// promptFile carries the one-shot prompt out of argv entirely. A skill-test prompt
+		// promptFile carries the one-shot prompt out of argv entirely. A runbook-test prompt
 		// is long and multi-line and wants to live in a file next to the runbook it
 		// exercises, rather than being shell-quoted — and a prompt beginning with a dash
 		// no longer needs `--` first. "-" reads stdin.
@@ -185,7 +185,7 @@ func parseArgsInto(args []string) (parsedArgs, *flag.FlagSet, error) {
 		// isolation without hand-rolling paths.
 		projectID = fs.String("project-id", "", "")
 		windowID  = fs.String("window-id", "", "")
-		// A PATH whose CONTENT becomes the DAINTREE.md override, so a skill can be tested
+		// A PATH whose CONTENT becomes the DAINTREE.md override, so a runbook can be tested
 		// against a synthetic project brief without writing one into the repo under test.
 		projectInstructionsFile = fs.String("project-instructions-file", "", "")
 		autoApprove             = fs.Bool("auto-approve", false, "")
@@ -209,14 +209,14 @@ func parseArgsInto(args []string) (parsedArgs, *flag.FlagSet, error) {
 		// `support-bundle` flags.
 		bundleOut   = fs.String("out", "", "")
 		bundleAudit = fs.Bool("include-audit", false, "")
-		// Skill controls. `--skill` is the repo's only repeatable flag, so it is the only
+		// Runbook controls. `--runbook` is the repo's only repeatable flag, so it is the only
 		// one registered through fs.Var rather than fs.String — one pin per occurrence,
-		// deliberately NOT comma-splitting, because a skill id is an opaque backend key
+		// deliberately NOT comma-splitting, because a runbook id is an opaque backend key
 		// and inventing a separator inside it would make a legal id unnameable.
-		skills     skillIDFlags
-		listSkills = fs.Bool("list-skills", false, "")
+		runbooks     runbookIDFlags
+		listRunbooks = fs.Bool("list-runbooks", false, "")
 	)
-	fs.Var(&skills, "skill", "")
+	fs.Var(&runbooks, "runbook", "")
 
 	flagArgs, positionals, help, forcePrompt, err := splitInterspersedArgs(fs, args)
 	if err != nil {
@@ -252,7 +252,7 @@ func parseArgsInto(args []string) (parsedArgs, *flag.FlagSet, error) {
 	// the point. Every check below this line sits after a subcommand's early return, so
 	// putting it there let `--multi-turn status` and `--json --multi-turn doctor` through
 	// unexamined — the flag silently doing nothing on a route that never runs a turn,
-	// which is exactly the "looks like it worked" failure --skill's own route check
+	// which is exactly the "looks like it worked" failure --runbook's own route check
 	// exists to prevent. --run-scheduler validates its bound here for the same reason.
 	//
 	// It insists on --json, which is not mere validation. Without it this flag would be a
@@ -273,11 +273,11 @@ func parseArgsInto(args []string) (parsedArgs, *flag.FlagSet, error) {
 		if *stdio {
 			return parsedArgs{}, nil, stdioRequiresHostError()
 		}
-		// --list-skills names its route with a FLAG rather than a positional, so the
+		// --list-runbooks names its route with a FLAG rather than a positional, so the
 		// check above cannot see it: it is a read-and-print that never runs a turn, and
 		// pairing it with --multi-turn silently discards the conversation.
-		if *listSkills {
-			return parsedArgs{}, nil, fmt.Errorf("--multi-turn and --list-skills do not go together: --list-skills prints the catalog and exits without running a turn")
+		if *listRunbooks {
+			return parsedArgs{}, nil, fmt.Errorf("--multi-turn and --list-runbooks do not go together: --list-runbooks prints the catalog and exits without running a turn")
 		}
 	}
 	// An explicitly EMPTY value is a mistake, never a request to fall back. A harness
@@ -347,27 +347,27 @@ func parseArgsInto(args []string) (parsedArgs, *flag.FlagSet, error) {
 		Timeout:                 *timeout,
 		RunScheduler:            *runScheduler,
 
-		PinnedSkillIDs: skills,
+		PinnedRunbookIDs: runbooks,
 	}
 
 	parsed := parsedArgs{Options: opts, Route: routeDefault}
-	// --list-skills is a read-and-print, and it is carved out FIRST — ahead of the
+	// --list-runbooks is a read-and-print, and it is carved out FIRST — ahead of the
 	// subcommand switch and, crucially, ahead of the "--json requires a prompt" rule
 	// below, for the same reason `doctor --json` is: a listing a script cannot parse is
-	// not one. It takes no prompt and no subcommand, and pairing it with --skill is a
+	// not one. It takes no prompt and no subcommand, and pairing it with --runbook is a
 	// contradiction (you cannot pin an id in the same breath as asking what the ids are),
 	// so both are refused rather than silently ignored.
-	if *listSkills {
+	if *listRunbooks {
 		if len(positionals) > 0 {
-			return parsedArgs{}, nil, fmt.Errorf("--list-skills does not take a prompt or a command: %s", strings.Join(positionals, " "))
+			return parsedArgs{}, nil, fmt.Errorf("--list-runbooks does not take a prompt or a command: %s", strings.Join(positionals, " "))
 		}
-		if len(skills) > 0 {
-			return parsedArgs{}, nil, errors.New("--list-skills and --skill do not go together: list the catalog first, then pin an id from it")
+		if len(runbooks) > 0 {
+			return parsedArgs{}, nil, errors.New("--list-runbooks and --runbook do not go together: list the catalog first, then pin an id from it")
 		}
 		if *stdio {
 			return parsedArgs{}, nil, stdioRequiresHostError()
 		}
-		parsed.Route = routeListSkills
+		parsed.Route = routeListRunbooks
 		return parsed, fs, nil
 	}
 	// `doctor --json` is a real thing: doctor is the release gate, and a gate that can
@@ -379,8 +379,8 @@ func parseArgsInto(args []string) (parsedArgs, *flag.FlagSet, error) {
 		if *stdio {
 			return parsedArgs{}, nil, stdioRequiresHostError()
 		}
-		if len(skills) > 0 {
-			return parsedArgs{}, nil, errors.New("--skill has no effect on \"doctor\", which never runs a turn")
+		if len(runbooks) > 0 {
+			return parsedArgs{}, nil, errors.New("--runbook has no effect on \"doctor\", which never runs a turn")
 		}
 		return parsed, fs, nil
 	}
@@ -450,10 +450,10 @@ func parseArgsInto(args []string) (parsedArgs, *flag.FlagSet, error) {
 			}
 			// A pin is meaningless on a route that never runs a turn, and --timeout's
 			// documented "silently ignored elsewhere" is the WRONG precedent to follow
-			// here: this whole flag exists because a --skill that does nothing looks
+			// here: this whole flag exists because a --runbook that does nothing looks
 			// exactly like one that worked. Say so at the argument boundary instead.
-			if len(skills) > 0 && !routeRunsTurns(parsed.Route) {
-				return parsedArgs{}, nil, fmt.Errorf("--skill has no effect on %q, which never runs a turn", positionals[0])
+			if len(runbooks) > 0 && !routeRunsTurns(parsed.Route) {
+				return parsedArgs{}, nil, fmt.Errorf("--runbook has no effect on %q, which never runs a turn", positionals[0])
 			}
 			return parsed, fs, nil
 		}
@@ -492,7 +492,7 @@ func parseArgsInto(args []string) (parsedArgs, *flag.FlagSet, error) {
 // checkRouteScopedFlags refuses a flag that only means something on one route.
 //
 // --timeout's "silently ignored elsewhere" is the wrong precedent for this one, for the
-// same reason --skill does not follow it: an operator types --allow-delegated-approvals
+// same reason --runbook does not follow it: an operator types --allow-delegated-approvals
 // to make a deliberate decision about whether the agent on the other end of the pipe may
 // approve mutations, and a flag that quietly does nothing looks exactly like one that
 // worked. Say so at the argument boundary.
@@ -561,25 +561,25 @@ func optionName(token string) (name string, inlineValue bool) {
 	return name, false
 }
 
-// skillIDFlags accumulates a repeatable --skill. Go's stock FlagSet has no repeatable
+// runbookIDFlags accumulates a repeatable --runbook. Go's stock FlagSet has no repeatable
 // string, and this is the first flag in the binary that needs one.
 //
 // It rejects an empty occurrence for the same reason the empty-value guard below rejects
-// `--state-dir=`: a harness expanding an unset shell variable produces `--skill=`, and
+// `--state-dir=`: a harness expanding an unset shell variable produces `--runbook=`, and
 // quietly ignoring it would run unpinned — the one outcome this flag exists to prevent.
 // Exact repeats are collapsed (first occurrence wins) rather than rejected, because
 // naming the same runbook twice is a harmless script artifact, not a mistake worth
 // failing a launch over.
 //
 // Case is preserved and commas are not split: the id is the backend's own key.
-type skillIDFlags []string
+type runbookIDFlags []string
 
-func (v *skillIDFlags) String() string { return strings.Join(*v, ",") }
+func (v *runbookIDFlags) String() string { return strings.Join(*v, ",") }
 
-func (v *skillIDFlags) Set(raw string) error {
+func (v *runbookIDFlags) Set(raw string) error {
 	id := strings.TrimSpace(raw)
 	if id == "" {
-		return errors.New("--skill was given an empty value; omit the flag to let the backend's selector choose")
+		return errors.New("--runbook was given an empty value; omit the flag to let the backend's selector choose")
 	}
 	for _, have := range *v {
 		if have == id {
@@ -602,8 +602,8 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 }
 
 // routeRunsTurns reports whether a route ever opens a backend turn, which is the only
-// thing a pinned skill can affect. `host` and `mcp` both serve sessions that do, so a
-// process-level --skill is a legitimate default for them (the MCP client can still
+// thing a pinned runbook can affect. `host` and `mcp` both serve sessions that do, so a
+// process-level --runbook is a legitimate default for them (the MCP client can still
 // override it per session.open); doctor/status/daemon/reset/support-bundle never do.
 func routeRunsTurns(r route) bool {
 	switch r {
@@ -670,8 +670,8 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "  --timeout DURATION  cancel a one-shot run after this long (e.g. 10m; 0 = no limit)")
 	fmt.Fprintln(w, "  --run-scheduler     run the scheduler during a one-shot and await its async work")
 	fmt.Fprintln(w, "                      before exiting (requires --timeout)")
-	fmt.Fprintln(w, "  --skill ID          load this backend runbook on every turn (repeatable)")
-	fmt.Fprintln(w, "  --list-skills       print the runbooks this backend can load, and exit")
+	fmt.Fprintln(w, "  --runbook ID          load this backend runbook on every turn (repeatable)")
+	fmt.Fprintln(w, "  --list-runbooks       print the runbooks this backend can load, and exit")
 	fmt.Fprintln(w, "  --yes               skip the reset confirmation (required without a TTY)")
 	fmt.Fprintln(w, "  --no-backup         skip the reset's timestamped backup")
 	fmt.Fprintln(w, "  --out PATH          support-bundle destination")

@@ -10,7 +10,7 @@ import (
 
 // controlRows is retained as the prefix these rehydration fixtures historically prepended
 // to their working rows. In the new model the CLI holds NO client-side control prefix (the
-// backend owns the system prompt + skills), so a persisted conversation begins with
+// backend owns the system prompt + runbooks), so a persisted conversation begins with
 // user/assistant/tool rows — there are no leading system control rows. The helper therefore
 // contributes nothing now; the fixtures that build on it exercise the same working-row +
 // marker logic with the working rows simply starting at their existing seq offsets.

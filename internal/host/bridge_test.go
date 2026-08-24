@@ -140,20 +140,20 @@ func TestBridgeTurnLifecycle(t *testing.T) {
 	}
 }
 
-// Neither backend-skill event has a host-protocol channel. Pinned alongside the
+// Neither backend-runbook event has a host-protocol channel. Pinned alongside the
 // turn-lifecycle assertions because the decision event carries the richest payload of the
 // two, and "just forward it" is the reflex this guards against — a host that wants it
 // reads the --json stream or the run transcript.
-func TestBridgeSkillEventsPostNothing(t *testing.T) {
+func TestBridgeRunbookEventsPostNothing(t *testing.T) {
 	c := &collector{}
 	b := NewBridge(BridgeOptions{SessionID: "s", Post: c.post})
 
 	b.StartExchange()
 	b.AssistantStart()
-	b.SkillLoaded([]string{"Multi-agent orchestration"})
-	b.SkillDecision(agent.SkillDecisionEvent{
-		Active:   []agent.SkillRef{{ID: "multi_agent", Title: "Multi-agent orchestration"}},
-		Selector: agent.SkillSelectorOutcome{Ran: true, Degraded: true},
+	b.RunbookLoaded([]string{"Multi-agent orchestration"})
+	b.RunbookDecision(agent.RunbookDecisionEvent{
+		Active:   []agent.RunbookRef{{ID: "multi_agent", Title: "Multi-agent orchestration"}},
+		Selector: agent.RunbookSelectorOutcome{Ran: true, Degraded: true},
 	})
 	b.AssistantToken("hi")
 	b.AssistantEnd("answer", "")
@@ -161,7 +161,7 @@ func TestBridgeSkillEventsPostNothing(t *testing.T) {
 	got := c.types()
 	want := []string{"turn:start", "turn:end", "turn:start", "turn:token", "turn:end"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("skill events reached the host protocol: got %v want %v", got, want)
+		t.Fatalf("runbook events reached the host protocol: got %v want %v", got, want)
 	}
 }
 
@@ -170,7 +170,7 @@ func TestBridgeInterruptSuppresses(t *testing.T) {
 	b := NewBridge(BridgeOptions{SessionID: "s", Post: c.post})
 	b.StartExchange()
 	b.AssistantStart()
-	b.Interrupt() // latches interrupted, closes turn agent-stuck
+	b.Interrupt() // latches interrupted, closes the turn as cancelled
 	b.AssistantToken("late")
 	b.ToolCall(agent.ToolCallEvent{ID: "t1", Name: "fs.read", StartedAt: 1})
 
@@ -180,11 +180,42 @@ func TestBridgeInterruptSuppresses(t *testing.T) {
 			t.Fatalf("interrupt failed to suppress: %v", c.types())
 		}
 	}
-	// The interrupt closed the assistant turn as agent-stuck.
+	// The interrupt closes the assistant turn as CANCELLED, not agent-stuck. The user
+	// pressed Stop; nothing hung. Recording a deliberate interruption as a fault
+	// misreports it in the transcript and in every tally built from outcomes.
 	snap := c.snapshot()
 	last := snap[len(snap)-1].(EvTurnEnd)
-	if last.Outcome != OutcomeAgentStuck {
-		t.Fatalf("interrupt close outcome=%q want agent-stuck", last.Outcome)
+	if last.Outcome != OutcomeCancelled {
+		t.Fatalf("interrupt close outcome=%q want cancelled", last.Outcome)
+	}
+}
+
+// An interrupt must terminalize every outstanding call. Without it the host was told
+// each call started and never told anything else, so a stopped turn left rows
+// rendering as "Running" permanently — describing work that is not happening.
+func TestBridgeInterruptTerminalizesOutstandingCalls(t *testing.T) {
+	c := &collector{}
+	b := NewBridge(BridgeOptions{SessionID: "s", Post: c.post})
+	b.StartExchange()
+	b.AssistantStart()
+	b.ToolBatch([]agent.BatchedToolCall{{ID: "t1", Name: "fs.read"}, {ID: "t2", Name: "git.status"}})
+	b.ToolState("t1", agent.ToolState("active"))
+
+	b.Interrupt()
+
+	states := map[string]string{}
+	for _, ev := range c.snapshot() {
+		if ts, ok := ev.(EvToolState); ok {
+			states[ts.ToolCallID] = ts.State
+		}
+	}
+	// The one that was running was cancelled; the one that never started was not run.
+	// The distinction is what tells a reader what the stop actually interrupted.
+	if states["t1"] != toolStateCancelled {
+		t.Errorf("running call state=%q want cancelled", states["t1"])
+	}
+	if states["t2"] != toolStateNotRun {
+		t.Errorf("queued call state=%q want not-run", states["t2"])
 	}
 }
 
@@ -380,5 +411,54 @@ func TestIsDanger(t *testing.T) {
 	}
 	if b.isDanger("unknown.tool") {
 		t.Error("unknown tool must not be danger")
+	}
+}
+
+// The approval event's display fields are only useful if they reach the wire. Both of
+// these existed on the struct while the encoder silently omitted them, so a host that
+// depended on either behaved as though every action were unrememberable.
+func TestApprovalRequestedEncodesGrantFields(t *testing.T) {
+	ev := EvApprovalRequested{
+		ApprovalID:   "apr_1",
+		ToolID:       "Send input",
+		Rememberable: true,
+		ToolKey:      "plugin:alpha/terminal.sendInput",
+	}
+	raw, err := ev.encode("s1", 1)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["rememberable"] != true {
+		t.Errorf("rememberable missing from the wire object: %v", got)
+	}
+	if got["toolKey"] != "plugin:alpha/terminal.sendInput" {
+		t.Errorf("toolKey missing or wrong: %v", got["toolKey"])
+	}
+}
+
+// A call that finished must LEAVE the live set. The engine emits tool:state(done)
+// after ToolResult has already forgotten the call, so recording it put a finished call
+// back among the live ones — and a later interrupt rewrote it as "not-run": a call that
+// demonstrably ran, reported as never started.
+func TestInterruptDoesNotRewriteFinishedCalls(t *testing.T) {
+	c := &collector{}
+	b := NewBridge(BridgeOptions{SessionID: "s", Post: c.post})
+	b.StartExchange()
+	b.AssistantStart()
+	b.ToolBatch([]agent.BatchedToolCall{{ID: "t1", Name: "fs.read"}})
+	b.ToolState("t1", agent.ToolState("active"))
+	b.ToolState("t1", agent.ToolState("done"))
+
+	b.Interrupt()
+
+	for _, ev := range c.snapshot() {
+		ts, ok := ev.(EvToolState)
+		if ok && ts.ToolCallID == "t1" && ts.State == toolStateNotRun {
+			t.Fatalf("a finished call was rewritten as not-run")
+		}
 	}
 }

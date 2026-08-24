@@ -311,12 +311,12 @@ func (s *Service) mirrorResourceLinks(g *Graph, p *Patch) {
 
 /* ---------------------------------- plan --------------------------------- */
 
-// Backend WorkflowPlanInput list caps (contracts/tasks.py: active_skill_ids
+// Backend WorkflowPlanInput list caps (contracts/tasks.py: active_runbook_ids
 // max_length 16, constraints max_length 25). maxPlanNotes leaves one constraint
 // slot for the mandatory local no-file-edit constraint Plan always prepends.
 const (
-	maxPlanSkillIDs = 16
-	maxPlanNotes    = 24
+	maxPlanRunbookIDs = 16
+	maxPlanNotes      = 24
 )
 
 // PlanRequest is workflow.plan's input.
@@ -325,7 +325,7 @@ type PlanRequest struct {
 	Scope              string
 	ExistingWorkflowID string
 	ForceReplan        bool
-	ActiveSkillIDs     []string
+	ActiveRunbookIDs   []string
 	Notes              []string
 	Source             Source
 }
@@ -355,15 +355,15 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (PlanResult, error)
 	}
 
 	// Clamp the unbounded request lists to the backend's strict pydantic caps
-	// (WorkflowPlanInput: active_skill_ids ≤ 16, constraints ≤ 25 — one of which
+	// (WorkflowPlanInput: active_runbook_ids ≤ 16, constraints ≤ 25 — one of which
 	// the mandatory local constraint below consumes). Head-truncate: earlier
 	// entries are the caller's highest-signal ones. A clamped input degrades
 	// gracefully where an over-cap list would 422 the whole task.
-	skillIDs := req.ActiveSkillIDs
-	if len(skillIDs) > maxPlanSkillIDs {
+	runbookIDs := req.ActiveRunbookIDs
+	if len(runbookIDs) > maxPlanRunbookIDs {
 		s.trace("workflow.plan.clamped", map[string]any{
-			"field": "active_skill_ids", "sent": maxPlanSkillIDs, "dropped": len(skillIDs) - maxPlanSkillIDs})
-		skillIDs = skillIDs[:maxPlanSkillIDs]
+			"field": "active_runbook_ids", "sent": maxPlanRunbookIDs, "dropped": len(runbookIDs) - maxPlanRunbookIDs})
+		runbookIDs = runbookIDs[:maxPlanRunbookIDs]
 	}
 	notes := req.Notes
 	if len(notes) > maxPlanNotes {
@@ -390,9 +390,9 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (PlanResult, error)
 	}
 
 	input := backend.WorkflowPlanInput{
-		Goal:           goal,
-		Scope:          strings.TrimSpace(req.Scope),
-		ActiveSkillIDs: skillIDs,
+		Goal:             goal,
+		Scope:            strings.TrimSpace(req.Scope),
+		ActiveRunbookIDs: runbookIDs,
 		Constraints: append([]string{
 			"the assistant must never edit project files directly — file changes go through visible agents (agentTask.spawnForEdits)",
 		}, notes...),

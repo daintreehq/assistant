@@ -12,7 +12,7 @@ import (
 )
 
 // warnSink records the non-fatal warnings a session raised. Pin refusals are the ONE
-// skill outcome this CLI surfaces (backend skill loading is deliberately invisible), so
+// runbook outcome this CLI surfaces (backend runbook loading is deliberately invisible), so
 // these tests are what keep that carve-out narrow.
 type warnSink struct {
 	NoopEventSink
@@ -36,8 +36,8 @@ func (w *warnSink) all() []string {
 func pinnedSession(t *testing.T, r Router, tr ToolRunner, pins []string, gate func() bool, sink EventSink) (*Session, *recordingBackend) {
 	t.Helper()
 	deps, be := recordingDeps(r, tr)
-	deps.PinnedSkillIDs = pins
-	deps.BackendAcceptsPinnedSkillIDs = gate
+	deps.PinnedRunbookIDs = pins
+	deps.BackendAcceptsPinnedRunbookIDs = gate
 	if sink != nil {
 		deps.Events = sink
 	}
@@ -67,12 +67,12 @@ func TestSelectionCarriesNoPinsWhenNoneWereNamed(t *testing.T) {
 	if sel.Policy != "new_instruction" {
 		t.Fatalf("policy = %q, want new_instruction (unchanged)", sel.Policy)
 	}
-	if sel.PinnedSkillIDs != nil {
-		t.Fatalf("an unpinned turn attached pins: %v", sel.PinnedSkillIDs)
+	if sel.PinnedRunbookIDs != nil {
+		t.Fatalf("an unpinned turn attached pins: %v", sel.PinnedRunbookIDs)
 	}
 }
 
-// Pins ride EVERY round, not just the first: skill selection is re-run per the policy,
+// Pins ride EVERY round, not just the first: runbook selection is re-run per the policy,
 // so a pin that only reached round 0 would silently drop out of the rest of the turn —
 // the exact half-honoured outcome the flag exists to rule out.
 func TestPinsRideEveryRound(t *testing.T) {
@@ -93,7 +93,7 @@ func TestPinsRideEveryRound(t *testing.T) {
 		if req.Selection == nil {
 			t.Fatalf("round %d has no selection block", i)
 		}
-		got := req.Selection.PinnedSkillIDs
+		got := req.Selection.PinnedRunbookIDs
 		if len(got) != 2 || got[0] != "a.one" || got[1] != "b.two" {
 			t.Fatalf("round %d pins = %v, want [a.one b.two] in order", i, got)
 		}
@@ -111,7 +111,7 @@ func TestPinsAreCopiedPerRound(t *testing.T) {
 	if _, err := s.Send(context.Background(), "hi", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	sent := be.requests()[0].Selection.PinnedSkillIDs
+	sent := be.requests()[0].Selection.PinnedRunbookIDs
 	sent[0] = "mutated"
 	if pins[0] != "a.one" {
 		t.Fatal("the request aliased the session's pin slice")
@@ -133,8 +133,8 @@ func TestClosedGateWithholdsPinsAndSaysSoOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i, req := range be.requests() {
-		if req.Selection != nil && len(req.Selection.PinnedSkillIDs) > 0 {
-			t.Fatalf("round %d sent pins to a backend that forbids the field: %v", i, req.Selection.PinnedSkillIDs)
+		if req.Selection != nil && len(req.Selection.PinnedRunbookIDs) > 0 {
+			t.Fatalf("round %d sent pins to a backend that forbids the field: %v", i, req.Selection.PinnedRunbookIDs)
 		}
 	}
 	warns := sink.all()
@@ -160,19 +160,19 @@ func TestNilGateFailsClosed(t *testing.T) {
 	if _, err := s.Send(context.Background(), "hi", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if got := be.requests()[0].Selection.PinnedSkillIDs; len(got) > 0 {
+	if got := be.requests()[0].Selection.PinnedRunbookIDs; len(got) > 0 {
 		t.Fatalf("a nil capability gate must not open: %v", got)
 	}
 }
 
 // Every pin-refusal code the backend can raise must reach the operator — that visibility
-// IS the feature. `--skill` exists so a runbook failure is distinguishable from a
+// IS the feature. `--runbook` exists so a runbook failure is distinguishable from a
 // selection failure, and a refusal reported nowhere puts you right back to guessing.
 func TestEveryPinFailureCodeSurfaces(t *testing.T) {
 	for code, want := range map[string]string{
-		"unknown_skill_id_ignored":    "did not recognise",
-		"pinned_skill_not_executable": "not executable",
-		"pinned_skill_over_cap":       "active-skill limit",
+		"unknown_runbook_id_ignored":    "did not recognise",
+		"pinned_runbook_not_executable": "not executable",
+		"pinned_runbook_over_cap":       "active-runbook limit",
 	} {
 		t.Run(code, func(t *testing.T) {
 			sink := &warnSink{}
@@ -200,20 +200,20 @@ func TestPinWarningsAreReportedOncePerSession(t *testing.T) {
 	sink := &warnSink{}
 	s, _ := pinnedSession(t, plainRouter(), &fakeTools{}, []string{"a.one"}, openGate, sink)
 	for i := 0; i < 4; i++ {
-		s.applyStreamMeta(backend.StreamMeta{Warnings: []string{"unknown_skill_id_ignored"}})
+		s.applyStreamMeta(backend.StreamMeta{Warnings: []string{"unknown_runbook_id_ignored"}})
 	}
 	if warns := sink.all(); len(warns) != 1 {
 		t.Fatalf("warnings = %v, want one after four identical metas", warns)
 	}
 	// A DIFFERENT cause is still news.
-	s.applyStreamMeta(backend.StreamMeta{Warnings: []string{"pinned_skill_over_cap"}})
+	s.applyStreamMeta(backend.StreamMeta{Warnings: []string{"pinned_runbook_over_cap"}})
 	if warns := sink.all(); len(warns) != 2 {
 		t.Fatalf("warnings = %v, want a second warning for a second cause", warns)
 	}
 }
 
-// The allowlist is the whole design. Backend skill loading is deliberately invisible in
-// this CLI — no card, no cue, no /skills — because the delta a load card showed was
+// The allowlist is the whole design. Backend runbook loading is deliberately invisible in
+// this CLI — no card, no cue, no /runbooks — because the delta a load card showed was
 // misleading. Only pin REFUSALS are carved out, so any other warning code the backend
 // adds must stay diagnostic-only rather than quietly resurrecting that surfacing.
 func TestUnrelatedBackendWarningsStaySilent(t *testing.T) {
@@ -228,18 +228,18 @@ func TestUnrelatedBackendWarningsStaySilent(t *testing.T) {
 }
 
 // A pin refusal reported to someone who never pinned anything describes a bug the client
-// cannot explain — and it would be the first "skill" message an ordinary session ever
+// cannot explain — and it would be the first "runbook" message an ordinary session ever
 // showed, against the invisibility invariant.
 func TestPinWarningsStaySilentWhenNothingWasPinned(t *testing.T) {
 	sink := &warnSink{}
 	s, _ := pinnedSession(t, plainRouter(), &fakeTools{}, nil, openGate, sink)
-	s.applyStreamMeta(backend.StreamMeta{Warnings: []string{"unknown_skill_id_ignored"}})
+	s.applyStreamMeta(backend.StreamMeta{Warnings: []string{"unknown_runbook_id_ignored"}})
 	if warns := sink.all(); len(warns) != 0 {
 		t.Fatalf("an unpinned session must never report a pin refusal: %v", warns)
 	}
 }
 
-// Greg's hard rule, and a hard invariant in CLAUDE.md: a loaded or pinned skill NEVER
+// Greg's hard rule, and a hard invariant in CLAUDE.md: a loaded or pinned runbook NEVER
 // narrows the callable toolset. Pinning is a wire field and nothing else.
 func TestPinningLeavesTheToolInventoryUntouched(t *testing.T) {
 	full := []models.ChatTool{
@@ -252,6 +252,6 @@ func TestPinningLeavesTheToolInventoryUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 	if tools.last != nil {
-		t.Fatalf("a pinned skill narrowed the toolset to %v; the filter must stay nil", tools.last)
+		t.Fatalf("a pinned runbook narrowed the toolset to %v; the filter must stay nil", tools.last)
 	}
 }

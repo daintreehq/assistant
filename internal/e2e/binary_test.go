@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/ipc"
 )
 
@@ -75,10 +76,10 @@ func TestBinaryJSONOneShot(t *testing.T) {
 			toolName:      "memory__list",
 			toolArgs:      `{"limit":3}`,
 			usage:         &fakeUsage{prompt: 50, completion: 6, total: 56, cached: 0},
-			// Round 1 loads one skill but reports TWO active: the second is retained /
-			// auto-paired, which is precisely what the delta-only skill:loaded cue can
-			// never report and what skill:decision exists to expose.
-			skills: skillsBlock(false,
+			// Round 1 loads one runbook but reports TWO active: the second is retained /
+			// auto-paired, which is precisely what the delta-only runbook:loaded cue can
+			// never report and what runbook:decision exists to expose.
+			runbooks: runbooksBlock(false,
 				[]string{"multi_agent", "Multi-agent orchestration",
 					"foundation", "Daintree orchestration foundation"},
 				[]string{"multi_agent", "Multi-agent orchestration"}),
@@ -88,7 +89,7 @@ func TestBinaryJSONOneShot(t *testing.T) {
 			usage:         &fakeUsage{prompt: 70, completion: 4, total: 74, cached: 20},
 			// Round 2 loads nothing and DEGRADES: the eager cue is silent for this round
 			// entirely, so only the decision reports that the set was kept by fail-open.
-			skills: skillsBlock(true,
+			runbooks: runbooksBlock(true,
 				[]string{"multi_agent", "Multi-agent orchestration",
 					"foundation", "Daintree orchestration foundation"},
 				nil),
@@ -149,7 +150,7 @@ func TestBinaryJSONOneShot(t *testing.T) {
 		t.Fatalf("no JSONL lines on stdout; stderr:\n%s", stderr.String())
 	}
 
-	// --- the skill decision reaches the real --json stream, once per round ---
+	// --- the runbook decision reaches the real --json stream, once per round ---
 	//
 	// This is the ONLY assertion that covers the whole production path at once: SSE
 	// decode → the committed OnMeta callback → the session's projection → MultiSink →
@@ -161,7 +162,7 @@ func TestBinaryJSONOneShot(t *testing.T) {
 		switch l.Type {
 		case "assistant:start":
 			starts++
-		case "skill:decision":
+		case "runbook:decision":
 			decisions = append(decisions, l.raw)
 		}
 	}
@@ -169,15 +170,15 @@ func TestBinaryJSONOneShot(t *testing.T) {
 		t.Fatalf("assistant:start count = %d, want 2 rounds: %v", starts, typesOf(lines))
 	}
 	if len(decisions) != starts {
-		t.Fatalf("skill:decision count = %d, want one per round (%d): %v",
+		t.Fatalf("runbook:decision count = %d, want one per round (%d): %v",
 			len(decisions), starts, typesOf(lines))
 	}
 
-	// Round 1: ids AND titles, and the whole active set — including the retained skill
+	// Round 1: ids AND titles, and the whole active set — including the retained runbook
 	// that never appeared in newly_loaded.
 	active, _ := decisions[0]["active"].([]any)
 	if len(active) != 2 {
-		t.Fatalf("round 1 active = %#v, want both the loaded and the retained skill", decisions[0]["active"])
+		t.Fatalf("round 1 active = %#v, want both the loaded and the retained runbook", decisions[0]["active"])
 	}
 	first, _ := active[0].(map[string]any)
 	if first["id"] != "multi_agent" || first["title"] != "Multi-agent orchestration" {
@@ -193,7 +194,7 @@ func TestBinaryJSONOneShot(t *testing.T) {
 	}
 
 	// Round 2: nothing newly loaded, and the fail-open flag — the round the eager
-	// skill:loaded cue is completely silent for.
+	// runbook:loaded cue is completely silent for.
 	sel2, _ := decisions[1]["selector"].(map[string]any)
 	if sel2["degraded"] != true {
 		t.Errorf("round 2 selector = %#v, want degraded:true", decisions[1]["selector"])
@@ -243,8 +244,9 @@ func TestBinaryJSONOneShot(t *testing.T) {
 	if last.Type != "result" {
 		t.Fatalf("last line type = %q, want result", last.Type)
 	}
-	if v, _ := last.raw["schemaVersion"].(float64); int(v) != 1 {
-		t.Errorf("result.schemaVersion = %v, want 1", last.raw["schemaVersion"])
+	if v, _ := last.raw["schemaVersion"].(float64); int(v) != domain.JSONOutputSchemaVersion {
+		t.Errorf("result.schemaVersion = %v, want %d",
+			last.raw["schemaVersion"], domain.JSONOutputSchemaVersion)
 	}
 	if s, _ := last.raw["status"].(string); s != "success" {
 		t.Errorf("result.status = %q, want success", s)

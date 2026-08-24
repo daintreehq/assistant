@@ -159,7 +159,7 @@ func readBoundedLine(r *bufio.Reader) ([]byte, error) {
 // StreamCallbacks receives streamed events as they arrive. All are optional. The
 // final assembled message + usage are returned by the stream parser regardless;
 // these callbacks exist for live UI (token streaming, surfacing newly-loaded
-// skills up front). They are invoked synchronously on the reader goroutine.
+// runbooks up front). They are invoked synchronously on the reader goroutine.
 type StreamCallbacks struct {
 	// OnRawMeta fires immediately when each HTTP attempt's SSE meta event is
 	// decoded. Unlike OnMeta, it is a transport-observation hook: retries can make
@@ -167,15 +167,15 @@ type StreamCallbacks struct {
 	// to adopt state or perform visible side effects. It exists so diagnostics can
 	// distinguish actual meta arrival from the retry-safe committed OnMeta callback.
 	OnRawMeta func(StreamMeta)
-	// OnMeta carries the refreshed state token, the skills outcome, and version
+	// OnMeta carries the refreshed state token, the runbooks outcome, and version
 	// markers. Client.RespondStream defers it until the attempt commits so retries
 	// cannot duplicate stateful side effects.
 	OnMeta func(StreamMeta)
-	// OnSkillLoaded fires as soon as a meta event reports newly-loaded skills,
+	// OnRunbookLoaded fires as soon as a meta event reports newly-loaded runbooks,
 	// before the upstream model needs to produce content. Client.RespondStream
 	// de-duplicates identical refs across retry attempts, so a retry cannot record the
 	// same load twice. DIAGNOSTIC ONLY — no consumer renders it in the transcript.
-	OnSkillLoaded func([]SkillRef)
+	OnRunbookLoaded func([]RunbookRef)
 	// OnContent fires for each visible content fragment, in order.
 	OnContent func(string)
 	// OnReasoning fires for each chain-of-thought fragment (DeepSeek thinking mode),
@@ -200,7 +200,21 @@ type StreamCallbacks struct {
 	// retry budget can now span a minute of wall clock, and an unexplained spinner is
 	// indistinguishable from a hang. Observational only — it must not block, and it
 	// never fires from the stream parser (only from the retry loop above it).
-	OnRetry func(RetryInfo)
+	// OnPreamble fires when the backend sent a fast preview, once per attempt, after
+	// OnMeta and before any executor content. It is for RENDERING ONLY: the text is
+	// provisional until the terminal `done`, and RespondResult.Message.Content is
+	// what gets committed.
+	//
+	// Fires AT MOST ONCE per call, not once per attempt: a retried attempt sends its
+	// own freshly written preamble, and the client suppresses it so the text on
+	// screen and the text committed to history are the same bytes. A renderer
+	// therefore never has to replace or de-duplicate anything.
+	//
+	// Deliberately NOT the retry boundary (OnContent is): preamble text is
+	// server-generated and idempotent, and treating it as visible content would make
+	// every turn that showed one un-retryable for no reason.
+	OnPreamble func(StreamPreamble)
+	OnRetry    func(RetryInfo)
 }
 
 type sseEventKind uint8
@@ -211,6 +225,7 @@ const (
 	sseEventMeta
 	sseEventStatus
 	sseEventDelta
+	sseEventPreamble
 	sseEventCompaction
 	sseEventDone
 	sseEventError
@@ -224,6 +239,8 @@ func parseSSEEventKind(name []byte) sseEventKind {
 		return sseEventStatus
 	case "delta":
 		return sseEventDelta
+	case "preamble":
+		return sseEventPreamble
 	case "compaction":
 		return sseEventCompaction
 	case "done":
@@ -283,6 +300,12 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 		// first one replaced, and the only safe reading of that is neither.
 		compaction        *StreamCompaction
 		compactionInvalid bool
+		// preamble holds the fast preview under the same commit discipline. It is a
+		// plain string rather than a latched at-most-once value because a REPEAT is
+		// legitimate here: the retry layer replays a failure that arrives before the
+		// first executor token, and the replayed attempt sends its own preamble. The
+		// last one seen is the one belonging to the attempt that finished.
+		preamble string
 	)
 
 	// dispatch decodes and applies one fully-buffered event, then clears the
@@ -307,8 +330,8 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 			if cb.OnRawMeta != nil {
 				cb.OnRawMeta(m)
 			}
-			if cb.OnSkillLoaded != nil && len(m.Skills.NewlyLoaded) > 0 {
-				cb.OnSkillLoaded(m.Skills.NewlyLoaded)
+			if cb.OnRunbookLoaded != nil && len(m.Runbooks.NewlyLoaded) > 0 {
+				cb.OnRunbookLoaded(m.Runbooks.NewlyLoaded)
 			}
 			if cb.OnMeta != nil {
 				cb.OnMeta(m)
@@ -344,6 +367,34 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 				if cb.OnToolCallDelta != nil {
 					cb.OnToolCallDelta(tc)
 				}
+			}
+		case sseEventPreamble:
+			// Best-effort, exactly like `compaction`: a preview this client cannot
+			// read is a turn that answers without one, never a failed answer. A
+			// decode error drops it and the stream carries on.
+			var pre StreamPreamble
+			if err := json.Unmarshal(data, &pre); err != nil {
+				return nil
+			}
+			if strings.TrimSpace(pre.Content) == "" {
+				return nil
+			}
+			// ENFORCED, not merely decoded. This client implements exactly one
+			// policy — hold it provisional, commit it on `done` — so a backend
+			// saying anything else is describing a contract we do not implement.
+			// Showing the text anyway would render a preview under rules its
+			// sender did not agree to, and the failure would be invisible: the
+			// turn looks fine and history quietly gains (or loses) a sentence.
+			// Dropping it costs a preview and nothing else.
+			if !pre.Provisional || pre.CommitOn != "done" {
+				return nil
+			}
+			// REPLACE, never append. A retried attempt sends its own preamble, and
+			// two on screen would describe the same work twice; the newest one is the
+			// one belonging to the attempt still running.
+			preamble = pre.Content
+			if cb.OnPreamble != nil {
+				cb.OnPreamble(pre)
 			}
 		case sseEventCompaction:
 			// Best-effort by contract: a block this client cannot read is a turn that
@@ -471,6 +522,16 @@ finish:
 	// rather than rely on every future caller checking the error first.
 	if metaSeen && doneSeen && !compactionInvalid {
 		result.Compaction = compaction
+	}
+	// The preamble commits on `done` and on nothing else — that is what the event's
+	// own `commit_on` says, and it is what keeps a turn that died mid-stream from
+	// leaving a sentence behind in canonical history.
+	//
+	// Reported here, JOINED one layer up. This function sees a single attempt, and
+	// which preamble the user actually saw is a fact about the whole retried call
+	// (RespondStream owns it, and joins there).
+	if metaSeen && doneSeen {
+		result.Preamble = preamble
 	}
 
 	if !metaSeen {

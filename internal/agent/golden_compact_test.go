@@ -7,7 +7,7 @@ package agent
 // orchestrator many turns later:
 //
 //  1. (removed) there is no longer a client-side control-message prefix to preserve —
-//     the backend owns the system prompt + skills, so compaction operates on a history
+//     the backend owns the system prompt + runbooks, so compaction operates on a history
 //     that begins at index 0 with user/assistant/tool messages only;
 //  2. (removed) distillation dedup/cap/truncate is server-owned now (memory_distill);
 //  3. live identifiers (term_*/run_*/wch_*/wfr_*, matching domain.PrefixWatcher /
@@ -118,13 +118,13 @@ func goldenForceAutoCompact(s *Session, working ...models.ChatMessage) {
 
 // TestGoldenCompactControlMessagesSurviveByteIdentical pins invariant (1): neither
 // compaction path rebuilds or reorders the three control messages — they pass through
-// untouched, so the cached prompt prefix and the loaded skills stay stable across an
+// untouched, so the cached prompt prefix and the loaded runbooks stay stable across an
 // arbitrarily long, repeatedly-compacted run.
 func TestGoldenCompactControlMessagesSurviveByteIdentical(t *testing.T) {
-	// Load a real skill first so messages[2] is a NON-trivial loaded-skills body, not the
-	// empty "no skills" default. Otherwise a regression that rebuilt the controls from
+	// Load a real runbook first so messages[2] is a NON-trivial loaded-runbooks body, not the
+	// empty "no runbooks" default. Otherwise a regression that rebuilt the controls from
 	// fresh defaults would still match the snapshot (default == default) and pass — the
-	// loaded skill gives the byte-equality check real bite.
+	// loaded runbook gives the byte-equality check real bite.
 	t.Run("manual", func(t *testing.T) {
 		s, _ := compactSession(t, plainRouter())
 		before := snapshotControls(s)

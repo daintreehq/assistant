@@ -34,6 +34,12 @@ func (h *Host) handleCommand(cmd HostCommand) {
 		// Resolving an approval unblocks a parked dispatch goroutine. Off-loop-safe:
 		// the bridge guards its own state, so call directly (no blocking).
 		h.bridge.ResolveApproval(cmd.ApprovalID, ConfirmationDecision(cmd.Decision))
+	case CmdCommand:
+		h.handleSlashCommand(cmd.CommandLine)
+	case CmdOperations:
+		h.postOperations()
+	case CmdInterjectRetract:
+		h.retractInjection()
 	case CmdQuestionAnswer:
 		// Same shape as an approval decision, and unblocks a dispatch the same way. A
 		// negative index is the host saying the user dismissed the sheet, which cancels
@@ -137,6 +143,8 @@ func (h *Host) handlePrompt(text string) {
 // settle any dangling assistant turn, reclaim injections the turn never
 // consumed, clear busy, and drain deferred wakes.
 func (h *Host) finishPromptTurn(gen uint64, ctx context.Context) {
+	// Cost BEFORE the turn settles, so it still carries the turn id it belongs to.
+	h.postCost()
 	h.bridge.SettleTurn(OutcomeAnswered)
 
 	cancelled := ctx.Err() != nil
@@ -227,6 +235,24 @@ func (h *Host) handleInterrupt() {
 	}
 	h.bridge.SettlePendingApprovals(DecisionRejected)
 	h.bridge.SettlePendingQuestions()
+	if cancel == nil {
+		h.turnMu.Lock()
+		waking := h.wakeCancel != nil
+		h.turnMu.Unlock()
+		if waking {
+			// A WAKE turn, which this interrupt deliberately does not abort (see
+			// above). Closing its visible turn as cancelled would report work as
+			// stopped while it carries on invisibly, so say what happened instead.
+			//
+			// Checked against wakeCancel rather than inferred from a nil turnCancel: a
+			// nil one only means no COMMAND turn is running, which is also true when a
+			// Stop lands just after an ordinary turn finished — and announcing
+			// background work there would invent a wake that does not exist.
+			h.bridge.Info("That was background work the assistant started on its own. " +
+				"Stopping does not abort it — it will finish on its own.")
+		}
+		return
+	}
 	h.bridge.Interrupt()
 }
 
@@ -293,7 +319,7 @@ func (h *Host) reactWake() {
 	// covered by teardown's join.
 	defer h.turnWG.Done()
 
-	h.bridge.StartExchange()
+	h.bridge.StartWakeExchange()
 
 	func() {
 		defer func() {
@@ -361,6 +387,10 @@ func (h *Host) reactWake() {
 		h.turnMu.Unlock()
 	}()
 
+	// Wake turns spend money too — often the utility calls a user has no other way to
+	// see — so report before settling, exactly as the prompt path does. Without this
+	// the figure went stale until the next interactive turn happened to finish.
+	h.postCost()
 	h.bridge.SettleTurn(OutcomeAnswered)
 
 	h.turnMu.Lock()
@@ -511,4 +541,67 @@ func (h *Host) onPanic(r any) {
 func flushExit(code int) {
 	_ = os.Stdout.Sync()
 	os.Exit(code)
+}
+
+// handleSlashCommand runs a slash line and posts its output.
+//
+// Not a turn: no turn:start/turn:end is emitted and the model is never consulted, so a
+// command costs nothing and cannot be answered with prose about itself. A `/quit` is
+// honoured by winding the session down exactly as a shutdown command would.
+func (h *Host) handleSlashCommand(line string) {
+	out := h.app.RunCommand(h.runCtx, line)
+	h.post(EvCommandResult{
+		Command:             line,
+		Text:                out.Text,
+		Quit:                out.Quit,
+		Unknown:             out.Unknown,
+		ConversationCleared: out.ConversationCleared,
+	})
+	// A command may have reconnected (or lost) the control plane — /reconnect exists
+	// precisely to change this — so re-report rather than leaving a stale status.
+	h.postMcpStatus()
+	if out.Quit {
+		h.cancelTurn()
+		h.teardown(ShutdownExit, "")
+	}
+}
+
+// postCost emits the session's cumulative spend. Best-effort: a missing ledger reports
+// nothing rather than failing a turn over a display figure.
+func (h *Host) postCost() {
+	if h.app == nil || h.bridge == nil {
+		return
+	}
+	total, complete := h.app.CostSnapshot()
+	h.bridge.PostCost(total, complete)
+}
+
+// postMcpStatus reports the control plane's reachability. Best-effort.
+func (h *Host) postMcpStatus() {
+	if h.app == nil || h.bridge == nil {
+		return
+	}
+	connected, toolCount, errMsg := h.app.McpStatus()
+	h.bridge.post(EvMcpStatus{Connected: connected, ToolCount: toolCount, Error: errMsg})
+}
+
+// postOperations answers an operations request with the current deck.
+func (h *Host) postOperations() {
+	if h.app == nil || h.bridge == nil {
+		return
+	}
+	h.bridge.post(EvOperations{Snapshot: h.app.Operations(h.runCtx)})
+}
+
+// retractInjection takes back the most recently buffered follow-up (LIFO) and hands the
+// text to the host, which puts it back in the composer for editing.
+//
+// This is Escape on an empty composer in the cockpit. It is only ever a window: the
+// message is buffered rather than sent, and the running turn folds the buffer in at its
+// next tool-iteration boundary. Once that has happened the model has seen it and there is
+// nothing to reclaim — which is what `retracted: false` says, so the host can leave the
+// draft alone instead of blanking it over a retract that did not happen.
+func (h *Host) retractInjection() {
+	text, ok := h.session.RetractPendingInjection()
+	h.bridge.PostInterjectRetracted(ok, text)
 }

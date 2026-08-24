@@ -135,7 +135,7 @@ and free-form custom args from the Assistant settings tab. There are **no** conn
 ### Working directory
 
 The assistant is launched with **cwd = the project root** (not the active worktree, not a
-per-session dir). Daintree's rationale: the assistant is env-only and ships its own skills,
+per-session dir). Daintree's rationale: the assistant is env-only and ships its own runbooks,
 so it reads nothing meaningful from cwd — running it at the project root makes its own file
 tools and the terminal's file-link resolution operate on the real project tree. (Other
 help-panel agents like Claude/Codex run in a per-session dir that owns their `.mcp.json`;

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+
 	"fmt"
 	"strings"
 	"sync"
@@ -84,7 +85,15 @@ type Bridge struct {
 	interrupted      bool // latched until next startExchange
 	pendingApprovals map[string]*pendingApproval
 	pendingQuestions map[string]*pendingQuestion
-	toolStartedAt    map[string]int64
+	// liveTools tracks announced-but-unsettled calls by id → last known state, so an
+	// interrupt can terminalize them. Without it a cancelled turn left every in-flight
+	// row rendering as "Running" forever: the host had been told the call started and
+	// was never told anything else.
+	liveTools     map[string]string
+	toolStartedAt map[string]int64
+	// wakeTurn marks the current exchange as one the assistant started ITSELF, so the
+	// assistant turn can carry it and a host can tell that Stop will not reach it.
+	wakeTurn bool
 }
 
 // NewBridge builds a Bridge with defaults filled.
@@ -110,6 +119,7 @@ func NewBridge(opts BridgeOptions) *Bridge {
 		approvalTimeoutMs: opts.ApprovalTimeoutMs,
 		pendingApprovals:  make(map[string]*pendingApproval),
 		pendingQuestions:  make(map[string]*pendingQuestion),
+		liveTools:         make(map[string]string),
 		toolStartedAt:     make(map[string]int64),
 	}
 }
@@ -128,14 +138,15 @@ func genID(prefix string) string { return domain.NewID(prefix + "_") }
 // vocabulary"; under v3 the host IS the UI, and liveness inferred from "has any
 // token arrived" is exactly the heuristic domain.RunPhase exists to replace.
 func (b *Bridge) Phase(p domain.RunPhase) {
+	// Checked and enqueued under one hold, like every other lifecycle event: a phase
+	// that slipped through after an interrupt put the status line back to "Working"
+	// for a turn the user had just stopped.
 	b.mu.Lock()
-	turnID := b.activeTurnID
-	interrupted := b.interrupted
-	b.mu.Unlock()
-	if interrupted {
+	defer b.mu.Unlock()
+	if b.interrupted {
 		return
 	}
-	b.postStream(EvTurnPhase{TurnID: turnID, Phase: p.String()})
+	b.postStream(EvTurnPhase{TurnID: b.activeTurnID, Phase: p.String(), Wake: b.wakeTurn})
 }
 
 func (b *Bridge) AssistantStart() {
@@ -147,8 +158,17 @@ func (b *Bridge) AssistantStart() {
 	turnID := genID("turn")
 	b.activeTurnID = turnID
 	now := b.now()
+	wake := b.wakeTurn
 	b.mu.Unlock()
-	b.post(EvTurnStart{TurnID: turnID, Role: RoleAssistant, StartedAt: now})
+	b.post(EvTurnStart{TurnID: turnID, Role: RoleAssistant, StartedAt: now, Wake: wake})
+}
+
+// AssistantPreamble forwards the fast preview as an ordinary turn token: a host is a
+// screen, and this event exists to put legible text in front of someone early. Hosts
+// already replace what they accumulated from turn:token with turn:end's authoritative
+// content, which on success carries this same text exactly once.
+func (b *Bridge) AssistantPreamble(text string) {
+	b.AssistantToken(text + "\n\n")
 }
 
 func (b *Bridge) AssistantToken(chunk string) {
@@ -205,53 +225,99 @@ func (b *Bridge) Interjection(text string) {
 	b.post(EvTurnInterjection{TurnID: turnID, Text: text})
 }
 
-// SkillLoaded stays unforwarded. It is a per-ATTEMPT cue that fires on a delta, so a
+// RunbookLoaded stays unforwarded. It is a per-ATTEMPT cue that fires on a delta, so a
 // retried round can report a load the committed round did not repeat — reconstructing
-// the active set from it is wrong by construction. SkillDecision is the authority.
-func (b *Bridge) SkillLoaded([]string) {}
+// the active set from it is wrong by construction. RunbookDecision is the authority.
+func (b *Bridge) RunbookLoaded([]string) {}
 
-// SkillDecision is diagnostic, not conversational: backend skill selection is prompt
+// RunbookDecision is diagnostic, not conversational: backend runbook selection is prompt
 // assembly the user neither approves nor steers, and the runtime contract is that no
 // sink folds it into the transcript. It reaches a human only through an explicit
 // `/explain <run>` replay, which reads the durable run log — so the bridge still
 // drops it rather than putting prompt-assembly machinery on the conversation wire.
-func (b *Bridge) SkillDecision(agent.SkillDecisionEvent) {}
+func (b *Bridge) RunbookDecision(agent.RunbookDecisionEvent) {}
+
+// postLive enqueues a tool-lifecycle event only if the turn has not been interrupted,
+// with the check and the enqueue under ONE lock hold.
+//
+// Splitting them is what let a stopped turn come back to life: Interrupt would
+// terminalize a call as cancelled, and an in-flight ToolState/ToolBatch/ToolCall —
+// already past its own check — would enqueue "queued" or "active" behind it, leaving a
+// row running on a turn the user had stopped. `post` is the transport's enqueue and
+// never re-enters the bridge, so holding the lock across it cannot deadlock.
+func (b *Bridge) postLive(ev HostEvent) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.interrupted {
+		return
+	}
+	b.post(ev)
+}
 
 // ToolBatch announces the WHOLE batch as queued before dispatch begins. Without it a
 // host can only reveal calls one at a time as each starts, which reads as the
 // assistant improvising rather than working through a plan it already made.
 func (b *Bridge) ToolBatch(calls []agent.BatchedToolCall) {
-	b.mu.Lock()
-	turnID := b.activeTurnID
-	interrupted := b.interrupted
-	b.mu.Unlock()
-	if interrupted || len(calls) == 0 {
+	if len(calls) == 0 {
 		return
 	}
+	b.mu.Lock()
+	if b.interrupted {
+		b.mu.Unlock()
+		return
+	}
+	turnID := b.activeTurnID
+	for _, c := range calls {
+		b.liveTools[c.ID] = toolStateQueued
+	}
+	b.mu.Unlock()
 	out := make([]BatchedCall, 0, len(calls))
 	for _, c := range calls {
+		verb, _ := presentToolVerb(c.Name)
 		out = append(out, BatchedCall{
 			ToolCallID:  c.ID,
 			ToolID:      c.Name,
 			ArgsSummary: redactArgs(c.Args),
 			Danger:      b.isDanger(c.Name),
+			Verb:        verb,
+			ActiveVerb:  presentToolActiveVerb(c.Name),
+			// Redacted like every other free-text field: the target is lifted straight
+			// out of the raw arguments, which is exactly the material redactArgs exists
+			// to guard. A command line or a saved memory body is a plausible place for a
+			// credential to appear.
+			Target: redact.String(presentToolTarget(c.Name, c.Args)),
 		})
 	}
-	b.post(EvToolBatch{TurnID: turnID, Calls: out})
+	b.postLive(EvToolBatch{TurnID: turnID, Calls: out})
 }
 
 // ToolState promotes one announced call. "waiting" is the load-bearing one: it means
 // blocked on the USER, not on the tool, and a host that renders it as ordinary
 // progress leaves someone watching a spinner for their own unanswered approval.
 func (b *Bridge) ToolState(id string, state agent.ToolState) {
+	// The interrupted check and the liveTools write happen under ONE lock hold.
+	// Splitting them let Interrupt run in the gap: it would terminalize this call as
+	// cancelled, and then this function — already past its check — would re-post
+	// "active" over the top and re-add the id, leaving a row spinning forever on a
+	// turn the user had stopped.
 	b.mu.Lock()
-	turnID := b.activeTurnID
-	interrupted := b.interrupted
-	b.mu.Unlock()
-	if interrupted {
+	if b.interrupted {
+		b.mu.Unlock()
 		return
 	}
-	b.post(EvToolState{ToolCallID: id, State: string(state), TurnID: turnID})
+	turnID := b.activeTurnID
+	// A TERMINAL state leaves the live set rather than joining it. The engine emits
+	// tool:state(done) after every successful result — after ToolResult has already
+	// forgotten the call — so recording it here put a finished call back among the
+	// live ones, and a later interrupt would rewrite it as "not-run": a call that
+	// demonstrably ran, reported as never started.
+	if state == "done" || state == "failed" {
+		delete(b.liveTools, id)
+	} else {
+		b.liveTools[id] = string(state)
+	}
+	b.mu.Unlock()
+	b.postLive(EvToolState{ToolCallID: id, State: string(state), TurnID: turnID})
 }
 
 // ToolProgress carries an in-tool substep so a long call does not look frozen.
@@ -275,7 +341,7 @@ func (b *Bridge) ToolCall(ev agent.ToolCallEvent) {
 	b.toolStartedAt[ev.ID] = ev.StartedAt
 	turnID := b.activeTurnID
 	b.mu.Unlock()
-	b.post(EvToolStarted{
+	b.postLive(EvToolStarted{
 		ToolCallID:  ev.ID,
 		ToolID:      ev.Name,
 		ArgsSummary: redactArgs(ev.Args),
@@ -293,6 +359,10 @@ func (b *Bridge) ToolResult(ev agent.ToolResultEvent) {
 	}
 	startedAt, hadStart := b.toolStartedAt[ev.ID]
 	delete(b.toolStartedAt, ev.ID)
+	// liveTools is NOT cleared here. Removing it before the settle is enqueued opens a
+	// window where an interrupt neither terminalizes this call (it is already gone
+	// from the snapshot) nor lets the settle through (the recheck suppresses it) —
+	// leaving the row active forever. It is cleared below, atomically with the post.
 	turnID := b.activeTurnID
 	b.mu.Unlock()
 
@@ -304,21 +374,40 @@ func (b *Bridge) ToolResult(ev agent.ToolResultEvent) {
 		}
 	}
 	result, severity, errorCode := resultToAudit(ev.Result)
+	errorMessage := ""
+	if ev.Result.Error != nil {
+		errorMessage = redact.String(ev.Result.Error.Message)
+	}
 	settled := EvToolSettled{
-		ToolCallID: ev.ID,
-		ToolID:     ev.Name,
-		DurationMs: durationMs,
-		Result:     result,
-		Severity:   severity,
-		ErrorCode:  errorCode,
-		TurnID:     turnID,
+		// Redacted on the way out, like every other model/tool-authored string that
+		// crosses this boundary: a summary or an error can quote an argument, and an
+		// argument can be a token.
+		Summary:      redact.String(ev.Result.Summary),
+		ErrorMessage: errorMessage,
+		ToolCallID:   ev.ID,
+		ToolID:       ev.Name,
+		DurationMs:   durationMs,
+		Result:       result,
+		Severity:     severity,
+		ErrorCode:    errorCode,
+		TurnID:       turnID,
 	}
 	// An accepted async handle: surface it so the host can render "accepted,
 	// still running in the background" instead of a finished success (parity
 	// with the host's yellow async-pending state).
 	if ev.Result.Ok && ev.Result.Async != nil {
 		settled.AsyncID = ev.Result.Async.ID
+		settled.AsyncTitle = redact.String(ev.Result.Async.Title)
 	}
+	// Validate, forget and enqueue under ONE hold. An interrupt either wins — and
+	// terminalizes this call, because it is still in liveTools — or loses, and the
+	// genuine settle goes out. There is no ordering in which the row is left running.
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.interrupted {
+		return
+	}
+	delete(b.liveTools, ev.ID)
 	b.post(settled)
 }
 
@@ -328,7 +417,7 @@ func (b *Bridge) Error(message string) {
 }
 
 // Warn forwards a non-fatal warning (a tool loop repeating the same failure, a
-// pinned skill the backend could not honour). v2 dropped these, which meant that once
+// pinned runbook the backend could not honour). v2 dropped these, which meant that once
 // the local renderer was gone they reached nobody at all.
 func (b *Bridge) Warn(message string) { b.postNotice("warning", message) }
 
@@ -385,15 +474,28 @@ func (b *Bridge) ModelRateLimited() {
 
 // StartExchange resets per-turn state and emits a zero-duration user turn
 // (start+end at the same ts). Prompt text is NOT carried — Daintree originated it.
-func (b *Bridge) StartExchange() {
+// StartWakeExchange is StartExchange for a turn the assistant started on its own.
+// The wake flag rides the assistant turn, since that is the one a host would offer a
+// Stop control for.
+func (b *Bridge) StartWakeExchange() { b.startExchange(true) }
+
+func (b *Bridge) StartExchange() { b.startExchange(false) }
+
+func (b *Bridge) startExchange(wake bool) {
 	b.mu.Lock()
 	b.interrupted = false
 	b.activeTurnID = ""
 	b.mu.Unlock()
 	turnID := genID("turn")
 	now := b.now()
-	b.post(EvTurnStart{TurnID: turnID, Role: RoleUser, StartedAt: now})
-	b.post(EvTurnEnd{TurnID: turnID, EndedAt: now})
+	if !wake {
+		// A wake has no user turn to open: nobody said anything.
+		b.post(EvTurnStart{TurnID: turnID, Role: RoleUser, StartedAt: now})
+		b.post(EvTurnEnd{TurnID: turnID, EndedAt: now})
+	}
+	b.mu.Lock()
+	b.wakeTurn = wake
+	b.mu.Unlock()
 }
 
 // SettleTurn closes any dangling assistant turn (no-op if already closed). Called
@@ -405,9 +507,75 @@ func (b *Bridge) SettleTurn(outcome TurnOutcomeClass) {
 	b.closeTurn(outcome)
 }
 
-// Interrupt is the display side of an interrupt: latch interrupted, stop
-// forwarding the in-flight turn, close it "agent-stuck". No-op without an active
-// turn.
+// rememberable reports whether a risk class may be added to a session "don't ask
+// again" list. The highest classes are always re-confirmed. Ported verbatim from the
+// cockpit, which owned this rule when it owned the approval sheet.
+func rememberable(r domain.RiskClass) bool {
+	// An ALLOW-list, not a deny-list. A deny-list fails open: a risk class added later
+	// — or one this build does not recognise — would default to rememberable, quietly
+	// making a new class of action eligible for "don't ask again" that nobody decided
+	// should be. The classes named here are the ones judged safe to remember.
+	switch r {
+	case domain.RiskRead,
+		domain.RiskLocal,
+		domain.RiskUI,
+		domain.RiskTerminal,
+		domain.RiskProject,
+		domain.RiskExternal:
+		return true
+	}
+	return false
+}
+
+// Tool lifecycle states, as they appear on the wire.
+const (
+	toolStateQueued  = "queued"
+	toolStateActive  = "active"
+	toolStateWaiting = "waiting"
+	// toolStateCancelled is a call that WAS running when the user stopped the turn.
+	toolStateCancelled = "cancelled"
+	// toolStateNotRun is a call that was announced but never started.
+	toolStateNotRun = "not-run"
+)
+
+// PostCost emits the session's cumulative spend. Called after a turn settles, which is
+// when the figure has actually moved and when a reader is most likely to look at it.
+//
+// EvCost existed on the wire from the start with no producer, so every embedded
+// session reported unknown cost forever — the one readout a user cannot reconstruct
+// from anything else on screen.
+func (b *Bridge) PostCost(total float64, complete bool) {
+	b.mu.Lock()
+	turnID := b.activeTurnID
+	b.mu.Unlock()
+	b.post(EvCost{TurnID: turnID, Total: total, Complete: complete})
+}
+
+// PostInterjectRetracted answers an interject:retract command.
+//
+// Posted unconditionally, including the "nothing to take back" answer: the host asked a
+// question and a silent non-answer would leave its composer waiting on a reply that
+// never comes. Not gated on `interrupted` either — a retract during teardown still has a
+// true answer, and it is the last chance to hand the text back before the session ends.
+func (b *Bridge) PostInterjectRetracted(retracted bool, text string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.post(EvInterjectRetracted{Retracted: retracted, Text: text})
+}
+
+// Interrupt is the display side of an interrupt: latch interrupted, terminalize every
+// outstanding call, and close the turn as CANCELLED.
+//
+// Two things changed here and both were wrong before. The outcome was "agent-stuck",
+// which describes an agent that hung — but the user pressed Stop, and recording their
+// deliberate interruption as a fault misreports it in the transcript and in every
+// tally built from outcomes. And nothing terminalized the calls: the host had been
+// told each one started and was never told anything else, so a stopped turn left rows
+// rendering as "Running" permanently, describing work that is not happening.
+//
+// A call that was running becomes "cancelled"; one that never started becomes
+// "not-run". The distinction matters to anyone reading back what a stop actually
+// interrupted.
 func (b *Bridge) Interrupt() {
 	b.mu.Lock()
 	if b.activeTurnID == "" {
@@ -415,8 +583,28 @@ func (b *Bridge) Interrupt() {
 		return
 	}
 	b.interrupted = true
+	turnID := b.activeTurnID
+	// Snapshot and clear under the lock; the posts happen outside it.
+	terminal := make(map[string]string, len(b.liveTools))
+	for id, state := range b.liveTools {
+		switch state {
+		case toolStateActive, toolStateWaiting:
+			terminal[id] = toolStateCancelled
+		default:
+			terminal[id] = toolStateNotRun
+		}
+	}
+	b.liveTools = make(map[string]string)
+	// Posted under the SAME hold that latched `interrupted` and took the snapshot.
+	// Releasing first would let a ToolState already past its own check enqueue behind
+	// these terminal states and revive the row. Ordered before turn:end so a consumer
+	// applying events in order never sees the turn close with calls still live.
+	for id, state := range terminal {
+		b.post(EvToolState{ToolCallID: id, State: state, TurnID: turnID})
+	}
 	b.mu.Unlock()
-	b.closeTurn(OutcomeAgentStuck)
+
+	b.closeTurn(OutcomeCancelled)
 }
 
 // closeTurn nulls the active turn and emits turn:end. Idempotent (guarded by the
@@ -474,8 +662,12 @@ func (b *Bridge) Confirm(ctx context.Context, req ConfirmRequest) bool {
 		})
 	}
 	b.pendingApprovals[approvalID] = pa
-	b.mu.Unlock()
-
+	// Registered AND announced under one hold. Releasing first let a decision — which
+	// can arrive the instant the request is visible — enqueue `approval:decided` ahead
+	// of the `approval:requested` it answers, leaving a card on screen that nothing
+	// will ever close. Unlocked explicitly right after the post, NOT deferred: the
+	// select below blocks until the decision arrives, and ResolveApproval needs this
+	// same lock to deliver it.
 	b.post(EvApprovalRequested{
 		ApprovalID:        approvalID,
 		ToolID:            req.ToolName,
@@ -486,7 +678,10 @@ func (b *Bridge) Confirm(ctx context.Context, req ConfirmRequest) bool {
 		Consequence:       req.Consequence,
 		ArgsSummary:       redactArgs(req.RawArgs),
 		NeedsTypedConfirm: req.NeedsTypedConfirm,
+		Rememberable:      rememberable(req.RiskClass),
+		ToolKey:           req.ToolKey,
 	})
+	b.mu.Unlock()
 
 	// Block on the decision. ctx cancellation (turn abort) also frees the dispatch:
 	// resolve as rejected so a parked dispatch returns USER_DECLINED.

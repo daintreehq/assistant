@@ -17,7 +17,7 @@ import (
 // Keeping the interface here (rather than resurrecting it in deps.go) means the
 // production build carries no model-access seam at all: there is no field a future
 // handler could reach through to bypass the backend that owns prompt assembly,
-// skill selection, and the provider credentials.
+// runbook selection, and the provider credentials.
 //
 // FlushMeter is deliberately absent — it drained the deleted Router's per-tier
 // usage meter, and UsageEvent.Tiers (its only consumer) was never populated.

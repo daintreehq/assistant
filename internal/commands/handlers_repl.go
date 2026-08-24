@@ -11,14 +11,18 @@ import (
 type CommandResult struct {
 	Handled bool
 	Quit    bool
+	// ConversationCleared reports that /clear ACTUALLY cleared. It is the only
+	// trustworthy signal: the clear is refused while a turn is in flight, so a caller
+	// that instead matches the command TEXT wipes its surface while the engine keeps
+	// the conversation and goes on working in it.
+	ConversationCleared bool
 }
 
 // HandleSlashCommand handles a slash line in the line REPL, printing the result
 // via the renderer. It shares the same data accessors as the UI
 // handler so both surfaces stay in lockstep (the registry test asserts every
 // command is handled by both). clearHostTerminal is called on /clear by the caller
-// (the REPL owns stdout), signalled via the returned result + this handler's wipe
-// of the conversation.
+// (the REPL owns stdout), signalled via CommandResult.ConversationCleared.
 func HandleSlashCommand(ctx context.Context, line string, a *app.App, r *render.Renderer) CommandResult {
 	cmd, _, rest := parseCommand(line)
 	if cmd == "" {
@@ -54,7 +58,7 @@ func HandleSlashCommand(ctx context.Context, line string, a *app.App, r *render.
 		if res.Text != "" {
 			r.Line(res.Text)
 		}
-		return CommandResult{Handled: true, Quit: res.Quit}
+		return CommandResult{Handled: true, Quit: res.Quit, ConversationCleared: res.ClearTranscript}
 	}
 }
 

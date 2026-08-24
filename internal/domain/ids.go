@@ -18,7 +18,7 @@ const (
 	PrefixGrant       = "grt_"
 	PrefixMessage     = "msg_"
 	PrefixWorkflow    = "wfr_"
-	PrefixSkillRun    = "rrs_"
+	PrefixRunbookRun  = "rrs_"
 	PrefixMemory      = "mem_"
 	PrefixAgentLaunch = "agt_"
 	PrefixScratch     = "scr_"

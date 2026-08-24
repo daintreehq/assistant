@@ -562,7 +562,7 @@ func (r *Runner) round(ctx context.Context, st *run, btools []backend.Tool, tool
 		Profile: backend.ProfileSubagent,
 		Session: backend.RespondSession{
 			// The sub-agent's OWN session id. This is what isolates it: the backend
-			// keys skill state and selector cadence on it, so a sub-agent can never
+			// keys runbook state and selector cadence on it, so a sub-agent can never
 			// disturb the main conversation's state — and vice versa.
 			ID:     st.id,
 			TurnID: st.id + "-r" + fmt.Sprint(st.rounds),

@@ -1,8 +1,9 @@
 // Package agent drives the main-thread agentic turn loop. AgentSession runs ONE
-// user (or autonomous) turn to completion: optional auto-compact → skill
+// user (or autonomous) turn to completion: optional auto-compact → runbook
 // re-selection → assemble the three control messages → stream the large model →
 // dispatch tool calls → feed results back (looping until the model stops calling
-// tools; no per-turn round cap). It owns conversation
+// tools, or the convergence guard in stall.go closes a turn that has stopped making
+// progress). It owns conversation
 // persistence/rehydration, the repeated-failure circuit breaker, oversized-tool-
 // result truncation into session artifacts, and a liveness-rich structured event
 // stream.
@@ -88,19 +89,19 @@ type UsageEvent struct {
 	Model   string
 }
 
-// SkillRef identifies one skill in a diagnostic event: the backend's stable id plus
-// its human-readable title. It is a COPY of backend.SkillRef, declared here rather than
+// RunbookRef identifies one runbook in a diagnostic event: the backend's stable id plus
+// its human-readable title. It is a COPY of backend.RunbookRef, declared here rather than
 // re-exported, so the sinks on the far side of this seam (internal/cli/jsonout,
 // internal/host) never have to import the wire package to read an event.
 //
-// The json tags ARE the --json stream's contract for a skill object; see
-// SkillDecisionEvent.
-type SkillRef struct {
+// The json tags ARE the --json stream's contract for a runbook object; see
+// RunbookDecisionEvent.
+type RunbookRef struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
 }
 
-// SkillSelectorOutcome is the selector telemetry a machine consumer needs to judge
+// RunbookSelectorOutcome is the selector telemetry a machine consumer needs to judge
 // whether a round's runbook was chosen for the right reason.
 //
 // Degraded is the load-bearing field: a degraded selector FAILS OPEN and reuses the
@@ -112,7 +113,7 @@ type SkillRef struct {
 // does not report it". The selector's own token usage is deliberately NOT here: it would
 // pull the backend Usage contract across this seam, and it would be read against the
 // terminal `result` envelope's stats, which do not include it.
-type SkillSelectorOutcome struct {
+type RunbookSelectorOutcome struct {
 	Ran        bool     `json:"ran"`
 	Degraded   bool     `json:"degraded"`
 	TaskType   string   `json:"taskType"`
@@ -120,25 +121,25 @@ type SkillSelectorOutcome struct {
 	Reason     string   `json:"reason"`
 }
 
-// SkillDecisionEvent is the AUTHORITATIVE skill outcome for one committed round: the
+// RunbookDecisionEvent is the AUTHORITATIVE runbook outcome for one committed round: the
 // whole active set, the delta that was newly loaded, and the selector's verdict.
 //
-// It is sourced from the committed stream meta (backend.StreamMeta.Skills), which the
+// It is sourced from the committed stream meta (backend.StreamMeta.Runbooks), which the
 // client forwards exactly once per round from the attempt that actually won — unlike the
-// eager SkillLoaded cue, which fires per attempt before the upstream model connects and
+// eager RunbookLoaded cue, which fires per attempt before the upstream model connects and
 // can therefore report a load that the committed round did not repeat. When the two
 // disagree, THIS is the truth.
 //
 // Active and NewlyLoaded are never nil: an empty set marshals as [] so a consumer can
 // tell "nothing active" from a field that failed to serialize. Refs are copied verbatim
 // in backend order — no title fallback, no dropping of malformed entries — because a
-// diagnostic must not launder what the backend actually said. (The eager SkillLoaded
+// diagnostic must not launder what the backend actually said. (The eager RunbookLoaded
 // titles keep that cosmetic fallback; they feed a human-readable replay, not an
 // assertion.)
-type SkillDecisionEvent struct {
-	Active      []SkillRef           `json:"active"`
-	NewlyLoaded []SkillRef           `json:"newlyLoaded"`
-	Selector    SkillSelectorOutcome `json:"selector"`
+type RunbookDecisionEvent struct {
+	Active      []RunbookRef           `json:"active"`
+	NewlyLoaded []RunbookRef           `json:"newlyLoaded"`
+	Selector    RunbookSelectorOutcome `json:"selector"`
 }
 
 // EventSink is the structured-event vocabulary the loop emits. The attached session's
@@ -150,8 +151,30 @@ type EventSink interface {
 	// this, NEVER an emptiness heuristic.
 	Phase(p domain.RunPhase)
 
-	AssistantStart()                        // a new round is about to stream
-	AssistantToken(token string)            // one streamed visible token (think-stripped)
+	AssistantStart()             // a new round is about to stream
+	AssistantToken(token string) // one streamed visible token (think-stripped)
+	// AssistantPreamble is the backend's fast preview: one or two sentences describing
+	// the work about to happen, shown before the executor produces anything.
+	//
+	// It is PROVISIONAL, and that is why it is not an AssistantToken. A token is the
+	// RECORD channel — it buffers, and every durable flush (a runbook decision, a usage
+	// row, an error) promotes whatever is buffered into a permanent row. Routing a
+	// preview through it wrote the preview into the durable journal twice on a good
+	// turn (once as a flushed partial, once inside the joined final message) and once
+	// on a failed turn, which is exactly the "commit nothing on error" rule this
+	// preview is supposed to obey.
+	//
+	// So the split is by what a sink IS, not by taste: sinks that PAINT A SCREEN show
+	// it (the console, the host bridge — a preview the user never sees buys nothing,
+	// and text left on screen by a failed turn is what live rendering has always
+	// meant), and sinks that KEEP A RECORD ignore it (the durable run log, --json,
+	// MCP). The record channels get these same bytes anyway: the backend client joins
+	// the preview onto the front of the final assistant message, so AssistantEnd
+	// carries it exactly once.
+	//
+	// Renderers own the spacing — the committed message joins with a blank line, so a
+	// painter that wants to match it adds the separator itself.
+	AssistantPreamble(text string)
 	AssistantEnd(content, reasoning string) // final round; reasoning = <think> body ("" when none)
 	AssistantCancelled(content string)      // user abort mid-flight; content often ""
 
@@ -161,9 +184,9 @@ type EventSink interface {
 	// durable log records it so /explain replay shows the mid-turn steer.
 	Interjection(text string)
 
-	// SkillLoaded reports that the backend's selector loaded one or more runbooks for
+	// RunbookLoaded reports that the backend's selector loaded one or more runbooks for
 	// THIS round (the NewlyLoaded set from the stream's first meta event). titles are
-	// human-readable skill names (the id is the fallback when a ref has no title). Never
+	// human-readable runbook names (the id is the fallback when a ref has no title). Never
 	// emitted with an empty slice.
 	//
 	// DIAGNOSTIC ONLY — no sink may fold it into the running conversation. The durable run
@@ -171,24 +194,24 @@ type EventSink interface {
 	// sinks deliberately drop it, and there is no command that reports the active set. The
 	// ONE place it reaches a human is the explicit `/explain <run>` timeline, alongside
 	// that run's tool calls and errors — a retrospective diagnostic view the user asked
-	// for, not the live transcript. See Session.emitSkillLoads for why.
-	SkillLoaded(titles []string)
+	// for, not the live transcript. See Session.emitRunbookLoads for why.
+	RunbookLoaded(titles []string)
 
-	// SkillDecision reports the backend's COMMITTED skill outcome for a round: the whole
+	// RunbookDecision reports the backend's COMMITTED runbook outcome for a round: the whole
 	// active set, the newly-loaded delta, and the selector's verdict. Emitted once per
 	// round that reaches committed meta — including rounds where nothing new loaded and
 	// the active set is unchanged, because "runbook X was still active for this round" is
-	// the assertion a scripted skill test needs to make, and because the selector can
+	// the assertion a scripted runbook test needs to make, and because the selector can
 	// degrade on a round that loads nothing.
 	//
-	// It is the AUTHORITATIVE counterpart to SkillLoaded, which stays a titles-only,
+	// It is the AUTHORITATIVE counterpart to RunbookLoaded, which stays a titles-only,
 	// per-attempt cue whose value is timing (it is the only signal available before the
 	// upstream model connects). A consumer asserting what a turn actually used reads this
-	// event and never reconstructs the active set from SkillLoaded.
+	// event and never reconstructs the active set from RunbookLoaded.
 	//
-	// DIAGNOSTIC ONLY, exactly as SkillLoaded is: the attached session, console and host sinks
-	// drop it. See Session.emitSkillLoads for the standing argument.
-	SkillDecision(ev SkillDecisionEvent)
+	// DIAGNOSTIC ONLY, exactly as RunbookLoaded is: the attached session, console and host sinks
+	// drop it. See Session.emitRunbookLoads for the standing argument.
+	RunbookDecision(ev RunbookDecisionEvent)
 
 	// ToolBatch announces every parsed tool call as queued BEFORE sequential
 	// dispatch begins. The loop then promotes each call.
@@ -225,25 +248,26 @@ type EventSink interface {
 // NoopEventSink discards every event. Default sink and test stand-in.
 type NoopEventSink struct{}
 
-func (NoopEventSink) Phase(domain.RunPhase)            {}
-func (NoopEventSink) AssistantStart()                  {}
-func (NoopEventSink) AssistantToken(string)            {}
-func (NoopEventSink) AssistantEnd(string, string)      {}
-func (NoopEventSink) AssistantCancelled(string)        {}
-func (NoopEventSink) Interjection(string)              {}
-func (NoopEventSink) SkillLoaded([]string)             {}
-func (NoopEventSink) SkillDecision(SkillDecisionEvent) {}
-func (NoopEventSink) ToolBatch([]BatchedToolCall)      {}
-func (NoopEventSink) ToolState(string, ToolState)      {}
-func (NoopEventSink) ToolProgress(string, string)      {}
-func (NoopEventSink) ToolCall(ToolCallEvent)           {}
-func (NoopEventSink) ToolResult(ToolResultEvent)       {}
-func (NoopEventSink) Error(string)                     {}
-func (NoopEventSink) Warn(string)                      {}
-func (NoopEventSink) Info(string)                      {}
-func (NoopEventSink) Usage(UsageEvent)                 {}
-func (NoopEventSink) TurnPrompt(string)                {}
-func (NoopEventSink) ModelRateLimited()                {}
+func (NoopEventSink) Phase(domain.RunPhase)                {}
+func (NoopEventSink) AssistantStart()                      {}
+func (NoopEventSink) AssistantToken(string)                {}
+func (NoopEventSink) AssistantPreamble(string)             {}
+func (NoopEventSink) AssistantEnd(string, string)          {}
+func (NoopEventSink) AssistantCancelled(string)            {}
+func (NoopEventSink) Interjection(string)                  {}
+func (NoopEventSink) RunbookLoaded([]string)               {}
+func (NoopEventSink) RunbookDecision(RunbookDecisionEvent) {}
+func (NoopEventSink) ToolBatch([]BatchedToolCall)          {}
+func (NoopEventSink) ToolState(string, ToolState)          {}
+func (NoopEventSink) ToolProgress(string, string)          {}
+func (NoopEventSink) ToolCall(ToolCallEvent)               {}
+func (NoopEventSink) ToolResult(ToolResultEvent)           {}
+func (NoopEventSink) Error(string)                         {}
+func (NoopEventSink) Warn(string)                          {}
+func (NoopEventSink) Info(string)                          {}
+func (NoopEventSink) Usage(UsageEvent)                     {}
+func (NoopEventSink) TurnPrompt(string)                    {}
+func (NoopEventSink) ModelRateLimited()                    {}
 
 // MultiSink fans every event out to several sinks, each isolated by panic
 // recovery so one misbehaving sink (e.g. a UI bridge) can never break the loop or
@@ -278,6 +302,12 @@ func (m *MultiSink) AssistantStart() {
 		fanOut(s, func(s EventSink) { s.AssistantStart() })
 	}
 }
+func (m *MultiSink) AssistantPreamble(t string) {
+	for _, s := range m.sinks {
+		fanOut(s, func(s EventSink) { s.AssistantPreamble(t) })
+	}
+}
+
 func (m *MultiSink) AssistantToken(t string) {
 	for _, s := range m.sinks {
 		fanOut(s, func(s EventSink) { s.AssistantToken(t) })
@@ -298,14 +328,14 @@ func (m *MultiSink) Interjection(text string) {
 		fanOut(s, func(s EventSink) { s.Interjection(text) })
 	}
 }
-func (m *MultiSink) SkillLoaded(titles []string) {
+func (m *MultiSink) RunbookLoaded(titles []string) {
 	for _, s := range m.sinks {
-		fanOut(s, func(s EventSink) { s.SkillLoaded(titles) })
+		fanOut(s, func(s EventSink) { s.RunbookLoaded(titles) })
 	}
 }
-func (m *MultiSink) SkillDecision(ev SkillDecisionEvent) {
+func (m *MultiSink) RunbookDecision(ev RunbookDecisionEvent) {
 	for _, s := range m.sinks {
-		fanOut(s, func(s EventSink) { s.SkillDecision(ev) })
+		fanOut(s, func(s EventSink) { s.RunbookDecision(ev) })
 	}
 }
 func (m *MultiSink) ToolBatch(calls []BatchedToolCall) {
@@ -429,6 +459,12 @@ func (s *RunEventSink) AssistantStart() {
 	s.write("assistant:start", nil)
 }
 
+// AssistantPreamble is deliberately NOT recorded. This is the durable /explain
+// journal, and the preview is provisional until `done`; the backend client joins it
+// onto the front of the final message, so AssistantEnd persists it exactly once —
+// and a turn that failed persists it not at all.
+func (s *RunEventSink) AssistantPreamble(string) {}
+
 func (s *RunEventSink) AssistantToken(token string) {
 	// Buffered; flushed as one assistant:content row when the round ends.
 	s.contentBuffer += token
@@ -457,24 +493,24 @@ func (s *RunEventSink) Interjection(text string) {
 	s.write("user:interjection", map[string]any{"text": text})
 }
 
-// SkillLoaded persists a server-side skill load as its own durable row so /explain
+// RunbookLoaded persists a server-side runbook load as its own durable row so /explain
 // replay shows when a runbook entered the prompt. Flush buffered prose first so it
-// lands at the round boundary where the skill was selected.
-func (s *RunEventSink) SkillLoaded(titles []string) {
+// lands at the round boundary where the runbook was selected.
+func (s *RunEventSink) RunbookLoaded(titles []string) {
 	s.flushContent()
-	s.write("skill:loaded", map[string]any{"titles": titles})
+	s.write("runbook:loaded", map[string]any{"titles": titles})
 }
 
-// SkillDecision persists the committed per-round skill outcome so /explain replay can
+// RunbookDecision persists the committed per-round runbook outcome so /explain replay can
 // answer "which runbook was active for this round, and did the selector actually decide
 // that or fail open into it". Written on EVERY committed round, unfiltered — the durable
 // log is the record; FormatRunTimeline decides what a human is shown, collapsing the
 // rounds where the active set did not change and always surfacing a degraded selector.
-// Once a run has these rows they are its whole skill story: the replay then suppresses
-// the eager skill:loaded rows, which name only a per-attempt delta.
-func (s *RunEventSink) SkillDecision(ev SkillDecisionEvent) {
+// Once a run has these rows they are its whole runbook story: the replay then suppresses
+// the eager runbook:loaded rows, which name only a per-attempt delta.
+func (s *RunEventSink) RunbookDecision(ev RunbookDecisionEvent) {
 	s.flushContent()
-	s.write("skill:decision", ev)
+	s.write("runbook:decision", ev)
 }
 
 // ToolBatch/ToolState are live-footer-only; the durable log keys off the concrete

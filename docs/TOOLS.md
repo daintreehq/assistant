@@ -3,14 +3,14 @@
 A **tool** is one capability the assistant model can call during a turn — a read, a
 Daintree MCP action, a timer, a watcher, a memory write. Tools are the assistant's
 **primary extension surface**: behavior the model can *do* is added here, behavior it
-should *know* is added as a [skill](SKILLS.md).
+should *know* is added as a [runbook](RUNBOOKS.md).
 
 > **The CLI never edits files.** Every registered tool name is checked at startup by
 > `AssertSafe` and a file-mutating name is rejected outright (see [below](#the-no-file-edit-invariant)).
 > Edits happen by spawning a visible Daintree agent (`agentTask.spawnForEdits`), never
 > by a tool that writes to disk. Do not add one.
 
-This mirrors [`SKILLS.md`](SKILLS.md): that doc is for *runbooks the model reads*; this
+This mirrors [`RUNBOOKS.md`](RUNBOOKS.md): that doc is for *runbooks the model reads*; this
 one is for *capabilities the model invokes*. The canonical Go shapes live in
 [`internal/tools/types.go`](../internal/tools/types.go); the dispatch pipeline is in
 [`internal/tools/dispatch.go`](../internal/tools/dispatch.go); the read-only exemplar is
@@ -204,7 +204,7 @@ what you need when deciding where a NEW tool goes:
 | `watcher` · `timer` · `queue` · `grant` | unattended supervision and the authority it requires |
 | `workflow` | the durable work ledger, plus the flag-gated execution graph |
 | `memory` · `scratchx` | state that outlives a session, and state scoped inside one |
-| `skill` | local run-tracking only — selection is server-owned ([`SKILLS.md`](SKILLS.md)) |
+| `runbook` | local run-tracking only — selection is server-owned ([`RUNBOOKS.md`](RUNBOOKS.md)) |
 | `auditx` · `artifactx` | the audit trail, and paging oversized results |
 | `questionx` | `user.askMultipleChoice` — one finite question, interactive sessions only |
 
@@ -323,7 +323,7 @@ outlive its justification, only its subject.
 
 What the budgets must NOT do is push a load-bearing rule into nowhere. A rule about ONE
 tool belongs in that tool's description, beside the thing it governs; a rule spanning
-several tools belongs in a backend-owned skill. Deleting it to hit a byte count is the
+several tools belongs in a backend-owned runbook. Deleting it to hit a byte count is the
 failure mode, and no test can catch that — only review can. The usual win is not deleting
 rules but **stating each one once**: a rule repeated in both the description and a
 parameter is paid for on every round, twice.
@@ -331,11 +331,11 @@ parameter is paid for on every round, twice.
 ## Exporting the tool inventory
 
 The backend pins a captured copy of the projection we send in `input.tools`, and its
-skill bodies name the tools in it. When a tool leaves the registry and that pin is not
+runbook bodies name the tools in it. When a tool leaves the registry and that pin is not
 refreshed, a runbook goes on instructing the model to call something that is no longer
 offered — which is worse than a stale doc, because the base prompt forbids inventing a
 tool, so the turn stalls on a contradiction it cannot report. That has already happened
-once: six removed tools, five skills still naming them, nothing detecting it.
+once: six removed tools, five runbooks still naming them, nothing detecting it.
 
 ```bash
 go run ./cmd/tooldump                         # → stdout, the projection a normal launch sends
@@ -344,7 +344,7 @@ go run ./cmd/tooldump -workflow-intelligence  # …plus the DAINTREE_WORKFLOW_IN
 ```
 
 The default output deliberately EXCLUDES the flag-gated execution-graph tools: pinning
-them would promise the backend that `workflow.plan` is always offered, and a skill
+them would promise the backend that `workflow.plan` is always offered, and a runbook
 written against that promise would name an unoffered tool for everyone who has not opted
 in.
 

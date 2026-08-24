@@ -1,4 +1,4 @@
-package skill
+package runbook
 
 import (
 	"context"
@@ -52,27 +52,27 @@ func okAnswer() domain.ModelJudgeAnswer {
 // where the side-channel must NOT fire (a failed write is not an "advance occurred").
 type failInsertStore struct{}
 
-func (failInsertStore) GetSkillRunState(context.Context, string, string) (*domain.SkillRunStateRecord, error) {
+func (failInsertStore) GetRunbookRunState(context.Context, string, string) (*domain.RunbookRunStateRecord, error) {
 	return nil, nil
 }
-func (failInsertStore) InsertSkillRunState(context.Context, domain.SkillRunStateRecord) (string, error) {
+func (failInsertStore) InsertRunbookRunState(context.Context, domain.RunbookRunStateRecord) (string, error) {
 	return "", errors.New("db down")
 }
-func (failInsertStore) UpdateSkillRunState(context.Context, domain.SkillRunStateRecord) error {
+func (failInsertStore) UpdateRunbookRunState(context.Context, domain.RunbookRunStateRecord) error {
 	return errors.New("db down")
 }
 
 // failUpdateStore returns an existing run (forcing the update branch) then fails the
 // update — the mirror of failInsertStore for the already-started-run path.
-type failUpdateStore struct{ rec *domain.SkillRunStateRecord }
+type failUpdateStore struct{ rec *domain.RunbookRunStateRecord }
 
-func (s failUpdateStore) GetSkillRunState(context.Context, string, string) (*domain.SkillRunStateRecord, error) {
+func (s failUpdateStore) GetRunbookRunState(context.Context, string, string) (*domain.RunbookRunStateRecord, error) {
 	return s.rec, nil
 }
-func (failUpdateStore) InsertSkillRunState(context.Context, domain.SkillRunStateRecord) (string, error) {
+func (failUpdateStore) InsertRunbookRunState(context.Context, domain.RunbookRunStateRecord) (string, error) {
 	return "", errors.New("unexpected insert on existing run")
 }
-func (failUpdateStore) UpdateSkillRunState(context.Context, domain.SkillRunStateRecord) error {
+func (failUpdateStore) UpdateRunbookRunState(context.Context, domain.RunbookRunStateRecord) error {
 	return errors.New("db down")
 }
 
@@ -88,9 +88,9 @@ func TestStepAdvanceNoObservabilityWhenDebugOff(t *testing.T) {
 			return okAnswer(), nil
 		},
 	}
-	tool := find(Tools(deps), "skill.step.advance")
+	tool := find(Tools(deps), "runbook.step.advance")
 	ctx := &tools.ToolContext{Config: config.AppConfig{DebugLog: false, LogDir: dir}, SessionID: "sess1", RunID: "r"}
-	res := tool.Handle(context.Background(), json.RawMessage(`{"skillId":"s","completedStep":1,"nextStep":2}`), ctx)
+	res := tool.Handle(context.Background(), json.RawMessage(`{"runbookId":"s","completedStep":1,"nextStep":2}`), ctx)
 	if !res.Ok {
 		t.Fatalf("expected ok, got %+v", res.Error)
 	}
@@ -106,15 +106,15 @@ func TestStepAdvanceNoObservabilityWhenDebugOff(t *testing.T) {
 // transition facts and no consistency event is emitted.
 func TestStepAdvanceDeltaLoggedWithoutChecker(t *testing.T) {
 	dir := t.TempDir()
-	tool := find(Tools(Deps{Store: &memStore{}}), "skill.step.advance")
-	res := tool.Handle(context.Background(), json.RawMessage(`{"skillId":"mySkill","completedStep":2,"nextStep":3}`), debugCtx(dir))
+	tool := find(Tools(Deps{Store: &memStore{}}), "runbook.step.advance")
+	res := tool.Handle(context.Background(), json.RawMessage(`{"runbookId":"myRunbook","completedStep":2,"nextStep":3}`), debugCtx(dir))
 	if !res.Ok {
 		t.Fatalf("expected ok, got %+v", res.Error)
 	}
 	logs := readLogs(t, dir)
 	for _, want := range []string{
-		"skill.step.delta",
-		"skillId=mySkill",
+		"runbook.step.delta",
+		"runbookId=myRunbook",
 		"completedStep=2",
 		"nextCurrentStep=3",
 		"runId=run-xyz",
@@ -124,7 +124,7 @@ func TestStepAdvanceDeltaLoggedWithoutChecker(t *testing.T) {
 			t.Errorf("delta log missing %q\n---\n%s", want, logs)
 		}
 	}
-	if strings.Contains(logs, "skill.step.consistency") {
+	if strings.Contains(logs, "runbook.step.consistency") {
 		t.Errorf("no consistency event expected without a checker\n---\n%s", logs)
 	}
 }
@@ -132,8 +132,8 @@ func TestStepAdvanceDeltaLoggedWithoutChecker(t *testing.T) {
 // A finished run (no nextStep) renders nextStep as the literal null in the delta line.
 func TestStepAdvanceDeltaFinishRendersNull(t *testing.T) {
 	dir := t.TempDir()
-	tool := find(Tools(Deps{Store: &memStore{}}), "skill.step.advance")
-	res := tool.Handle(context.Background(), json.RawMessage(`{"skillId":"s","completedStep":4}`), debugCtx(dir))
+	tool := find(Tools(Deps{Store: &memStore{}}), "runbook.step.advance")
+	res := tool.Handle(context.Background(), json.RawMessage(`{"runbookId":"s","completedStep":4}`), debugCtx(dir))
 	if !res.Ok {
 		t.Fatalf("expected ok, got %+v", res.Error)
 	}
@@ -158,8 +158,8 @@ func TestStepAdvanceConsistencyVerdictLogged(t *testing.T) {
 			return domain.ModelJudgeAnswer{Reason: "step 5 jumped past 2-4", Confidence: 0.9, Matched: true}, nil
 		},
 	}
-	tool := find(Tools(deps), "skill.step.advance")
-	res := tool.Handle(context.Background(), json.RawMessage(`{"skillId":"s","completedStep":5,"nextStep":6}`), debugCtx(dir))
+	tool := find(Tools(deps), "runbook.step.advance")
+	res := tool.Handle(context.Background(), json.RawMessage(`{"runbookId":"s","completedStep":5,"nextStep":6}`), debugCtx(dir))
 	if !res.Ok {
 		t.Fatalf("expected ok, got %+v", res.Error)
 	}
@@ -174,8 +174,8 @@ func TestStepAdvanceConsistencyVerdictLogged(t *testing.T) {
 	}
 	logs := readLogs(t, dir)
 	for _, want := range []string{
-		"skill.step.delta",
-		"skill.step.consistency",
+		"runbook.step.delta",
+		"runbook.step.consistency",
 		"checkOk=true",
 		"flagged=true",
 		"confidence=0.9",
@@ -196,13 +196,13 @@ func TestStepAdvanceConsistencyErrorLoggedSafely(t *testing.T) {
 			return domain.ModelJudgeAnswer{}, errors.New("model timeout")
 		},
 	}
-	tool := find(Tools(deps), "skill.step.advance")
-	res := tool.Handle(context.Background(), json.RawMessage(`{"skillId":"s","completedStep":1,"nextStep":2}`), debugCtx(dir))
+	tool := find(Tools(deps), "runbook.step.advance")
+	res := tool.Handle(context.Background(), json.RawMessage(`{"runbookId":"s","completedStep":1,"nextStep":2}`), debugCtx(dir))
 	if !res.Ok {
 		t.Fatalf("a failed consistency check must not break the tool call, got %+v", res.Error)
 	}
 	logs := readLogs(t, dir)
-	if !strings.Contains(logs, "skill.step.consistency") || !strings.Contains(logs, "checkOk=false") {
+	if !strings.Contains(logs, "runbook.step.consistency") || !strings.Contains(logs, "checkOk=false") {
 		t.Errorf("expected a checkOk=false consistency event\n---\n%s", logs)
 	}
 	if !strings.Contains(logs, "model timeout") {
@@ -223,18 +223,18 @@ func TestStepAdvanceConsistencyPanicSafe(t *testing.T) {
 			panic("boom")
 		},
 	}
-	tool := find(Tools(deps), "skill.step.advance")
-	res := tool.Handle(context.Background(), json.RawMessage(`{"skillId":"s","completedStep":1,"nextStep":2}`), debugCtx(dir))
+	tool := find(Tools(deps), "runbook.step.advance")
+	res := tool.Handle(context.Background(), json.RawMessage(`{"runbookId":"s","completedStep":1,"nextStep":2}`), debugCtx(dir))
 	if !res.Ok {
 		t.Fatalf("a panicking consistency check must not break the tool call, got %+v", res.Error)
 	}
 	logs := readLogs(t, dir)
-	if !strings.Contains(logs, "skill.step.delta") {
+	if !strings.Contains(logs, "runbook.step.delta") {
 		t.Errorf("delta should be logged before the panicking check\n---\n%s", logs)
 	}
 	// A crashed check must STILL surface a checkOk=false event so it is distinguishable
 	// from "no checker wired" — not be silently swallowed by the outer recover guard.
-	if !strings.Contains(logs, "skill.step.consistency") || !strings.Contains(logs, "checkOk=false") {
+	if !strings.Contains(logs, "runbook.step.consistency") || !strings.Contains(logs, "checkOk=false") {
 		t.Errorf("a panicking check should surface a checkOk=false event\n---\n%s", logs)
 	}
 	if !strings.Contains(logs, "panic: boom") {
@@ -247,8 +247,8 @@ func TestStepAdvanceConsistencyPanicSafe(t *testing.T) {
 func TestStepAdvanceNoObservabilityOnUpdateFailure(t *testing.T) {
 	dir := t.TempDir()
 	called := false
-	seeded := &domain.SkillRunStateRecord{
-		ID: "rrs_x", SessionID: "sess1", SkillID: "s", CurrentStep: 2, StepsJson: "[]", Status: domain.SkillRunActive,
+	seeded := &domain.RunbookRunStateRecord{
+		ID: "rrs_x", SessionID: "sess1", RunbookID: "s", CurrentStep: 2, StepsJson: "[]", Status: domain.RunbookRunActive,
 	}
 	deps := Deps{
 		Store: failUpdateStore{rec: seeded},
@@ -257,8 +257,8 @@ func TestStepAdvanceNoObservabilityOnUpdateFailure(t *testing.T) {
 			return okAnswer(), nil
 		},
 	}
-	tool := find(Tools(deps), "skill.step.advance")
-	res := tool.Handle(context.Background(), json.RawMessage(`{"skillId":"s","completedStep":3,"nextStep":4}`), debugCtx(dir))
+	tool := find(Tools(deps), "runbook.step.advance")
+	res := tool.Handle(context.Background(), json.RawMessage(`{"runbookId":"s","completedStep":3,"nextStep":4}`), debugCtx(dir))
 	if res.Ok {
 		t.Fatal("expected failure when the update fails")
 	}
@@ -275,9 +275,9 @@ func TestStepAdvanceNoObservabilityOnUpdateFailure(t *testing.T) {
 // (NOT aliasing the mutated after-steps), after-steps the persisted result.
 func TestStepAdvanceConsistencyInputOnExistingRun(t *testing.T) {
 	dir := t.TempDir()
-	seeded := &domain.SkillRunStateRecord{
-		ID: "rrs_x", SessionID: "sess1", SkillID: "s", CurrentStep: 2,
-		StepsJson: `[{"index":2,"status":"done","ts":111}]`, Status: domain.SkillRunActive,
+	seeded := &domain.RunbookRunStateRecord{
+		ID: "rrs_x", SessionID: "sess1", RunbookID: "s", CurrentStep: 2,
+		StepsJson: `[{"index":2,"status":"done","ts":111}]`, Status: domain.RunbookRunActive,
 	}
 	var got ConsistencyCheckInput
 	deps := Deps{
@@ -287,15 +287,15 @@ func TestStepAdvanceConsistencyInputOnExistingRun(t *testing.T) {
 			return okAnswer(), nil
 		},
 	}
-	tool := find(Tools(deps), "skill.step.advance")
-	res := tool.Handle(context.Background(), json.RawMessage(`{"skillId":"s","completedStep":3,"nextStep":4}`), debugCtx(dir))
+	tool := find(Tools(deps), "runbook.step.advance")
+	res := tool.Handle(context.Background(), json.RawMessage(`{"runbookId":"s","completedStep":3,"nextStep":4}`), debugCtx(dir))
 	if !res.Ok {
 		t.Fatalf("expected ok, got %+v", res.Error)
 	}
 	if got.PrevCurrentStep != 2 {
 		t.Errorf("PrevCurrentStep = %d, want 2", got.PrevCurrentStep)
 	}
-	if got.PrevRunStatus != domain.SkillRunActive {
+	if got.PrevRunStatus != domain.RunbookRunActive {
 		t.Errorf("PrevRunStatus = %q, want active", got.PrevRunStatus)
 	}
 	if got.NextCurrentStep != 4 {
@@ -325,8 +325,8 @@ func TestStepAdvanceNoObservabilityOnPersistFailure(t *testing.T) {
 			return okAnswer(), nil
 		},
 	}
-	tool := find(Tools(deps), "skill.step.advance")
-	res := tool.Handle(context.Background(), json.RawMessage(`{"skillId":"s","completedStep":1,"nextStep":2}`), debugCtx(dir))
+	tool := find(Tools(deps), "runbook.step.advance")
+	res := tool.Handle(context.Background(), json.RawMessage(`{"runbookId":"s","completedStep":1,"nextStep":2}`), debugCtx(dir))
 	if res.Ok {
 		t.Fatal("expected failure when persistence fails")
 	}

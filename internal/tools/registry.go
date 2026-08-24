@@ -213,8 +213,8 @@ func (r *Registry) OpenAITools(filterNames []string) ([]ChatTool, error) {
 	//   - nil filter ⇒ registration order (r.order);
 	//   - non-nil filter ⇒ filterNames order, de-duped, skipping unregistered names.
 	// The filter slice already carries the caller's intended order (coreTools then
-	// each skill's requiredTools), so honoring it keeps the per-turn toolset stable
-	// across runs for the same loaded-skill set — a prompt-cache-stability invariant.
+	// each runbook's requiredTools), so honoring it keeps the per-turn toolset stable
+	// across runs for the same loaded-runbook set — a prompt-cache-stability invariant.
 	var names []string
 	if filterNames == nil {
 		names = r.order

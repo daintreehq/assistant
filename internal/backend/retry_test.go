@@ -398,36 +398,36 @@ func TestRespondStream_MetaForwardedOnceAcrossRetries(t *testing.T) {
 	}
 }
 
-func TestRespondStream_SkillLoadDeduplicatedAcrossRetries(t *testing.T) {
+func TestRespondStream_RunbookLoadDeduplicatedAcrossRetries(t *testing.T) {
 	const firstMeta = "event: meta\n" +
-		"data: {\"skills\":{\"newly_loaded\":[{\"id\":\"multi_agent\",\"title\":\"Multi-agent orchestration\"}]}}\n\n"
+		"data: {\"runbooks\":{\"newly_loaded\":[{\"id\":\"multi_agent\",\"title\":\"Multi-agent orchestration\"}]}}\n\n"
 	const changedMeta = "event: meta\n" +
-		"data: {\"skills\":{\"newly_loaded\":[{\"id\":\" multi_agent \",\"title\":\"Changed title\"}]}}\n\n"
-	const failWithSkill = firstMeta +
+		"data: {\"runbooks\":{\"newly_loaded\":[{\"id\":\" multi_agent \",\"title\":\"Changed title\"}]}}\n\n"
+	const failWithRunbook = firstMeta +
 		"event: error\ndata: {\"error\":{\"code\":\"upstream_error\",\"message\":\"boom\"}}\n\n"
-	const changedFailWithSkill = changedMeta +
+	const changedFailWithRunbook = changedMeta +
 		"event: error\ndata: {\"error\":{\"code\":\"upstream_error\",\"message\":\"boom\"}}\n\n"
-	const okWithSkill = changedMeta +
+	const okWithRunbook = changedMeta +
 		"event: delta\ndata: {\"content\":\"hi\"}\n\n" +
 		"event: done\ndata: {\"finish_reason\":\"stop\"}\n\n"
 
 	const failFirst = 2
 	srv, hits := countingServer(t, func(n int) (int, string) {
 		if n == 0 {
-			return http.StatusOK, failWithSkill
+			return http.StatusOK, failWithRunbook
 		}
 		if n < failFirst {
-			return http.StatusOK, changedFailWithSkill
+			return http.StatusOK, changedFailWithRunbook
 		}
-		return http.StatusOK, okWithSkill
+		return http.StatusOK, okWithRunbook
 	})
 	defer srv.Close()
 
-	var callbacks [][]SkillRef
+	var callbacks [][]RunbookRef
 	c := NewClient(ClientConfig{BaseURL: srv.URL, Retry: fastRetry(6)})
 	_, err := c.RespondStream(context.Background(), RespondRequest{}, StreamCallbacks{
-		OnSkillLoaded: func(refs []SkillRef) {
-			callbacks = append(callbacks, append([]SkillRef(nil), refs...))
+		OnRunbookLoaded: func(refs []RunbookRef) {
+			callbacks = append(callbacks, append([]RunbookRef(nil), refs...))
 		},
 	})
 	if err != nil {
@@ -437,26 +437,26 @@ func TestRespondStream_SkillLoadDeduplicatedAcrossRetries(t *testing.T) {
 		t.Fatalf("server hit %d times, want %d", got, failFirst+1)
 	}
 	if len(callbacks) != 1 {
-		t.Fatalf("OnSkillLoaded fired %d times, want 1: %+v", len(callbacks), callbacks)
+		t.Fatalf("OnRunbookLoaded fired %d times, want 1: %+v", len(callbacks), callbacks)
 	}
 	if got := callbacks[0]; len(got) != 1 || got[0].ID != "multi_agent" || got[0].Title != "Multi-agent orchestration" {
-		t.Fatalf("skill callback refs = %+v", got)
+		t.Fatalf("runbook callback refs = %+v", got)
 	}
 }
 
-func TestRespondStream_RetryAdoptsMetaStateAndKeepsSkillSelection(t *testing.T) {
+func TestRespondStream_RetryAdoptsMetaStateAndKeepsRunbookSelection(t *testing.T) {
 	const selectedState = "dst1.selected"
 	const firstAttempt = "event: meta\n" +
-		"data: {\"state\":\"dst1.selected\",\"skills\":{\"newly_loaded\":[{\"id\":\"skill_a\",\"title\":\"Skill A\"}]}}\n\n" +
+		"data: {\"state\":\"dst1.selected\",\"runbooks\":{\"newly_loaded\":[{\"id\":\"runbook_a\",\"title\":\"Runbook A\"}]}}\n\n" +
 		"event: error\ndata: {\"error\":{\"code\":\"upstream_error\",\"message\":\"boom\"}}\n\n"
 	const stableRetry = "event: meta\n" +
-		"data: {\"state\":\"dst1.selected\",\"skills\":{\"newly_loaded\":[]}}\n\n" +
+		"data: {\"state\":\"dst1.selected\",\"runbooks\":{\"newly_loaded\":[]}}\n\n" +
 		"event: delta\ndata: {\"content\":\"hi\"}\n\n" +
 		"event: done\ndata: {\"finish_reason\":\"stop\"}\n\n"
 	// This branch models what would happen if the second POST omitted state and made
-	// the backend run selection again: a different skill would be reported.
+	// the backend run selection again: a different runbook would be reported.
 	const reselectedRetry = "event: meta\n" +
-		"data: {\"state\":\"dst1.different\",\"skills\":{\"newly_loaded\":[{\"id\":\"skill_b\",\"title\":\"Skill B\"}]}}\n\n" +
+		"data: {\"state\":\"dst1.different\",\"runbooks\":{\"newly_loaded\":[{\"id\":\"runbook_b\",\"title\":\"Runbook B\"}]}}\n\n" +
 		"event: delta\ndata: {\"content\":\"wrong selection\"}\n\n" +
 		"event: done\ndata: {\"finish_reason\":\"stop\"}\n\n"
 
@@ -495,7 +495,7 @@ func TestRespondStream_RetryAdoptsMetaStateAndKeepsSkillSelection(t *testing.T) 
 	var committedMeta StreamMeta
 	c := NewClient(ClientConfig{BaseURL: srv.URL, Retry: fastRetry(3)})
 	res, err := c.RespondStream(context.Background(), RespondRequest{}, StreamCallbacks{
-		OnSkillLoaded: func(refs []SkillRef) {
+		OnRunbookLoaded: func(refs []RunbookRef) {
 			for _, ref := range refs {
 				loaded = append(loaded, ref.ID)
 			}
@@ -525,17 +525,17 @@ func TestRespondStream_RetryAdoptsMetaStateAndKeepsSkillSelection(t *testing.T) 
 	if gotReselected {
 		t.Fatal("retry omitted the selected state and reran the selector")
 	}
-	if len(loaded) != 1 || loaded[0] != "skill_a" {
-		t.Fatalf("surfaced skill loads = %v, want only skill_a", loaded)
+	if len(loaded) != 1 || loaded[0] != "runbook_a" {
+		t.Fatalf("surfaced runbook loads = %v, want only runbook_a", loaded)
 	}
-	if committedMeta.State != selectedState || len(committedMeta.Skills.NewlyLoaded) != 0 {
-		t.Fatalf("committed meta = %+v, want stable retry meta with no new skill", committedMeta)
+	if committedMeta.State != selectedState || len(committedMeta.Runbooks.NewlyLoaded) != 0 {
+		t.Fatalf("committed meta = %+v, want stable retry meta with no new runbook", committedMeta)
 	}
 }
 
 func TestRespondStream_TerminalPreMetaRetryFlushesLastReceivedMeta(t *testing.T) {
 	const firstAttempt = "event: meta\n" +
-		"data: {\"state\":\"dst1.selected\",\"skills\":{\"newly_loaded\":[{\"id\":\"skill_a\",\"title\":\"Skill A\"}]}}\n\n" +
+		"data: {\"state\":\"dst1.selected\",\"runbooks\":{\"newly_loaded\":[{\"id\":\"runbook_a\",\"title\":\"Runbook A\"}]}}\n\n" +
 		"event: error\ndata: {\"error\":{\"code\":\"upstream_error\",\"message\":\"boom\"}}\n\n"
 
 	srv, hits := countingServer(t, func(n int) (int, string) {
@@ -552,7 +552,7 @@ func TestRespondStream_TerminalPreMetaRetryFlushesLastReceivedMeta(t *testing.T)
 	c := NewClient(ClientConfig{BaseURL: srv.URL, Retry: fastRetry(2)})
 	_, err := c.RespondStream(context.Background(), RespondRequest{}, StreamCallbacks{
 		OnMeta: func(m StreamMeta) { metas = append(metas, m) },
-		OnSkillLoaded: func(refs []SkillRef) {
+		OnRunbookLoaded: func(refs []RunbookRef) {
 			for _, ref := range refs {
 				loaded = append(loaded, ref.ID)
 			}
@@ -567,8 +567,8 @@ func TestRespondStream_TerminalPreMetaRetryFlushesLastReceivedMeta(t *testing.T)
 	if len(metas) != 1 || metas[0].State != "dst1.selected" {
 		t.Fatalf("OnMeta calls = %+v, want last received state once", metas)
 	}
-	if len(loaded) != 1 || loaded[0] != "skill_a" {
-		t.Fatalf("OnSkillLoaded calls = %v, want skill_a once", loaded)
+	if len(loaded) != 1 || loaded[0] != "runbook_a" {
+		t.Fatalf("OnRunbookLoaded calls = %v, want runbook_a once", loaded)
 	}
 }
 

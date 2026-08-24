@@ -47,7 +47,7 @@ func TestDaintreeCallDenylistNamesWrapper(t *testing.T) {
 // that word order) — costing the model several wasted discovery rounds before bare
 // "rename" finally hit. NOTE tool.search reads the RAW Daintree catalog, so a word
 // the raw description lacks (e.g. "title") still won't match here — that gap is
-// covered separately by the terminal.rename typed wrapper + manual + skill, which
+// covered separately by the terminal.rename typed wrapper + manual + runbook, which
 // remove the need to search at all.
 func TestToolSearchTokenizesQuery(t *testing.T) {
 	mcp := &fakeMCP{connected: true, toolList: []MCPToolInfo{

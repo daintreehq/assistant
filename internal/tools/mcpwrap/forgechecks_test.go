@@ -180,7 +180,7 @@ func TestForgeChecksDescriptionCarriesTheTraps(t *testing.T) {
 		t.Fatalf("tool name = %q", tool.Name)
 	}
 	// The description must carry the traps: this is the surface the model reads, and the
-	// whole point of the wrapper is that they stop living in skill prose.
+	// whole point of the wrapper is that they stop living in runbook prose.
 	for _, want := range []string{"conclusive", "REQUIRED checks only", "per-check"} {
 		if !strings.Contains(tool.Description, want) {
 			t.Errorf("description does not mention %q:\n%s", want, tool.Description)

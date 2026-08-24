@@ -35,7 +35,7 @@ func sseServer(t *testing.T, sseBody string, lastReq *RespondRequest) *httptest.
 func TestRespondStream_BasicAnswer(t *testing.T) {
 	body := strings.Join([]string{
 		`event: meta`,
-		`data: {"protocol_version":2,"request_id":"req_1","model":"daintree-assistant","state":"dst1.test"}`,
+		`data: {"protocol_version":3,"request_id":"req_1","model":"daintree-assistant","state":"dst1.test"}`,
 		``,
 		`event: delta`,
 		`data: {"content":"Hello"}`,
@@ -88,7 +88,7 @@ func TestRespondStream_BasicAnswer(t *testing.T) {
 	}
 }
 
-func TestRespondStream_SkillLoadFiresBeforeFirstContent(t *testing.T) {
+func TestRespondStream_RunbookLoadFiresBeforeFirstContent(t *testing.T) {
 	releaseContent := make(chan struct{})
 	released := false
 	defer func() {
@@ -101,13 +101,13 @@ func TestRespondStream_SkillLoadFiresBeforeFirstContent(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "event: meta\n"+
-			`data: {"request_id":"req_skill","skills":{"newly_loaded":[{"id":"multi_agent","title":"Multi-agent orchestration"}]},"state":"dst1.skill"}`+
+			`data: {"request_id":"req_runbook","runbooks":{"newly_loaded":[{"id":"multi_agent","title":"Multi-agent orchestration"}]},"state":"dst1.runbook"}`+
 			"\n\n")
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
 		}
 
-		// Keep the model side gated after meta. The skill callback must reach the
+		// Keep the model side gated after meta. The runbook callback must reach the
 		// caller while this handler is still waiting here.
 		<-releaseContent
 		_, _ = io.WriteString(w, "event: delta\n"+
@@ -119,7 +119,7 @@ func TestRespondStream_SkillLoadFiresBeforeFirstContent(t *testing.T) {
 
 	type observed struct {
 		kind string
-		refs []SkillRef
+		refs []RunbookRef
 		meta StreamMeta
 	}
 	eventsCh := make(chan observed, 3)
@@ -130,8 +130,8 @@ func TestRespondStream_SkillLoadFiresBeforeFirstContent(t *testing.T) {
 			OnRawMeta: func(m StreamMeta) {
 				eventsCh <- observed{kind: "raw", meta: m}
 			},
-			OnSkillLoaded: func(refs []SkillRef) {
-				eventsCh <- observed{kind: "skill", refs: refs}
+			OnRunbookLoaded: func(refs []RunbookRef) {
+				eventsCh <- observed{kind: "runbook", refs: refs}
 			},
 			OnMeta: func(m StreamMeta) {
 				eventsCh <- observed{kind: "committed", meta: m}
@@ -142,7 +142,7 @@ func TestRespondStream_SkillLoadFiresBeforeFirstContent(t *testing.T) {
 
 	select {
 	case ev := <-eventsCh:
-		if ev.kind != "raw" || ev.meta.State != "dst1.skill" {
+		if ev.kind != "raw" || ev.meta.State != "dst1.runbook" {
 			t.Fatalf("first callback = %+v, want raw meta", ev)
 		}
 	case <-time.After(time.Second):
@@ -150,11 +150,11 @@ func TestRespondStream_SkillLoadFiresBeforeFirstContent(t *testing.T) {
 	}
 	select {
 	case ev := <-eventsCh:
-		if ev.kind != "skill" || len(ev.refs) != 1 || ev.refs[0].ID != "multi_agent" || ev.refs[0].Title != "Multi-agent orchestration" {
-			t.Fatalf("second callback = %+v, want eager skill cue", ev)
+		if ev.kind != "runbook" || len(ev.refs) != 1 || ev.refs[0].ID != "multi_agent" || ev.refs[0].Title != "Multi-agent orchestration" {
+			t.Fatalf("second callback = %+v, want eager runbook cue", ev)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("skill callback waited for model content")
+		t.Fatal("runbook callback waited for model content")
 	}
 	select {
 	case ev := <-eventsCh:
@@ -174,7 +174,7 @@ func TestRespondStream_SkillLoadFiresBeforeFirstContent(t *testing.T) {
 	}
 	select {
 	case ev := <-eventsCh:
-		if ev.kind != "committed" || ev.meta.State != "dst1.skill" {
+		if ev.kind != "committed" || ev.meta.State != "dst1.runbook" {
 			t.Fatalf("post-content callback = %+v, want committed meta", ev)
 		}
 	default:
@@ -185,7 +185,7 @@ func TestRespondStream_SkillLoadFiresBeforeFirstContent(t *testing.T) {
 func TestRespondStream_ToolCallAccumulation(t *testing.T) {
 	body := strings.Join([]string{
 		`event: meta`,
-		`data: {"protocol_version":2,"request_id":"req_2","model":"daintree-assistant","state":"dst1.x"}`,
+		`data: {"protocol_version":3,"request_id":"req_2","model":"daintree-assistant","state":"dst1.x"}`,
 		``,
 		`event: delta`,
 		`data: {"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"git__status","arguments":""}}]}`,
@@ -486,9 +486,9 @@ func TestCapabilitiesAndHealth(t *testing.T) {
 		case "/health":
 			_, _ = io.WriteString(w, `{"status":"ok"}`)
 		case "/readyz":
-			_, _ = io.WriteString(w, `{"status":"ready","catalog_revision":"sha256:x","skills":4}`)
+			_, _ = io.WriteString(w, `{"status":"ready","catalog_revision":"sha256:x","runbooks":4}`)
 		case "/v1/daintree/capabilities":
-			_, _ = io.WriteString(w, `{"server_version":"1.0.0","protocol":{"min":2,"max":2},"respond":{"endpoint":"/v1/daintree/respond","model":"daintree-assistant","streaming":true,"stream_events":["meta","delta","done","error"],"system_messages_accepted":false,"max_active_skills":3,"display_context":true},"tasks":["checkpoint","memory_distill"],"limits":{"request_bytes":8388608,"tools":128}}`)
+			_, _ = io.WriteString(w, `{"server_version":"1.0.0","protocol":{"min":3,"max":3},"respond":{"endpoint":"/v1/daintree/respond","model":"daintree-assistant","streaming":true,"stream_events":["meta","delta","done","error"],"system_messages_accepted":false,"max_active_runbooks":3,"display_context":true},"tasks":["checkpoint","memory_distill"],"limits":{"request_bytes":8388608,"tools":128}}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -505,8 +505,11 @@ func TestCapabilitiesAndHealth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Capabilities: %v", err)
 	}
-	if caps.Protocol.Min != 2 || caps.Protocol.Max != 2 {
-		t.Errorf("protocol = %+v", caps.Protocol)
+	// Pinned against the constant, not a literal: this asserts that the advertised
+	// range is decoded, and a range that no longer brackets what the CLI speaks is a
+	// stale fixture rather than a passing test.
+	if caps.Protocol.Min != ProtocolVersion || caps.Protocol.Max != ProtocolVersion {
+		t.Errorf("protocol = %+v, want the range to bracket %d", caps.Protocol, ProtocolVersion)
 	}
 	if len(caps.Tasks) != 2 {
 		t.Errorf("tasks = %+v", caps.Tasks)

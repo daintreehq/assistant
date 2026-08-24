@@ -304,6 +304,12 @@ func (s *Sink) AssistantStart() {
 	s.emit("assistant:start", nil)
 }
 
+// AssistantPreamble is deliberately NOT recorded. This sink's content field is a
+// machine-readable RESULT, and the preview is provisional until `done` — the backend
+// client joins it onto the front of the final message, so AssistantEnd carries it
+// exactly once and a failed turn carries it not at all.
+func (s *Sink) AssistantPreamble(string) {}
+
 func (s *Sink) AssistantToken(token string) {
 	s.mu.Lock()
 	s.contentBuffer += token
@@ -373,30 +379,30 @@ func (s *Sink) Interjection(text string) {
 	s.emit("user:interjection", map[string]any{"text": text})
 }
 
-// SkillLoaded emits a server-side skill load as its own JSONL line (flushing buffered
-// prose first so it lands at the round boundary where the skill was selected).
-func (s *Sink) SkillLoaded(titles []string) {
+// RunbookLoaded emits a server-side runbook load as its own JSONL line (flushing buffered
+// prose first so it lands at the round boundary where the runbook was selected).
+func (s *Sink) RunbookLoaded(titles []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.flushContent()
-	s.emit("skill:loaded", map[string]any{"titles": titles})
+	s.emit("runbook:loaded", map[string]any{"titles": titles})
 }
 
-// SkillDecision emits the committed per-round skill outcome. Unlike every other payload
+// RunbookDecision emits the committed per-round runbook outcome. Unlike every other payload
 // on this sink it is marshalled from the event STRUCT rather than a hand-rolled map (the
 // emitStruct path, as the `session` line uses): the keys a consumer asserts on are then
-// declared exactly once, on agent.SkillDecisionEvent, and cannot drift from what is
+// declared exactly once, on agent.RunbookDecisionEvent, and cannot drift from what is
 // documented without the compiler noticing. Those tags are camelCase to match the rest of
 // this stream, deliberately NOT the snake_case the backend sends on the wire.
 //
-// Additive: skill:loaded keeps its shape, so this needs no JSONOutputSchemaVersion bump.
+// Additive: runbook:loaded keeps its shape, so this needs no JSONOutputSchemaVersion bump.
 // A consumer must switch on `type` and tolerate line types it does not know — the extra
 // line does shift every later `seq`.
-func (s *Sink) SkillDecision(ev agent.SkillDecisionEvent) {
+func (s *Sink) RunbookDecision(ev agent.RunbookDecisionEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.flushContent() // prose precedes the round boundary this decision belongs to
-	s.emitStruct("skill:decision", ev)
+	s.emitStruct("runbook:decision", ev)
 }
 
 // ToolBatch / ToolState / ToolProgress are live-footer-only; not part of the JSONL stream.

@@ -144,18 +144,18 @@ func jsonStr(s string) string {
 	return string(b)
 }
 
-// decisionRow builds a skill:decision run-event row.
+// decisionRow builds a runbook:decision run-event row.
 func decisionRow(seq int, payload string) domain.RunEventRecord {
-	return domain.RunEventRecord{RunID: "r", Seq: seq, Type: "skill:decision", Payload: strPtr(payload)}
+	return domain.RunEventRecord{RunID: "r", Seq: seq, Type: "runbook:decision", Payload: strPtr(payload)}
 }
 
 const activeMulti = `{"active":[{"id":"multi_agent","title":"Multi-agent orchestration"},` +
 	`{"id":"foundation","title":"Daintree orchestration foundation"}],"newlyLoaded":[],` +
 	`"selector":{"ran":true,"degraded":false,"taskType":"orchestration","confidence":0.9,"reason":""}}`
 
-// The committed decision is the run's skill story, and it names the WHOLE active set —
-// including the foundation skill that was retained rather than newly loaded, which the
-// delta-only skill:loaded cue can never mention.
+// The committed decision is the run's runbook story, and it names the WHOLE active set —
+// including the foundation runbook that was retained rather than newly loaded, which the
+// delta-only runbook:loaded cue can never mention.
 func TestFormatRunTimelineShowsActiveSetFromDecision(t *testing.T) {
 	out := FormatRunTimeline([]domain.RunEventRecord{decisionRow(0, activeMulti)}, nil)
 	if !strings.Contains(out, "Multi-agent orchestration") ||
@@ -164,12 +164,12 @@ func TestFormatRunTimelineShowsActiveSetFromDecision(t *testing.T) {
 	}
 }
 
-// Once a run records decisions, the eager skill:loaded row is SUPERSEDED. It is a
-// per-attempt delta: on a retried round it can name a skill the committed round never
+// Once a run records decisions, the eager runbook:loaded row is SUPERSEDED. It is a
+// per-attempt delta: on a retried round it can name a runbook the committed round never
 // kept, so showing it above the authoritative line would put the wrong answer first.
-func TestFormatRunTimelineDecisionSupersedesEagerSkillLoaded(t *testing.T) {
+func TestFormatRunTimelineDecisionSupersedesEagerRunbookLoaded(t *testing.T) {
 	events := []domain.RunEventRecord{
-		{RunID: "r", Seq: 0, Type: "skill:loaded", Payload: strPtr(`{"titles":["Attempt-one runbook"]}`)},
+		{RunID: "r", Seq: 0, Type: "runbook:loaded", Payload: strPtr(`{"titles":["Attempt-one runbook"]}`)},
 		decisionRow(1, activeMulti),
 	}
 	out := FormatRunTimeline(events, nil)
@@ -182,14 +182,14 @@ func TestFormatRunTimelineDecisionSupersedesEagerSkillLoaded(t *testing.T) {
 }
 
 // A run from before this event existed has ONLY the eager rows, so they must still
-// render — dropping them unconditionally would blank the skill story of every past run.
-func TestFormatRunTimelineKeepsSkillLoadedWhenNoDecisionRecorded(t *testing.T) {
+// render — dropping them unconditionally would blank the runbook story of every past run.
+func TestFormatRunTimelineKeepsRunbookLoadedWhenNoDecisionRecorded(t *testing.T) {
 	events := []domain.RunEventRecord{
-		{RunID: "r", Seq: 0, Type: "skill:loaded", Payload: strPtr(`{"titles":["Legacy runbook"]}`)},
+		{RunID: "r", Seq: 0, Type: "runbook:loaded", Payload: strPtr(`{"titles":["Legacy runbook"]}`)},
 	}
 	out := FormatRunTimeline(events, nil)
 	if !strings.Contains(out, "Legacy runbook") {
-		t.Fatalf("a pre-decision run lost its skill row: %q", out)
+		t.Fatalf("a pre-decision run lost its runbook row: %q", out)
 	}
 }
 
@@ -203,7 +203,7 @@ func TestFormatRunTimelineCollapsesUnchangedActiveSet(t *testing.T) {
 		decisionRow(2, activeMulti),
 	}
 	out := FormatRunTimeline(events, nil)
-	if got := strings.Count(out, "skills active"); got != 1 {
+	if got := strings.Count(out, "runbooks active"); got != 1 {
 		t.Fatalf("active line rendered %d times across 3 identical rounds, want 1: %q", got, out)
 	}
 }
@@ -216,7 +216,7 @@ func TestFormatRunTimelineShowsChangedActiveSet(t *testing.T) {
 	}
 	out := FormatRunTimeline(events, nil)
 	if !strings.Contains(out, "Alpha") || !strings.Contains(out, "Beta") {
-		t.Fatalf("a mid-turn skill change was collapsed away: %q", out)
+		t.Fatalf("a mid-turn runbook change was collapsed away: %q", out)
 	}
 }
 
@@ -251,15 +251,15 @@ func TestFormatRunTimelineReportsReactivationAfterClearing(t *testing.T) {
 	}
 }
 
-// A run that never has any active skills stays silent. "none" is for a set that CLEARED,
-// not for the ordinary no-skills run, which would otherwise gain a line per turn.
+// A run that never has any active runbooks stays silent. "none" is for a set that CLEARED,
+// not for the ordinary no-runbooks run, which would otherwise gain a line per turn.
 func TestFormatRunTimelineSilentWhenNothingWasEverActive(t *testing.T) {
 	events := []domain.RunEventRecord{
 		decisionRow(0, `{"active":[],"newlyLoaded":[],"selector":{"ran":false,"degraded":false}}`),
 		decisionRow(1, `{"active":[],"newlyLoaded":[],"selector":{"ran":false,"degraded":false}}`),
 	}
 	if out := FormatRunTimeline(events, nil); strings.TrimSpace(out) != "" {
-		t.Fatalf("a run with no skills must render nothing, got %q", out)
+		t.Fatalf("a run with no runbooks must render nothing, got %q", out)
 	}
 }
 
@@ -315,7 +315,7 @@ func TestFormatRunTimelineSurfacesDegradedEvenWhenSetUnchanged(t *testing.T) {
 // than something built in-process. Each shape gets its own case with an exact expected
 // output, so a malformed row cannot start leaking text while a combined assertion still
 // passes on one good line elsewhere.
-func TestFormatRunTimelineToleratesMalformedSkillDecision(t *testing.T) {
+func TestFormatRunTimelineToleratesMalformedRunbookDecision(t *testing.T) {
 	cases := []struct {
 		name    string
 		payload *string
@@ -337,21 +337,21 @@ func TestFormatRunTimelineToleratesMalformedSkillDecision(t *testing.T) {
 		// diagnostic, and a missing set must not suppress it.
 		{"degraded with unusable active", strPtr(
 			`{"active":"not-an-array","selector":{"degraded":true}}`),
-			"⚠ skill selector degraded (reused the prior set)"},
+			"⚠ runbook selector degraded (reused the prior set)"},
 		{"degraded with non-string reason", strPtr(
 			`{"active":[],"selector":{"degraded":true,"reason":42}}`),
-			"⚠ skill selector degraded (reused the prior set)"},
+			"⚠ runbook selector degraded (reused the prior set)"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			out := FormatRunTimeline(
-				[]domain.RunEventRecord{{RunID: "r", Seq: 0, Type: "skill:decision", Payload: tc.payload}}, nil)
+				[]domain.RunEventRecord{{RunID: "r", Seq: 0, Type: "runbook:decision", Payload: tc.payload}}, nil)
 			if strings.TrimSpace(out) != tc.want {
 				t.Fatalf("output = %q, want %q", out, tc.want)
 			}
-			// Never the bare "· skill:decision" default, which is noise with none of
+			// Never the bare "· runbook:decision" default, which is noise with none of
 			// the information.
-			if strings.Contains(out, "· skill:decision") {
+			if strings.Contains(out, "· runbook:decision") {
 				t.Fatalf("bare event type leaked into the replay: %q", out)
 			}
 		})

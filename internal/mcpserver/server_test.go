@@ -834,13 +834,13 @@ func TestRunEventsReachTheCaller(t *testing.T) {
 	fake := newFakeRuntime("ses_test")
 	fake.script = func(sink agent.EventSink) {
 		sink.AssistantStart()
-		sink.SkillLoaded([]string{"Orchestration"})
-		sink.SkillDecision(agent.SkillDecisionEvent{
-			Active: []agent.SkillRef{
+		sink.RunbookLoaded([]string{"Orchestration"})
+		sink.RunbookDecision(agent.RunbookDecisionEvent{
+			Active: []agent.RunbookRef{
 				{ID: "orchestration", Title: "Orchestration"},
 				{ID: "bare_id"}, // no title: falls back to the id, never a blank row
 			},
-			Selector: agent.SkillSelectorOutcome{Ran: true, Degraded: true},
+			Selector: agent.RunbookSelectorOutcome{Ran: true, Degraded: true},
 		})
 		sink.ToolCall(agent.ToolCallEvent{ID: "c1", Name: "terminal.list"})
 		sink.ToolResult(agent.ToolResultEvent{ID: "c1", Name: "terminal.list", Result: domain.Ok("2 terminals", nil)})
@@ -864,7 +864,7 @@ func TestRunEventsReachTheCaller(t *testing.T) {
 	for _, e := range run.Events {
 		seen[e.Type]++
 	}
-	for _, want := range []string{"assistant:start", "skill:loaded", "skill:decision", "tool:call", "tool:result", "assistant:end"} {
+	for _, want := range []string{"assistant:start", "runbook:loaded", "runbook:decision", "tool:call", "tool:result", "assistant:end"} {
 		if seen[want] == 0 {
 			t.Errorf("no %q event in the recorded timeline: %+v", want, run.Events)
 		}
@@ -874,23 +874,23 @@ func TestRunEventsReachTheCaller(t *testing.T) {
 	// --json stream — this transcript is a digest, which is also why it drops tool args.
 	var decision *Event
 	for i := range run.Events {
-		if run.Events[i].Type == "skill:decision" {
+		if run.Events[i].Type == "runbook:decision" {
 			decision = &run.Events[i]
 		}
 	}
 	if decision == nil {
-		t.Fatalf("no skill:decision event recorded: %+v", run.Events)
+		t.Fatalf("no runbook:decision event recorded: %+v", run.Events)
 	}
-	if len(decision.Skills) != 2 || decision.Skills[0] != "Orchestration" || decision.Skills[1] != "bare_id" {
-		t.Errorf("decision skills = %v, want the active titles with an id fallback", decision.Skills)
+	if len(decision.Runbooks) != 2 || decision.Runbooks[0] != "Orchestration" || decision.Runbooks[1] != "bare_id" {
+		t.Errorf("decision runbooks = %v, want the active titles with an id fallback", decision.Runbooks)
 	}
-	if !decision.SkillsDegraded {
-		t.Error("skillsDegraded lost; a fail-open round would read as a clean one")
+	if !decision.RunbooksDegraded {
+		t.Error("runbooksDegraded lost; a fail-open round would read as a clean one")
 	}
 	// The marker must be OMITTED from unrelated events, not merely false — a decoded
 	// bool cannot tell those apart, so assert on the raw JSON keys.
 	for _, e := range run.Events {
-		if e.Type == "skill:decision" {
+		if e.Type == "runbook:decision" {
 			continue
 		}
 		raw, err := json.Marshal(e)
@@ -901,8 +901,8 @@ func TestRunEventsReachTheCaller(t *testing.T) {
 		if err := json.Unmarshal(raw, &keys); err != nil {
 			t.Fatalf("decode %q event: %v", e.Type, err)
 		}
-		if _, present := keys["skillsDegraded"]; present {
-			t.Errorf("skillsDegraded present on a %q event: %s", e.Type, raw)
+		if _, present := keys["runbooksDegraded"]; present {
+			t.Errorf("runbooksDegraded present on a %q event: %s", e.Type, raw)
 		}
 	}
 
@@ -1544,8 +1544,8 @@ func TestSessionOpenSchemaDocumentsProjectIdentity(t *testing.T) {
 // The two headless surfaces must not drift: a runbook you can pin from argv you must be
 // able to pin here. That starts with the argument being discoverable — a caller that
 // cannot see the field in the schema has to read our source to find it, which is the
-// exact problem --list-skills exists to end.
-func TestSessionOpenAdvertisesTheSkillsArgument(t *testing.T) {
+// exact problem --list-runbooks exists to end.
+func TestSessionOpenAdvertisesTheRunbooksArgument(t *testing.T) {
 	cs, _ := connect(t, func(_, _ context.Context, _ OpenParams) (Runtime, error) {
 		return newFakeRuntime("ses_test"), nil
 	})
@@ -1567,19 +1567,19 @@ func TestSessionOpenAdvertisesTheSkillsArgument(t *testing.T) {
 		t.Fatalf("marshal schema: %v", err)
 	}
 	schema := string(b)
-	if !strings.Contains(schema, `"skills"`) {
-		t.Fatalf("session.open does not advertise a skills argument:\n%s", schema)
+	if !strings.Contains(schema, `"runbooks"`) {
+		t.Fatalf("session.open does not advertise a runbooks argument:\n%s", schema)
 	}
 	// A caller told to pass an id needs to be told where ids come from, or the field is
 	// only usable by someone who already read the backend's source.
-	if !strings.Contains(schema, "--list-skills") {
-		t.Fatalf("the skills argument does not say how to discover an id:\n%s", schema)
+	if !strings.Contains(schema, "--list-runbooks") {
+		t.Fatalf("the runbooks argument does not say how to discover an id:\n%s", schema)
 	}
 }
 
 // The pins must reach the factory verbatim, and nil must stay nil so the merge below it
 // can still tell "omitted" from "explicitly cleared".
-func TestSessionOpenPassesSkillsThrough(t *testing.T) {
+func TestSessionOpenPassesRunbooksThrough(t *testing.T) {
 	var got OpenParams
 	// A distinct id per open: the registry (rightly) refuses to reopen one that is
 	// already live, and this test deliberately opens twice to compare "given" against
@@ -1592,34 +1592,34 @@ func TestSessionOpenPassesSkillsThrough(t *testing.T) {
 	})
 	var out SessionOutput
 	if err := call(t, cs, "daintree.session.open",
-		OpenInput{Project: "/repo", Skills: []string{"b.two", "a.one"}}, &out); err != nil {
+		OpenInput{Project: "/repo", Runbooks: []string{"b.two", "a.one"}}, &out); err != nil {
 		t.Fatalf("session.open: %v", err)
 	}
-	if len(got.Skills) != 2 || got.Skills[0] != "b.two" || got.Skills[1] != "a.one" {
-		t.Fatalf("Skills = %v, want [b.two a.one] in order", got.Skills)
+	if len(got.Runbooks) != 2 || got.Runbooks[0] != "b.two" || got.Runbooks[1] != "a.one" {
+		t.Fatalf("Runbooks = %v, want [b.two a.one] in order", got.Runbooks)
 	}
 
 	got = OpenParams{}
 	if err := call(t, cs, "daintree.session.open", OpenInput{Project: "/repo"}, &out); err != nil {
 		t.Fatalf("session.open: %v", err)
 	}
-	if got.Skills != nil {
-		t.Fatalf("an omitted skills argument must stay nil so it can inherit the process default, got %#v", got.Skills)
+	if got.Runbooks != nil {
+		t.Fatalf("an omitted runbooks argument must stay nil so it can inherit the process default, got %#v", got.Runbooks)
 	}
 }
 
 // Trimming a blank entry away would open a session pinned to LESS than was asked for —
-// the same silent underrun `--skill=` is rejected for at the argument boundary.
-func TestSessionOpenRejectsABlankSkillID(t *testing.T) {
+// the same silent underrun `--runbook=` is rejected for at the argument boundary.
+func TestSessionOpenRejectsABlankRunbookID(t *testing.T) {
 	cs, _ := connect(t, func(_, _ context.Context, _ OpenParams) (Runtime, error) {
 		return newFakeRuntime("ses_test"), nil
 	})
 	var out SessionOutput
-	err := call(t, cs, "daintree.session.open", OpenInput{Project: "/repo", Skills: []string{"a.one", "  "}}, &out)
+	err := call(t, cs, "daintree.session.open", OpenInput{Project: "/repo", Runbooks: []string{"a.one", "  "}}, &out)
 	if err == nil {
-		t.Fatal("a blank skills entry must fail the open rather than being silently dropped")
+		t.Fatal("a blank runbooks entry must fail the open rather than being silently dropped")
 	}
-	if !strings.Contains(err.Error(), "skills[1]") {
+	if !strings.Contains(err.Error(), "runbooks[1]") {
 		t.Fatalf("the error must name which entry was blank: %v", err)
 	}
 }
@@ -1630,27 +1630,27 @@ func TestSessionOpenRejectsABlankSkillID(t *testing.T) {
 func TestSessionOpenSurfacesThePinPreflightAdvisory(t *testing.T) {
 	cs, _ := connect(t, func(_, _ context.Context, _ OpenParams) (Runtime, error) {
 		rt := newFakeRuntime("ses_test")
-		rt.facts.PinnedSkills = []string{"a.one"}
-		rt.facts.PinPreflightWarning = "this backend advertises no skill catalog"
+		rt.facts.PinnedRunbooks = []string{"a.one"}
+		rt.facts.PinPreflightWarning = "this backend advertises no runbook catalog"
 		return rt, nil
 	})
 	out := openSession(t, cs)
-	if !strings.Contains(strings.Join(out.Warnings, " | "), "no skill catalog") {
+	if !strings.Contains(strings.Join(out.Warnings, " | "), "no runbook catalog") {
 		t.Fatalf("the pin advisory did not reach the caller: %v", out.Warnings)
 	}
-	if len(out.Facts.PinnedSkills) != 1 || out.Facts.PinnedSkills[0] != "a.one" {
+	if len(out.Facts.PinnedRunbooks) != 1 || out.Facts.PinnedRunbooks[0] != "a.one" {
 		t.Fatalf("a caller that inherited a server-level pin must be able to see it: %+v", out.Facts)
 	}
 }
 
 // The nil-versus-empty distinction has to survive the SDK's decode, not just
-// applySliceIfSet's unit test — an explicit `"skills": []` is a caller CLEARING the
-// server's `--skill` defaults for this session, and if it arrived as nil the server
+// applySliceIfSet's unit test — an explicit `"runbooks": []` is a caller CLEARING the
+// server's `--runbook` defaults for this session, and if it arrived as nil the server
 // would do the opposite of what was asked and pin runbooks the caller declined.
 //
-// Sent as raw arguments deliberately: a typed OpenInput{Skills: []string{}} cannot
+// Sent as raw arguments deliberately: a typed OpenInput{Runbooks: []string{}} cannot
 // express this, because the field's own `omitempty` drops an empty slice on the way out.
-func TestSessionOpenDistinguishesEmptySkillsFromOmitted(t *testing.T) {
+func TestSessionOpenDistinguishesEmptyRunbooksFromOmitted(t *testing.T) {
 	var got OpenParams
 	opened := 0
 	cs, _ := connect(t, func(_, _ context.Context, p OpenParams) (Runtime, error) {
@@ -1661,22 +1661,22 @@ func TestSessionOpenDistinguishesEmptySkillsFromOmitted(t *testing.T) {
 
 	var out SessionOutput
 	if err := call(t, cs, "daintree.session.open",
-		map[string]any{"project": "/repo", "skills": []any{}}, &out); err != nil {
+		map[string]any{"project": "/repo", "runbooks": []any{}}, &out); err != nil {
 		t.Fatalf("session.open: %v", err)
 	}
-	if got.Skills == nil {
-		t.Fatal(`an explicit "skills": [] decoded to nil — the session cannot clear a server-level default`)
+	if got.Runbooks == nil {
+		t.Fatal(`an explicit "runbooks": [] decoded to nil — the session cannot clear a server-level default`)
 	}
-	if len(got.Skills) != 0 {
-		t.Fatalf("Skills = %v, want an empty (but non-nil) slice", got.Skills)
+	if len(got.Runbooks) != 0 {
+		t.Fatalf("Runbooks = %v, want an empty (but non-nil) slice", got.Runbooks)
 	}
 
 	got = OpenParams{}
 	if err := call(t, cs, "daintree.session.open", map[string]any{"project": "/repo"}, &out); err != nil {
 		t.Fatalf("session.open: %v", err)
 	}
-	if got.Skills != nil {
-		t.Fatalf("an omitted skills argument must stay nil so it inherits the default, got %#v", got.Skills)
+	if got.Runbooks != nil {
+		t.Fatalf("an omitted runbooks argument must stay nil so it inherits the default, got %#v", got.Runbooks)
 	}
 }
 

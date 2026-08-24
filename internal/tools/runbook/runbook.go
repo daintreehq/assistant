@@ -1,11 +1,11 @@
-// Package skill holds the local skill RUN-STATE tools: skill.run.get and
-// skill.step.advance. These track stepwise progress keyed to the live session so a
+// Package runbook holds the local runbook RUN-STATE tools: runbook.run.get and
+// runbook.step.advance. These track stepwise progress keyed to the live session so a
 // multi-step runbook can resume.
 //
-// Skill SELECTION (skill.find / skill.load) is NOT here: it is server-owned. The
+// Runbook SELECTION (runbook.find / runbook.load) is NOT here: it is server-owned. The
 // backend's selector picks and injects runbooks; the CLI only records progress
 // through the steps the backend prompt directs the model to advance.
-package skill
+package runbook
 
 import (
 	"context"
@@ -21,28 +21,28 @@ import (
 
 const (
 	codeInvalidArgs = "INVALID_ARGS"
-	codeNoSession   = "SKILL_RUN_NO_SESSION"
+	codeNoSession   = "RUNBOOK_RUN_NO_SESSION"
 )
 
-// SkillStore is the slice of storage the run-state tools touch. Natural key is
-// (sessionId, skillId).
-type SkillStore interface {
-	GetSkillRunState(ctx context.Context, sessionID, skillID string) (*domain.SkillRunStateRecord, error)
-	InsertSkillRunState(ctx context.Context, rec domain.SkillRunStateRecord) (string, error)
-	UpdateSkillRunState(ctx context.Context, rec domain.SkillRunStateRecord) error
+// RunbookStore is the slice of storage the run-state tools touch. Natural key is
+// (sessionId, runbookId).
+type RunbookStore interface {
+	GetRunbookRunState(ctx context.Context, sessionID, runbookID string) (*domain.RunbookRunStateRecord, error)
+	InsertRunbookRunState(ctx context.Context, rec domain.RunbookRunStateRecord) (string, error)
+	UpdateRunbookRunState(ctx context.Context, rec domain.RunbookRunStateRecord) error
 }
 
-// Deps is the dependency set for the skill family. Any of these may be nil; the
+// Deps is the dependency set for the runbook family. Any of these may be nil; the
 // corresponding tool then returns its specific "unavailable" code (so a stripped
 // test/non-main context fails gracefully rather than panicking).
 //
-// skill.find / skill.load are NOT part of this family anymore: skill selection is
+// runbook.find / runbook.load are NOT part of this family anymore: runbook selection is
 // server-owned (the backend's selector picks and injects runbooks), so the CLI only
-// keeps the local run-state tools (skill.run.get / skill.step.advance) the backend
+// keeps the local run-state tools (runbook.run.get / runbook.step.advance) the backend
 // prompt drives.
 type Deps struct {
-	Store SkillStore
-	// CheckConsistency optionally runs a small-tier judge over a skill.step.advance
+	Store RunbookStore
+	// CheckConsistency optionally runs a small-tier judge over a runbook.step.advance
 	// transition and returns its verdict — surfacing semantically-wrong Director
 	// decisions (a bad jump, a regression, a premature finish) that a clean ok=true
 	// tool call would otherwise hide (issue #240). nil ⇒ the judge is skipped (tests,
@@ -52,29 +52,29 @@ type Deps struct {
 	CheckConsistency func(ctx context.Context, in ConsistencyCheckInput) (domain.ModelJudgeAnswer, error)
 }
 
-// ConsistencyCheckInput is the before/after snapshot of one skill.step.advance handed
+// ConsistencyCheckInput is the before/after snapshot of one runbook.step.advance handed
 // to a small-tier consistency judge. It carries ONLY state-transition shape (step
 // indices, statuses, the progress arrays) — never the runbook body — so the check
-// stays cheap, and uses plain domain values so the skill package needs no model
+// stays cheap, and uses plain domain values so the runbook package needs no model
 // imports.
 type ConsistencyCheckInput struct {
-	SkillID         string
+	RunbookID       string
 	RunID           string
 	SessionID       string
 	CompletedStep   int
 	NextStep        *int // nil ⇒ this advance finished the run
-	StepStatus      domain.SkillStepStatus
+	StepStatus      domain.RunbookStepStatus
 	Notes           string
 	PrevCurrentStep int
 	NextCurrentStep int
-	PrevRunStatus   domain.SkillRunStatus
-	NextRunStatus   domain.SkillRunStatus
-	BeforeSteps     []domain.SkillStepProgress
-	AfterSteps      []domain.SkillStepProgress
+	PrevRunStatus   domain.RunbookRunStatus
+	NextRunStatus   domain.RunbookRunStatus
+	BeforeSteps     []domain.RunbookStepProgress
+	AfterSteps      []domain.RunbookStepProgress
 }
 
-// Tools returns the skill run-state tool family (skill.run.get / skill.step.advance).
-// Selection (skill.find / skill.load) is server-owned and intentionally absent.
+// Tools returns the runbook run-state tool family (runbook.run.get / runbook.step.advance).
+// Selection (runbook.find / runbook.load) is server-owned and intentionally absent.
 func Tools(deps Deps) []*tools.Tool {
 	return []*tools.Tool{
 		newRunGetTool(deps),
@@ -82,57 +82,57 @@ func Tools(deps Deps) []*tools.Tool {
 	}
 }
 
-// --- skill.run.get ---
+// --- runbook.run.get ---
 
 type runGetArgs struct {
-	SkillID string `json:"skillId"`
+	RunbookID string `json:"runbookId"`
 }
 
 var runGetSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
-  "required": ["skillId"],
-  "properties": { "skillId": { "type": "string", "minLength": 1 } }
+  "required": ["runbookId"],
+  "properties": { "runbookId": { "type": "string", "minLength": 1 } }
 }`)
 
 func newRunGetTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
-		Name:        "skill.run.get",
-		Description: "Read your stepwise progress through a loaded skill's runbook in THIS session: currentStep, per-step status (done|skipped) with notes and timestamps, and the run status. Absence is a NORMAL ok answer ({state: null}) — it means no step has been advanced yet, not an error. Use it after a compaction or a wake turn to find where you left off. Requires a live session.",
+		Name:        "runbook.run.get",
+		Description: "Read your stepwise progress through a loaded runbook in THIS session: currentStep, per-step status (done|skipped) with notes and timestamps, and the run status. Absence is a NORMAL ok answer ({state: null}) — it means no step has been advanced yet, not an error. Use it after a compaction or a wake turn to find where you left off. Requires a live session.",
 		Risk:        domain.RiskRead,
 		Schema:      runGetSchema,
 		Decode:      tools.StrictDecoder(func() any { return &runGetArgs{} }),
 		Handle: func(ctx context.Context, args json.RawMessage, tctx *tools.ToolContext) tools.ToolResult {
 			var a runGetArgs
 			if err := tools.DecodeStrict(args, &a); err != nil {
-				return tools.Fail(codeInvalidArgs, "Invalid arguments for skill.run.get: "+err.Error())
+				return tools.Fail(codeInvalidArgs, "Invalid arguments for runbook.run.get: "+err.Error())
 			}
-			id := strings.TrimSpace(a.SkillID)
+			id := strings.TrimSpace(a.RunbookID)
 			if id == "" {
-				return tools.Fail(codeInvalidArgs, "skill.run.get: skillId is required")
+				return tools.Fail(codeInvalidArgs, "runbook.run.get: runbookId is required")
 			}
 			if tctx.SessionID == "" {
-				return tools.Fail(codeNoSession, "skill.run.get requires a live session.", tools.Unrecoverable())
+				return tools.Fail(codeNoSession, "runbook.run.get requires a live session.", tools.Unrecoverable())
 			}
 			if deps.Store == nil {
-				return tools.Ok("No skill run state.", map[string]any{"state": nil})
+				return tools.Ok("No runbook run state.", map[string]any{"state": nil})
 			}
-			rec, err := deps.Store.GetSkillRunState(ctx, tctx.SessionID, id)
+			rec, err := deps.Store.GetRunbookRunState(ctx, tctx.SessionID, id)
 			if err != nil {
-				return tools.Fail(domain.CodeInternal, "skill.run.get: "+err.Error())
+				return tools.Fail(domain.CodeInternal, "runbook.run.get: "+err.Error())
 			}
 			if rec == nil {
-				return tools.Ok("No skill run state.", map[string]any{"state": nil})
+				return tools.Ok("No runbook run state.", map[string]any{"state": nil})
 			}
-			return tools.Ok("Skill run state for "+id+".", map[string]any{"state": runStateView(rec)})
+			return tools.Ok("Runbook run state for "+id+".", map[string]any{"state": runStateView(rec)})
 		},
 	}
 }
 
-// --- skill.step.advance ---
+// --- runbook.step.advance ---
 
 type stepAdvanceArgs struct {
-	SkillID       string `json:"skillId"`
+	RunbookID     string `json:"runbookId"`
 	CompletedStep int    `json:"completedStep"`
 	NextStep      *int   `json:"nextStep,omitempty"`
 	Status        string `json:"status,omitempty"` // done | skipped (default done)
@@ -142,9 +142,9 @@ type stepAdvanceArgs struct {
 var stepAdvanceSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
-  "required": ["skillId", "completedStep"],
+  "required": ["runbookId", "completedStep"],
   "properties": {
-    "skillId": { "type": "string", "minLength": 1 },
+    "runbookId": { "type": "string", "minLength": 1 },
     "completedStep": { "type": "integer", "minimum": 1 },
     "nextStep": { "type": "integer", "minimum": 1 },
     "status": { "type": "string", "enum": ["done", "skipped"] },
@@ -154,53 +154,53 @@ var stepAdvanceSchema = json.RawMessage(`{
 
 func newStepAdvanceTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
-		Name:        "skill.step.advance",
-		Description: "Record that step N of a loaded skill's runbook is done (or skipped) and move to nextStep; OMIT nextStep to finish the run. Call it as you complete each step, not in one batch at the end — this is the progress record a compaction or a wake turn reads back through skill.run.get. currentStep never regresses. notes is an optional one-liner about what the step produced. Requires a live session.",
+		Name:        "runbook.step.advance",
+		Description: "Record that step N of a loaded runbook is done (or skipped) and move to nextStep; OMIT nextStep to finish the run. Call it as you complete each step, not in one batch at the end — this is the progress record a compaction or a wake turn reads back through runbook.run.get. currentStep never regresses. notes is an optional one-liner about what the step produced. Requires a live session.",
 		Risk:        domain.RiskLocal,
 		Schema:      stepAdvanceSchema,
 		Decode:      tools.StrictDecoder(func() any { return &stepAdvanceArgs{} }),
 		Handle: func(ctx context.Context, args json.RawMessage, tctx *tools.ToolContext) tools.ToolResult {
 			var a stepAdvanceArgs
 			if err := tools.DecodeStrict(args, &a); err != nil {
-				return tools.Fail(codeInvalidArgs, "Invalid arguments for skill.step.advance: "+err.Error())
+				return tools.Fail(codeInvalidArgs, "Invalid arguments for runbook.step.advance: "+err.Error())
 			}
-			id := strings.TrimSpace(a.SkillID)
+			id := strings.TrimSpace(a.RunbookID)
 			if id == "" {
-				return tools.Fail(codeInvalidArgs, "skill.step.advance: skillId is required")
+				return tools.Fail(codeInvalidArgs, "runbook.step.advance: runbookId is required")
 			}
 			if a.CompletedStep < 1 {
-				return tools.Fail(codeInvalidArgs, "skill.step.advance: completedStep must be >= 1")
+				return tools.Fail(codeInvalidArgs, "runbook.step.advance: completedStep must be >= 1")
 			}
 			if a.NextStep != nil && *a.NextStep < 1 {
-				return tools.Fail(codeInvalidArgs, "skill.step.advance: nextStep must be >= 1")
+				return tools.Fail(codeInvalidArgs, "runbook.step.advance: nextStep must be >= 1")
 			}
-			stepStatus := domain.SkillStepDone
+			stepStatus := domain.RunbookStepDone
 			switch a.Status {
 			case "", "done":
-				stepStatus = domain.SkillStepDone
+				stepStatus = domain.RunbookStepDone
 			case "skipped":
-				stepStatus = domain.SkillStepSkipped
+				stepStatus = domain.RunbookStepSkipped
 			default:
-				return tools.Fail(codeInvalidArgs, "skill.step.advance: status must be done|skipped")
+				return tools.Fail(codeInvalidArgs, "runbook.step.advance: status must be done|skipped")
 			}
 			if tctx.SessionID == "" {
-				return tools.Fail(codeNoSession, "skill.step.advance requires a live session.", tools.Unrecoverable())
+				return tools.Fail(codeNoSession, "runbook.step.advance requires a live session.", tools.Unrecoverable())
 			}
 			if deps.Store == nil {
-				return tools.Fail(domain.CodeInternal, "skill.step.advance: storage unavailable")
+				return tools.Fail(domain.CodeInternal, "runbook.step.advance: storage unavailable")
 			}
 
 			now := domain.NowMS()
-			existing, err := deps.Store.GetSkillRunState(ctx, tctx.SessionID, id)
+			existing, err := deps.Store.GetRunbookRunState(ctx, tctx.SessionID, id)
 			if err != nil {
-				return tools.Fail(domain.CodeInternal, "skill.step.advance: "+err.Error())
+				return tools.Fail(domain.CodeInternal, "runbook.step.advance: "+err.Error())
 			}
 
 			finished := a.NextStep == nil
 
-			var steps []domain.SkillStepProgress
+			var steps []domain.RunbookStepProgress
 			var prevCurrent int
-			var prevRunStatus domain.SkillRunStatus
+			var prevRunStatus domain.RunbookRunStatus
 			if existing != nil {
 				steps = decodeSteps(existing.StepsJson)
 				prevCurrent = existing.CurrentStep
@@ -209,9 +209,9 @@ func newStepAdvanceTool(deps Deps) *tools.Tool {
 			// issue #240: snapshot the pre-advance progress for the decision-correctness
 			// side-channel BEFORE upsertStep mutates `steps` in place. Only clone when
 			// debug logging is on — the snapshot is unused otherwise (zero normal-run cost).
-			var beforeSteps []domain.SkillStepProgress
+			var beforeSteps []domain.RunbookStepProgress
 			if tctx.Config.DebugLog {
-				beforeSteps = append([]domain.SkillStepProgress(nil), steps...)
+				beforeSteps = append([]domain.RunbookStepProgress(nil), steps...)
 			}
 			// Upsert the completed step into the sorted array.
 			var notesPtr *string
@@ -219,7 +219,7 @@ func newStepAdvanceTool(deps Deps) *tools.Tool {
 				n := a.Notes
 				notesPtr = &n
 			}
-			upsertStep(&steps, domain.SkillStepProgress{
+			upsertStep(&steps, domain.RunbookStepProgress{
 				Index:  a.CompletedStep,
 				Status: stepStatus,
 				Notes:  notesPtr,
@@ -237,9 +237,9 @@ func newStepAdvanceTool(deps Deps) *tools.Tool {
 			}
 
 			stepsJSON, _ := json.Marshal(steps)
-			runStatus := domain.SkillRunActive
+			runStatus := domain.RunbookRunActive
 			if finished {
-				runStatus = domain.SkillRunCompleted
+				runStatus = domain.RunbookRunCompleted
 			}
 
 			// issue #240 decision-correctness side-channel input, populated once; it is
@@ -247,7 +247,7 @@ func newStepAdvanceTool(deps Deps) *tools.Tool {
 			// write must not log an "advance occurred" event). `steps` is the post-upsert
 			// (after) state; beforeSteps holds the pre-upsert snapshot.
 			observeIn := ConsistencyCheckInput{
-				SkillID:         id,
+				RunbookID:       id,
 				RunID:           tctx.RunID,
 				SessionID:       tctx.SessionID,
 				CompletedStep:   a.CompletedStep,
@@ -263,10 +263,10 @@ func newStepAdvanceTool(deps Deps) *tools.Tool {
 			}
 
 			if existing == nil {
-				rec := domain.SkillRunStateRecord{
-					ID:          domain.NewID(domain.PrefixSkillRun),
+				rec := domain.RunbookRunStateRecord{
+					ID:          domain.NewID(domain.PrefixRunbookRun),
 					SessionID:   tctx.SessionID,
-					SkillID:     id,
+					RunbookID:   id,
 					CurrentStep: currentStep,
 					StepsJson:   string(stepsJSON),
 					Status:      runStatus,
@@ -278,8 +278,8 @@ func newStepAdvanceTool(deps Deps) *tools.Tool {
 				if finished {
 					rec.CompletedAt = &now
 				}
-				if _, err := deps.Store.InsertSkillRunState(ctx, rec); err != nil {
-					return tools.Fail(domain.CodeInternal, "skill.step.advance: "+err.Error())
+				if _, err := deps.Store.InsertRunbookRunState(ctx, rec); err != nil {
+					return tools.Fail(domain.CodeInternal, "runbook.step.advance: "+err.Error())
 				}
 				observeStepAdvance(ctx, deps, tctx, observeIn)
 				return tools.Ok(advanceSummary(id, finished, currentStep), map[string]any{"state": runStateView(&rec)})
@@ -293,8 +293,8 @@ func newStepAdvanceTool(deps Deps) *tools.Tool {
 			if finished && existing.CompletedAt == nil {
 				existing.CompletedAt = &now
 			}
-			if err := deps.Store.UpdateSkillRunState(ctx, *existing); err != nil {
-				return tools.Fail(domain.CodeInternal, "skill.step.advance: "+err.Error())
+			if err := deps.Store.UpdateRunbookRunState(ctx, *existing); err != nil {
+				return tools.Fail(domain.CodeInternal, "runbook.step.advance: "+err.Error())
 			}
 			observeStepAdvance(ctx, deps, tctx, observeIn)
 			return tools.Ok(advanceSummary(id, finished, currentStep), map[string]any{"state": runStateView(existing)})
@@ -303,7 +303,7 @@ func newStepAdvanceTool(deps Deps) *tools.Tool {
 }
 
 // observeStepAdvance emits the issue #240 decision-correctness side-channels for a
-// SUCCESSFUL skill.step.advance: a free before/after state-delta line, and — when a
+// SUCCESSFUL runbook.step.advance: a free before/after state-delta line, and — when a
 // consistency judge is wired — its verdict. BOTH are gated on debug logging (zero
 // overhead in normal runs) and the whole body runs inside a recover() so a logging or
 // model-call failure can NEVER break the tool result (the same best-effort guarantee
@@ -323,10 +323,10 @@ func observeStepAdvance(ctx context.Context, deps Deps, tctx *tools.ToolContext,
 	if in.NextStep != nil {
 		nextStep = *in.NextStep
 	}
-	debuglog.LogDebug(cfg, "skill.step.delta", map[string]any{
+	debuglog.LogDebug(cfg, "runbook.step.delta", map[string]any{
 		"runId":           in.RunID,
 		"sessionId":       in.SessionID,
-		"skillId":         in.SkillID,
+		"runbookId":       in.RunbookID,
 		"completedStep":   in.CompletedStep,
 		"nextStep":        nextStep,
 		"status":          string(in.StepStatus),
@@ -343,7 +343,7 @@ func observeStepAdvance(ctx context.Context, deps Deps, tctx *tools.ToolContext,
 		// returns). That is acceptable because the whole side-channel is debug-gated —
 		// a developer explicitly opted in — and it keeps the log ordering deterministic
 		// and the {input → verdict} pair testable. The trade-off: in a slow/hung small-
-		// tier environment it adds the model round-trip's latency to skill.step.advance
+		// tier environment it adds the model round-trip's latency to runbook.step.advance
 		// (the delta line above has already been written, so logs are unaffected).
 		logConsistencyCheck(ctx, cfg, deps.CheckConsistency, in)
 	}
@@ -358,9 +358,9 @@ func observeStepAdvance(ctx context.Context, deps Deps, tctx *tools.ToolContext,
 func logConsistencyCheck(ctx context.Context, cfg debuglog.Config, check func(context.Context, ConsistencyCheckInput) (domain.ModelJudgeAnswer, error), in ConsistencyCheckInput) {
 	defer func() {
 		if r := recover(); r != nil {
-			debuglog.LogDebug(cfg, "skill.step.consistency", map[string]any{
+			debuglog.LogDebug(cfg, "runbook.step.consistency", map[string]any{
 				"runId":         in.RunID,
-				"skillId":       in.SkillID,
+				"runbookId":     in.RunbookID,
 				"completedStep": in.CompletedStep,
 				"checkOk":       false,
 				"error":         fmt.Sprintf("panic: %v", r),
@@ -369,18 +369,18 @@ func logConsistencyCheck(ctx context.Context, cfg debuglog.Config, check func(co
 	}()
 	ans, err := check(ctx, in)
 	if err != nil {
-		debuglog.LogDebug(cfg, "skill.step.consistency", map[string]any{
+		debuglog.LogDebug(cfg, "runbook.step.consistency", map[string]any{
 			"runId":         in.RunID,
-			"skillId":       in.SkillID,
+			"runbookId":     in.RunbookID,
 			"completedStep": in.CompletedStep,
 			"checkOk":       false,
 			"error":         err.Error(),
 		})
 		return
 	}
-	debuglog.LogDebug(cfg, "skill.step.consistency", map[string]any{
+	debuglog.LogDebug(cfg, "runbook.step.consistency", map[string]any{
 		"runId":         in.RunID,
-		"skillId":       in.SkillID,
+		"runbookId":     in.RunbookID,
 		"completedStep": in.CompletedStep,
 		"checkOk":       true,
 		"flagged":       ans.Matched,
@@ -391,14 +391,14 @@ func logConsistencyCheck(ctx context.Context, cfg debuglog.Config, check func(co
 
 func advanceSummary(id string, finished bool, currentStep int) string {
 	if finished {
-		return "Completed skill run for " + id + "."
+		return "Completed runbook run for " + id + "."
 	}
-	return fmt.Sprintf("Advanced skill %s to step %d.", id, currentStep)
+	return fmt.Sprintf("Advanced runbook %s to step %d.", id, currentStep)
 }
 
 // upsertStep inserts or replaces the step with the same Index, keeping the slice
 // sorted ascending by Index.
-func upsertStep(steps *[]domain.SkillStepProgress, step domain.SkillStepProgress) {
+func upsertStep(steps *[]domain.RunbookStepProgress, step domain.RunbookStepProgress) {
 	for i := range *steps {
 		if (*steps)[i].Index == step.Index {
 			(*steps)[i] = step
@@ -409,23 +409,23 @@ func upsertStep(steps *[]domain.SkillStepProgress, step domain.SkillStepProgress
 	sort.Slice(*steps, func(i, j int) bool { return (*steps)[i].Index < (*steps)[j].Index })
 }
 
-// decodeSteps parses a stored SkillStepProgress[], DROPPING corrupted entries
+// decodeSteps parses a stored RunbookStepProgress[], DROPPING corrupted entries
 // (non-object members, or a member with an unrecognized status). Go's slice
 // unmarshal aborts on the first bad element and leaves a zero-value placeholder,
 // so we decode per-entry and keep only well-formed steps — tolerating a
 // corrupted checkpoint blob.
-func decodeSteps(raw string) []domain.SkillStepProgress {
+func decodeSteps(raw string) []domain.RunbookStepProgress {
 	var entries []json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
 		return nil
 	}
-	var out []domain.SkillStepProgress
+	var out []domain.RunbookStepProgress
 	for _, e := range entries {
-		var s domain.SkillStepProgress
+		var s domain.RunbookStepProgress
 		if err := json.Unmarshal(e, &s); err != nil {
 			continue
 		}
-		if s.Status != domain.SkillStepDone && s.Status != domain.SkillStepSkipped {
+		if s.Status != domain.RunbookStepDone && s.Status != domain.RunbookStepSkipped {
 			continue
 		}
 		out = append(out, s)
@@ -433,15 +433,15 @@ func decodeSteps(raw string) []domain.SkillStepProgress {
 	return out
 }
 
-func runStateView(rec *domain.SkillRunStateRecord) map[string]any {
+func runStateView(rec *domain.RunbookRunStateRecord) map[string]any {
 	steps := decodeSteps(rec.StepsJson)
 	if steps == nil {
-		steps = []domain.SkillStepProgress{}
+		steps = []domain.RunbookStepProgress{}
 	}
 	view := map[string]any{
 		"id":          rec.ID,
 		"sessionId":   rec.SessionID,
-		"skillId":     rec.SkillID,
+		"runbookId":   rec.RunbookID,
 		"currentStep": rec.CurrentStep,
 		"steps":       steps,
 		"status":      rec.Status,

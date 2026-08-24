@@ -36,7 +36,9 @@ func (r *recordingSink) Phase(p domain.RunPhase) {
 	r.mu.Unlock()
 	r.log("phase:" + p.String())
 }
-func (r *recordingSink) AssistantStart() { r.log("assistant:start") }
+func (r *recordingSink) AssistantStart()            { r.log("assistant:start") }
+func (r *recordingSink) AssistantPreamble(t string) { r.AssistantToken(t + "\n\n") }
+
 func (r *recordingSink) AssistantToken(t string) {
 	r.mu.Lock()
 	r.tokens = append(r.tokens, t)
@@ -49,13 +51,13 @@ func (r *recordingSink) AssistantEnd(c, _ string) {
 	r.mu.Unlock()
 	r.log("assistant:end")
 }
-func (r *recordingSink) AssistantCancelled(string)              { r.log("assistant:cancelled") }
-func (r *recordingSink) Interjection(string)                    { r.log("user:interjection") }
-func (r *recordingSink) SkillLoaded([]string)                   { r.log("skill:loaded") }
-func (r *recordingSink) SkillDecision(agent.SkillDecisionEvent) { r.log("skill:decision") }
-func (r *recordingSink) ToolBatch([]agent.BatchedToolCall)      { r.log("tool:batch") }
-func (r *recordingSink) ToolState(string, agent.ToolState)      {}
-func (r *recordingSink) ToolProgress(string, string)            {}
+func (r *recordingSink) AssistantCancelled(string)                  { r.log("assistant:cancelled") }
+func (r *recordingSink) Interjection(string)                        { r.log("user:interjection") }
+func (r *recordingSink) RunbookLoaded([]string)                     { r.log("runbook:loaded") }
+func (r *recordingSink) RunbookDecision(agent.RunbookDecisionEvent) { r.log("runbook:decision") }
+func (r *recordingSink) ToolBatch([]agent.BatchedToolCall)          { r.log("tool:batch") }
+func (r *recordingSink) ToolState(string, agent.ToolState)          {}
+func (r *recordingSink) ToolProgress(string, string)                {}
 func (r *recordingSink) ToolCall(ev agent.ToolCallEvent) {
 	r.mu.Lock()
 	r.calls = append(r.calls, ev)

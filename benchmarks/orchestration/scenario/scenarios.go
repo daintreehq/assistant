@@ -535,7 +535,7 @@ func questionSurfacedNotHung() Scenario {
 //
 // These scenarios exist for their RoundDetail metrics, not their checks: cheap,
 // fast, deterministic turns whose per-round latency decomposition (gap / raw meta /
-// skill cue / committed meta / first token / cache hit) is the benchmark. Diff two
+// runbook cue / committed meta / first token / cache hit) is the benchmark. Diff two
 // runs' latency tables to see what a prompt/backend/CLI change did to response speed.
 
 func latencyChat() Scenario {

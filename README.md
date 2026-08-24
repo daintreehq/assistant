@@ -20,7 +20,7 @@ a *visible* agent in a worktree and supervises it.
 
 Every model call takes one path — CLI → Daintree Assistant backend → the upstream
 provider → the selected model. The CLI holds no credential at all: the backend supplies
-the upstream key and owns the system prompt, skill selection, and model choice. See
+the upstream key and owns the system prompt, runbook selection, and model choice. See
 [`docs/BACKEND.md`](docs/BACKEND.md).
 
 ## Supported platforms
@@ -138,7 +138,7 @@ every copy it finds.
 
 | Working on it | |
 | --- | --- |
-| [`docs/BACKEND.md`](docs/BACKEND.md) | The model / skill / prompt story — **start here** |
+| [`docs/BACKEND.md`](docs/BACKEND.md) | The model / runbook / prompt story — **start here** |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How the pieces fit |
 | [`docs/SUPERVISOR.md`](docs/SUPERVISOR.md) | The persistent daemon |
 | [`docs/TOOLS.md`](docs/TOOLS.md) | Adding a tool |

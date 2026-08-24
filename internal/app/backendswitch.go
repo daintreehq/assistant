@@ -145,9 +145,33 @@ func backendAliasList() string {
 //     knows for certain.
 //   - Dropping that state token. It is server-SIGNED and endpoint-specific, so carrying
 //     it across a switch hands the new backend a token it cannot verify. The conversation
-//     survives; only the server's skill-selection state is endpoint-bound, and the new
+//     survives; only the server's runbook-selection state is endpoint-bound, and the new
 //     backend simply re-runs selection.
+//
+// ErrBackendPinned is the refusal every switch route must be able to recognize, which
+// is why it is a sentinel rather than an inline errors.New: ResetBackendURL runs its own
+// cleanup after SetBackendURL returns, and an unrecognizable refusal there meant the
+// command reported "pinned, nothing changed" while having DELETED the stored preference.
+var ErrBackendPinned = errors.New("this session's endpoint was pinned by whatever launched it (DAINTREE_BACKEND_URL or --backend-url), so it cannot be switched from in here — change it where the session is started")
+
 func (a *App) SetBackendURL(rawURL string) (string, error) {
+	// PINNED sessions cannot be switched at all.
+	//
+	// DAINTREE_BACKEND_URL (or --backend-url) means a HOST chose this session's
+	// endpoint, and it outranks the stored preference at every startup — so a switch
+	// here could only ever move the live client while leaving the pin in place,
+	// producing a session whose requests go somewhere its own configuration says they
+	// do not, until the next launch silently moves them back.
+	//
+	// That gap is a security boundary for an embedding host, not just a confusing
+	// state: Daintree spawns this engine with a loopback endpoint precisely because the
+	// panel is unauthenticated, and a session that can be talked into switching to a
+	// remote endpoint from inside undoes that with one line of prose. The refusal
+	// belongs here rather than in the host, because here is the only place that knows
+	// the pin exists and every route to a swap passes through it.
+	if a.snapshotConfig().BackendURLPinnedByEnv {
+		return "", ErrBackendPinned
+	}
 	target, err := ResolveBackendTarget(rawURL)
 	if err != nil {
 		return "", err
@@ -271,8 +295,11 @@ func (a *App) ResetBackendURL() (string, error) {
 	// the file on its way through, so returning early on a save error would leave the
 	// preference pinned to a value the user just asked to forget — the one outcome this
 	// command exists to prevent. A refused switch (a turn in flight) is different: it
-	// changed nothing, so there is nothing to clean up.
-	if errors.Is(err, agent.ErrTurnInProgress) {
+	// changed nothing, so there is nothing to clean up. A PINNED session is the same
+	// case and for a stronger reason: the pin is a security boundary (see
+	// SetBackendURL), and "forget the preference" is a switch route like any other, so
+	// clearing the file here would let the refusal be worked around by asking to reset.
+	if errors.Is(err, agent.ErrTurnInProgress) || errors.Is(err, ErrBackendPinned) {
 		return "", err
 	}
 	a.switchMu.Lock()

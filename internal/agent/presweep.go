@@ -17,7 +17,7 @@ const dupRefPrefix = "[duplicate of "
 // runPreSweep performs a cheap, lossless, deterministic cleanup of the working messages
 // BEFORE the auto-compact summary rung — the issue #257 pre-sweep. Two strictly
 // reductive passes run over tool-role messages only; control messages (the fixed
-// system/runtime/skills prefix) and prose are never touched:
+// system/runtime/runbooks prefix) and prose are never touched:
 //
 //  1. Dedup — byte-identical tool-result bodies collapse to a "[duplicate of <id>]"
 //     back-reference at every copy EXCEPT the most recent, whose verbatim body is kept.

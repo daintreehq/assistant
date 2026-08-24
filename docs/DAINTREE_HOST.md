@@ -21,6 +21,43 @@ the binary, hands it a session, drives turns, answers approvals, and tears it do
 
 ---
 
+## `host:ready` — the session facts a host renders (protocol v3)
+
+> **Note.** Most of this document describes the PTY embedding, where Daintree ran this
+> binary as a terminal panel. Daintree now embeds the engine **headless** over the stdio
+> NDJSON protocol in `internal/host/` and draws its own interface. The env contract and
+> tier semantics below still hold; the "terminal panel" framing does not.
+
+The first frame of a session is `host:ready`. Beyond `protocolVersion`, it carries the
+facts a host needs to state what this session *is* — the same set the CLI's own masthead
+stated, and for the same reason it exists at all: **a protocol-only consumer never reads
+stderr**, so anything mentioned only there is invisible to an embedding host.
+
+| Field | Meaning | Absent when |
+|---|---|---|
+| `version` | Engine build string (distinct from `protocolVersion`) | never sent empty |
+| `autoApprove` | This session runs mutating tools with **no** confirmation | always present (boolean) |
+| `tier` | Permission tier in force (`supervisor` / `operator` / `system`) | unset |
+| `tierGloss` | Plain-language reading of `tier` | unknown tier |
+| `backend` | A **non-default** backend endpoint, named and sanitized | the deployed default |
+| `routing` | A **non-default** endpoint-routing policy, as one line | the default policy |
+| `logFile` | Absolute path of this session's debug log | debug logging is off |
+
+Two rules hold for all of them:
+
+- **The engine resolves them, not the host.** Each is a policy judgement that depends on
+  constants this module owns — which backend URL is "the deployed one", what the local
+  endpoint is called, which routing policy is default, what a tier permits. A host that
+  re-derived them would need a second copy of all of that, wrong the first time any of it
+  changed. See [`internal/host/masthead.go`](../internal/host/masthead.go).
+- **Absent means "the default, which needs no announcement"** — except `logFile`, where
+  absent means logging is off. Only a *deviation* is reported, so a host can render these
+  unconditionally and stay quiet in the common case.
+
+`logFile` in particular cannot be worked out from outside: the engine picks the filename
+(`<date>-<sessionId>.log`), so a host that guessed it would show a path that does not
+exist the first time that format changes.
+
 ## TL;DR
 
 - Daintree spawns `daintree-assistant host --stdio` and talks **NDJSON over stdio**: one JSON
@@ -353,6 +390,49 @@ questions stay distinct tools throughout.
 `/backend`'s endpoint picker reuses this channel, marked local so Esc dismisses it instead of
 cancelling the turn.
 
+| | **Terminal transcript** (host scrollback) | **Conversation** (`state.db` history) | **Project state** (memory, workflows, audit, inbox) | **Background supervision** (watchers, async, timers) |
+| --- | --- | --- | --- | --- |
+| Panel hidden / project switch | survives | survives | survives | runs (attached session owns the lease) |
+| Cockpit exits normally (`^C`, `/quit`) | cleared by the host | survives | survives | **continues** — the daemon re-acquires the lease and adopts the live rows |
+| Cockpit crashes / PTY killed | cleared by the host | survives | survives | **continues** — flock is kernel-released, so handover needs no cleanup |
+| Host **"+ New session"** | dropped deliberately | new conversation; the old one stays in `state.db` | survives | **continues**, and completions land in the attention inbox |
+| Daintree app quits | gone | survives | survives | **stops** — the daemon loses the MCP token, so supervision *pauses* with a blocked inbox item rather than fabricating outcomes; it resumes on the next launch |
+| Machine sleeps | survives | survives | survives | pauses, then does timer catch-up on wake |
+| Machine restarts | gone | survives | survives | **stops**; the next launch adopts the persisted rows |
+| `/clear` | wiped (the only scrollback wipe path) — **but only when it actually cleared**, see below | cleared | survives | **cancelled** — `/clear` is the one wholesale teardown |
+| `reset project-state` | untouched | cleared | cleared | cancelled |
+| CLI upgrade with a schema bump | untouched | moved aside to a timestamped backup, then recreated | same | cancelled with the old DB |
+| **Windows** | as above | as above | as above | **never survives attached session exit** — no supervisor on this platform |
+
+#### A host must never infer the clear from the command text
+
+`/clear` is REFUSED while a turn is in flight — clearing history mid-stream would corrupt
+the snapshot the turn is still writing into — so the engine answers with a note and keeps
+the conversation. The `command:result` event therefore carries the authoritative outcome:
+
+```json
+{"type":"command:result","command":"/clear","text":"…","conversationCleared":false}
+```
+
+**`conversationCleared` is the only trustworthy signal, and it is always present** (unlike
+`quit` and `unknown`, which are omitted when false — an absent field here means an engine
+older than this contract, and nothing else). Gate the scrollback wipe on it being `true`.
+
+A host that instead matches the command line wipes its transcript, tool rows and live
+state on a clear the engine refused, while the engine goes on working in the conversation
+it kept — leaving the user talking to a model whose context they can no longer see, with
+the two sides disagreeing about what was said. That is worse than the refusal it misread.
+It is the same field and the same JSON key the `--multi-turn` surface uses (`docs/HEADLESS.md`).
+
+The one-time **"While you were away"** notice (`App.AttachSummaryLines`, consumed on read)
+is how the second and third rows become visible: a fresh attached session starts with a clean
+transcript, but it tells you what the supervisor did while you were detached. It never
+repeats.
+
+So the honest promise to a tester is: **"this survives closing the Assistant panel"** — not
+"this survives closing Daintree", and never "this runs overnight" unless Daintree stays up
+on a Unix machine.
+
 ---
 
 ## 9. Contract summary — what each side may rely on
@@ -385,6 +465,23 @@ The wire contract must stay byte-for-byte with Daintree's
 line-by-line and rejects unknown shapes. A change here is a change in both repositories and a
 bump of `host.ProtocolVersion`, which regenerates
 [`generated/COMPATIBILITY.md`](generated/COMPATIBILITY.md):
+
+- The MCP connection arrives **only** via `DAINTREE_MCP_URL` + `DAINTREE_MCP_TOKEN` env,
+  fresh per launch, `/mcp` Streamable HTTP, localhost-only. Use the URL's port verbatim.
+- `DAINTREE_PROJECT_ID` is a **stable identity** across launches/resumes for a given project
+  — safe to key `StateDir` and per-project memory on.
+- `DAINTREE_WINDOW_ID` is informational; the real binding is server-side.
+- The session tier on the wire is **`system`**; the host will not tier-block the assistant,
+  so **the CLI owns confirmation of dangerous operations.**
+- `SESSION_BINDING_GONE` / `BINDING_STALE` are **terminal** — stop retrying that session and
+  surface it to the user; they mean the bound window/project is gone.
+- Worktree identity is **not** in env or cwd — query it over MCP (`actions.getContext` /
+  `worktree.getCurrent`); it's pinned at launch.
+- `/clear` can be **refused** (a turn in flight). Gate any transcript wipe on
+  `command:result.conversationCleared === true`, never on the command text.
+- Hiding keeps the CLI alive; **New session** kills it and drops the host-side transcript;
+  eviction/close/crash kill it (with a resume capture that, for this CLI, currently
+  translates to a fresh launch because there's no resume command).
 
 ```bash
 go test ./internal/app -run TestGeneratedDocsAreCurrent -update

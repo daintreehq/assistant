@@ -435,7 +435,7 @@ func assertWakePromptToolsAreCore(t *testing.T, label, prompt string, prohibitio
 
 // TestBuildWakePromptNamesOnlyCoreTools pins the invariant behind issue #370: every tool
 // the autonomous wake prompt tells the model to CALL must be in coreToolNames. A wake
-// may run with no relevant skill active — nothing is guaranteed to reintroduce a tool
+// may run with no relevant runbook active — nothing is guaranteed to reintroduce a tool
 // the prompt assumed — so a prompt naming a non-core tool is an instruction the model
 // may be unable to follow the moment anything projects a SUBSET of the registry.
 //

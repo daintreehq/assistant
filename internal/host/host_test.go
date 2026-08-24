@@ -24,13 +24,23 @@ import (
 type fakeApp struct {
 	hooks   AppHooks
 	session *agent.Session
+	// command, when set, is what RunCommand returns — the seam for asserting that the
+	// host carries an engine outcome onto the wire rather than inventing one.
+	command CommandOutcome
 
 	mu      sync.Mutex
 	rearmed []string
 }
 
-func (f *fakeApp) SetHooks(h AppHooks)                             { f.hooks = h }
-func (f *fakeApp) ConnectMCP(context.Context) error                { return nil }
+func (f *fakeApp) SetHooks(h AppHooks)              { f.hooks = h }
+func (f *fakeApp) ConnectMCP(context.Context) error { return nil }
+func (f *fakeApp) RunCommand(context.Context, string) CommandOutcome {
+	return f.command
+}
+func (f *fakeApp) CostSnapshot() (float64, bool)                   { return 0, false }
+func (f *fakeApp) McpStatus() (bool, *int, string)                 { return false, nil, "" }
+func (f *fakeApp) CommandCatalog() []CommandMeta                   { return nil }
+func (f *fakeApp) Operations(context.Context) OperationsSnapshot   { return OperationsSnapshot{} }
 func (f *fakeApp) StartScheduler(func(events []domain.QueueEvent)) {}
 func (f *fakeApp) Session() *agent.Session                         { return f.session }
 func (f *fakeApp) RiskOf(string) (domain.RiskClass, bool)          { return "", false }

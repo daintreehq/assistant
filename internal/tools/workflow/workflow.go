@@ -49,9 +49,9 @@ type Store interface {
 }
 
 // Deps is the dependency set for the workflow family. Graph is the
-// workflow-intelligence service; nil (the default when
-// DAINTREE_WORKFLOW_INTELLIGENCE is off) registers only the flat ledger tools,
-// keeping the projected toolset byte-identical to before the feature.
+// workflow-intelligence service; nil (when DAINTREE_WORKFLOW_INTELLIGENCE is
+// turned off) registers only the flat ledger tools, keeping the projected
+// toolset byte-identical to before the feature.
 type Deps struct {
 	Store Store
 	Graph GraphService

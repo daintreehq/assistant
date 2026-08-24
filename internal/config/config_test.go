@@ -83,6 +83,37 @@ func TestLoadConfig_AutoApproveDefaultAndEnv(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_WorkflowIntelligenceDefaultsOnAndCanBeTurnedOff(t *testing.T) {
+	stateDir := t.TempDir()
+	if !mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir)}).WorkflowIntelligence {
+		t.Error("workflowIntelligence should default ON — the backend advertises the workflow tasks and its skill catalog is written against the graph tools, so a client with them unregistered is told to build a workflow it cannot build")
+	}
+	// Every OFF spelling, because a feature switch someone reaches for in a shell is
+	// typed by hand and "0" is not the only thing a hand types.
+	for _, off := range []string{"0", "false", "FALSE", "no", "off", " off "} {
+		t.Setenv("DAINTREE_WORKFLOW_INTELLIGENCE", off)
+		if mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir)}).WorkflowIntelligence {
+			t.Errorf("DAINTREE_WORKFLOW_INTELLIGENCE=%q should turn workflow intelligence off", off)
+		}
+	}
+	// A value that is neither on nor off leaves the feature WORKING. The alternative is
+	// a typo that silently strips the graph tools, which is the failure this default
+	// exists to end.
+	t.Setenv("DAINTREE_WORKFLOW_INTELLIGENCE", "yes-please")
+	if !mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir)}).WorkflowIntelligence {
+		t.Error("an unrecognised value should leave workflow intelligence on")
+	}
+	// An explicit override still beats the env, in both directions.
+	t.Setenv("DAINTREE_WORKFLOW_INTELLIGENCE", "1")
+	if mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir), WorkflowIntelligence: boolptr(false)}).WorkflowIntelligence {
+		t.Error("explicit override should beat env")
+	}
+	t.Setenv("DAINTREE_WORKFLOW_INTELLIGENCE", "0")
+	if !mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir), WorkflowIntelligence: boolptr(true)}).WorkflowIntelligence {
+		t.Error("explicit override should beat env")
+	}
+}
+
 func TestLoadConfig_ProjectInstructionsPassthrough(t *testing.T) {
 	stateDir := t.TempDir()
 	// loadConfig carries pre-loaded content; it never reads the FS for this.

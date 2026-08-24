@@ -10,7 +10,7 @@ import (
 	"github.com/daintreehq/assistant/internal/backend"
 )
 
-// pinnedskills.go owns the `--skill` preflight: the one place that decides whether a
+// pinnedrunbooks.go owns the `--runbook` preflight: the one place that decides whether a
 // caller-named runbook may ride a turn, and the one place that refuses to send it.
 //
 // The whole feature exists because a silently-unpinned run is indistinguishable from a
@@ -18,17 +18,17 @@ import (
 // refusing to launch is the honest answer, while proceeding unpinned reproduces exactly
 // the ambiguity the flag was added to remove.
 
-// NormalizePinnedSkillIDs cleans a caller-supplied pin list: trim, drop blanks, and
-// collapse exact repeats keeping first-seen order. Case is PRESERVED — a skill id is
+// NormalizePinnedRunbookIDs cleans a caller-supplied pin list: trim, drop blanks, and
+// collapse exact repeats keeping first-seen order. Case is PRESERVED — a runbook id is
 // the backend's own key, not a user-facing label, and lowercasing one would turn a
 // typo the catalog check can name into a different typo it cannot.
 //
 // Order is preserved because the backend admits pins in the order given and budgets
-// them against max_active_skills: with a cap of two, `--skill a --skill b` and
-// `--skill b --skill a` are genuinely different requests.
+// them against max_active_runbooks: with a cap of two, `--runbook a --runbook b` and
+// `--runbook b --runbook a` are genuinely different requests.
 //
 // Returns nil (not an empty slice) for "no pins", which is what every caller tests.
-func NormalizePinnedSkillIDs(ids []string) []string {
+func NormalizePinnedRunbookIDs(ids []string) []string {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -51,29 +51,29 @@ func NormalizePinnedSkillIDs(ids []string) []string {
 	return out
 }
 
-// PinnedSkillIDs returns this session's pinned runbook ids (nil when none were named).
+// PinnedRunbookIDs returns this session's pinned runbook ids (nil when none were named).
 // The returned slice is a copy — the App's own list must not be mutable through it.
-func (a *App) PinnedSkillIDs() []string {
-	if len(a.pinnedSkillIDs) == 0 {
+func (a *App) PinnedRunbookIDs() []string {
+	if len(a.pinnedRunbookIDs) == 0 {
 		return nil
 	}
-	return append([]string(nil), a.pinnedSkillIDs...)
+	return append([]string(nil), a.pinnedRunbookIDs...)
 }
 
-// backendAcceptsPinnedSkillIDs reports whether it is SAFE to attach pinned skill ids to
+// backendAcceptsPinnedRunbookIDs reports whether it is SAFE to attach pinned runbook ids to
 // a request. The exact shape of backendAcceptsDisplayContext, and for the same reason:
 // Selection is validated with extra="forbid", so guessing wrong costs the whole turn.
 // Fails closed on an unknown backend, and on one whose cached answer came from a
 // DIFFERENT endpoint than the one about to be called.
-func (a *App) backendAcceptsPinnedSkillIDs() bool {
+func (a *App) backendAcceptsPinnedRunbookIDs() bool {
 	snap := a.backendCaps.Load()
 	if snap == nil || a.Backend == nil {
 		return false
 	}
-	return snap.baseURL == a.Backend.BaseURL() && snap.caps.Skills.PinnedSkillIDs
+	return snap.baseURL == a.Backend.BaseURL() && snap.caps.Runbooks.PinnedRunbookIDs
 }
 
-// PreparePinnedSkills negotiates the pins this App was created with, and must be called
+// PreparePinnedRunbooks negotiates the pins this App was created with, and must be called
 // once after app.Create on every path that can run a turn — one-shot, interactive, and
 // the MCP session factory. It returns a non-fatal advisory (empty when there is none)
 // for the caller to surface in whatever output contract it owns, or an error that must
@@ -87,49 +87,49 @@ func (a *App) backendAcceptsPinnedSkillIDs() bool {
 // The three outcomes, in the order they are decided:
 //
 //   - the capability fetch fails, or the backend does not advertise
-//     skills.pinned_skill_ids → ERROR. Withholding the field and running anyway is
-//     precisely the silent no-op `--skill` exists to prevent, and sending it anyway
+//     runbooks.pinned_runbook_ids → ERROR. Withholding the field and running anyway is
+//     precisely the silent no-op `--runbook` exists to prevent, and sending it anyway
 //     would 422 the turn.
 //   - the backend advertises pinning but no catalog → ADVISORY. The id cannot be
-//     checked locally; the backend's own `unknown_skill_id_ignored` warning is the
+//     checked locally; the backend's own `unknown_runbook_id_ignored` warning is the
 //     backstop, and refusing to launch over a capability the SERVER is missing would
 //     punish the caller for the deployment's age.
 //   - the catalog is advertised and an id is not in it → ERROR, with a near miss. This
 //     is the common case (a typo), and it is worth the whole feature to catch it here
 //     instead of after a normal-looking run.
-func (a *App) PreparePinnedSkills(ctx context.Context) (string, error) {
-	pins := a.pinnedSkillIDs
+func (a *App) PreparePinnedRunbooks(ctx context.Context) (string, error) {
+	pins := a.pinnedRunbookIDs
 	if len(pins) == 0 {
 		return "", nil
 	}
 	caps, err := a.BackendCapabilities(ctx)
 	if err != nil {
-		return "", fmt.Errorf("--skill needs the backend's capabilities and they could not be read (%w); "+
+		return "", fmt.Errorf("--runbook needs the backend's capabilities and they could not be read (%w); "+
 			"a pin that cannot be negotiated would run silently unpinned", err)
 	}
-	if !caps.Skills.PinnedSkillIDs {
-		return "", errors.New("this backend does not accept pinned skills (no skills.pinned_skill_ids capability), " +
-			"so --skill cannot be honoured; upgrade the backend, or drop --skill to let the selector choose")
+	if !caps.Runbooks.PinnedRunbookIDs {
+		return "", errors.New("this backend does not accept pinned runbooks (no runbooks.pinned_runbook_ids capability), " +
+			"so --runbook cannot be honoured; upgrade the backend, or drop --runbook to let the selector choose")
 	}
-	if caps.Skills.Catalog == nil {
-		return fmt.Sprintf("this backend advertises no skill catalog, so %s could not be checked before the turn; "+
+	if caps.Runbooks.Catalog == nil {
+		return fmt.Sprintf("this backend advertises no runbook catalog, so %s could not be checked before the turn; "+
 			"an id it does not recognise will be reported as a warning instead", quoteIDs(pins)), nil
 	}
-	if err := validatePinnedSkillIDs(pins, caps.Skills.Catalog); err != nil {
+	if err := validatePinnedRunbookIDs(pins, caps.Runbooks.Catalog); err != nil {
 		return "", err
 	}
 	return "", nil
 }
 
-// validatePinnedSkillIDs checks every pin against the advertised catalog and reports
+// validatePinnedRunbookIDs checks every pin against the advertised catalog and reports
 // ALL failures at once — a caller who mistyped two ids should not have to re-run to
 // discover the second.
 //
 // Matching is exact and case-sensitive (the id is the backend's key); the near-miss
 // suggestion is case-insensitive, because a wrong case is exactly the kind of typo a
 // suggestion should catch. A suggestion never rewrites what is sent: guessing at a
-// skill would defeat the point of naming one.
-func validatePinnedSkillIDs(pins []string, catalog []backend.SkillRef) error {
+// runbook would defeat the point of naming one.
+func validatePinnedRunbookIDs(pins []string, catalog []backend.RunbookRef) error {
 	known := make(map[string]struct{}, len(catalog))
 	for _, ref := range catalog {
 		known[ref.ID] = struct{}{}
@@ -139,7 +139,7 @@ func validatePinnedSkillIDs(pins []string, catalog []backend.SkillRef) error {
 		if _, ok := known[id]; ok {
 			continue
 		}
-		if near := nearestSkillID(id, catalog); near != "" {
+		if near := nearestRunbookID(id, catalog); near != "" {
 			bad = append(bad, fmt.Sprintf("%q (did you mean %q?)", id, near))
 			continue
 		}
@@ -148,33 +148,33 @@ func validatePinnedSkillIDs(pins []string, catalog []backend.SkillRef) error {
 	if len(bad) == 0 {
 		return nil
 	}
-	noun := "unknown skill id"
+	noun := "unknown runbook id"
 	if len(bad) > 1 {
-		noun = "unknown skill ids"
+		noun = "unknown runbook ids"
 	}
-	return fmt.Errorf("%s: %s — run `daintree-assistant --list-skills` to see what this backend can load",
+	return fmt.Errorf("%s: %s — run `daintree-assistant --list-runbooks` to see what this backend can load",
 		noun, strings.Join(bad, ", "))
 }
 
-// maxSkillSuggestionDistance is how wrong an id may be and still be worth guessing at.
+// maxRunbookSuggestionDistance is how wrong an id may be and still be worth guessing at.
 // Two edits catches the typos that actually happen — a transposition, a dropped
 // character, a wrong case — while staying far short of the distance at which a
 // suggestion starts naming an unrelated runbook and sending the reader to fix something
 // that was never the problem.
-const maxSkillSuggestionDistance = 2
+const maxRunbookSuggestionDistance = 2
 
-// nearestSkillID returns the catalog id within maxSkillSuggestionDistance edits of want,
+// nearestRunbookID returns the catalog id within maxRunbookSuggestionDistance edits of want,
 // or "" when nothing is close enough. Ties break on the lexicographically smallest id so
 // the suggestion is deterministic rather than dependent on catalog order.
 //
 // This deliberately does not reuse internal/commands.suggestCommand: that package
 // imports app, so the dependency can only run the other way.
-func nearestSkillID(want string, catalog []backend.SkillRef) string {
+func nearestRunbookID(want string, catalog []backend.RunbookRef) string {
 	want = strings.ToLower(strings.TrimSpace(want))
 	if want == "" {
 		return ""
 	}
-	best, bestD := "", maxSkillSuggestionDistance+1
+	best, bestD := "", maxRunbookSuggestionDistance+1
 	for _, ref := range catalog {
 		id := strings.TrimSpace(ref.ID)
 		if id == "" {
@@ -184,7 +184,7 @@ func nearestSkillID(want string, catalog []backend.SkillRef) string {
 		// Checked FIRST and separately from the tie-break below. Folding the two
 		// together works only because nothing sorts before the empty initial best, which
 		// is the kind of accident that survives until someone seeds `best` differently.
-		if d > maxSkillSuggestionDistance {
+		if d > maxRunbookSuggestionDistance {
 			continue
 		}
 		if best == "" || d < bestD || (d == bestD && id < best) {

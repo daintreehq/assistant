@@ -1,9 +1,35 @@
-# Runtime behavior — compaction & model errors
+# Runtime behavior — convergence, compaction & model errors
 
-Two runtime behaviors surprise new users the first time they hit them: the assistant
-silently **compacting** a long conversation, and a turn ending with a terse **model
-error** instead of an answer. Both are deliberate. This is the "why did it do that?"
-reference.
+Three runtime behaviors surprise new users the first time they hit them: a long turn being
+**closed** with a plan instead of a result, the assistant silently **compacting** a long
+conversation, and a turn ending with a terse **model error** instead of an answer. All three
+are deliberate. This is the "why did it do that?" reference.
+
+## Turn convergence
+
+A turn ends when the model stops calling tools. Two guards close one that never does.
+
+**Repetition.** A round that produces no `(tool, arguments, result)` triple the turn has not
+already seen learned nothing — it re-ran work whose answer had not moved. `domain.TurnStallWarn`
+consecutive such rounds nudge the model; `domain.TurnStallAbort` close the turn. Keying on the
+RESULT and not the call alone is what lets a legitimate poll of a mutable read
+(`watcher.list`, `agentTask.status`) keep going: its answer changes, so it is progress.
+
+**Round budget.** A turn is closed after `domain.TurnRoundBudget` model rounds regardless,
+with a warning at `domain.TurnRoundWarn`. A model can churn without ever repeating itself —
+a different file every round, forever — and the budget is the backstop for that.
+
+**What a close looks like.** Not silence and not an error: the loop spends its last round with
+`tool_choice: "none"` and asks the model to report what it already set running, the plan it
+would follow, and what it needs narrowed. That answer is the turn's reply. Only when the
+closing round produces no prose at all does a deterministic "Stopped after N rounds…" stand in.
+The human also gets a warning line saying the turn was closed rather than answered.
+
+**It bounds the turn, not the work.** Nothing already spawned is discarded, and "continue"
+starts a fresh turn with a fresh budget. The round budget counts rounds streamed since the turn
+began and nothing rewinds it — a mid-turn injection resets the repetition tally but never the
+budget, so every turn ends within `TurnRoundBudget + 1` rounds. The guard lives in
+[`internal/agent/stall.go`](../internal/agent/stall.go).
 
 ## Auto-compaction
 
@@ -11,8 +37,8 @@ To keep long sessions affordable and inside the model's working set, the assista
 summarizes and drops old turns once the conversation grows too large.
 
 **When it fires.** Before your message is sent, and again at the top of every subsequent
-model round of that turn (a single turn can run unboundedly many rounds, so context has to
-be re-bounded each time). The gate is `maybeAutoCompact` in
+model round of that turn (a turn can run many rounds, so context has to be re-bounded each
+time). The gate is `maybeAutoCompact` in
 [`internal/agent/session.go`](../internal/agent/session.go); the constants live in
 [`internal/domain/constants.go`](../internal/domain/constants.go).
 
@@ -153,7 +179,7 @@ call that carries its own deadline (a boot handshake, a scheduler item) never ou
 
 ## See also
 
-- The backend integration — model, skills, prompt assembly — [`BACKEND.md`](BACKEND.md).
+- The backend integration — model, runbooks, prompt assembly — [`BACKEND.md`](BACKEND.md).
 - Environment variables (tier, offline, state dir) — [`README.md`](../README.md#environment-variables).
 - Full-fidelity tracing for debugging — set `DAINTREE_ASSISTANT_DEBUG_LOG=1`
   ([`LOGGING.md`](LOGGING.md) is the event reference).

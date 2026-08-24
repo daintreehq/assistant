@@ -98,7 +98,7 @@ type ClientConfig struct {
 
 // CostEvent is one billed backend REQUEST, reported to ClientConfig.OnCost.
 //
-// One event is not one provider call: a single turn can bill the skill selector, a
+// One event is not one provider call: a single turn can bill the runbook selector, a
 // repair pass, a losing speculative generation and the main completion. Amount is the
 // request's total across all of them, which is the number the caller is charged.
 //
@@ -144,7 +144,7 @@ const (
 	transportDialTimeout         = 5 * time.Second
 	transportTLSHandshakeTimeout = 5 * time.Second
 	// streamResponseHeaderTimeout bounds how long the respond POST may wait for the
-	// response headers. The backend commits the SSE response as soon as skill
+	// response headers. The backend commits the SSE response as soon as runbook
 	// selection completes (~1.5–2.5s), well before the upstream model produces
 	// anything, so 10s is generous headroom without letting a wedged backend pin a
 	// turn. doJSON's client deliberately has NO header timeout — a utility task runs
@@ -172,6 +172,46 @@ func proxyExceptLoopback(req *http.Request) (*url.URL, error) {
 		return nil, nil
 	}
 	return http.ProxyFromEnvironment(req)
+}
+
+// errRedirectRefused is returned by noRedirects. A sentinel so the transport-error
+// mapping can classify it as final rather than as a retriable "connect" — replaying a
+// refused redirect nine times over a 75-second backoff only re-derives the same answer.
+var errRedirectRefused = errors.New("backend: refusing to follow a redirect")
+
+// noRedirects refuses EVERY redirect, on both clients.
+//
+// Without a CheckRedirect, Go follows redirects with the default policy, and a 307/308
+// REPLAYS the POST body at the new location. The body of a respond request is the whole
+// conversation — prose, file paths, tool arguments, results — so a backend answering
+// with a remote Location moves all of it off-box in one hop.
+//
+// That is not a hypothetical for this engine specifically. Daintree pins the assistant
+// to loopback precisely BECAUSE the native panel is unauthenticated and carries
+// everything in that request; a followed redirect walks straight through the pin, and
+// through the sibling defence next door (proxyExceptLoopback), both of which only ever
+// inspect the endpoint the session was CONFIGURED with.
+//
+// Refusing outright rather than validating each hop against isLoopbackHost, because the
+// assistant API has no legitimate reason to redirect at all: the client owns the full
+// URL, builds fixed paths against it, and speaks JSON and SSE — there is no HTML
+// navigation, no auth handshake, and no canonical-host normalisation for it to follow.
+// DefaultBaseURL is already https, so not even an http→https upgrade applies. "Follows
+// no redirects" is also a property a reader can verify by reading one function, where
+// "follows only safe ones" has to be re-verified against the loopback predicate every
+// time that predicate changes.
+func noRedirects(req *http.Request, _ []*http.Request) error {
+	return fmt.Errorf("%w to %s — the assistant API does not redirect, and following it would replay this request (the whole conversation, file paths and tool arguments) at an endpoint this session was never pointed at", errRedirectRefused, req.URL.Redacted())
+}
+
+// transportError maps a *http.Client.Do failure onto the wire error taxonomy. A refused
+// redirect gets its OWN code so the retry layer treats it as final: every code except
+// "connect" falls through isRetriable to false, the same trick doJSON uses for "timeout".
+func transportError(err error) *Error {
+	if errors.Is(err, errRedirectRefused) {
+		return &Error{Code: "redirect_refused", Message: "assistant backend redirected the request: " + err.Error()}
+	}
+	return &Error{Code: "connect", Message: "could not reach assistant backend: " + err.Error()}
 }
 
 // newTransport builds the structured default transport: bounded dial + TLS
@@ -214,8 +254,8 @@ func NewClient(cfg ClientConfig) *Client {
 	hc := cfg.HTTPClient
 	jc := cfg.HTTPClient
 	if hc == nil {
-		hc = &http.Client{Transport: newTransport(streamResponseHeaderTimeout)}
-		jc = &http.Client{Transport: newTransport(0)}
+		hc = &http.Client{Transport: newTransport(streamResponseHeaderTimeout), CheckRedirect: noRedirects}
+		jc = &http.Client{Transport: newTransport(0), CheckRedirect: noRedirects}
 	}
 	retry := cfg.Retry
 	if retry.MaxAttempts == 0 {
@@ -291,10 +331,10 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 	//   - OnRawMeta is intentionally observational and remains per-attempt. It may
 	//     fire more than once so latency/debug instrumentation sees the real transport
 	//     timeline; it must never adopt state or produce user-visible effects.
-	//   - OnSkillLoaded is intentionally EAGER: a selector result is worth recording before
+	//   - OnRunbookLoaded is intentionally EAGER: a selector result is worth recording before
 	//     the upstream model connects or emits a token, so a trace shows selection latency
 	//     separately from generation. The same request can be retried after receiving meta,
-	//     so identical skill refs are de-duplicated across attempts before reaching the
+	//     so identical runbook refs are de-duplicated across attempts before reaching the
 	//     caller — one load, one record. A failed attempt's signed state is
 	//     also adopted into the next POST so the backend reuses that selection instead of
 	//     paying for a second selector run that could land somewhere else.
@@ -316,9 +356,9 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 	var pendingMeta *StreamMeta
 	var lastReceivedMeta *StreamMeta
 	userOnMeta := cb.OnMeta
-	userOnSkillLoaded := cb.OnSkillLoaded
+	userOnRunbookLoaded := cb.OnRunbookLoaded
 	userOnContent := cb.OnContent
-	seenSkillLoads := make(map[string]struct{})
+	seenRunbookLoads := make(map[string]struct{})
 
 	flushMeta := func() {
 		if metaForwarded {
@@ -345,11 +385,11 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 		pendingMeta = &mm // captured; not forwarded until the attempt commits
 		lastReceivedMeta = &mm
 	}
-	if userOnSkillLoaded != nil {
-		cb.OnSkillLoaded = func(refs []SkillRef) {
-			unseen := make([]SkillRef, 0, len(refs))
+	if userOnRunbookLoaded != nil {
+		cb.OnRunbookLoaded = func(refs []RunbookRef) {
+			unseen := make([]RunbookRef, 0, len(refs))
 			for _, ref := range refs {
-				// The id is the stable skill identity. Fall back to the display title for
+				// The id is the stable runbook identity. Fall back to the display title for
 				// malformed refs, but do not let harmless title drift on a retry produce
 				// a duplicate card for the same id.
 				key := strings.TrimSpace(ref.ID)
@@ -359,14 +399,14 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 				if key == "" {
 					continue
 				}
-				if _, ok := seenSkillLoads[key]; ok {
+				if _, ok := seenRunbookLoads[key]; ok {
 					continue
 				}
-				seenSkillLoads[key] = struct{}{}
+				seenRunbookLoads[key] = struct{}{}
 				unseen = append(unseen, ref)
 			}
 			if len(unseen) > 0 {
-				userOnSkillLoaded(unseen)
+				userOnRunbookLoaded(unseen)
 			}
 		}
 	}
@@ -377,13 +417,34 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 			userOnContent(s)
 		}
 	}
+	// The preamble is FIRST-WINS across attempts, and deliberately not the retry
+	// boundary — see StreamCallbacks.OnPreamble.
+	//
+	// First-wins is what keeps the screen and the committed history the same text.
+	// A replayed attempt asks the fast model again and gets its own wording, so
+	// last-wins would commit a sentence the user never read: they saw attempt 1's
+	// preamble, and nothing on screen is rewritten by attempt 2 arriving. The cost
+	// is that the winning attempt's executor was handed slightly different wording
+	// as its prior turn than the history records — a one-turn inconsistency on a
+	// rare path, against showing one thing and recording another on every retry.
+	shownPreamble := ""
+	userOnPreamble := cb.OnPreamble
+	cb.OnPreamble = func(p StreamPreamble) {
+		if shownPreamble != "" {
+			return // already on screen; a replay must not stack a second one
+		}
+		shownPreamble = p.Content
+		if userOnPreamble != nil {
+			userOnPreamble(p)
+		}
+	}
 
 	// Cost accounting spans the whole retried call, not one attempt, and it is the one
 	// piece of bookkeeping that must survive EVERY exit path — the caller is paying for
 	// this with their own key.
 	//
 	// abandonedSpend records that some earlier attempt reached the point of billing
-	// (it got a meta event, which means the skill selector already ran and charged)
+	// (it got a meta event, which means the runbook selector already ran and charged)
 	// and then failed. That money is invisible: a failed attempt never reaches its
 	// `done` event, and the succeeding attempt's `cost.total` covers only ITS OWN
 	// request — the backend aggregates re-rolls within one request, never across
@@ -418,6 +479,24 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 		result, serr := c.respondStreamOnce(ctx, body, cb)
 		if serr == nil {
 			flushMeta() // committed success (incl. pure tool-call turns with no content)
+			// Commit exactly what was shown. Joined onto the front of the assistant
+			// content in this one place, so every caller downstream — history, the
+			// display's end hook, the trace — records the turn the user actually saw
+			// without needing to know this feature exists. The backend hands the
+			// executor these same bytes as its own prior assistant turn, so ONE
+			// joined message is the honest shape; committing two would claim a turn
+			// boundary the executor never saw.
+			result.Preamble = shownPreamble
+			if shownPreamble != "" {
+				if body := result.Message.Content; body != "" {
+					result.Message.Content = shownPreamble + "\n\n" + body
+				} else {
+					// A tool-call round can legitimately produce no prose at all.
+					// The preamble is still what the user saw, and still belongs to
+					// this turn.
+					result.Message.Content = shownPreamble
+				}
+			}
 			finalize(result, false)
 			return result, nil
 		}
@@ -517,8 +596,7 @@ func (c *Client) respondStreamOnce(ctx context.Context, body []byte, cb StreamCa
 		// dying is a completely different diagnosis from a refused socket, and only the
 		// marks tell them apart. A truly refused connection records nothing, which is
 		// the honest answer rather than a row of zeroes.
-		return RespondResult{Transport: marks.result()},
-			&Error{Code: "connect", Message: "could not reach assistant backend: " + err.Error()}
+		return RespondResult{Transport: marks.result()}, transportError(err)
 	}
 	defer resp.Body.Close()
 
@@ -995,7 +1073,7 @@ func (c *Client) doJSONAttempt(attemptCtx context.Context, method, path string, 
 
 	resp, err := c.jsonHTTP.Do(req)
 	if err != nil {
-		return &Error{Code: "connect", Message: "could not reach assistant backend: " + err.Error()}
+		return transportError(err)
 	}
 	defer resp.Body.Close()
 

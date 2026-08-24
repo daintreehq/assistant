@@ -66,6 +66,15 @@ func (s *consoleSink) Phase(p domain.RunPhase) {
 // token leaves a failed one-shot with non-empty stdout. The first token opens the
 // human answer instead; tool-only turns already add their own spacing.
 func (s *consoleSink) AssistantStart() {}
+
+// AssistantPreamble paints the fast preview into the answer the user is already
+// watching, separator included so the live text matches the message that commits.
+// This is a SCREEN, so it shows provisional text: a preview nobody sees buys nothing,
+// and a failed turn leaving words on a terminal is what streaming has always meant.
+func (s *consoleSink) AssistantPreamble(t string) {
+	s.AssistantToken(t + "\n\n")
+}
+
 func (s *consoleSink) AssistantToken(t string) {
 	if !s.answerOpen {
 		s.r.AssistantStart()
@@ -97,19 +106,19 @@ func (s *consoleSink) Interjection(text string) {
 	s.r.Info("you (mid-turn): " + text)
 }
 
-// SkillLoaded is DELIBERATELY silent, matching the attached session: which runbooks the backend
+// RunbookLoaded is DELIBERATELY silent, matching the attached session: which runbooks the backend
 // selected is prompt-assembly machinery, not a step in the operator's narrative. See
-// Session.emitSkillLoads.
+// Session.emitRunbookLoads.
 //
 // Note it does NOT call closeAnswer. The old visible cue had to, to terminate the open
 // answer paragraph before printing; doing it for a silent event would split one streamed
 // answer into two paragraphs for no visible reason.
-func (s *consoleSink) SkillLoaded([]string) {}
+func (s *consoleSink) RunbookLoaded([]string) {}
 
-// SkillDecision is silent for the same reason, and more so: it fires on EVERY round,
+// RunbookDecision is silent for the same reason, and more so: it fires on EVERY round,
 // including ones that changed nothing. It exists for the --json stream and the durable
 // run log, not for a person reading an answer scroll past.
-func (s *consoleSink) SkillDecision(agent.SkillDecisionEvent) {}
+func (s *consoleSink) RunbookDecision(agent.RunbookDecisionEvent) {}
 
 // ToolBatch / ToolState / ToolProgress are live-footer-only; the console prints
 // concrete tool calls + results, not the per-call substep stream.

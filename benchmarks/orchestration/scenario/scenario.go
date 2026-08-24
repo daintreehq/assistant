@@ -49,22 +49,22 @@ type RunResult struct {
 	TimedOut     bool
 
 	// Latency decomposition, reconstructed from the debug-log timeline.
-	TurnMS          int64         // turn.start → turn.end (excludes process boot/exit)
-	FirstRawMetaMS  int64         // turn.start → round 0's raw SSE meta
-	FirstSkillCueMS int64         // turn.start → first eager skill-loaded cue (0 when none)
-	FirstContentMS  int64         // turn.start → first visible content across all rounds (0 when none)
-	RoundDetail     []RoundMetric // one entry per model round, in round order
+	TurnMS            int64         // turn.start → turn.end (excludes process boot/exit)
+	FirstRawMetaMS    int64         // turn.start → round 0's raw SSE meta
+	FirstRunbookCueMS int64         // turn.start → first eager runbook-loaded cue (0 when none)
+	FirstContentMS    int64         // turn.start → first visible content across all rounds (0 when none)
+	RoundDetail       []RoundMetric // one entry per model round, in round order
 }
 
 // RoundMetric is one model round's latency decomposition. RawMetaMS observes the
-// actual SSE meta arrival; SkillCueMS observes the optional eager user cue;
+// actual SSE meta arrival; RunbookCueMS observes the optional eager user cue;
 // CommittedMetaMS observes retry-safe state adoption; and FirstTokenMS observes
 // visible model content.
 type RoundMetric struct {
 	Round            int    `json:"round"`
 	GapBeforeMS      int64  `json:"gapBeforeMs"`               // prior round's done → this request: tool execution + CLI bookkeeping (round 0: turn.start → request)
 	RawMetaMS        int64  `json:"rawMetaMs,omitempty"`       // request → raw SSE meta arrival
-	SkillCueMS       int64  `json:"skillCueMs,omitempty"`      // request → eager skill-loaded cue (0 when none)
+	RunbookCueMS     int64  `json:"runbookCueMs,omitempty"`    // request → eager runbook-loaded cue (0 when none)
 	CommittedMetaMS  int64  `json:"committedMetaMs,omitempty"` // request → retry-safe OnMeta callback
 	FirstTokenMS     int64  `json:"firstTokenMs,omitempty"`    // request → first content delta (0 on tool-call-only rounds)
 	TotalMS          int64  `json:"totalMs"`                   // request → done (the whole round)

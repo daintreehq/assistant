@@ -16,7 +16,7 @@ import (
 func TestRespondStreamReportsCostFromTheDoneEvent(t *testing.T) {
 	body := strings.Join([]string{
 		`event: meta`,
-		`data: {"protocol_version":2,"request_id":"req_1","model":"daintree-assistant","state":"dst1.t"}`,
+		`data: {"protocol_version":3,"request_id":"req_1","model":"daintree-assistant","state":"dst1.t"}`,
 		``,
 		`event: delta`,
 		`data: {"content":"hi"}`,
@@ -75,7 +75,7 @@ func TestRespondStreamReportsCostFromTheDoneEvent(t *testing.T) {
 func TestRespondStreamReportsAnUnknownCost(t *testing.T) {
 	body := strings.Join([]string{
 		`event: meta`,
-		`data: {"protocol_version":2,"request_id":"req_1","model":"daintree-assistant","state":"dst1.t"}`,
+		`data: {"protocol_version":3,"request_id":"req_1","model":"daintree-assistant","state":"dst1.t"}`,
 		``,
 		`event: done`,
 		`data: {"finish_reason":"stop","usage":{"prompt_tokens":10}}`,
@@ -106,7 +106,7 @@ func TestRespondStreamReportsAnUnknownCost(t *testing.T) {
 func TestRespondStreamCarriesTheIncompleteFlag(t *testing.T) {
 	body := strings.Join([]string{
 		`event: meta`,
-		`data: {"protocol_version":2,"request_id":"r","model":"m","state":"dst1.t"}`,
+		`data: {"protocol_version":3,"request_id":"r","model":"m","state":"dst1.t"}`,
 		``,
 		`event: done`,
 		`data: {"finish_reason":"stop","usage":{},"cost":{"total":0.5,"complete":false}}`,
@@ -219,7 +219,7 @@ func TestCostHookPanicDoesNotFailTheCall(t *testing.T) {
 // A RETRIED turn under-reports unless the client says so. Each attempt bills
 // independently — the backend aggregates re-rolls WITHIN a request, never across HTTP
 // attempts — so the succeeding attempt's `cost.total` omits everything the failed one
-// spent. The failed attempt got a meta event, which means its skill selector already ran
+// spent. The failed attempt got a meta event, which means its runbook selector already ran
 // and charged. Reporting that total as exact would show a number below the real bill.
 func TestRetriedTurnIsReportedAsIncomplete(t *testing.T) {
 	fail := "event: meta\ndata: {\"protocol_version\":2,\"request_id\":\"r1\",\"model\":\"m\",\"state\":\"dst1.a\"}\n\n" +

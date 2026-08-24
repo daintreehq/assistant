@@ -17,12 +17,12 @@ import (
 // exactly how far "same" goes).
 //
 // It exists because the backend pins a captured copy of that payload (it is the largest
-// single region of a request, and its skills name the tools in it), and refreshing that
+// single region of a request, and its runbooks name the tools in it), and refreshing that
 // pin previously required EDITING THIS REPO: write a throwaway test that guesses how to
 // build the registry, run it, delete it, hope `git status` came back clean. The guess
 // went stale exactly as you would expect — the backend's recipe still named the
 // pre-rename module path and claimed a booted App was required — and the drift it hid
-// was real: six tools had left the projection while five backend skills still instructed
+// was real: six tools had left the projection while five backend runbooks still instructed
 // the model to call them. A runbook naming a tool that is not offered, while the base
 // prompt forbids inventing one, stalls the turn on a contradiction the model cannot
 // report usefully.
@@ -41,7 +41,7 @@ type ToolInventoryOptions struct {
 	// WorkflowIntelligence includes the seven execution-graph tools that register only
 	// under DAINTREE_WORKFLOW_INTELLIGENCE=1. Default OFF, which is what a normal launch
 	// sends — a fixture pinned with the flag on would tell the backend that
-	// workflow.plan is always offered, and a skill written against that promise would
+	// workflow.plan is always offered, and a runbook written against that promise would
 	// name an unoffered tool for every user who has not opted in.
 	WorkflowIntelligence bool
 }
@@ -91,8 +91,8 @@ func BuildToolInventory(opts ToolInventoryOptions) (inv []backend.Tool, err erro
 	}()
 
 	// Project through the SAME seam a turn uses (the App's toolRunner), with a nil
-	// filter — the full registry, which is what every turn offers, since skill selection
-	// is server-owned and a loaded skill never narrows the toolset.
+	// filter — the full registry, which is what every turn offers, since runbook selection
+	// is server-owned and a loaded runbook never narrows the toolset.
 	projected, err := newToolRunner(a).OpenAITools(nil)
 	if err != nil {
 		return nil, fmt.Errorf("project tools: %w", err)

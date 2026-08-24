@@ -129,9 +129,9 @@ func TestCoerceToolArgs(t *testing.T) {
 
 func TestValidateBackendTools(t *testing.T) {
 	bad := [][]backend.Tool{
-		{{Function: backend.FunctionDef{Name: "skill__find"}}},
-		{{Function: backend.FunctionDef{Name: "skill__load"}}},
-		{{Function: backend.FunctionDef{Name: "skill.find"}}},
+		{{Function: backend.FunctionDef{Name: "runbook__find"}}},
+		{{Function: backend.FunctionDef{Name: "runbook__load"}}},
+		{{Function: backend.FunctionDef{Name: "runbook.find"}}},
 		{{Function: backend.FunctionDef{Name: "daintree_internal__x"}}},
 		{{Function: backend.FunctionDef{Name: "fs.read"}}}, // dotted name not wire-safe
 		{{Function: backend.FunctionDef{Name: ""}}},
@@ -148,7 +148,7 @@ func TestValidateBackendTools(t *testing.T) {
 	good := []backend.Tool{
 		{Function: backend.FunctionDef{Name: "fs__read"}},
 		{Function: backend.FunctionDef{Name: "git__status"}},
-		{Function: backend.FunctionDef{Name: "skill__step__advance"}},
+		{Function: backend.FunctionDef{Name: "runbook__step__advance"}},
 		{Function: backend.FunctionDef{Name: "terminal__run"}},
 	}
 	if err := validateBackendTools(good); err != nil {

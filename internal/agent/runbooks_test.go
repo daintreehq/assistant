@@ -11,12 +11,12 @@ import (
 )
 
 // These tests pin the post-migration session-history + tool-projection contract.
-// Skills are SERVER-OWNED now (the backend's selector picks and injects runbooks), so
-// the Session no longer holds a skill catalog and never narrows the toolset — every
+// Runbooks are SERVER-OWNED now (the backend's selector picks and injects runbooks), so
+// the Session no longer holds a runbook catalog and never narrows the toolset — every
 // turn offers the full registry.
 
 // captureStreamTools records the projected tool wire-names from a stream so the
-// per-turn projection can be asserted (skills never narrow the toolset, so this should
+// per-turn projection can be asserted (runbooks never narrow the toolset, so this should
 // always be the full registry — a nil filter).
 type captureStreamTools struct {
 	*fakeTools
@@ -39,14 +39,14 @@ func (c *captureStreamTools) OpenAITools(filter []string) ([]models.ChatTool, er
 	return out, nil
 }
 
-// skillSession builds a session wired through the backend-from-router adapter. The
-// Session no longer consumes a skill catalog — the backend owns skill selection.
-func skillSession(t *testing.T, r Router, tr ToolRunner) *Session {
+// runbookSession builds a session wired through the backend-from-router adapter. The
+// Session no longer consumes a runbook catalog — the backend owns runbook selection.
+func runbookSession(t *testing.T, r Router, tr ToolRunner) *Session {
 	t.Helper()
 	deps := SessionDeps{
 		Backend:   backendFromRouter{r: r},
 		Tools:     tr,
-		SessionID: "ses_skills",
+		SessionID: "ses_runbooks",
 		Events:    NoopEventSink{},
 		PromptContext: prompts.MainPromptContext{
 			Tier: domain.TierOperator, ProjectPath: "/proj",
@@ -64,10 +64,10 @@ func plainRouter() *fakeRouter {
 // --- fresh session / history shape ---
 
 // TestFreshSessionStartsEmpty pins the new reality: the CLI holds no client-side control
-// prefix (the backend owns the system prompt + skills), so a fresh session begins with an
+// prefix (the backend owns the system prompt + runbooks), so a fresh session begins with an
 // EMPTY visible history. The first turn appends the user message at index 0.
 func TestFreshSessionStartsEmpty(t *testing.T) {
-	s := skillSession(t, plainRouter(), &fakeTools{})
+	s := runbookSession(t, plainRouter(), &fakeTools{})
 	if got := len(s.Messages()); got != 0 {
 		t.Fatalf("fresh session messages = %d want 0 (no client-side control prefix)", got)
 	}
@@ -77,7 +77,7 @@ func TestFreshSessionStartsEmpty(t *testing.T) {
 // the user message, then the assistant reply — no leading system/control rows.
 func TestSendAppendsUserThenAssistant(t *testing.T) {
 	r := &fakeRouter{results: []models.ChatResult{{Content: "hi"}}}
-	s := skillSession(t, r, &fakeTools{})
+	s := runbookSession(t, r, &fakeTools{})
 	if _, err := s.Send(context.Background(), "hello there", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -95,14 +95,14 @@ func TestSendAppendsUserThenAssistant(t *testing.T) {
 
 // --- tool projection (always the full registry) ---
 
-func TestSendFullRegistryWhenNoSkillActive(t *testing.T) {
+func TestSendFullRegistryWhenNoRunbookActive(t *testing.T) {
 	full := []models.ChatTool{
 		{Function: models.ChatToolFunc{Name: "fs__read"}},
 		{Function: models.ChatToolFunc{Name: "timer__schedule"}},
 	}
 	tools := &captureStreamTools{fakeTools: &fakeTools{result: domain.Ok("ok", nil)}, full: full}
 	r := &fakeRouter{results: []models.ChatResult{{Content: "ok"}}}
-	s := skillSession(t, r, tools)
+	s := runbookSession(t, r, tools)
 	if _, err := s.Send(context.Background(), "simple question", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestSendNeverEmptyToolListUnconstrained(t *testing.T) {
 	full := []models.ChatTool{{Function: models.ChatToolFunc{Name: "fs__read"}}}
 	tools := &captureStreamTools{fakeTools: &fakeTools{result: domain.Ok("ok", nil)}, full: full}
 	r := &fakeRouter{results: []models.ChatResult{{Content: "ok"}}}
-	s := skillSession(t, r, tools)
+	s := runbookSession(t, r, tools)
 	if _, err := s.Send(context.Background(), "hi", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}

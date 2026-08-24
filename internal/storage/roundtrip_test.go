@@ -668,30 +668,30 @@ func TestListConfirmedAgentLaunchesWithTerminal(t *testing.T) {
 	}
 }
 
-// ---- skill run state: unique key throws + list order + immutable cols ----
+// ---- runbook run state: unique key throws + list order + immutable cols ----
 
-func TestSkillRunStateUniqueAndImmutable(t *testing.T) {
+func TestRunbookRunStateUniqueAndImmutable(t *testing.T) {
 	idRe := regexp.MustCompile(`^rrs_[0-9a-f]{8}$`)
 	s := openTest(t, 9000)
-	rec, _ := s.InsertSkillRunState(domain.SkillRunStateRecord{SessionID: "ses_a", SkillID: "r.one"})
-	if !idRe.MatchString(rec.ID) || rec.Status != domain.SkillRunActive || rec.CurrentStep != 0 || rec.StepsJson != "[]" {
-		t.Fatalf("skill run defaults wrong: %+v", rec)
+	rec, _ := s.InsertRunbookRunState(domain.RunbookRunStateRecord{SessionID: "ses_a", RunbookID: "r.one"})
+	if !idRe.MatchString(rec.ID) || rec.Status != domain.RunbookRunActive || rec.CurrentStep != 0 || rec.StepsJson != "[]" {
+		t.Fatalf("runbook run defaults wrong: %+v", rec)
 	}
 	// natural-key uniqueness: duplicate insert errors.
-	if _, err := s.InsertSkillRunState(domain.SkillRunStateRecord{SessionID: "ses_a", SkillID: "r.one"}); err == nil {
-		t.Fatalf("duplicate (session,skill) insert must error")
+	if _, err := s.InsertRunbookRunState(domain.RunbookRunStateRecord{SessionID: "ses_a", RunbookID: "r.one"}); err == nil {
+		t.Fatalf("duplicate (session,runbook) insert must error")
 	}
 
-	// immutable session/skill/startedAt; updatedAt force-advances.
-	rec2, _ := s.InsertSkillRunState(domain.SkillRunStateRecord{SessionID: "ses_a", SkillID: "r.imm", StartedAt: 1000})
+	// immutable session/runbook/startedAt; updatedAt force-advances.
+	rec2, _ := s.InsertRunbookRunState(domain.RunbookRunStateRecord{SessionID: "ses_a", RunbookID: "r.imm", StartedAt: 1000})
 	s.now = func() int64 { return 2000 }
-	s.UpdateSkillRunState(rec2.ID, map[string]any{
-		"sessionId": "ses_other", "skillId": "r.other", "startedAt": int64(5),
+	s.UpdateRunbookRunState(rec2.ID, map[string]any{
+		"sessionId": "ses_other", "runbookId": "r.other", "startedAt": int64(5),
 		"currentStep": 2, "bogus": "nope",
 	})
-	got, _ := s.GetSkillRunState("ses_a", "r.imm")
-	if got == nil || got.SessionID != "ses_a" || got.SkillID != "r.imm" || got.StartedAt != 1000 {
-		t.Fatalf("session/skill/startedAt must be immutable: %+v", got)
+	got, _ := s.GetRunbookRunState("ses_a", "r.imm")
+	if got == nil || got.SessionID != "ses_a" || got.RunbookID != "r.imm" || got.StartedAt != 1000 {
+		t.Fatalf("session/runbook/startedAt must be immutable: %+v", got)
 	}
 	if got.CurrentStep != 2 || got.UpdatedAt != 2000 {
 		t.Fatalf("allowed columns / forced updatedAt wrong: %+v", got)
@@ -699,11 +699,11 @@ func TestSkillRunStateUniqueAndImmutable(t *testing.T) {
 
 	// list filters by session, updatedAt DESC.
 	s.now = func() int64 { return 100 }
-	s.InsertSkillRunState(domain.SkillRunStateRecord{SessionID: "ses_b", SkillID: "x.1", StartedAt: 100, UpdatedAt: 100})
-	if got, _ := s.ListSkillRunStates("ses_a"); len(got) != 2 {
+	s.InsertRunbookRunState(domain.RunbookRunStateRecord{SessionID: "ses_b", RunbookID: "x.1", StartedAt: 100, UpdatedAt: 100})
+	if got, _ := s.ListRunbookRunStates("ses_a"); len(got) != 2 {
 		t.Fatalf("ses_a should have 2 states, got %d", len(got))
 	}
-	if all, _ := s.ListSkillRunStates(""); len(all) != 3 {
+	if all, _ := s.ListRunbookRunStates(""); len(all) != 3 {
 		t.Fatalf("unscoped list want 3, got %d", len(all))
 	}
 }

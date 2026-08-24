@@ -186,14 +186,24 @@ var wakeFailurePrefixes = []string{
 	"Model unavailable:",
 	"Model rate-limited:",
 	"Model error:",
-	"Can't reach the Daintree assistant backend", // backend unreachable (classifyBackendError)
+	"Can't reach the Daintree assistant backend",        // backend unreachable (classifyBackendError)
+	"Daintree assistant backend is a different version", // protocol mismatch (classifyBackendError)
 	"Tool projection failed:",
 	"Stopped: called ",
 	"Turn cancelled",
 }
 
-// IsWakeFailureReply reports whether a Send reply is a non-result (prefix match).
+// IsWakeFailureReply reports whether a Send reply is a non-result.
+//
+// The stalled-turn sentinel is matched WHOLE (isStalledReply), not by prefix. A turn
+// that hit its round budget and reported its plan is a real answer; only the fallback
+// the engine emits when the closing round produced no prose at all is a non-result, and
+// "Stopped after N rounds…" is far too plausible an opening for the former to be
+// classified on its first two words.
 func IsWakeFailureReply(reply string) bool {
+	if isStalledReply(reply) {
+		return true
+	}
 	for _, p := range wakeFailurePrefixes {
 		if strings.HasPrefix(reply, p) {
 			return true

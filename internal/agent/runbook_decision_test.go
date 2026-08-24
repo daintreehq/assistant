@@ -8,24 +8,24 @@ import (
 	"github.com/daintreehq/assistant/internal/models"
 )
 
-// skill_decision_test.go covers the committed per-round skill decision: the projection
-// from the backend's SkillsBlock, and the guarantee that it is emitted on EVERY committed
-// round — including the rounds the eager skill:loaded cue is silent for, which is the gap
+// runbook_decision_test.go covers the committed per-round runbook decision: the projection
+// from the backend's RunbooksBlock, and the guarantee that it is emitted on EVERY committed
+// round — including the rounds the eager runbook:loaded cue is silent for, which is the gap
 // the whole event exists to close.
 
-// quietSkillBackend commits meta with an active set but NO newly-loaded delta: the shape
-// of every round after the first, and the case the eager OnSkillLoaded callback never
+// quietRunbookBackend commits meta with an active set but NO newly-loaded delta: the shape
+// of every round after the first, and the case the eager OnRunbookLoaded callback never
 // fires for (backend/sse.go only calls it when NewlyLoaded is non-empty).
-type quietSkillBackend struct {
+type quietRunbookBackend struct {
 	degraded bool
 }
 
-func (b quietSkillBackend) RespondStream(_ context.Context, _ backend.RespondRequest, cb backend.StreamCallbacks) (backend.RespondResult, error) {
+func (b quietRunbookBackend) RespondStream(_ context.Context, _ backend.RespondRequest, cb backend.StreamCallbacks) (backend.RespondResult, error) {
 	meta := backend.StreamMeta{
 		Model: "daintree-assistant",
 		State: "dst1.quiet",
-		Skills: backend.SkillsBlock{
-			Active:      []backend.SkillRef{{ID: "multi_agent", Title: "Multi-agent orchestration"}},
+		Runbooks: backend.RunbooksBlock{
+			Active:      []backend.RunbookRef{{ID: "multi_agent", Title: "Multi-agent orchestration"}},
 			NewlyLoaded: nil, // nothing changed this round
 			Selector: backend.SelectorMeta{
 				Ran:      true,
@@ -34,8 +34,8 @@ func (b quietSkillBackend) RespondStream(_ context.Context, _ backend.RespondReq
 			},
 		},
 	}
-	if cb.OnSkillLoaded != nil && len(meta.Skills.NewlyLoaded) > 0 {
-		cb.OnSkillLoaded(meta.Skills.NewlyLoaded)
+	if cb.OnRunbookLoaded != nil && len(meta.Runbooks.NewlyLoaded) > 0 {
+		cb.OnRunbookLoaded(meta.Runbooks.NewlyLoaded)
 	}
 	if cb.OnMeta != nil {
 		cb.OnMeta(meta)
@@ -49,7 +49,7 @@ func (b quietSkillBackend) RespondStream(_ context.Context, _ backend.RespondReq
 	}, nil
 }
 
-func (quietSkillBackend) RunTask(context.Context, backend.TaskRequest) (backend.TaskResult, error) {
+func (quietRunbookBackend) RunTask(context.Context, backend.TaskRequest) (backend.TaskResult, error) {
 	return backend.TaskResult{}, nil
 }
 
@@ -57,24 +57,24 @@ func (quietSkillBackend) RunTask(context.Context, backend.TaskRequest) (backend.
 // one without threading through the rest of the event vocabulary.
 type decisionSink struct {
 	NoopEventSink
-	decisions []SkillDecisionEvent
+	decisions []RunbookDecisionEvent
 	loads     int
 }
 
-func (s *decisionSink) SkillDecision(ev SkillDecisionEvent) {
+func (s *decisionSink) RunbookDecision(ev RunbookDecisionEvent) {
 	s.decisions = append(s.decisions, ev)
 }
-func (s *decisionSink) SkillLoaded([]string) { s.loads++ }
+func (s *decisionSink) RunbookLoaded([]string) { s.loads++ }
 
 // The load-bearing case: a round where nothing new loaded still reports what is active.
 // Without this, a consumer would have to reconstruct the active set by replaying every
 // prior round's delta — which is both the burden the issue objects to and impossible to
 // do correctly, since a degraded selector changes the set without a delta.
-func TestSkillDecisionEmittedOnRoundWithNoNewLoads(t *testing.T) {
+func TestRunbookDecisionEmittedOnRoundWithNoNewLoads(t *testing.T) {
 	sink := &decisionSink{}
 	r := &fakeRouter{results: []models.ChatResult{{Content: "unused"}}}
 	deps := baseDeps(r, &fakeTools{})
-	deps.Backend = quietSkillBackend{}
+	deps.Backend = quietRunbookBackend{}
 	deps.Events = sink
 	s := NewSession(deps)
 
@@ -83,15 +83,15 @@ func TestSkillDecisionEmittedOnRoundWithNoNewLoads(t *testing.T) {
 	}
 
 	if sink.loads != 0 {
-		t.Fatalf("eager SkillLoaded fired %d time(s) on a no-delta round; the fixture is "+
+		t.Fatalf("eager RunbookLoaded fired %d time(s) on a no-delta round; the fixture is "+
 			"not exercising the gap this event closes", sink.loads)
 	}
 	if len(sink.decisions) != 1 {
-		t.Fatalf("SkillDecision fired %d time(s), want 1 per committed round", len(sink.decisions))
+		t.Fatalf("RunbookDecision fired %d time(s), want 1 per committed round", len(sink.decisions))
 	}
 	got := sink.decisions[0]
 	if len(got.Active) != 1 || got.Active[0].ID != "multi_agent" {
-		t.Fatalf("active = %#v, want the retained multi_agent skill", got.Active)
+		t.Fatalf("active = %#v, want the retained multi_agent runbook", got.Active)
 	}
 	// Empty, never nil — the sinks marshal this straight to JSON, where nil would be null.
 	if got.NewlyLoaded == nil {
@@ -105,11 +105,11 @@ func TestSkillDecisionEmittedOnRoundWithNoNewLoads(t *testing.T) {
 // A degraded selector fails open into the prior set. The active set alone looks perfectly
 // healthy, so the flag is the only thing that distinguishes "chose this runbook" from
 // "kept this runbook because deciding failed".
-func TestSkillDecisionCarriesDegradedSelector(t *testing.T) {
+func TestRunbookDecisionCarriesDegradedSelector(t *testing.T) {
 	sink := &decisionSink{}
 	r := &fakeRouter{results: []models.ChatResult{{Content: "unused"}}}
 	deps := baseDeps(r, &fakeTools{})
-	deps.Backend = quietSkillBackend{degraded: true}
+	deps.Backend = quietRunbookBackend{degraded: true}
 	deps.Events = sink
 	s := NewSession(deps)
 
@@ -117,7 +117,7 @@ func TestSkillDecisionCarriesDegradedSelector(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(sink.decisions) != 1 {
-		t.Fatalf("SkillDecision fired %d time(s), want 1", len(sink.decisions))
+		t.Fatalf("RunbookDecision fired %d time(s), want 1", len(sink.decisions))
 	}
 	if !sink.decisions[0].Selector.Degraded {
 		t.Fatal("Selector.Degraded lost in projection; a fail-open round would look clean")
@@ -129,16 +129,16 @@ func TestSkillDecisionCarriesDegradedSelector(t *testing.T) {
 
 // The projection copies refs VERBATIM. A diagnostic that quietly repaired or dropped a
 // malformed backend ref would hide exactly the selector bug someone is reading it to
-// find — unlike skillLabels, whose title fallback serves a human-readable replay.
-func TestSkillDecisionFromCopiesRefsVerbatim(t *testing.T) {
+// find — unlike runbookLabels, whose title fallback serves a human-readable replay.
+func TestRunbookDecisionFromCopiesRefsVerbatim(t *testing.T) {
 	conf := 0.42
-	got := skillDecisionFrom(backend.SkillsBlock{
-		Active: []backend.SkillRef{
+	got := runbookDecisionFrom(backend.RunbooksBlock{
+		Active: []backend.RunbookRef{
 			{ID: "b", Title: "Beta"},
 			{ID: "a"}, // no title: NOT back-filled from the id
 			{},        // malformed: NOT dropped
 		},
-		NewlyLoaded: []backend.SkillRef{{ID: "a"}},
+		NewlyLoaded: []backend.RunbookRef{{ID: "a"}},
 		Selector: backend.SelectorMeta{
 			Ran: true, TaskType: "review", Confidence: &conf, Reason: "because",
 		},
@@ -146,16 +146,16 @@ func TestSkillDecisionFromCopiesRefsVerbatim(t *testing.T) {
 
 	// Assert the WHOLE projection, field by field. A subset check here would pass an
 	// implementation that dropped every title, or returned an empty NewlyLoaded.
-	wantActive := []SkillRef{
+	wantActive := []RunbookRef{
 		{ID: "b", Title: "Beta"}, // order preserved: the backend's ranking is information
 		{ID: "a"},                // title NOT back-filled from the id
 		{},                       // malformed ref NOT dropped
 	}
-	if !equalSkillRefs(got.Active, wantActive) {
+	if !equalRunbookRefs(got.Active, wantActive) {
 		t.Fatalf("active = %#v, want %#v", got.Active, wantActive)
 	}
-	wantNewly := []SkillRef{{ID: "a"}}
-	if !equalSkillRefs(got.NewlyLoaded, wantNewly) {
+	wantNewly := []RunbookRef{{ID: "a"}}
+	if !equalRunbookRefs(got.NewlyLoaded, wantNewly) {
 		t.Fatalf("newlyLoaded = %#v, want %#v", got.NewlyLoaded, wantNewly)
 	}
 
@@ -170,7 +170,7 @@ func TestSkillDecisionFromCopiesRefsVerbatim(t *testing.T) {
 	}
 }
 
-func equalSkillRefs(a, b []SkillRef) bool {
+func equalRunbookRefs(a, b []RunbookRef) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -184,9 +184,9 @@ func equalSkillRefs(a, b []SkillRef) bool {
 
 // Duplicate ids and characters that need JSON escaping are carried through untouched —
 // the projection must not dedupe, reorder, or sanitize what the backend said.
-func TestSkillDecisionFromPreservesDuplicatesAndEscapableText(t *testing.T) {
-	got := skillDecisionFrom(backend.SkillsBlock{
-		Active: []backend.SkillRef{
+func TestRunbookDecisionFromPreservesDuplicatesAndEscapableText(t *testing.T) {
+	got := runbookDecisionFrom(backend.RunbooksBlock{
+		Active: []backend.RunbookRef{
 			{ID: "dup", Title: "First"},
 			{ID: "dup", Title: "Second"},
 			{ID: `quote"back\slash`, Title: "line\nbreak — ünïcode"},
@@ -203,23 +203,23 @@ func TestSkillDecisionFromPreservesDuplicatesAndEscapableText(t *testing.T) {
 	}
 }
 
-// divergentSkillBackend fires the EAGER cue with one skill, then commits meta describing
+// divergentRunbookBackend fires the EAGER cue with one runbook, then commits meta describing
 // a DIFFERENT active set — the retry shape, where attempt 1 loaded something the
 // committed attempt did not keep. Session must wire the decision to the committed meta,
 // not to the eager cue.
-type divergentSkillBackend struct{}
+type divergentRunbookBackend struct{}
 
-func (divergentSkillBackend) RespondStream(_ context.Context, _ backend.RespondRequest, cb backend.StreamCallbacks) (backend.RespondResult, error) {
+func (divergentRunbookBackend) RespondStream(_ context.Context, _ backend.RespondRequest, cb backend.StreamCallbacks) (backend.RespondResult, error) {
 	// What attempt 1 eagerly reported, before it failed and was retried.
-	eager := []backend.SkillRef{{ID: "abandoned", Title: "Abandoned by the retry"}}
-	if cb.OnSkillLoaded != nil {
-		cb.OnSkillLoaded(eager)
+	eager := []backend.RunbookRef{{ID: "abandoned", Title: "Abandoned by the retry"}}
+	if cb.OnRunbookLoaded != nil {
+		cb.OnRunbookLoaded(eager)
 	}
 	// What the attempt that actually committed selected.
 	meta := backend.StreamMeta{
 		State: "dst1.committed",
-		Skills: backend.SkillsBlock{
-			Active:      []backend.SkillRef{{ID: "committed", Title: "Committed runbook"}},
+		Runbooks: backend.RunbooksBlock{
+			Active:      []backend.RunbookRef{{ID: "committed", Title: "Committed runbook"}},
 			NewlyLoaded: nil,
 			Selector:    backend.SelectorMeta{Ran: true},
 		},
@@ -236,18 +236,18 @@ func (divergentSkillBackend) RespondStream(_ context.Context, _ backend.RespondR
 	}, nil
 }
 
-func (divergentSkillBackend) RunTask(context.Context, backend.TaskRequest) (backend.TaskResult, error) {
+func (divergentRunbookBackend) RunTask(context.Context, backend.TaskRequest) (backend.TaskResult, error) {
 	return backend.TaskResult{}, nil
 }
 
 // The authoritative-source guarantee. Wiring the decision to the eager refs would be an
-// easy and invisible mistake — both callbacks carry []backend.SkillRef — and it would
+// easy and invisible mistake — both callbacks carry []backend.RunbookRef — and it would
 // silently make the event report a selection the round never used.
-func TestSkillDecisionSourcedFromCommittedMetaNotEagerCue(t *testing.T) {
+func TestRunbookDecisionSourcedFromCommittedMetaNotEagerCue(t *testing.T) {
 	sink := &decisionSink{}
 	r := &fakeRouter{results: []models.ChatResult{{Content: "unused"}}}
 	deps := baseDeps(r, &fakeTools{})
-	deps.Backend = divergentSkillBackend{}
+	deps.Backend = divergentRunbookBackend{}
 	deps.Events = sink
 	s := NewSession(deps)
 
@@ -255,11 +255,11 @@ func TestSkillDecisionSourcedFromCommittedMetaNotEagerCue(t *testing.T) {
 		t.Fatal(err)
 	}
 	if sink.loads != 1 {
-		t.Fatalf("eager SkillLoaded fired %d time(s), want 1 — the fixture is not "+
+		t.Fatalf("eager RunbookLoaded fired %d time(s), want 1 — the fixture is not "+
 			"exercising the divergence", sink.loads)
 	}
 	if len(sink.decisions) != 1 {
-		t.Fatalf("SkillDecision fired %d time(s), want exactly 1", len(sink.decisions))
+		t.Fatalf("RunbookDecision fired %d time(s), want exactly 1", len(sink.decisions))
 	}
 	got := sink.decisions[0]
 	if len(got.Active) != 1 || got.Active[0].ID != "committed" {
@@ -268,15 +268,15 @@ func TestSkillDecisionSourcedFromCommittedMetaNotEagerCue(t *testing.T) {
 	}
 	for _, ref := range got.Active {
 		if ref.ID == "abandoned" {
-			t.Fatal("the abandoned attempt's skill leaked into the committed decision")
+			t.Fatal("the abandoned attempt's runbook leaked into the committed decision")
 		}
 	}
 }
 
 // Both slices are allocated even when the backend sent nothing at all, so the JSON sinks
 // emit [] rather than null without each having to normalize.
-func TestSkillDecisionFromAllocatesEmptySlices(t *testing.T) {
-	got := skillDecisionFrom(backend.SkillsBlock{})
+func TestRunbookDecisionFromAllocatesEmptySlices(t *testing.T) {
+	got := runbookDecisionFrom(backend.RunbooksBlock{})
 	if got.Active == nil || got.NewlyLoaded == nil {
 		t.Fatalf("nil slice(s) from an empty block: active=%#v newlyLoaded=%#v",
 			got.Active, got.NewlyLoaded)
@@ -288,14 +288,14 @@ func TestSkillDecisionFromAllocatesEmptySlices(t *testing.T) {
 
 // Selector usage and the vestigial Prelude are dropped on purpose; pinned so a later
 // "just pass the whole block through" refactor has to argue with a test.
-func TestSkillDecisionEventHasNoUsageOrPrelude(t *testing.T) {
-	got := skillDecisionFrom(backend.SkillsBlock{
+func TestRunbookDecisionEventHasNoUsageOrPrelude(t *testing.T) {
+	got := runbookDecisionFrom(backend.RunbooksBlock{
 		Selector: backend.SelectorMeta{Usage: &backend.Usage{}},
 		Prelude:  backend.Prelude{ToolExecutions: []backend.PreludeExecution{{}}},
 	})
-	// A compile-time guarantee as much as a runtime one: SkillDecisionEvent has exactly
+	// A compile-time guarantee as much as a runtime one: RunbookDecisionEvent has exactly
 	// three fields, none of which can carry either.
-	if got.Selector != (SkillSelectorOutcome{}) {
+	if got.Selector != (RunbookSelectorOutcome{}) {
 		t.Fatalf("selector = %#v, want the zero outcome (usage must not leak in)", got.Selector)
 	}
 }

@@ -24,7 +24,7 @@ import (
 // upstream provider — but it now covers the whole CLI↔backend hop for as long as a
 // restart plausibly takes. Replays are near-free: the conversation prefix is
 // unchanged across attempts and the backend prefix-caches it; after an eager meta,
-// the retry also carries that attempt's signed state so skill selection is reused.
+// the retry also carries that attempt's signed state so runbook selection is reused.
 const (
 	defaultMaxAttempts = 10 // initial attempt + 9 retries
 	defaultBaseDelay   = 500 * time.Millisecond

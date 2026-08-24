@@ -6,7 +6,7 @@
 //	go run ./cmd/tooldump -workflow-intelligence   # …including the flag-gated graph tools
 //
 // It exists for the backend, which pins a captured copy of this payload and needs to
-// regenerate it in CI to catch catalog drift (a removed tool that its skills still name).
+// regenerate it in CI to catch catalog drift (a removed tool that its runbooks still name).
 // Refreshing that pin must not require editing this repo, which is why this is a
 // committed command and not a throwaway test. See internal/app/toolinventory.go.
 //
@@ -28,7 +28,7 @@ func main() {
 	var (
 		out      = flag.String("o", "", "write to this file instead of stdout")
 		workflow = flag.Bool("workflow-intelligence", false,
-			"include the execution-graph tools that register only under DAINTREE_WORKFLOW_INTELLIGENCE=1")
+			"include the execution-graph tools, which register unless DAINTREE_WORKFLOW_INTELLIGENCE=0")
 	)
 	flag.Parse()
 
