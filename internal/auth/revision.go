@@ -17,8 +17,21 @@ import (
 	"github.com/daintreehq/assistant/internal/ipc"
 )
 
-// revision.go is a non-secret marker that tells every other process "the credential
-// changed — drop what you cached".
+// revision.go is a non-secret marker that tells every other process "the IDENTITY
+// changed — stop using what you cached".
+//
+// The distinction between an identity change and a routine rotation is load-bearing, and
+// getting it wrong produces a refresh storm. A rotation replaces the stored refresh token
+// but leaves every other process's ACCESS token perfectly valid until its own expiry; a
+// process only needs the refresh token when it next refreshes, and it re-reads it under
+// the lock at that point anyway. If a rotation bumped this marker, the result would be:
+// P1 refreshes and bumps; P2 discards a good access token and refreshes, bumping again;
+// P1 discards ITS good token and refreshes... forever, spending a one-time-use token per
+// round trip.
+//
+// So this marker moves for LOGIN, LOGOUT and REVOCATION only — the events after which a
+// cached access token is genuinely wrong to use. See Manager.refresh, which deliberately
+// does not bump on rotation.
 //
 // It exists because of the supervisor daemon, the consumer that makes this problem
 // interesting: it can make PAID requests hours after the visible UI closed. When someone

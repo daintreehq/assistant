@@ -66,6 +66,26 @@ const (
 	CodeExchangeFailed = "auth_exchange_failed"
 	// CodeBrowserFailed: the system browser could not be opened.
 	CodeBrowserFailed = "auth_browser_failed"
+	// CodeGrantRejected: the identity provider explicitly rejected the grant
+	// (invalid_grant) — the refresh token is expired, already used, or revoked.
+	//
+	// It is its own code, rather than a flavour of CodeRefreshFailed, because it is the
+	// ONE provider answer that means the session is genuinely gone and the stored
+	// credential should be deleted. Everything else that goes wrong during a refresh is
+	// a reason to keep it. Distinguishing them by parsing a message would put that
+	// decision at the mercy of wording; a code makes it a type.
+	CodeGrantRejected = "auth_grant_rejected"
+	// CodeRefreshFailed: a token refresh could not complete. Distinct from
+	// CodeExchangeFailed because the remedies differ — a failed refresh may simply be a
+	// network blip on an otherwise valid session, where a failed exchange means the
+	// login attempt itself did not produce credentials.
+	CodeRefreshFailed = "auth_refresh_failed"
+	// CodeNotSignedIn: an operation needing a credential was attempted without one.
+	CodeNotSignedIn = "auth_not_signed_in"
+	// CodeStorageUnavailable: no OS credential service, so a session cannot persist.
+	CodeStorageUnavailable = "auth_storage_unavailable"
+	// CodeLoginInProgress: another login attempt is already running.
+	CodeLoginInProgress = "auth_login_in_progress"
 )
 
 // Error is a local auth failure carrying a stable Code, a message written for a human,
