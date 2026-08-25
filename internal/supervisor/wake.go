@@ -203,11 +203,12 @@ func (r *Runtime) authorizedToSpendLocked() bool {
 	// StateAccessRefused is deliberately NOT here, and the reasoning is worth keeping.
 	// It is settled and no retry changes it, which argues for blocking — but a refusal
 	// at the backend's own door never reaches a provider, so there is no spend to stop,
-	// and blocking would be unrecoverable: this gate is re-evaluated only when the
-	// identity revision moves (see refreshAuthPosture), and an administrator registering
-	// the OAuth client or granting the permission moves nothing. The daemon would stay
-	// blocked until the process restarted, long after the deployment was fixed. Letting
-	// it keep trying costs one cheap 403 per wake and recovers on its own.
+	// and a block would be hard to leave. This function re-runs on every tick, but the
+	// STATE it reads is only re-hydrated when the identity revision moves (see
+	// refreshAuthPosture), and an administrator registering the OAuth client or granting
+	// the permission moves nothing — so the daemon would stay blocked until the process
+	// restarted, long after the deployment was fixed. Letting it keep trying costs one
+	// cheap 403 per wake and recovers on its own.
 	state := r.auth.State()
 	// Remember having HAD a session. What this gate must catch is a session ENDING, and
 	// StateSignedOut cannot say that on its own: it is equally the state of a machine

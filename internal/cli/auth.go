@@ -77,7 +77,7 @@ func AuthUsage() string {
 		"  login       sign in with your Daintree account (opens a browser)",
 		"  status      show the signed-in account and plan",
 		"  logout      sign out on this machine",
-		"  disconnect  revoke Daintree Assistant for every device (opens the website)",
+		"  disconnect  print the account page, where access can be revoked for every device",
 	}, "\n")
 }
 

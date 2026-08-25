@@ -38,7 +38,7 @@ func tierGloss(t domain.Tier) string {
 // mastheadBackend names a NON-DEFAULT backend endpoint, or "" for the deployed one.
 //
 // Only a deviation is announced: the deployed backend is what every install talks to
-// and needs no statement. Since sign-in went away there is no other on-screen readout
+// and needs no statement. The masthead carries no other endpoint readout
 // of which backend answered a turn, so an endpoint exported in another terminal is
 // otherwise completely invisible — and a transcript that does not say it was talking to
 // a local backend is a transcript that cannot be trusted.

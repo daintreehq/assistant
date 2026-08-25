@@ -35,9 +35,10 @@ backend owns the system prompt, developer instructions, **runbook selection**, m
 choice, prompt assembly, and the utility-model prompts. The CLI executes the local
 tool calls the backend asks for and streams the assistant's text. See `docs/BACKEND.md`.
 
-**The backend owns the upstream credential, and the CLI has none.** Every model call —
-main and utility alike — is funded by a key the SERVER holds; the CLI ships no provider
-credential and asks the user for none. Model identities that appear in this repo's
+**The backend owns the upstream PROVIDER credential, and the CLI has none.** Every model
+call — main and utility alike — is funded by a key the SERVER holds; the CLI ships no
+provider credential and asks the user for none. That is separate from the ACCOUNT
+credential below, which says who is calling and not what pays. Model identities that appear in this repo's
 comments are the backend's upstream route ids, not direct provider integrations; where a
 comment names model-specific protocol behaviour, read it as "that model's behaviour when
 reached through the backend's upstream". There is no provider API key anywhere in this
@@ -51,7 +52,7 @@ process.
 > shape, fix it directly in `../assistant-backend` (prompt/runbook changes land there; local
 > tool-shape changes land here) — no need to ask first.
 
-**Endpoint, and NO sign-in.** The default endpoint is the deployed backend,
+**Endpoint.** The default endpoint is the deployed backend,
 `https://assistant.daintree.org` (`backend.DefaultBaseURL`); `backend.LocalBaseURL` is
 the local one (`http://127.0.0.1:8473`) you get by running `../assistant-backend`
 (`python -m daintree_assistant_server`). Three ways to choose, highest first:
@@ -81,22 +82,56 @@ unreadable stored preference), surfaced via `cfg.EndpointInsecureRejected`. See
 `backend.ValidatePlaintextRemote` / `internal/app/backendswitch.go`'s own
 independent check on the interactive `/backend <url>` path (no escape hatch there).
 
-**There is no sign-in, and the CLI stores no credential.** The backend holds its own
-upstream key and serves a request that carries **no `Authorization` header at all**, so
-the CLI never prompts for a key, never writes one to disk, and never gates startup on
-one. `login` / `logout`, `/auth`, `/login`, any local sign-in sheet, `internal/credentials`
-and the `reset credentials` scope are all GONE — do not reintroduce them. That is a
-deliberate stage, not the destination: Daintree account authentication is being built
-next, and it lands in the seams kept alive for it, not in a rebuilt OpenRouter-key flow.
+**Accounts exist, and whether one is REQUIRED is the deployment's answer, not this
+build's** — the deployed backend's configuration answers no today (`AUTH_MODE` defaults
+to `open` and the deployment sets no Supabase values). `internal/auth` is the CLI's account authority: OAuth Authorization Code +
+PKCE against Supabase, the refresh token in the OS credential store and nowhere else, the
+access token in process memory and nowhere else, refresh under a cross-process lock, and
+one typed state machine every surface renders (`auth login` / `status` / `logout` /
+`disconnect`). Auth state is per USER, at the state ROOT — so one login covers every
+project sharing that root, which an explicit `--state-dir` deliberately does not.
 
-Two of those seams are load-bearing and must stay:
+The deployment decides whether any of it applies. A backend answers
+`GET /v1/daintree/auth/config` with a manifest carrying `configured` and `required`, and
+a deployment with no identity provider returns exactly four fields — `version`,
+`environment`, `configured`, `required` — and no issuer, client id, endpoints or links: a
+CORRECT response that fails manifest validation by design. Requests then go out with no
+`Authorization` header at all and the backend serves them, which is what every install
+does today. `auth.Availability` carries that answer through to status, and it is the one
+thing that must never be rendered as a session or as an outage: see
+`Status.WithAvailability`, where a known `configured:false` overrides the credential
+state, because the credential store knows nothing about the deployment.
+
+**The backend's answer about the account reaches the state machine.** A protected 2xx
+confirms the session; an expired credential is refreshed and the request replayed once,
+and only before anything visible has been streamed (a preamble counts); a revocation
+deletes the stored credential and bumps the shared revision so another process notices;
+plan and dependency failures preserve it. (Cleanup is best-effort: the delete, the
+descriptor removal and the revision bump are each attempted and their errors ignored, so
+the local state is authoritative and the stored copy may briefly outlive it.) The seam is
+`backend.AccountObserver`,
+implemented by `*auth.Manager` and held on `App.Auth` — ONE per process, shared with the
+supervisor's spend gate, because a verdict landing on an object the gate never reads is
+the bug that shape exists to prevent. Verdicts arrive late, so every write rechecks the
+identity generation inside the section that performs it.
+
+**The one remaining gap, and it is a real one:** a turn still surfaces most account
+failures as a generic "Model error" (`agent/session.go` `classifyBackendError` — only
+`account_rate_limited` gets its own wording, via `IsRateLimited`), and the host protocol
+emits `turn-error` for all of them. Nothing reads `App.Auth` to render account STATE:
+its only readers construct the token source and replace it on a `/backend` switch.
+
+Two further seams are load-bearing and must stay:
 
 - **`DAINTREE_API_KEY`** still resolves into `cfg.APIKey` (trusted env ONLY — a project
   `.env` may supply neither it nor the URL, since one steals a spendable credential and
   the other redirects where it is sent), as does **`--api-key-file PATH`** for a headless
   caller (a path, never `--api-key`: argv is world-readable through `ps`). When set, the
-  client sends it as the bearer and the backend PREFERS it over its own key for that
-  request. Nothing sets either on a normal install; they stay live, with the header, the
+  client sends it as the bearer. What the backend does with it is NOT "spend it instead":
+  in `open` mode it is not read at all, and in `observe`/`enforce` it is interpreted as an
+  ACCOUNT token, never a provider key. Every model call is funded by the server's own
+  credential either way (`serving_api_key`), so this variable changes who is CALLING, not
+  who pays. Nothing sets either on a normal install; they stay live, with the header, the
   shape check and `backend.ScrubKey`, so a per-account credential later becomes a VALUE
   flowing through existing plumbing rather than new plumbing. A NAMED key that cannot be
   read is fatal, never a fallback — falling through to the backend's own would bill the
@@ -105,11 +140,40 @@ Two of those seams are load-bearing and must stay:
   a client rebuild reaches Session, watchers, asyncwork and the workflow layer without
   re-wiring. Nothing swaps today; in-place re-authentication is what it is kept for.
 
-`POST /v1/daintree/auth/verify` survives too, with its question changed: it now answers
-for whichever key the request WOULD spend — the backend's own, on every normal install —
-so it is the one probe that can say "this deployment can actually run a turn" before a
-turn is spent finding out. `doctor` is its only caller (`upstream credential` row). The
-CLI must never probe a provider itself.
+`POST /v1/daintree/auth/verify` answers for whichever key the request WOULD spend — the
+backend's own, on every normal install — so it is the one probe that can say "this
+deployment can actually run a turn" before a turn is spent finding out. `doctor` is its
+only caller (`upstream credential` row), and it branches on the stable `reason`, never on
+the prose `detail`. The CLI must never probe a provider itself.
+
+**The OAuth shape is fixed and pinned.** The callback is exactly
+`http://127.0.0.1:42813/oauth/callback` — Supabase matches redirect URIs exactly, so
+binding a different port would produce a `redirect_uri` the provider has never seen. A
+REMOTE issuer must sit under `supabase.co` or `daintree.org`, and remote browser links
+under `daintree.org` (literal loopback is exempt, which is the local-development shape),
+both matched on a LABEL boundary (`notdaintree.org` and
+`daintree.org.evil.example` are refused). Manifest validation takes the expected redirect
+and NOTHING else — no backend, no origin — which is what lets `assistant.daintree.org`
+serve a manifest saying `environment: staging` with links on `staging.daintree.org`
+without `staging.daintree.org` ever being hardcoded as a backend.
+
+**The refresh token is the only account secret that persists, and the OS keychain is
+the only place it goes.** macOS Keychain, Linux Secret Service. The access token is never
+persisted at all. Neither is written to `state.db` or any file, passed in argv, put in an
+environment variable, or sent over the daemon's control socket — the state root holds only
+`auth/credential.json` (a non-secret descriptor naming WHICH credential), the revision
+marker and lock files. Where no credential service is reachable — a headless box with no
+session bus, a locked store — there is no persistence at all: `auth status` reports
+`credentials  this process only`, and since `auth login` is itself a short-lived process,
+a login on that tier is gone the moment the command exits.
+
+**`logout` and `disconnect` are different operations, and neither revokes anything
+remotely.** `logout` deletes the credential from THIS machine and bumps the shared
+revision so a running daemon stops spending; there is no server-side sign-out call, which
+is why `Manager.Logout` returns `revokedRemotely` and it is always false. `disconnect`
+does even less: it validates and PRINTS the account-page URL (after confirming, since the
+action it points at affects every device) and opens no browser. Whether anything is
+revoked depends on what the user does on that page, and the CLI cannot confirm it.
 
 ## Commands
 
@@ -156,13 +220,18 @@ go run ./cmd/tooldump -workflow-intelligence=false  # …WITHOUT the graph tools
 ```
 
 CI additionally runs on **macOS and Linux** (PTY harness on macOS, race detector on
-Linux), diffs the generated docs, runs `govulncheck`, and scans the working tree for
-literal credentials with both `gitleaks` and a scan-grade SUBSET of the project's own
-patterns (`redact.FindLiteralSecrets`, pinned by `TestRepositoryContainsNoCredentials`).
-The subset is narrower on purpose: redaction errs toward masking, but a scanner that fires
-on this repo's own prose about credential shapes gets switched off. A credential-shaped
-string in the tree must announce itself as a fixture ("fake", "test", "example") — so a
-real key, which never does, still trips it. A tagged push builds macOS/Linux archives with
+Linux), diffs the generated docs, runs `govulncheck`, and scans for literal credentials
+with TWO scanners that read different things. `gitleaks` reads git HISTORY (hence
+`fetch-depth: 0`): a credential committed and "removed" a week later is still in the
+history and still needs rotating, and only a history scan finds it. The project's own
+`redact.FindLiteralSecrets`, pinned by `TestRepositoryContainsNoCredentials`, reads the
+WORKING TREE with a scan-grade SUBSET of the redaction patterns — narrower on purpose,
+because redaction errs toward masking and a scanner that fires on this repo's own prose
+about credential shapes gets switched off. A credential-shaped string must announce itself
+as a fixture ("fake", "test", "example") — so a real key, which never does, still trips it.
+The one escape from that rule is `.gitleaksignore`, a per-finding fingerprint for a
+fixture already committed before the rule existed: history is immutable, so such a value
+can never grow a marker. Each entry records why it is not a leak. A tagged push builds macOS/Linux archives with
 checksums and an SBOM (`.github/workflows/release.yml`); it does not sign or notarize,
 because that needs an Apple certificate this repo cannot provision.
 
@@ -197,6 +266,11 @@ internal/
   storage/       Store (store.go) over modernc.org/sqlite — timers, watchers, events, audit,
                  conversation, grants, memory; watchers/async/the attention inbox are
                  PROJECT-scoped and adopted (never cancelled) on Open — see BeginOwnership
+  auth/          the account authority: OAuth discovery + PKCE login, the refresh token in
+                 the OS credential store, refresh under a cross-process lock, logout, and
+                 the typed state machine + redacted Status every surface renders. Also the
+                 backend.AccountObserver: it is what turns a backend account verdict into
+                 local state. Per USER, at the state ROOT — one login covers every project
   backend/       Daintree backend client — the CLI's ONLY model gateway. client.go (Respond/
                  RunTask/Health), contracts.go (strict wire envelope), sse.go (named-event
                  meta/delta/done/error parser), tasks.go (server-owned utility tasks). See docs/BACKEND.md

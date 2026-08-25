@@ -534,18 +534,22 @@ selection rather than replacing it, so the turn still loads whatever else it nee
 
 Four rules worth knowing before you script against them:
 
-- **You need no key.** There is no sign-in: the backend holds its own upstream
-  credential, so a headless run works with nothing but a prompt. `--api-key-file` and
-  `DAINTREE_API_KEY` are for the case where you want a SPECIFIC account to fund the run
-  instead — the backend prefers a caller-supplied key over its own.
+- **You need no key.** The backend holds its own upstream credential and funds every
+  model call from it, so a headless run works with nothing but a prompt. `--api-key-file`
+  and `DAINTREE_API_KEY` do NOT change that: they supply a bearer that says who is
+  CALLING, which a deployment with accounts configured will verify and one without will
+  ignore entirely. Neither pays for anything. If a deployment does require an account,
+  sign in interactively once (`daintree-assistant auth login`) and headless runs on that
+  machine pick the session up from the keychain — there is no headless login flow,
+  because the authorization code arrives through a browser.
 - **The key never rides argv.** `ps` is world-readable, so `--api-key-file` takes a
   path. The file is read with a bounded read (a FIFO would otherwise defeat
   `--timeout`) and checked with the same shape rule `DAINTREE_API_KEY` gets, so a stray
   newline fails locally instead of as an opaque header error every turn.
 - **A named key that cannot be read is FATAL, never a fallback.** Both a missing file
   and `--api-key-file=` — what a harness produces when it expands an unset variable —
-  fail at the argument boundary. Falling through to the backend's own credential would
-  bill the wrong account and hide the mistake behind a successful-looking run.
+  fail at the argument boundary. Falling through to an anonymous request would run the
+  turn as a different principal and hide the mistake behind a successful-looking run.
 - **An explicitly false boolean wins.** `--auto-approve=false` beats
   `DAINTREE_ASSISTANT_AUTO_APPROVE=1`. An *absent* flag leaves the env in charge.
 
@@ -553,8 +557,11 @@ Four rules worth knowing before you script against them:
 
 A harness should never touch the developer's real state. `--state-dir` relocates the
 database, the artifacts and the owner lease, so an isolated run shares nothing with a
-attached session the developer has open. Nothing else needs supplying — there is no credential to
-carry across:
+attached session the developer has open. Nothing else needs supplying against a backend
+that asks for no account — which is every deployment today. Note that `--state-dir` is
+also the account boundary: a login lives under the state ROOT, so an isolated run does
+NOT inherit the developer's session, and against a deployment that required one it would
+have to sign in under that directory itself.
 
 ```bash
 daintree-assistant \

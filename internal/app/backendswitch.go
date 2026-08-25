@@ -14,8 +14,8 @@ import (
 
 // backendswitch.go is `/backend`: choosing which Daintree backend answers this session.
 //
-// It exists because dropping the sign-in dropped the endpoint picker with it. The
-// endpoint itself still had two perfectly good mechanisms (DAINTREE_BACKEND_URL and
+// It exists because the endpoint deserves a first-class choice at runtime, not only at
+// launch. The endpoint itself had two perfectly good mechanisms (DAINTREE_BACKEND_URL and
 // --backend-url), but both are decided BEFORE launch, and switching meant quitting. This
 // puts the choice back where it is actually made — mid-session, while comparing a local
 // backend against the deployed one — without putting a credential store back with it.

@@ -59,8 +59,9 @@ either.
 
 ## What it costs you
 
-**Nothing.** There is no key to supply and no account to fund: the backend holds the
-upstream credential and Daintree pays for every model call — turns you type, and also:
+**Nothing.** There is no key to supply, and the backend you are pointed at does not ask
+for an account: it holds the upstream credential and Daintree pays for every model call —
+turns you type, and also:
 
 - watcher checks (a small model classifying terminal output, on a cadence)
 - async supervision waking the assistant when work completes

@@ -40,11 +40,22 @@ class implies, is a security bug even when nothing leaked. Include:
 
 ## The model this project is defending
 
-The CLI normally holds **no upstream credential at all** — the backend supplies its own,
-and a request carries no `Authorization` header. What it does hold is the Daintree MCP
-token, which authorises **system-tier** actions for its validity window, plus an optional
-`DAINTREE_API_KEY` bearer on the rare install that sets one. Both are treated as material
-that must never reach a durable or shareable surface.
+The CLI holds **no upstream provider credential at all** — the backend supplies its own,
+and on a deployment with no account layer a request carries no `Authorization` header.
+What it can hold is:
+
+- the **Daintree MCP token**, which authorises **system-tier** actions for its validity
+  window;
+- an **account refresh token**, where a deployment configures accounts, in the OS
+  credential store (macOS Keychain / Linux Secret Service) and never on the project state
+  path, and the **access token** derived from it, in process memory only;
+- an optional **`DAINTREE_API_KEY`** bearer on the rare install that sets one.
+
+All of them are treated as material that must never reach a durable or shareable surface.
+`internal/redact` masks credential shapes plus values registered at runtime — the MCP
+token, and every account token the auth layer issues — at the write boundary of the debug
+log, the audit rows and the support bundle. Registration is additive on purpose: a rotated
+token stays registered, because a line written under it is still on disk.
 
 Enforced properties, each with tests:
 

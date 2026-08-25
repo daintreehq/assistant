@@ -11,9 +11,13 @@ import (
 	"github.com/daintreehq/assistant/internal/debuglog"
 )
 
-// backendclient.go builds the one backend client the App talks through. It was carved
-// out of the old signin.go, which went away with the sign-in itself: the backend now
-// holds its own upstream credential and serves a request that carries no Authorization
+// backendclient.go builds the one backend client the App talks through, and the one
+// account manager that credentials it. The two are built together on purpose: the object
+// that issues a credential has to be the object told what the backend said about it.
+//
+// The backend holds its own upstream PROVIDER credential, so a request needs no key in
+// order to have one to spend, and on a deployment with no account layer it carries no
+// Authorization
 // header, so there is no key to prompt for, store, verify, or swap in place.
 
 // backendClientConfig builds the backend client options from resolved config.

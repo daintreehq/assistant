@@ -5,7 +5,27 @@ guarantees, and the SQLite schema is a single clean baseline rather than a migra
 
 ## Unreleased — internal beta preparation
 
-### Changed — no sign-in, no API key
+### Added — Daintree account sign-in
+
+- **`daintree-assistant auth login | status | logout | disconnect`.** A browser
+  Authorization Code + PKCE flow; the refresh token goes to the OS credential store
+  (macOS Keychain, Linux Secret Service) and nowhere else, and the access token stays in
+  process memory. One login covers every project sharing a state root.
+- **Whether you need one is the BACKEND's answer, not the binary's.** A deployment
+  publishes `configured` and `required`; the one this build points at today publishes
+  neither, so nothing changes for anyone — `auth status` says
+  `accounts  not offered by this backend`.
+- **The backend's account verdicts now change local state.** A confirmed request marks
+  the session active, an expired credential is refreshed and the request replayed once
+  (never after anything visible has streamed), a revoked session is deleted locally, and
+  plan or dependency failures leave it alone. Unattended supervision stops when a session
+  it was using ends.
+- `DAINTREE_API_KEY` is unchanged and still not a way to pay: it says who is calling.
+
+### Changed — no API key to paste
+
+The entry below is kept as written when it landed. Sign-in returned in the form above,
+which is an ACCOUNT, not the provider key this describes removing.
 
 - **The CLI no longer asks for, verifies, or stores a credential.** The backend holds its
   own upstream key and serves a request that carries no `Authorization` header, so

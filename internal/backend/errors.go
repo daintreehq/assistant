@@ -38,8 +38,10 @@ type EnvelopeError struct {
 //     directions — replaying a deterministic verdict burns the whole retry budget to
 //     re-derive the same answer, and failing to replay a transient one turns a blip
 //     into a failed turn.
-//   - Whose problem it is. The account codes are the caller's own OpenRouter settings;
-//     the routing code is their policy; the two "rejected/protocol" codes are ours.
+//   - Whose problem it is. The provider-account codes describe the credential the
+//     BACKEND spends upstream; the routing code is the caller's policy; the two
+//     "rejected/protocol" codes are ours. (Not to be confused with account.go's codes,
+//     which are about who is CALLING — a different question with a different remedy.)
 //     Only distinct codes can produce distinct advice, which is what
 //     internal/agent/session.go renders.
 //

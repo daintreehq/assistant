@@ -37,9 +37,10 @@ without `-e` a `false` result still exits 0.
 
 ## `auth.credentialUsable` — the provider rejected this credential
 
-There is nothing for you to paste: on a normal install this row reports on the
-**backend's own** upstream credential, and its detail says so (`the backend's own`). A
-rejection there is ours to fix — report it.
+There is nothing for you to paste: this row reports on the **backend's own** upstream
+provider credential, and its detail says so (`the backend's own`). It is not a question
+about your account — `daintree-assistant auth status` answers that one. A rejection here
+is ours to fix; report it.
 
 The one case where it is yours: if the detail reads `(yours, from DAINTREE_API_KEY)`, you
 have that variable exported and the backend is spending YOUR key instead of its own.
@@ -120,8 +121,10 @@ somewhere writable.
 
 ## `state.dir` — readable by other users
 
-Run the `chmod` doctor prints. There is no credentials file to worry about — this CLI
-stores no key at all — but the state dir still holds your conversation database and
+Run the `chmod` doctor prints. No secret lives there — the state dir holds only a
+non-secret `auth/credential.json` descriptor naming which account this machine has, if
+any, while the token itself is in your OS keychain — but it still holds your conversation
+database and
 artifacts, so a mode wider than the CLI wrote means something else changed it.
 
 ## `state.schema` — the database is from an older version

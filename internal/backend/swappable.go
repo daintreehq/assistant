@@ -15,10 +15,12 @@ import (
 // turns). Reassigning a plain `App.Backend` field under all that is a data race, and
 // threading a guarded accessor through four subsystems would touch every call site.
 //
-// NOTHING SWAPS TODAY: the sign-in that used to re-authenticate in place is gone, since
-// the backend now holds its own upstream credential. The wrapper is kept deliberately —
-// account sign-in is being built next, and landing it here is a delegate swap rather than
-// a re-wiring of every consumer above.
+// WHAT SWAPS: `/backend`, which points the session at a different deployment. That is a
+// new endpoint AND a new account authority — a credential is minted for one deployment
+// and must never be presented to another — so the swap rebuilds the client and the
+// manager together (internal/app/backendswitch.go). An ordinary token refresh does NOT
+// come through here: TokenSource changes the credential for the same endpoint, one level
+// below, so an hourly rotation touches neither the transport nor any consumer's handle.
 //
 // Instead the app hands out ONE Swappable at construction and never replaces the
 // reference. Every consumer keeps the pointer it already has; a swap changes only what

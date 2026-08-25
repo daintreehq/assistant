@@ -602,8 +602,10 @@ func Create(opts CreateOptions) (*App, error) {
 	//
 	// The endpoint comes from the resolved config (internal/config) — app.Create never
 	// reads the environment itself, so every entry point (attached session, one-shot, host,
-	// supervisor daemon) is configured identically. There is no credential to resolve
-	// on the normal path: the backend holds its own upstream key and serves a request
+	// supervisor daemon) is configured identically. There is no PROVIDER credential to
+	// resolve on any path — the backend holds its own upstream key. Whether an ACCOUNT
+	// credential goes out is decided per request by the token source below, and on a
+	// deployment with no account layer the answer is no: the backend serves a request
 	// with no Authorization header. cfg.APIKey is set only when DAINTREE_API_KEY named
 	// one, and then it overrides the backend's own for this session's calls.
 	//

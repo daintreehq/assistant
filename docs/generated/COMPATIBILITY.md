@@ -47,7 +47,9 @@ count-only check could not see).
 | Deployed (default) | `https://assistant.daintree.org` |
 | Local development | `http://127.0.0.1:8473` |
 
-Selected with `DAINTREE_BACKEND_URL`; there is no sign-in and no key to supply.
+Selected with `DAINTREE_BACKEND_URL`. There is no provider key to supply — the
+backend holds its own. Whether an ACCOUNT is needed is the deployment's answer,
+discovered per endpoint; `daintree-assistant auth status` reports it.
 A **remote** endpoint that does not serve `/v1/daintree/auth/verify` is a `doctor`
 failure; only a loopback endpoint is forgiven. See `docs/BACKEND.md`.
 

@@ -141,6 +141,37 @@ so a fully-detached daemon can only *watch* again once a new assistant launch pu
 fresh credentials. That limit is inherent to Daintree's env-only, per-session token
 model and is stated honestly in the blocked inbox item.
 
+## The account gate (a different credential entirely)
+
+The MCP token above says the daemon may talk to Daintree. The ACCOUNT credential
+(`internal/auth`) says who is CALLING — the backend funds every model call from its own
+provider key either way — and it gates something sharper: a wake turn is a paid request
+made with nobody watching, and after a logout this process still holds an access token
+that stays valid until its expiry. `authorizedToSpendLocked` refuses one.
+
+It shares ONE `*auth.Manager` with the App that makes the requests — injected through
+`app.CreateOptions.AuthManager` — so the verdicts those requests produce land on the
+object the gate reads. Two managers meant the gate deciding from a state nothing updated.
+
+What it refuses is a session that ENDED, which is not the same as one that never began:
+
+- **Never signed in** — every install today — keeps working. The backend's open door
+  serves anonymous requests, and the manager reaches `signed_out` on its own the first
+  time anything asks it for a credential. Blocking on that state alone stopped unattended
+  work everywhere after a single request.
+- **A session the daemon OBSERVED as live, then sees end**, stops it. A logout in
+  another process bumps the shared revision, `refreshAuthPosture` notices on the next
+  check, and `Runtime.authSawSession` is what remembers there was a session to lose. The
+  pause itself is announced once per transition, by `authBlocked` / `authJustBlocked`. A
+  login and logout that both fall between two observations set nothing.
+- A fresh daemon on an already-logged-out machine cannot reliably tell the two apart:
+  logout deliberately erases the evidence. The guarantee is about a transition it saw.
+- A settled 403 (`access_refused`) is deliberately NOT a blocking state. It is refused at
+  the backend's own door, so no provider is reached and there is no spend to stop — while
+  a block would be hard to leave: the gate re-runs on every tick, but the account STATE it
+  reads is only re-hydrated when the identity revision moves, and an administrator fixing
+  the deployment moves nothing. Letting it keep trying costs one cheap 403 and recovers.
+
 ## Files
 
 - `internal/ipc` — flock leases, socket path derivation, NDJSON control protocol.

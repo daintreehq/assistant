@@ -2,13 +2,14 @@ package backend
 
 import "strings"
 
-// verify.go holds what survives of key verification now that there is no sign-in.
+// verify.go answers one question: can this deployment actually fund a turn?
 //
-// The CLI never asks for a credential: the backend holds its own and serves a request
-// with no Authorization header. But `/v1/daintree/auth/verify` did not go away — it
+// It is about the PROVIDER credential behind the backend, never the caller's account —
+// two different questions that `doctor` reports as two different rows. The CLI never asks
+// anyone for a provider key: the backend holds its own. `/v1/daintree/auth/verify`
 // answers for whichever key the request WOULD spend, the backend's own on every normal
-// install — so it is still the one probe that can say "this deployment can actually run
-// a turn" before a turn is spent finding out. `doctor` is its caller now.
+// install, and it is the one probe that can say "this deployment can actually run a turn"
+// before a turn is spent finding out. `doctor` is its only caller.
 
 // The stable machine-readable outcomes `/v1/daintree/auth/verify` answers with. The
 // backend composes `detail` from these (`_REASON_DETAIL` in its daintree_auth.py) and

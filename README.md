@@ -19,8 +19,10 @@ product surface.
 a *visible* agent in a worktree and supervises it.
 
 Every model call takes one path — CLI → Daintree Assistant backend → the upstream
-provider → the selected model. The CLI holds no credential at all: the backend supplies
-the upstream key and owns the system prompt, runbook selection, and model choice. See
+provider → the selected model. The CLI holds no PROVIDER credential: the backend supplies
+the upstream key and owns the system prompt, runbook selection, and model choice. (It can
+hold an ACCOUNT credential — see sign-in below — which says who is calling, not what
+pays.) See
 [`docs/BACKEND.md`](docs/BACKEND.md).
 
 ## Supported platforms
@@ -55,9 +57,15 @@ go install github.com/daintreehq/assistant/cmd/daintree-assistant@latest
 daintree-assistant doctor     # read it top to bottom; you want no FAIL lines
 ```
 
-**There is no sign-in and no API key to paste.** The backend holds the upstream
-credential and Daintree pays for the model calls, so the binary works as soon as it is on
-your `PATH`. Account sign-in is being built; when it arrives, this section grows a step.
+**There is no API key to paste, and today there is nothing to sign in to either.** The
+backend holds the upstream credential and Daintree pays for the model calls, so the binary
+works as soon as it is on your `PATH`.
+
+The binary does have accounts — on a deployment that offers them, `daintree-assistant
+auth login` opens a browser and stores a token in your system keychain — but whether one
+is needed is the BACKEND's answer, and the deployed one does not ask. `daintree-assistant
+auth status` says which of those you are looking at: `accounts  not offered by this
+backend` means there is nothing to do.
 
 One thing that trips people up: `go install` writes to `$(go env GOPATH)/bin` (usually
 `~/go/bin`), **which is not on `PATH` by default on macOS** — so the install succeeds and

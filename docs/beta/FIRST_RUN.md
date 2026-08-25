@@ -38,20 +38,36 @@ copy — it cannot remove one that is already there, which is what `doctor` find
 
 ---
 
-## 2. There is nothing to sign in to
+## 2. There is nothing to sign in to — for now
 
 No key, no login, no account. The Daintree Assistant backend holds its own upstream
 credential and **Daintree pays for the model calls** — including the background ones
 (watcher checks, async completions, summarize/extract/classify) that happen while you are
 not looking.
 
+The binary *can* sign in — on a deployment that offers accounts, `daintree-assistant
+auth login` opens a browser and keeps a token in your system keychain — but whether it
+needs to is the backend's decision, not this build's, and the one you are pointed at does
+not ask. `auth status` tells you which:
+
+```
+  accounts     not offered by this backend
+  state        this backend has no accounts
+```
+
+If it ever says `accounts  required`, that is when you sign in. Two notes for when you do.
+The refresh token lives in the macOS Keychain or the Linux Secret Service and nowhere
+else, so on a box with neither there is no persistence at all and the login is gone when
+the command exits (`auth status` says `credentials  this process only`). And `auth logout`
+signs out THIS machine only — there is no remote sign-out — while `auth disconnect` prints
+the account page, which is where access can be revoked for every device.
+
 No model-provider credential is stored on your machine, and nothing reaches a model
 provider from it directly: the CLI sends its requests to the backend with no
 `Authorization` header, and the backend does the rest. The CLI does store project-scoped
 conversation and operational state locally (`state.db` under `~/.daintree/assistant-cli/`)
 so sessions, memories, supervision, audit, and recovery can work — see
-[`PRIVACY_AND_DATA.md`](PRIVACY_AND_DATA.md) for exactly what and for how long. Account
-sign-in is being built; when it lands, this page grows a step.
+[`PRIVACY_AND_DATA.md`](PRIVACY_AND_DATA.md) for exactly what and for how long.
 
 ---
 

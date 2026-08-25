@@ -735,8 +735,12 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 //
 // The local credential is deleted REGARDLESS of whether the provider could be reached.
 // A user must always be able to remove access from their own machine; making that
-// conditional on a network call means an offline laptop cannot be signed out. The caller
-// is told when server-side revocation could not be confirmed.
+// conditional on a network call means an offline laptop cannot be signed out.
+//
+// It is LOCAL ONLY, and the return type says so rather than implying otherwise: there is
+// no server-side sign-out call, so `revokedRemotely` is always false today. Revoking the
+// grant across every device is a separate, website-side action — see `auth disconnect`,
+// which prints the page and revokes nothing itself.
 func (m *Manager) Logout(ctx context.Context) (revokedRemotely bool, err error) {
 	// The key comes from discovery when the backend is reachable, and from the
 	// descriptor written at login when it is not.

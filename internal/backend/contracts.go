@@ -37,16 +37,21 @@ const ProtocolVersion = 3
 
 // DefaultBaseURL is the deployed backend, and the endpoint a fresh install uses.
 //
-// THERE IS NO SIGN-IN. The backend holds its own upstream credential and funds every
-// turn from it, so a request carries no Authorization header at all and an anonymous
-// principal is a valid caller. `DAINTREE_API_KEY` remains supported — a caller-supplied
-// bearer still WINS over the backend's own credential for that request — but it is
-// unset on a normal install.
+// AN ANONYMOUS PRINCIPAL IS A VALID CALLER, and on this deployment it is the only one:
+// the backend holds its own upstream credential and funds every turn from it, so a
+// request carries no Authorization header at all. A deployment CAN configure accounts
+// (see internal/auth), in which case the account's access token rides protected paths —
+// but that is the deployment's answer, discovered per endpoint, not a property of this
+// build. `DAINTREE_API_KEY` remains supported on top of either, and is unset on a normal
+// install — but it is not a way to PAY. It wins over this client's account manager, and
+// the backend either ignores it entirely (open mode) or verifies it as an ACCOUNT token;
+// every model call is funded by the server's own credential regardless.
 //
-// (This comment previously described a mandatory per-caller API key and pointed at
-// `internal/credentials` and `internal/cli/login.go`. Both were deleted with the
-// backend migration; the sign-in it described has not existed for some time. See
-// docs/BACKEND.md, which is the live account of how a turn is funded.)
+// (This comment once described a mandatory per-caller API key that funded the turn. That
+// is gone in both halves: the CLI's own key flow was deleted with the backend migration,
+// and the backend now funds every call from `serving_api_key`. Account sign-in exists
+// again — see internal/auth — but it answers who is calling, not what pays. See
+// docs/BACKEND.md, which is the live account of both.)
 const DefaultBaseURL = "https://assistant.daintree.org"
 
 // LocalBaseURL is the local development backend (`python -m daintree_assistant_server`

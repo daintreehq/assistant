@@ -40,28 +40,40 @@ Two constants: `backend.DefaultBaseURL` = `https://assistant.daintree.org` (the 
 backend, and the default for a fresh install) and `backend.LocalBaseURL` =
 `http://127.0.0.1:8473` (a backend you run yourself).
 
-**There is no sign-in.** The backend holds its own upstream credential and funds every
-turn from it, so a request needs to carry no key in order to have one to spend, and
-`auth.authenticate` returns an anonymous principal for a request with no `Authorization`
-header. That is what the CLI sends. It never prompts for a key, never writes one to disk,
-and never gates startup on one.
+**Whether a request carries a credential is the deployment's answer.** The backend holds
+its own upstream credential and funds every turn from it, so a request needs to carry no
+key in order to have one to spend: `auth.authenticate` returns an anonymous principal for
+a request with no `Authorization` header, and that is what the CLI sends on every install
+today. It never prompts for a provider key, never writes one to disk, and never gates
+startup on one.
 
-This is a **stage, not a destination**: Daintree account authentication is being built,
-and it lands in the seams below rather than in a rebuilt key flow. Do not reintroduce
-`login`, `logout`, `/auth`, `/login`, a credentials file, or a startup sign-in gate.
+The CLI does have ACCOUNTS (`internal/auth`, and `daintree-assistant auth …`), and when a
+deployment configures an identity provider it sends the account's access token as the
+bearer on protected paths. Discovery decides: `GET /v1/daintree/auth/config` answers with
+`configured` and `required`, and a deployment with neither returns just those two flags —
+no issuer, no client id — which the CLI reads as "no accounts here", not as a fault. The
+protected/public split matters here: `/healthz`, `/readyz`, `/version` and the discovery
+endpoint itself never wait on a credential, because they are exactly what someone probes
+when their login is broken.
 
-Three things stay live because that next step needs them:
+**The backend's account verdicts change local state.** The codes in `account.go` are not
+just for display: a protected 2xx confirms the session, `auth_token_expired` gets one
+refresh and one replay (never after anything visible has streamed), `auth_session_revoked`
+deletes the stored credential, and the 402/503 families preserve it. See
+`backend.AccountObserver`.
 
-| seam | state today | why it is kept |
+Three surfaces carry that, and what each one actually does:
+
+| surface | state today | what it does |
 |---|---|---|
-| `DAINTREE_API_KEY` → `cfg.APIKey` → `Authorization: Bearer` | unset on a normal install | a caller-supplied bearer still WINS: the backend prefers it over its own credential for that request. Keeping the header, the shape check and `ScrubKey` alive makes a per-account credential a *value* flowing through existing plumbing |
-| `App.Backend` is a `backend.Swappable` | nothing swaps | every consumer holds the wrapper, so in-place re-authentication is a delegate swap rather than a re-wiring of Session, watchers, asyncwork and the workflow layer |
-| `POST /v1/daintree/auth/verify` | `doctor` is the only caller | it now answers for whichever key the request WOULD spend — the backend's own, normally — so it is the one probe that says "this deployment can actually run a turn" |
+| `DAINTREE_API_KEY` → `cfg.APIKey` → `Authorization: Bearer` | unset on a normal install | supplies a bearer identifying the CALLER. It does not fund anything: in `open` mode the backend does not read it, and in `observe`/`enforce` it is verified as an account token. Every model call is funded by the server's own credential regardless. It takes precedence over the account manager on this side, so setting both is a configuration mistake rather than a precedence question |
+| `App.Backend` is a `backend.Swappable` | `/backend` swaps it | a different deployment is a different account authority too, so the swap rebuilds the client AND the manager. An ordinary token refresh does not come through here — `TokenSource` changes the credential for the same endpoint, one level below |
+| `POST /v1/daintree/auth/verify` | `doctor` is the only caller | answers for the PROVIDER credential the request would spend — the backend's own, normally — so it is the one probe that says "this deployment can actually run a turn". It is not a question about the caller's account |
 
 A **malformed** bearer is still a `401 invalid_api_key`, and that asymmetry is deliberate:
 absence is a valid choice, but a header that is present and unusable is a mistake, and
 silently ignoring it would show a caller a successful authentication while every turn ran
-on the backend's account. The CLI shape-checks `DAINTREE_API_KEY` in `config.LoadConfig`
+as an anonymous principal. The CLI shape-checks `DAINTREE_API_KEY` in `config.LoadConfig`
 for the same reason, one layer earlier — nobody is prompted any more, so a mangled value
 arrives from the environment and would otherwise die inside `net/http` as "invalid header
 field value" on every turn, naming neither the variable nor the cause.
@@ -181,8 +193,10 @@ python -m daintree_assistant_server            # serves on 127.0.0.1:8473 (its .
 DAINTREE_BACKEND_URL=http://127.0.0.1:8473 daintree-assistant
 ```
 
-e2e tests use the same override to point at a fake backend. They need nothing else —
-there is no sign-in gate left to clear.
+e2e tests use the same override to point at a fake backend. They need nothing else: a
+fake that serves no discovery route leaves account state UNKNOWN rather than "no accounts
+here" — but a machine with no stored credential short-circuits to an anonymous request
+either way, so nothing gates them.
 
 A remote endpoint's plaintext `http://` is refused by default: `config.LoadConfig` refuses a non-loopback `http://`
 backend URL by default (`backend.ValidatePlaintextRemote`) — a request may carry no

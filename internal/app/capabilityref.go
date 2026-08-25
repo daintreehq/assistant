@@ -313,7 +313,9 @@ func RenderCompatibilityManifest() string {
 	b.WriteString("| Endpoint | URL |\n|---|---|\n")
 	fmt.Fprintf(&b, "| Deployed (default) | `%s` |\n", backend.DefaultBaseURL)
 	fmt.Fprintf(&b, "| Local development | `%s` |\n", backend.LocalBaseURL)
-	b.WriteString("\nSelected with `DAINTREE_BACKEND_URL`; there is no sign-in and no key to supply.\n")
+	b.WriteString("\nSelected with `DAINTREE_BACKEND_URL`. There is no provider key to supply — the\n")
+	b.WriteString("backend holds its own. Whether an ACCOUNT is needed is the deployment's answer,\n")
+	b.WriteString("discovered per endpoint; `daintree-assistant auth status` reports it.\n")
 	b.WriteString("A **remote** endpoint that does not serve `/v1/daintree/auth/verify` is a `doctor`\n")
 	b.WriteString("failure; only a loopback endpoint is forgiven. See `docs/BACKEND.md`.\n")
 

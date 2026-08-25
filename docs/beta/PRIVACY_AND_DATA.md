@@ -77,8 +77,24 @@ window.
 | Artifacts (oversized results, archived transcripts) | `state.db` | 90 days / 1,000 rows — deliberately the same window as the conversation, so a transcript stub can never outlive the payload it points at |
 | Attention inbox | `state.db` | Until resolved (7 days once terminal) |
 
-**No credential is stored at all.** There is no sign-in: the backend holds the upstream
-key and a request from the CLI carries no `Authorization` header.
+**The account subsystem never writes a token to `state.db`.** No provider credential
+exists on your machine at all, and a request from the CLI carries no `Authorization`
+header on the deployment you are pointed at.
+
+If you ever sign in to a deployment that has accounts, the refresh token is the only
+account secret that persists, and it goes to the **macOS Keychain or the Linux Secret
+Service** — never to `state.db`, never to the project directory, never into an environment
+variable or a command line. The access token is never persisted at all; it lives in
+process memory and is gone when the process exits. What the state root does hold is
+`auth/credential.json`, a non-secret descriptor naming WHICH credential this machine has,
+plus a revision marker and lock files. Where no OS credential store is reachable, nothing
+persists and the session dies with the process — `auth status` says `credentials  this
+process only` rather than pretending otherwise.
+
+(One caveat we would rather state than imply: `state.db` holds conversation and tool
+output, and if a credential is *typed into a prompt* or printed by a command, it is in
+there like any other text. That is the same caveat as the rest of this page — the
+account subsystem's own tokens are what never go there.)
 
 And under `~/.daintree/logs/`, only when `DAINTREE_ASSISTANT_DEBUG_LOG=1`:
 
@@ -168,13 +184,17 @@ them for their retention and access policy. What is true here: a **support bundl
 none of it**, and we will not ask for a debug log as a first step.
 
 **Is my key stored anywhere but my machine?** There is no key. This client holds **no
-model or provider credential at all** — there is no sign-in, nothing is written to disk,
-and a normal request carries no `Authorization` header. The backend funds every model
-call from a credential it holds itself.
+model or provider credential at all** — nothing of the sort is written to disk, and a
+normal request carries no `Authorization` header. The backend funds every model call from
+a credential it holds itself. (An ACCOUNT credential, if a deployment ever needs one, is a
+different thing: it says who is calling, not what pays, and it stays in your OS keychain —
+see above.)
 
 The one exception is opt-in and never stored: if you set `DAINTREE_API_KEY`, or point
 `--api-key-file` at a file you already own, that value is forwarded verbatim as a
-per-request bearer so the turn is billed to your account instead. This client neither
+per-request bearer identifying the caller. It does not change who PAYS — every model
+call is funded by the backend's own credential — and a deployment with no account layer
+does not read it at all. This client neither
 persists it nor copies it anywhere; whether the backend does is a property of the
 backend, and its policy is the authority, not this page.
 
