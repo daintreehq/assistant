@@ -719,8 +719,11 @@ func TestBackendRemediesMapToStates(t *testing.T) {
 		backend.RemedySignIn:          StateSignedOut,
 		backend.RemedyRefresh:         StateRefreshing,
 		backend.RemedyRefreshOrSignIn: StateRefreshing,
-		backend.RemedyReconfigure:     StateTemporarilyUnavailable,
-		backend.RemedyNone:            StateUnknown,
+		// NOT StateTemporarilyUnavailable, which is where this used to land. A rejected
+		// OAuth client or a credential without the required permission is SETTLED: the
+		// backend answered, and no retry, refresh or re-login changes the answer.
+		backend.RemedyReconfigure: StateAccessRefused,
+		backend.RemedyNone:        StateUnknown,
 	} {
 		if got := StateForRemedy(r); got != want {
 			t.Errorf("StateForRemedy(%s) = %q, want %q", r, got, want)

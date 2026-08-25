@@ -30,6 +30,20 @@ type Status struct {
 	// tell them apart.
 	Environment string `json:"environment,omitempty"`
 	BackendURL  string `json:"backendUrl,omitempty"`
+	// Configured and AuthRequired describe the DEPLOYMENT, not the credential, and they
+	// are the pair a native consumer needs to tell three situations apart that State
+	// alone renders identically:
+	//
+	//   - accounts not configured here, anonymous requests served (configured false)
+	//   - accounts configured but optional (configured true, authRequired false)
+	//   - accounts required (both true)
+	//
+	// POINTERS because there is a fourth answer — "we could not ask" — and a bare false
+	// would decode as the first one. A consumer that rendered an unreachable backend as
+	// "this deployment has no accounts" would tell someone their sign-in is unnecessary
+	// during an outage. Absent means unknown; branch accordingly.
+	Configured   *bool `json:"configured,omitempty"`
+	AuthRequired *bool `json:"authRequired,omitempty"`
 	// Email is display-only and may be absent. It is never a database join key and is
 	// never persisted — it comes from the backend session endpoint each time.
 	Email string `json:"email,omitempty"`
@@ -124,6 +138,52 @@ func (s Status) WithManifest(m *Manifest) Status {
 	s.Environment = m.Environment
 	s.Links = StatusLinks{Account: m.AccountURL, Subscribe: m.SubscribeURL}
 	s.SessionMaxAgeSeconds = m.SessionPolicy.SessionMaxAgeSeconds
+	configured, required := m.Configured == nil || *m.Configured, m.Required
+	s.Configured, s.AuthRequired = &configured, &required
+	return s
+}
+
+// WithAvailability fills in what the deployment says about accounts.
+//
+// Separate from WithManifest because it is the only one that can be called at all when
+// there is no valid manifest — which is exactly the unconfigured case, the one this pair
+// of fields exists to describe. A caller applies whichever it has; on a normal
+// deployment both run and agree.
+//
+// An availability that is not Known writes NOTHING. Leaving both fields absent is the
+// honest answer for a backend we could not reach, and stamping false would say the
+// deployment has no accounts on the strength of a network failure.
+func (s Status) WithAvailability(a Availability) Status {
+	if !a.Known {
+		return s
+	}
+	configured, required := a.Configured, a.Required
+	s.Configured, s.AuthRequired = &configured, &required
+	// The environment is filled in only if nothing has already set it. A validated
+	// manifest is the better source — it has been through every check — and on a normal
+	// deployment WithManifest runs first; overwriting there would let the pre-validation
+	// copy win for no reason. This is the fallback for the unconfigured case, where
+	// there is no validated manifest at all.
+	if s.Environment == "" {
+		s.Environment = a.Environment
+	}
+	// A KNOWN "no accounts here" overrides whatever the local credential state says, and
+	// this is the single rule that makes the forbidden rendering unreachable rather than
+	// merely unlikely.
+	//
+	// The state is derived from the credential STORE, which knows nothing about the
+	// deployment. So a machine that signed in while accounts existed, on a deployment
+	// that has since turned them off, reports `signed_in_unverified` and
+	// `authenticated:true` beside `configured:false` — and if the store entry is missing
+	// it reports `signed_out` and sends the user to a login no endpoint will answer, and
+	// if the store is locked it reports an outage. Three different wrong answers from
+	// three different local accidents, none of which the deployment cares about.
+	//
+	// Overriding here catches all three at the one point every surface reads.
+	if !configured {
+		s.State = StateAccountsUnavailable
+		s.Authenticated = false
+	}
 	return s
 }
 

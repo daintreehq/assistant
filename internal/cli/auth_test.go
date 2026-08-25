@@ -199,6 +199,7 @@ func TestEveryStateHasAHumanLabel(t *testing.T) {
 		auth.StateSubscriptionRequired, auth.StateSubscriptionInactive,
 		auth.StateRefreshing, auth.StateTemporarilyUnavailable,
 		auth.StateRevoked, auth.StateStorageUnavailable,
+		auth.StateAccountsUnavailable, auth.StateAccessRefused,
 	} {
 		label := authStateLabel(s)
 		if label == "" {

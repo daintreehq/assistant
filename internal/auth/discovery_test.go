@@ -688,6 +688,65 @@ func TestAnUnconfiguredDeploymentIsReportedAsSuchNotAsBroken(t *testing.T) {
 	}
 }
 
+// The staging deployment's actual shape: the CLI talks to `assistant.daintree.org`,
+// while the manifest it serves says `environment: staging` and points the browser at
+// `staging.daintree.org`. Nothing about validation may depend on the backend base.
+//
+// The property is worth pinning precisely because the alternative looks reasonable.
+// Checking the manifest against the endpoint that served it — "a staging manifest should
+// come from a staging host" — would make the backend base part of the trust decision,
+// and then staging.daintree.org has to be hardcoded somewhere as a backend. It is not,
+// and this is what keeps it that way: Validate takes the expected REDIRECT and nothing
+// else, so the same manifest is judged identically whatever served it.
+func TestTheManifestIsJudgedIndependentlyOfTheBackendItCameFrom(t *testing.T) {
+	m := validManifest() // environment staging, links on staging.daintree.org
+	if m.Environment != "staging" || m.AccountURL != "https://staging.daintree.org/account" {
+		t.Fatalf("fixture drifted: environment=%q account=%q", m.Environment, m.AccountURL)
+	}
+
+	// Validate takes the expected REDIRECT and nothing else — no backend, no origin.
+	// That is the property, and it is checked by its signature as much as by its result:
+	// there is no parameter through which the endpoint could influence the verdict.
+	if err := m.Validate(RedirectURI()); err != nil {
+		t.Fatalf("a staging manifest was rejected: %v", err)
+	}
+
+	// End to end, through a real fetch, from three different origins: a
+	// production-shaped assistant host, a loopback dev backend, and a host with no
+	// relationship to Daintree at all. The same staging manifest must be accepted by
+	// all three, or the backend base has become part of the trust decision.
+	for _, label := range []string{"assistant origin", "loopback dev backend", "unrelated host"} {
+		srv := manifestServer(t, m, "", nil)
+		got, err := NewDiscoverer(srv.URL, nil).Manifest(context.Background())
+		srv.Close()
+		if err != nil {
+			t.Errorf("%s: a staging manifest served from here was rejected: %v", label, err)
+			continue
+		}
+		if got.Environment != "staging" || got.AccountURL != m.AccountURL {
+			t.Errorf("%s: the manifest was altered in transit: env=%q account=%q",
+				label, got.Environment, got.AccountURL)
+		}
+	}
+
+	// The links are pinned to daintree.org and the callback is exact, so the freedom
+	// above costs nothing: a manifest from anywhere still cannot redirect the browser
+	// off Daintree or move the callback.
+	if m.RedirectURI != "http://127.0.0.1:42813/oauth/callback" {
+		t.Errorf("callback = %q, want the exact compiled loopback", m.RedirectURI)
+	}
+	evil := validManifest()
+	evil.AccountURL = "https://staging.daintree.org.evil.example/account"
+	if err := evil.Validate(RedirectURI()); err == nil {
+		t.Error("a link on a look-alike of the staging host was accepted")
+	}
+	notOurs := validManifest()
+	notOurs.SubscribeURL = "https://notdaintree.org/subscribe"
+	if err := notOurs.Validate(RedirectURI()); err == nil {
+		t.Error("a link on a suffix look-alike was accepted")
+	}
+}
+
 // An OLDER backend omits the field entirely. Treating that as unconfigured would
 // silently disable sign-in against every deployment predating the flag.
 func TestAnAbsentConfiguredFlagMeansConfigured(t *testing.T) {

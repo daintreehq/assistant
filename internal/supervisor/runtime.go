@@ -988,6 +988,10 @@ func (r *Runtime) authStateForStatus() string {
 }
 
 // authPausedForStatus reports whether unattended work is paused pending a sign-in.
+//
+// It must name the SAME states as authorizedToSpendLocked refuses, or the control-socket
+// status says work is running while the gate silently declines every turn — a daemon
+// that looks healthy and does nothing is the hardest failure to notice.
 func (r *Runtime) authPausedForStatus() bool {
 	if r.auth == nil {
 		return false

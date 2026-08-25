@@ -200,6 +200,14 @@ func (r *Runtime) authorizedToSpendLocked() bool {
 	if r.auth == nil {
 		return true // no account layer configured: the open door applies
 	}
+	// StateAccessRefused is deliberately NOT here, and the reasoning is worth keeping.
+	// It is settled and no retry changes it, which argues for blocking — but a refusal
+	// at the backend's own door never reaches a provider, so there is no spend to stop,
+	// and blocking would be unrecoverable: this gate is re-evaluated only when the
+	// identity revision moves (see refreshAuthPosture), and an administrator registering
+	// the OAuth client or granting the permission moves nothing. The daemon would stay
+	// blocked until the process restarted, long after the deployment was fixed. Letting
+	// it keep trying costs one cheap 403 per wake and recovers on its own.
 	switch r.auth.State() {
 	case auth.StateRevoked, auth.StateSignedOut:
 		// Reported once per transition. A daemon writing this on every 3s tick would

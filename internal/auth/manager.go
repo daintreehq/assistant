@@ -201,6 +201,12 @@ func (m *Manager) Manifest(ctx context.Context) (*Manifest, error) {
 	return man, nil
 }
 
+// Availability reports what this deployment says about accounts. Answerable when
+// Manifest is not — see the type — which is the whole reason it is its own call.
+func (m *Manager) Availability(ctx context.Context) Availability {
+	return m.discoverer.Availability(ctx)
+}
+
 // key builds the credential key for the current backend and manifest.
 func (m *Manager) key(man *Manifest) CredentialKey {
 	return KeyFor(m.stateRoot, m.backendURL, man)
@@ -332,6 +338,23 @@ func (m *Manager) refresh(ctx context.Context) (TokenSet, error) {
 
 	man, err := m.Manifest(ctx)
 	if err != nil {
+		if CodeOf(err) == CodeAccountsUnavailable {
+			// The deployment has TURNED OFF accounts under a machine that still holds a
+			// credential for it. There is nothing to refresh against and nothing wrong
+			// locally, and the backend serves anonymous requests — so this must read as
+			// "send no credential", exactly like never having signed in.
+			//
+			// recordUnavailable would be doubly wrong here: it reports an outage for a
+			// deployment that answered, and the error it returns propagates out of
+			// AccessToken, where the client turns it into CodeCredentialUnavailable and
+			// ABORTS the request rather than sending it bare. A backend perfectly willing
+			// to serve this user would become unreachable until they logged out.
+			m.mu.Lock()
+			m.access = TokenSet{}
+			m.state = StateAccountsUnavailable
+			m.mu.Unlock()
+			return TokenSet{}, newError(CodeNotSignedIn, "this backend does not offer account sign-in")
+		}
 		m.recordUnavailable(err)
 		return TokenSet{}, err
 	}
@@ -741,11 +764,37 @@ func (m *Manager) Hydrate(ctx context.Context) (resolved bool) {
 		m.state = StateSignedOut
 		m.mu.Unlock()
 		return true
+	case keyNotOffered:
+		// The backend ANSWERED and says it has no identity provider. There is no
+		// credential to find and none to look for, and this is the branch that stops
+		// that being reported as an outage: it used to fall into keyUnresolved below,
+		// which set StateTemporarilyUnavailable — a state whose SignedIn() is true — so
+		// `auth status` on a deployment working exactly as designed said "signed in —
+		// could not check just now", with authenticated:true and no session behind it.
+		m.mu.Lock()
+		m.access = TokenSet{}
+		m.state = StateAccountsUnavailable
+		m.mu.Unlock()
+		return true
 	case keyUnresolved:
 		// "I could not work out which credential this is" is not "you are signed out".
 		// Signing someone out over a backend outage is the failure this branch exists to
 		// prevent.
-		m.recordUnavailable(newError(CodeDiscoveryUnavailable, "could not determine which account this backend uses"))
+		unresolved := newError(CodeDiscoveryUnavailable, "could not determine which account this backend uses")
+		if _, everSignedIn := loadKeyRef(m.authDir); !everSignedIn {
+			// No descriptor means no login has EVER completed on this machine, so there
+			// is no session for an outage to have interrupted. recordUnavailable would
+			// promote Unknown to TemporarilyUnavailable here — a state whose SignedIn()
+			// is true — and `auth status` on a fresh install pointed at an unreachable
+			// backend would answer "signed in", with authenticated:true and no
+			// credential anywhere. Record the reason and leave the state unknown, which
+			// is what it is.
+			m.mu.Lock()
+			m.lastErr = unresolved
+			m.mu.Unlock()
+			return false
+		}
+		m.recordUnavailable(unresolved)
 		return false
 	}
 	store := m.ensureStore(ctx)
@@ -839,9 +888,14 @@ func (m *Manager) ApplyBackendVerdict(ctx context.Context, gen uint64, usedToken
 		m.mu.Unlock()
 	case be.AuthRemedy() == backend.RemedyReconfigure:
 		// A valid token this deployment will not accept. Nothing about the credential is
-		// wrong, so it is kept — but nothing can be verified either, and refreshing would
-		// only mint another token rejected in exactly the same way.
-		m.recordUnavailable(err)
+		// wrong, so it is KEPT — but refreshing would only mint another token rejected in
+		// exactly the same way, and recordUnavailable (where this used to go) says a
+		// dependency blipped. That is not what happened: the backend answered, and the
+		// answer will not change until someone alters the deployment.
+		m.mu.Lock()
+		m.lastErr = err
+		m.state = StateAccessRefused
+		m.mu.Unlock()
 	case be.Code == backend.CodeSubscriptionRequired:
 		m.setState(StateSubscriptionRequired)
 	case be.Code == backend.CodeSubscriptionInactive:
@@ -897,6 +951,11 @@ const (
 	keyAbsent
 	// keyUnresolved: there may be one, but which is unknown right now.
 	keyUnresolved
+	// keyNotOffered: this deployment has no accounts, so there is no key to resolve.
+	// Distinct from keyUnresolved because it is an ANSWER rather than a gap, and the
+	// two demand opposite handling — one is settled and fine, the other must never be
+	// allowed to look like a verdict.
+	keyNotOffered
 )
 
 // resolveKey works out which credential this manager is responsible for.
@@ -912,13 +971,23 @@ func (m *Manager) resolveKey(ctx context.Context) (CredentialKey, keyResolution)
 		}
 		// It belongs to another endpoint. This one's key can still be derived if
 		// discovery works.
-		if man, err := m.Manifest(ctx); err == nil {
+		man, err := m.Manifest(ctx)
+		if err == nil {
 			return m.key(man), keyResolved
+		}
+		if CodeOf(err) == CodeAccountsUnavailable {
+			// A descriptor for ANOTHER endpoint, and this one has no accounts. There is
+			// nothing here to resolve, and saying so beats reporting an outage.
+			return CredentialKey{}, keyNotOffered
 		}
 		return CredentialKey{}, keyUnresolved
 	}
-	if man, err := m.Manifest(ctx); err == nil {
+	man, err := m.Manifest(ctx)
+	if err == nil {
 		return m.key(man), keyResolved
+	}
+	if CodeOf(err) == CodeAccountsUnavailable {
+		return CredentialKey{}, keyNotOffered
 	}
 	// No descriptor AND no manifest. A descriptor is written on every successful login,
 	// so its absence is strong evidence of no login — but not proof, since persistence is

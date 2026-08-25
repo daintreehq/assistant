@@ -21,6 +21,12 @@ import "github.com/daintreehq/assistant/internal/backend"
 // panel — branches on this and nothing else.
 
 // State is the local account state.
+//
+// The domain is OPEN, and a consumer must treat it that way. New states are added as the
+// account layer learns to tell situations apart that it previously collapsed — two
+// arrived at once for exactly that reason — and a consumer that switches without a
+// default, or validates against a closed enum, breaks on the next one. Fall back to
+// rendering the string and to the boolean predicates below, which are the stable part.
 type State string
 
 const (
@@ -51,6 +57,27 @@ const (
 	// StateStorageUnavailable: signed in, but nothing was persisted and the session dies
 	// with this process.
 	StateStorageUnavailable State = "storage_unavailable"
+	// StateAccountsUnavailable: this DEPLOYMENT has no identity provider, so there is
+	// nothing to sign in to. Requests go anonymously and the backend serves them.
+	//
+	// It is separate from StateSignedOut for the same reason StateSignedOut is separate
+	// from StateRevoked: the next action differs. Signed out means "sign in"; this means
+	// "nothing needs to be done", and offering a sign-in here sends someone through a
+	// browser flow no endpoint will answer. It is separate from
+	// StateTemporarilyUnavailable in the other direction: the backend ANSWERED, so this
+	// is a settled fact, not a gap.
+	StateAccountsUnavailable State = "accounts_unavailable"
+	// StateAccessRefused: a credential that is valid and current, refused by this
+	// deployment anyway — a rejected OAuth client, or an account without the required
+	// permission.
+	//
+	// Its own state because every other one lies about it. Signed-out is false and would
+	// discard a good credential; temporarily-unavailable — where this used to land —
+	// says a dependency blipped and invites a retry, when in fact nothing will change
+	// until a person alters the deployment. That mattered beyond wording: the state was
+	// non-terminal and reported the session as signed in, so an unattended daemon kept
+	// scheduling paid work the backend had already refused.
+	StateAccessRefused State = "access_refused"
 )
 
 // SignedIn reports whether a credential exists, whatever the plan says.
@@ -62,9 +89,21 @@ func (s State) SignedIn() bool {
 	switch s {
 	case StateSignedInUnverified, StateSignedInActive,
 		StateSubscriptionRequired, StateSubscriptionInactive,
-		StateRefreshing, StateTemporarilyUnavailable, StateStorageUnavailable:
+		StateRefreshing, StateTemporarilyUnavailable, StateStorageUnavailable,
+		StateAccessRefused:
 		return true
 	}
+	// StateAccessRefused is INCLUDED above, and the temptation to exclude it is worth
+	// naming: the session cannot do anything, so "signed in" feels wrong. But this
+	// method answers whether a credential EXISTS, and a refused one does — it is
+	// deliberately retained, because a fresh one would be refused identically. Excluding
+	// it would also make Hydrate quietly erase the refusal: it promotes any state that
+	// is not SignedIn to unverified on finding a stored credential, which is exactly
+	// what it would find. "Can this proceed" is a different question, answered by the
+	// state itself.
+	//
+	// StateAccountsUnavailable IS absent: there is no credential and no way to get one,
+	// so reporting a session would be a plain falsehood.
 	return false
 }
 
@@ -73,6 +112,10 @@ func (s State) SignedIn() bool {
 // StateTemporarilyUnavailable is deliberately excluded even though nothing can be
 // verified in it: "we could not check" is not "you are signed out", and prompting there
 // discards a working credential over an outage.
+// StateAccountsUnavailable is likewise excluded, from the other direction: there is
+// nothing to sign in TO, and prompting sends someone through a browser flow no endpoint
+// will answer. StateAccessRefused too — the credential is fine and a new one would be
+// refused identically.
 func (s State) NeedsLogin() bool {
 	return s == StateSignedOut || s == StateRevoked
 }
@@ -91,9 +134,16 @@ func (s State) NeedsPlan() bool {
 // human is there to read the error.
 func (s State) CanSpend() bool { return s == StateSignedInActive }
 
-// Terminal reports a state that will not change without user action.
+// Terminal reports a state no local retry will move: nothing this process can do
+// changes the answer.
+//
+// It licenses NOT RETRYING NOW. It does not license never re-evaluating — "someone fixes
+// the deployment" is an external event that moves several of these, and a caller that
+// reads Terminal as permanent will still be refusing work long after the cause is gone.
+// It has no production callers today; the first one should re-read this line.
 func (s State) Terminal() bool {
-	return s == StateSignedOut || s == StateRevoked || s == StateSubscriptionRequired
+	return s == StateSignedOut || s == StateRevoked || s == StateSubscriptionRequired ||
+		s == StateAccountsUnavailable || s == StateAccessRefused
 }
 
 // StateForRemedy maps a backend identity verdict onto the local state it produces.
@@ -115,8 +165,9 @@ func StateForRemedy(r backend.AuthRemedy) State {
 		return StateRefreshing
 	case backend.RemedyReconfigure:
 		// The token is valid and this deployment will not take it. Nothing about the
-		// credential is wrong, so it is kept — but nothing can be verified either.
-		return StateTemporarilyUnavailable
+		// credential is wrong, so it is KEPT — but this is settled, not transient, and
+		// it used to land on StateTemporarilyUnavailable, which says the opposite.
+		return StateAccessRefused
 	}
 	return StateUnknown
 }

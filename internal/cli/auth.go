@@ -83,6 +83,12 @@ func AuthUsage() string {
 
 // authEventVersion versions the NDJSON event stream. Daintree validates every line
 // against a shared schema keyed on this.
+//
+// It stays 1 through an additive change: new optional properties and new `state` values.
+// That is only safe if the shared schema treats both as open — `additionalProperties`
+// permitted, and `state` a string rather than a closed enum — because a strict v1 schema
+// would reject the whole line rather than degrade. The schema lives in the Daintree app,
+// so this side cannot check it; a state added here needs that confirmed there.
 const authEventVersion = 1
 
 // authEvent is one line of the --json stream.
@@ -271,13 +277,23 @@ func runAuthStatus(ctx context.Context, w authWriter, mgr *auth.Manager, cfg con
 	// Best-effort: a manifest fills in the environment and links, and its absence must
 	// not stop status answering. "The backend is unreachable" is precisely when someone
 	// runs this.
+	//
+	// Availability is read WHETHER OR NOT the manifest validated, because the one case
+	// it answers for — a deployment with no identity provider — is the case that makes
+	// the manifest fail. Reading it only on success is how "this backend has no
+	// accounts" came to be indistinguishable from "we could not reach it".
 	st := mgr.Status()
 	if man, err := mgr.Manifest(ctx); err == nil {
 		st = st.WithManifest(man)
 	}
+	st = st.WithAvailability(mgr.Availability(ctx))
 	st.BackendURL = sanitizeURLForDisplay(st.BackendURL)
 
 	exit := 0
+	// NeedsLogin, not "is not signed in". A deployment with no accounts is not signed in
+	// and never will be, and returning the not-signed-in code for it would have every
+	// script that branches on it try to log in against an endpoint with nothing to log
+	// in to.
 	if st.State.NeedsLogin() {
 		// A distinct exit code so a script can branch on "not signed in" without parsing
 		// prose, while keeping it separate from an outright failure.
@@ -318,6 +334,7 @@ func renderAuthStatus(w authWriter, st auth.Status, cfg config.AppConfig) {
 	if st.Environment != "" {
 		w.human("  environment  %s", st.Environment)
 	}
+	w.human("  accounts     %s", authAvailabilityLabel(st))
 	w.human("  state        %s", authStateLabel(st.State))
 	if st.Email != "" {
 		w.human("  email        %s", st.Email)
@@ -354,7 +371,33 @@ func renderAuthStatus(w authWriter, st auth.Status, cfg config.AppConfig) {
 	case st.State.NeedsPlan() && st.Links.Subscribe != "":
 		w.human("")
 		w.human("Choose a plan: %s", st.Links.Subscribe)
+	case st.State == auth.StateAccountsUnavailable:
+		w.human("")
+		w.human("This backend serves requests without an account. Nothing to do.")
+	case st.State == auth.StateAccessRefused:
+		w.human("")
+		w.human("Your sign-in is intact and this deployment will not act on it.")
+		w.human("Signing in again produces the same result; this needs a change at the backend.")
 	}
+}
+
+// authAvailabilityLabel renders what the DEPLOYMENT offers, which is a different
+// question from what this machine holds.
+//
+// The unknown case is spelled out rather than omitted. A missing row reads as "fine" to
+// anyone skimming, and the one thing this line must never do is let an unreachable
+// backend pass for one that simply has no accounts.
+func authAvailabilityLabel(st auth.Status) string {
+	if st.Configured == nil {
+		return "could not ask this backend"
+	}
+	if !*st.Configured {
+		return "not offered by this backend"
+	}
+	if st.AuthRequired != nil && *st.AuthRequired {
+		return "required"
+	}
+	return "supported, not required"
 }
 
 // authStateLabel renders a state for a person.
@@ -376,6 +419,10 @@ func authStateLabel(s auth.State) string {
 		return "access was disconnected"
 	case auth.StateStorageUnavailable:
 		return "signed in — will not persist after exit"
+	case auth.StateAccountsUnavailable:
+		return "this backend has no accounts"
+	case auth.StateAccessRefused:
+		return "signed in — this backend refuses these credentials"
 	case auth.StateAuthorizing:
 		return "waiting for the browser"
 	case auth.StateRefreshing:

@@ -164,6 +164,40 @@ type Manifest struct {
 	SessionPolicy         SessionPolicy `json:"session_policy"`
 }
 
+// Availability is what a deployment says about ACCOUNTS, as distinct from what it says
+// about OAuth.
+//
+// It exists because those two questions have different answers on the same response, and
+// only one of them survives validation. A deployment with no identity provider returns a
+// manifest that is CORRECT and unusable — version, environment and the two flags, with
+// no issuer or client id — and Validate rejects it, so `Manifest` yields an error and
+// every flag on it is lost. The caller is then left inferring "no accounts" from a
+// failure, which is how a deployment that is working exactly as intended comes to be
+// rendered as an outage.
+//
+// Known is the third state and it is the important one: absent this field, a caller
+// cannot tell "the backend says it has no accounts" from "we could not reach the
+// backend", and those demand opposite handling — the first is settled and fine, the
+// second must never discard a credential.
+type Availability struct {
+	// Known is false when discovery could not answer at all. The other fields are
+	// meaningless then and must not be rendered.
+	Known bool
+	// Configured reports whether this deployment has an identity provider at all.
+	Configured bool
+	// Required reports whether it refuses anonymous requests. Advisory — the backend's
+	// 401 is the authority — and meaningful only when Configured.
+	Required bool
+	// Environment is the deployment identity, carried because it is the one field that
+	// distinguishes a staging account from a production one and it is present even on
+	// a manifest that names no issuer.
+	Environment string
+}
+
+// Offered reports a deployment that HAS accounts, so signing in is a thing that can be
+// done here. Distinct from Known: a deployment can be reachable and simply not offer them.
+func (a Availability) Offered() bool { return a.Known && a.Configured }
+
 // maxClientIDLen bounds the client id. It goes into a URL query string and into a
 // credential-store account key; an unbounded value from the wire has no business in
 // either.
@@ -472,6 +506,13 @@ type Discoverer struct {
 	cached    *Manifest
 	etag      string
 	fetchedAt time.Time
+	// availability is recorded from every response that decoded AND cleared the shape
+	// checks, including the one that then fails as "no accounts here". That is the whole
+	// point: the unconfigured shape is the one that fails, and its flags are exactly
+	// what a caller needs to say so. availabilityAt ages it, because unlike `cached` it
+	// is recorded on a path that stores no manifest to expire.
+	availability   Availability
+	availabilityAt time.Time
 	// generation rises on every Invalidate. A fetch samples it before releasing the
 	// lock and refuses to store its result if it has moved, so a request that was
 	// already in flight when the caller invalidated cannot repopulate the cache
@@ -552,13 +593,63 @@ func (d *Discoverer) Manifest(ctx context.Context) (*Manifest, error) {
 	}
 	// Validate BEFORE storing, so nothing that failed a check can ever be cached or
 	// returned. It also normalises whitespace onto m, so the stored copy is canonical.
-	if err := m.Validate(RedirectURI()); err != nil {
-		return nil, err
+	verr := m.Validate(RedirectURI())
+	// Record what the deployment said about ACCOUNTS. This has to survive a FAILED
+	// validation, because the unconfigured shape is precisely the one Validate rejects
+	// and its flags are what tell a caller the deployment is fine rather than broken —
+	// but only that failure. A body rejected for any other reason described a manifest
+	// this build will not use, and reading account flags off it would let an unsupported
+	// version or an unrecognised environment answer a question it was never trusted to
+	// answer. Everything else leaves the previous value, and Known false if there was
+	// none.
+	if verr == nil || CodeOf(verr) == CodeAccountsUnavailable {
+		d.availability = Availability{
+			Known:       true,
+			Configured:  m.Configured == nil || *m.Configured,
+			Required:    m.Required,
+			Environment: m.Environment,
+		}
+		d.availabilityAt = d.now()
+	}
+	if verr != nil {
+		return nil, verr
 	}
 	d.cached = m.clone()
 	d.etag = newETag
 	d.fetchedAt = d.now()
 	return m.clone(), nil
+}
+
+// Availability reports what this deployment says about accounts, fetching if needed.
+//
+// The ACCOUNTS-UNAVAILABLE error is not a failure here. It means the fetch succeeded and
+// the answer is "no accounts here" — the exact question this method asks — so treating it
+// as one would make the single case this exists for unanswerable.
+//
+// Any OTHER error returns whatever was last recorded, which is Known false until a body
+// has been read. That is a deliberate choice over flapping to unknown on every blip: a
+// caller asking during a 30-second outage is better served by the answer this deployment
+// gave two minutes ago than by "we have no idea". The cost is that a persistent outage
+// keeps serving that answer, so it is a last-known value and not a live one — which is
+// why the result carries Known rather than a plain pair of booleans.
+func (d *Discoverer) Availability(ctx context.Context) Availability {
+	// A fresh recorded answer is served without a fetch. Manifest has its own cache, but
+	// it only caches SUCCESS — and the unconfigured shape never validates, so without
+	// this an `auth status` that asks for the manifest and the availability would make
+	// two round trips on exactly the deployment this method exists to describe, and two
+	// full timeouts on an unreachable one.
+	d.mu.Lock()
+	if d.availability.Known && d.now().Sub(d.availabilityAt) < manifestCacheTTL {
+		av := d.availability
+		d.mu.Unlock()
+		return av
+	}
+	d.mu.Unlock()
+
+	_, _ = d.Manifest(ctx)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.availability
 }
 
 // clone returns a deep copy.
@@ -652,5 +743,9 @@ func (d *Discoverer) Invalidate() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.cached, d.etag, d.fetchedAt = nil, "", time.Time{}
+	// The availability goes with it. It describes the deployment we were pointed at,
+	// and keeping it would let `auth status` report backend A's "no accounts here"
+	// about backend B — the same mistake the cached manifest is dropped to avoid.
+	d.availability, d.availabilityAt = Availability{}, time.Time{}
 	d.generation++
 }
