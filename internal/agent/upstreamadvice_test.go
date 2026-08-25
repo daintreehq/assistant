@@ -57,26 +57,34 @@ func TestUpstreamFailureAdviceIgnoresUnknownCodes(t *testing.T) {
 	}
 }
 
-// The two account failures a user can actually resolve should say WHERE to go, and the
-// one they cannot resolve by signing in again must not tell them to.
-func TestUpstreamFailureAdviceCarriesTheRightNextStep(t *testing.T) {
-	invalidKey := upstreamFailureAdvice(&backend.Error{Code: backend.CodeProviderInvalidAPIKey})
-	if !strings.Contains(invalidKey, "/login") {
-		t.Errorf("a rejected key should point at /login, got %q", invalidKey)
+// The three PROVIDER-credential failures describe a credential the user does not hold.
+//
+// The backend funds every model call with its own key; the CLI ships none. So none of
+// these may say "your API key", offer a place for the user to top up, or point at a
+// sign-in — all three did, and the first sent the reader to `/login`, a cockpit command
+// that does not exist, to replace a credential they have never seen.
+func TestProviderCredentialAdviceDoesNotBlameTheUsersKey(t *testing.T) {
+	for _, code := range []string{
+		backend.CodeProviderInvalidAPIKey,
+		backend.CodeProviderInsufficientCredit,
+		backend.CodeProviderKeyForbidden,
+	} {
+		msg := upstreamFailureAdvice(&backend.Error{Code: code})
+		for _, banned := range []string{"your API key", "your OpenRouter account", "openrouter.ai/credits", "/login"} {
+			if strings.Contains(msg, banned) {
+				t.Errorf("%s says %q, which describes a credential the user does not hold: %q", code, banned, msg)
+			}
+		}
+		// It must still say whose problem it is, or the reader has a diagnosis and
+		// nowhere to take it.
+		if !strings.Contains(msg, "deployment") {
+			t.Errorf("%s does not say the credential belongs to the deployment: %q", code, msg)
+		}
 	}
 
-	noCredit := upstreamFailureAdvice(&backend.Error{Code: backend.CodeProviderInsufficientCredit})
-	if !strings.Contains(noCredit, "openrouter.ai/credits") {
-		t.Errorf("an empty balance should link where to add credit, got %q", noCredit)
-	}
-
-	// A key that is recognised and funded but not permitted for this model: re-running
-	// sign-in with the same key changes nothing, so suggesting it wastes the user's
-	// time and points them away from the setting that would actually fix it.
+	// A credential that is recognised and funded but not permitted for this model still
+	// names permissions, which is the one thing that distinguishes it from the other two.
 	forbidden := upstreamFailureAdvice(&backend.Error{Code: backend.CodeProviderKeyForbidden})
-	if strings.Contains(forbidden, "/login") {
-		t.Errorf("a permissions problem must not suggest signing in again, got %q", forbidden)
-	}
 	if !strings.Contains(forbidden, "permission") {
 		t.Errorf("a permissions problem should name permissions, got %q", forbidden)
 	}

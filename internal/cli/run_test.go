@@ -268,19 +268,40 @@ func TestDoctorFailsWhenTheBackendRejectsTheRequestOutright(t *testing.T) {
 	}
 }
 
-// The same row, told whose credential it just reported on. Getting this backwards sends
-// someone hunting for a setting that does not exist on their machine.
-func TestCredentialOwnershipWordingFollowsTheKey(t *testing.T) {
-	if s := credentialOwnerSuffix(""); !strings.Contains(s, "backend's own") {
-		t.Errorf("with no caller key the row must name the backend's credential: %q", s)
+// The same row, told whose credential it just reported on — which is the DEPLOYMENT's,
+// always.
+//
+// The row reports on the credential the backend would spend, and it spends its own on
+// every install. A caller-supplied bearer (DAINTREE_API_KEY / --api-key-file) identifies
+// the ACCOUNT and is never sent upstream, so describing the verified credential as
+// "yours" whenever one was set was a straightforward misattribution: it sent someone to
+// replace a value that could not have caused the rejection, and disagreed with what a
+// turn says about the identical condition.
+func TestCredentialOwnershipAlwaysNamesTheDeployment(t *testing.T) {
+	for name, suffix := range map[string]string{
+		"no caller key":  credentialOwnerSuffix(""),
+		"caller key set": credentialOwnerSuffix("k"),
+	} {
+		if !strings.Contains(suffix, "backend's own") {
+			t.Errorf("%s: row = %q, want the backend's credential named", name, suffix)
+		}
+		if strings.Contains(suffix, "yours") {
+			t.Errorf("%s: row = %q claims a credential the caller does not hold", name, suffix)
+		}
 	}
-	if s := credentialOwnerSuffix("k"); !strings.Contains(s, "DAINTREE_API_KEY") {
-		t.Errorf("with a caller key the row must name where it came from: %q", s)
+	for name, hint := range map[string]string{
+		"no caller key":  credentialFixHint(""),
+		"caller key set": credentialFixHint("k"),
+	} {
+		if !strings.Contains(hint, "not yours") {
+			t.Errorf("%s: fix = %q, want the deployment named as the owner", name, hint)
+		}
 	}
-	if h := credentialFixHint(""); strings.Contains(h, "DAINTREE_API_KEY") {
-		t.Errorf("with no caller key the fix must not mention a variable they never set: %q", h)
+	// A bearer that IS set is still named — as present and ruled out, never as the fault.
+	if h := credentialFixHint(""); strings.Contains(h, "caller-supplied") {
+		t.Errorf("with no caller key the fix must not mention one: %q", h)
 	}
-	if h := credentialFixHint("k"); !strings.Contains(h, "DAINTREE_API_KEY") {
-		t.Errorf("with a caller key the fix must name it: %q", h)
+	if h := credentialFixHint("k"); !strings.Contains(h, "caller-supplied") {
+		t.Errorf("with a caller key the fix must say it is in play: %q", h)
 	}
 }

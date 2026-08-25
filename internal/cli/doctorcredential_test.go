@@ -78,8 +78,15 @@ func TestAnExhaustedCredentialKeepsItsTopUpAdvice(t *testing.T) {
 	if !strings.Contains(c.Detail, "NO CREDIT") {
 		t.Errorf("detail = %q, want the exhausted-balance wording", c.Detail)
 	}
-	if !strings.Contains(c.Hint, "Top up") {
-		t.Errorf("hint = %q, want the top-up action", c.Hint)
+	// It must still be the EXHAUSTED copy — distinct from every other refusal — but it
+	// may not tell the reader to top up. The spent account is the deployment's upstream
+	// one; the CLI holds no provider credential, so "top up the account" named an action
+	// the reader could not take.
+	if !strings.Contains(c.Hint, "backend's own upstream account") {
+		t.Errorf("hint = %q, want it to say whose account is spent", c.Hint)
+	}
+	if !strings.Contains(c.Hint, "report it") {
+		t.Errorf("hint = %q, want the action actually available here", c.Hint)
 	}
 	if c.Data["limitRemaining"] != float64(0) {
 		t.Errorf("Data[limitRemaining] = %v, want 0 — a reported zero is not the same as absent", c.Data["limitRemaining"])
@@ -102,8 +109,8 @@ func TestAnOlderBackendsSpentKeyKeepsItsTopUpAdvice(t *testing.T) {
 		if !strings.Contains(c.Detail, "NO CREDIT") {
 			t.Errorf("remaining=%v: detail = %q, want the exhausted-balance wording", remaining, c.Detail)
 		}
-		if !strings.Contains(c.Hint, "Top up") {
-			t.Errorf("remaining=%v: hint = %q — the actionable advice was lost", remaining, c.Hint)
+		if !strings.Contains(c.Hint, "backend's own upstream account") {
+			t.Errorf("remaining=%v: hint = %q — the exhausted-balance advice was lost", remaining, c.Hint)
 		}
 		if _, ok := c.Data["reason"]; ok {
 			t.Errorf("remaining=%v: Data carries a reason for a backend that reported none", remaining)
@@ -169,9 +176,16 @@ func TestATransportFailureStaysUnknown(t *testing.T) {
 	}
 }
 
-// A rejected credential routes its fix to whoever can apply it. Telling someone to
-// re-paste a key they never pasted sends them looking for a setting that does not exist.
-func TestARejectedCredentialNamesWhoCanFixIt(t *testing.T) {
+// A rejected credential routes its fix to whoever can apply it — and that is ALWAYS the
+// deployment, whether or not a caller-supplied bearer is set.
+//
+// This row reports /v1/daintree/auth/verify, which answers for the credential the backend
+// would SPEND, and the backend spends its own on every install. DAINTREE_API_KEY and
+// --api-key-file supply an ACCOUNT bearer: they say who is CALLING, never who pays. The
+// copy used to route a rejection at the user whenever one was set, which told them their
+// key had been refused upstream when their key never reached the provider at all — and
+// contradicted what the same condition says in a turn.
+func TestARejectedCredentialAlwaysNamesTheDeployment(t *testing.T) {
 	ver := backend.KeyVerification{Valid: false, Reason: backend.ReasonProviderRejected, Detail: "rejected"}
 
 	backends := credentialVerdictRow(ver, nil, "https://assistant.daintree.org", "")
@@ -180,11 +194,18 @@ func TestARejectedCredentialNamesWhoCanFixIt(t *testing.T) {
 	if backends.Status != StatusFail || callers.Status != StatusFail {
 		t.Fatalf("statuses = %s / %s, want fail", backends.Status, callers.Status)
 	}
-	if backends.Hint == callers.Hint {
-		t.Error("the same advice for the backend's own credential and for a caller-supplied one")
+	for name, hint := range map[string]string{"no caller key": backends.Hint, "caller key set": callers.Hint} {
+		if !strings.Contains(hint, "backend-side problem, not yours") {
+			t.Errorf("%s: hint = %q, want the deployment named as the owner", name, hint)
+		}
 	}
-	if !strings.Contains(callers.Hint, "DAINTREE_API_KEY") {
-		t.Errorf("caller hint = %q, want it to name the variable holding the key", callers.Hint)
+	// With a bearer set the reader is told it is in play — and told it is NOT the cause,
+	// which is the part that stops them spending an afternoon on it.
+	if !strings.Contains(callers.Hint, "not the cause") {
+		t.Errorf("caller hint = %q, want it to rule the bearer out explicitly", callers.Hint)
+	}
+	if strings.Contains(backends.Hint, "caller-supplied") {
+		t.Errorf("no-key hint = %q mentions a bearer they never set", backends.Hint)
 	}
 	if backends.Data["reason"] != backend.ReasonProviderRejected {
 		t.Errorf("Data[reason] = %v, want the stable reason", backends.Data["reason"])
@@ -202,7 +223,7 @@ func TestAnExhaustedReasonAloneDrivesTheCopy(t *testing.T) {
 	if c.Status != StatusFail {
 		t.Errorf("status = %s, want fail", c.Status)
 	}
-	if !strings.Contains(c.Detail, "NO CREDIT") || !strings.Contains(c.Hint, "Top up") {
+	if !strings.Contains(c.Detail, "NO CREDIT") || !strings.Contains(c.Hint, "backend's own upstream account") {
 		t.Errorf("detail=%q hint=%q — the reason alone should have selected the exhausted copy", c.Detail, c.Hint)
 	}
 	if _, ok := c.Data["limitRemaining"]; ok {

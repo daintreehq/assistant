@@ -186,6 +186,12 @@ var wakeFailurePrefixes = []string{
 	"Model unavailable:",
 	"Model rate-limited:",
 	"Model error:",
+	// "Account problem:", not "Account:". These are matched by PREFIX against a reply
+	// the model may have authored, and an assistant answer can perfectly well open with
+	// "Account: ..." as a heading — at which point a real result would be recorded as a
+	// failed turn and the work it summarized lost. Every other entry here is
+	// failure-shaped for the same reason; isStalledReply goes further and matches whole.
+	"Account problem:",                                  // account taxonomy (classifyBackendError → accountFailureAdvice)
 	"Can't reach the Daintree assistant backend",        // backend unreachable (classifyBackendError)
 	"Daintree assistant backend is a different version", // protocol mismatch (classifyBackendError)
 	"Tool projection failed:",

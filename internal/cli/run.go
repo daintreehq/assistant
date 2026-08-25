@@ -1259,15 +1259,19 @@ func unusableCredentialCopy(ver backend.KeyVerification) (detail, hint string) {
 	spent := ver.Reason == backend.ReasonCreditsExhausted ||
 		(ver.Reason == "" && ver.LimitRemaining != nil && *ver.LimitRemaining <= 0)
 	if spent {
+		// The account is the DEPLOYMENT's, so "top up the account" was an instruction
+		// the reader could not carry out. It is the backend's upstream credential that
+		// is spent, and the only move available to someone running the CLI is to say so
+		// to whoever runs the backend.
 		return "the credential is valid but has NO CREDIT remaining",
-			"Top up the account — every turn will fail until you do."
+			"That is the backend's own upstream account, so it cannot be topped up from here — report it to whoever runs this backend. Every turn will fail until it is."
 	}
 	if ver.Reason == "" {
 		return "the credential is valid, but this backend reports it cannot fund a turn",
-			"The backend gave no reason. Check the account behind this credential; every turn will fail until it can pay."
+			"The backend gave no reason. The account behind that credential is the deployment's, so this needs whoever runs the backend; every turn will fail until it can pay."
 	}
 	return "the credential is valid, but this backend reports it cannot fund a turn (" + safeReason(ver.Reason) + ")",
-		"The backend named a condition this build has no advice for. Check the account behind this credential."
+		"The backend named a condition this build has no advice for. The account behind that credential is the deployment's — report it to whoever runs this backend."
 }
 
 // safeReason bounds an unrecognised reason before it is printed.
@@ -1356,11 +1360,14 @@ func blockingAccountCopy(err error, callerKey string) (detail, hint string) {
 		return "this backend does not accept this client's account credentials — " + text,
 			"This build's OAuth client is not registered with the backend you are pointed at. Check DAINTREE_BACKEND_URL, or use a build matching this deployment."
 	case backend.CodeSubscriptionRequired:
+		// --refresh, not plain status. A plain read makes no account request and nothing
+		// about the plan is persisted between processes, so in a fresh process it
+		// reports an unverified session and never reaches the line carrying the link.
 		return "this account has no plan that includes the assistant — " + text,
-			"The sign-in is fine; the plan is the problem. Run `daintree-assistant auth status` for the link."
+			"The sign-in is fine; the plan is the problem. Run `daintree-assistant auth status --refresh` for the link."
 	case backend.CodeSubscriptionInactive:
 		return "this account's plan is not currently active — " + text,
-			"Check the billing portal rather than buying again — a second checkout is how people pay twice."
+			"Check the billing portal rather than buying again — a second checkout is how people pay twice. Run `daintree-assistant auth status --refresh` for the account page."
 	case backend.CodeUsageLimitReached:
 		return "this account has reached its usage limit for the period — " + text,
 			"It clears when the period rolls over, or when the plan changes."
@@ -1420,25 +1427,36 @@ func isBlockingAccountVerdict(err error) bool {
 		berr.IsUsageLimited()
 }
 
-// credentialOwnerSuffix names WHOSE credential the row just reported on. Without it the
-// same word means two very different things — "the backend's account is funded" versus
-// "the key you exported is funded" — and the reader cannot tell which from the endpoint.
+// credentialOwnerSuffix names WHOSE credential this row reported on.
+//
+// It is ALWAYS the deployment's, and the callerKey parameter is kept only to say when a
+// caller-supplied bearer is additionally in play. That correction matters: this row
+// reports `/v1/daintree/auth/verify`, which answers for the credential the backend would
+// SPEND, and the backend spends its own on every install. DAINTREE_API_KEY and
+// --api-key-file supply an ACCOUNT bearer — they say who is CALLING, never who pays —
+// so describing the verified credential as "yours, from DAINTREE_API_KEY" told a user
+// their key had been rejected upstream when their key never reached the provider at all,
+// and sent them to replace a value that was not the problem.
 func credentialOwnerSuffix(callerKey string) string {
 	if callerKey != "" {
-		// Not "from DAINTREE_API_KEY": --api-key-file sets the same value, and naming
-		// only the variable tells someone who used the flag that a variable they never
-		// exported is in play.
-		return " (yours, from DAINTREE_API_KEY or --api-key-file)"
+		// Named, because a reader with one set needs to know it is in play — just not
+		// as the thing this row verified. Not "from DAINTREE_API_KEY" alone:
+		// --api-key-file sets the same value, and naming only the variable tells someone
+		// who used the flag that a variable they never exported is involved.
+		return " (the backend's own; a caller-supplied account bearer is also set)"
 	}
 	return " (the backend's own)"
 }
 
-// credentialFixHint routes a rejection to whoever can actually fix it. A caller-supplied
-// key is the user's to correct; the backend's own is not, and telling them to re-paste
-// something they never pasted sends them looking for a setting that does not exist.
+// credentialFixHint routes a rejection to whoever can actually fix it.
+//
+// Always the deployment, for the reason above: the rejected credential is the backend's
+// upstream key, not the caller's bearer. The caller-key branch survives only to warn that
+// an account override is set — because someone reading a rejection with one exported will
+// otherwise assume it is the cause and spend their time on it.
 func credentialFixHint(callerKey string) string {
 	if callerKey != "" {
-		return "The caller-supplied key (DAINTREE_API_KEY or --api-key-file) names a credential the provider will not accept — unset it to fall back to the backend's own."
+		return "The backend's own upstream credential is rejected — a backend-side problem, not yours. (A caller-supplied bearer is set too, but it identifies the account and is never spent upstream, so it is not the cause.)"
 	}
 	return "The backend's own upstream credential is rejected — this is a backend-side problem, not yours."
 }

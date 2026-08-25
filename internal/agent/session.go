@@ -1987,6 +1987,24 @@ func (s *Session) classifyBackendError(err error) string {
 		return domain.CancelledReply
 	}
 	var be *backend.Error
+	// The ACCOUNT taxonomy is consulted FIRST, before any branch that reads an HTTP
+	// status. That order is the same rule account.go states for classification: a
+	// recognised code decides on its own, and the status is consulted only for codes we
+	// do not know. Below the status branches, a `subscription_inactive` that happened to
+	// arrive with a 429 — which a backend bug, a proxy, or a future status change could
+	// easily produce — rendered as "Model rate-limited", and one carrying a 426 rendered
+	// as a version mismatch. Both send the reader somewhere no billing problem is.
+	//
+	// `account_rate_limited` still reaches the rate-limit branch below, because
+	// accountFailureAdvice deliberately returns "" for it: it IS a rate limit, and that
+	// branch carries the health badge which clears on the next good usage report.
+	if errors.As(err, &be) {
+		if msg := accountFailureAdvice(be); msg != "" {
+			s.events.Phase(domain.PhaseFailed)
+			s.events.Error(msg)
+			return msg
+		}
+	}
 	if errors.As(err, &be) && be.IsRateLimited() {
 		// Upstream/model rate limit: a friendly, byte-stable reply plus a health
 		// badge — not the raw provider blob. The badge clears on the next good Usage.
@@ -2036,6 +2054,76 @@ func (s *Session) classifyBackendError(err error) string {
 	return msg
 }
 
+// accountFailureAdvice renders the user-facing reply for the backend's ACCOUNT taxonomy,
+// or "" when the error carries none of those codes.
+//
+// Every line names a CLI-owned command or a URL, and none of them names a cockpit slash
+// command: there is no `/login` and no `/auth`, deliberately, because the CLI is the only
+// desktop authentication surface. Native Daintree has no sign-in UI to fall back on, so
+// a message that points at a command which does not exist leaves a user with no way
+// forward at all.
+//
+// The three groups need three different next steps and must never be collapsed:
+//
+//   - IDENTITY — sign in again, except for the two 403s, where a fresh credential is
+//     refused identically and saying otherwise opens a loop with no exit.
+//   - PLAN — the sign-in is FINE. A missing plan gets the plans page; a lapsed one gets
+//     billing, never a second checkout, which is how people pay twice.
+//   - DEPENDENCY — nothing was established. This must never read as "not subscribed":
+//     the credential is good, the answer simply could not be obtained.
+//
+// Every reply starts with the registered "Account:" wake prefix (wake.go). That
+// registration is load-bearing rather than bookkeeping: without it the supervisor's
+// unattended wake would mistake a turn that stopped at the account door for a real
+// answer and record the work it was supervising as summarized.
+func accountFailureAdvice(be *backend.Error) string {
+	const refresh = "run `daintree-assistant auth status --refresh` for the details and the link"
+	switch be.Code {
+	case backend.CodeAuthRequired:
+		return "Account problem: this backend requires an account and no credential was sent. Run `daintree-assistant auth login` in your terminal to sign in."
+	case backend.CodeAuthTokenExpired, backend.CodeAuthTokenInvalid:
+		// Deliberately does NOT say the renewal was attempted and failed. It usually was
+		// — the client refreshes and replays once — but not always: a turn that has
+		// already shown a preamble, a meta event or visible text skips the replay by
+		// design, so the credential may never have been renewed at all. Asserting a
+		// failure that did not happen is the same small lie the upstream-unavailable
+		// message avoids, and it matters here because it makes a sign-in sound
+		// mandatory when simply asking again would have worked.
+		return "Account problem: this backend would not accept the stored credential for this turn. Try again; if it persists, run `daintree-assistant auth login` to sign in again."
+	case backend.CodeAuthSessionRevoked:
+		return "Account problem: this session was ended elsewhere — a sign-out, or access revoked for this account. Run `daintree-assistant auth login` to sign in again."
+	case backend.CodeAuthClientNotAllowed:
+		// Deliberately does NOT suggest signing in again. The credential is valid and
+		// current; another one would be refused in exactly the same way, forever.
+		return "Account problem: this backend does not accept this client's account credentials. Signing in again produces the same result — this needs a change at the backend, or a build matching this deployment."
+	case backend.CodeAuthPermissionDenied:
+		// The account IS recognised. Handing over the "your client is not registered"
+		// diagnosis here would send someone to check a registration that is fine.
+		return "Account problem: this backend accepts your credentials but not for this operation. Nothing local fixes it; ask whoever administers this deployment."
+	case backend.CodeSubscriptionRequired:
+		return "Account problem: this account has no plan that includes the assistant. Your sign-in is fine — the plan is the problem, so " + refresh + "."
+	case backend.CodeSubscriptionInactive:
+		// Billing, never a second checkout.
+		return "Account problem: this account's plan is not currently active. Check billing rather than buying again — " + refresh + "."
+	case backend.CodeUsageLimitReached:
+		return "Account problem: this account has reached its usage limit for the period. It clears when the period rolls over, or when the plan changes."
+	case backend.CodeAuthDependencyUnavailable, backend.CodeEntitlementUnavailable,
+		backend.CodeUsageAccountingUnavailable:
+		// "Could not check" is not "the answer is no". Nothing here suggests a sign-in
+		// or a purchase, because neither is the problem and both would be wasted.
+		return "Account problem: your account could not be checked just now — a service the backend depends on is unavailable. Your sign-in is unaffected; try again shortly."
+	case backend.CodeCredentialUnavailable:
+		// LOCAL, and specifically not auth_required: no request was made at all. Telling
+		// someone to sign in when the real fault is a locked keychain sends them through
+		// a browser flow that will fail at the same write.
+		return "Account problem: this machine could not produce an account credential — usually a locked or unavailable keychain. The backend never rejected anything; run `daintree-assistant auth status` for what this machine can see."
+	}
+	// account_rate_limited is deliberately absent: it is a genuine rate limit, and the
+	// branch above it already renders one with the health badge that clears on the next
+	// good usage report.
+	return ""
+}
+
 // upstreamFailureAdvice renders the user-facing reply for the backend's upstream-failure
 // taxonomy, or "" when the error is not one of those codes (leaving the generic
 // "Model error:" fallback in place).
@@ -2054,15 +2142,17 @@ func (s *Session) classifyBackendError(err error) string {
 func upstreamFailureAdvice(be *backend.Error) string {
 	switch be.Code {
 	case backend.CodeProviderInvalidAPIKey:
-		return "Model unavailable: OpenRouter rejected your API key. Replace or rotate it, then run /login."
+		// The rejected credential is the BACKEND's, not the user's. This message used to
+		// say "your API key" and send the reader to `/login` — a command that does not
+		// exist, to replace a key they have never held. The CLI ships no provider
+		// credential at all; the deployment funds every call with its own.
+		return "Model unavailable: the provider rejected the credential this backend spends. That credential belongs to the deployment, not to your account — nothing on this machine changes it, so report it to whoever runs this backend."
 	case backend.CodeProviderInsufficientCredit:
-		// The most likely failure of the lot, and the easiest to fix — so it gets the
-		// place to go, not just the diagnosis.
-		return "Model unavailable: your OpenRouter account is out of credit. Add credits at https://openrouter.ai/credits, then try again."
+		return "Model unavailable: the account this backend spends from is out of credit. It is the deployment's account rather than yours, so topping up your own would not help — report it to whoever runs this backend."
 	case backend.CodeProviderKeyForbidden:
-		// Deliberately does NOT suggest /login. The key is recognised and funded; a
-		// fresh sign-in with the same key changes nothing.
-		return "Model unavailable: the credential funding this turn isn't permitted to use this model. Its model permissions, spend limit or guardrails are blocking it."
+		// Deliberately offers no sign-in. The credential is recognised and funded, and
+		// it is not the user's to alter.
+		return "Model unavailable: the credential funding this turn isn't permitted to use this model. Its model permissions, spend limit or guardrails are blocking it, and it belongs to the deployment rather than to your account."
 	case backend.CodeUpstreamNoCompliantProvider:
 		return "Model unavailable: no OpenRouter endpoint matched your routing policy. Run /routing to see it — a stricter privacy mode or a narrow endpoint list can empty the pool, and it is never relaxed automatically to find a route."
 	case backend.CodeUpstreamUnavailable:
