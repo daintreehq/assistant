@@ -147,12 +147,14 @@ func (e *Error) Error() string {
 // telling someone whose key the provider revoked to "check you pasted it in full" sends
 // them round a re-entry loop that cannot work.
 //
-// `auth_client_not_allowed` is the newer and sharper case. It is a 403 carrying a
-// perfectly valid, perfectly fresh token — from an OAuth client this deployment does
-// not accept. Reading it as "sign in again" is worse than unhelpful: the auth layer
-// treats IsAuth as licence to refresh, and every refresh mints another token that is
-// wrong in exactly the same way. The environment is misconfigured; no credential
-// operation can fix it. See AuthRemedy, which names the difference explicitly.
+// The two 403s — `auth_client_not_allowed` and `auth_permission_denied` — are the
+// newer and sharper case. Each carries a perfectly valid, perfectly fresh token that
+// this deployment refuses anyway: the first because the OAuth client that minted it is
+// not accepted, the second because the credential lacks authority for the operation.
+// Reading either as "sign again" is worse than unhelpful — the auth layer treats IsAuth
+// as licence to refresh, and every refresh mints another token wrong in exactly the same
+// way. No credential operation can fix them, which is what `unfixableIdentityCodes`
+// names. See AuthRemedy, which maps both to RemedyReconfigure.
 //
 // A 401 or 403 carrying no code this package recognises still reads as auth, so a CLI
 // pointed at an older backend — or through a proxy that rewrote the body — keeps its
@@ -170,7 +172,7 @@ func (e *Error) IsAuth() bool {
 	// `auth_token_expired` that arrived mid-stream (status 0) escape classification
 	// entirely. The code is the stable contract; the status is not.
 	if accountCodes[e.Code] {
-		return identityCodes[e.Code] && e.Code != CodeAuthClientNotAllowed
+		return identityCodes[e.Code] && !unfixableIdentityCodes[e.Code]
 	}
 	// A local credential failure is not the backend rejecting us — we never asked.
 	if e.Code == CodeCredentialUnavailable {

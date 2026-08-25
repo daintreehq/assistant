@@ -25,6 +25,7 @@ func TestTheAccountCodesAreExactlyTheseWireStrings(t *testing.T) {
 		"auth_token_expired":           CodeAuthTokenExpired,
 		"auth_session_revoked":         CodeAuthSessionRevoked,
 		"auth_client_not_allowed":      CodeAuthClientNotAllowed,
+		"auth_permission_denied":       CodeAuthPermissionDenied,
 		"subscription_required":        CodeSubscriptionRequired,
 		"subscription_inactive":        CodeSubscriptionInactive,
 		"usage_limit_reached":          CodeUsageLimitReached,
@@ -242,19 +243,25 @@ func TestProviderAccountCodesAreNotAnAuthRemedy(t *testing.T) {
 	}
 }
 
-// The regression this whole file guards: auth_client_not_allowed is a 403 with a
-// valid token. Reading it as "sign in" licenses a refresh loop that cannot terminate,
-// because every refresh produces another token from the same rejected client.
-func TestClientNotAllowedIsNeitherAuthNorRetriable(t *testing.T) {
-	e := &Error{HTTPStatus: 403, Code: CodeAuthClientNotAllowed}
-	if e.IsAuth() {
-		t.Error("IsAuth() = true — a refresh loop; want false")
-	}
-	if isRetriable(e) {
-		t.Error("isRetriable() = true — a replay loop; want false")
-	}
-	if got := e.AuthRemedy(); got != RemedyReconfigure {
-		t.Errorf("remedy = %s, want reconfigure", got)
+// The regression this whole file guards, in both its forms: a 403 carrying a valid
+// token. Reading either as "sign in" licenses a refresh loop that cannot terminate —
+// every refresh produces another token from the same rejected client, or another token
+// with the same insufficient authority.
+func TestNeither403IsAuthOrRetriable(t *testing.T) {
+	for _, code := range []string{CodeAuthClientNotAllowed, CodeAuthPermissionDenied} {
+		e := &Error{HTTPStatus: 403, Code: code}
+		if e.IsAuth() {
+			t.Errorf("%s: IsAuth() = true — a refresh loop; want false", code)
+		}
+		if isRetriable(e) {
+			t.Errorf("%s: isRetriable() = true — a replay loop; want false", code)
+		}
+		if got := e.AuthRemedy(); got != RemedyReconfigure {
+			t.Errorf("%s: remedy = %s, want reconfigure", code, got)
+		}
+		if !e.IsAccountIdentity() {
+			t.Errorf("%s: IsAccountIdentity() = false — it is a verdict about WHO is calling", code)
+		}
 	}
 }
 
@@ -337,17 +344,80 @@ func TestIdentityCodesClassifyWithoutAnHTTPStatus(t *testing.T) {
 			t.Errorf("%s: lost its remedy mid-stream", code)
 		}
 	}
-	// The fifth identity code is the odd one out in every direction: still an identity
-	// code, still non-retriable, but never an auth remedy.
-	nope := &Error{Code: CodeAuthClientNotAllowed, Stream: true}
-	if !nope.IsAccountIdentity() {
-		t.Error("auth_client_not_allowed (mid-stream): IsAccountIdentity() = false")
+	// The two 403s are the odd ones out in every direction: still identity codes, still
+	// non-retriable, but never something IsAuth claims. Mid-stream is where that has to
+	// hold WITHOUT a status to lean on — a 200 was already committed, so the 403 they
+	// would otherwise be recognised by never arrives.
+	for _, code := range []string{CodeAuthClientNotAllowed, CodeAuthPermissionDenied} {
+		nope := &Error{Code: code, Stream: true}
+		if !nope.IsAccountIdentity() {
+			t.Errorf("%s (mid-stream): IsAccountIdentity() = false", code)
+		}
+		if nope.IsAuth() {
+			t.Errorf("%s (mid-stream): IsAuth() = true — a refresh loop", code)
+		}
+		if isRetriable(nope) {
+			t.Errorf("%s (mid-stream): isRetriable() = true", code)
+		}
+		if got := nope.AuthRemedy(); got != RemedyReconfigure {
+			t.Errorf("%s (mid-stream): remedy = %s, want reconfigure", code, got)
+		}
 	}
-	if nope.IsAuth() {
-		t.Error("auth_client_not_allowed (mid-stream): IsAuth() = true — a refresh loop")
+}
+
+// The two 403s must stay DISTINGUISHABLE even though they share a remedy. Folding them
+// into one code would be invisible to every classifier here and wrong only where it
+// matters: told their OAuth client is not accepted when it plainly is, whoever reads
+// that message goes looking for a registration problem that does not exist.
+func TestTheTwo403sAreDistinguishable(t *testing.T) {
+	if CodeAuthClientNotAllowed == CodeAuthPermissionDenied {
+		t.Fatal("the two 403s collapsed into one wire string")
 	}
-	if isRetriable(nope) {
-		t.Error("auth_client_not_allowed (mid-stream): isRetriable() = true")
+	for _, code := range []string{CodeAuthClientNotAllowed, CodeAuthPermissionDenied} {
+		if !unfixableIdentityCodes[code] {
+			t.Errorf("%s is not in unfixableIdentityCodes — IsAuth would license a refresh loop", code)
+		}
+		// Not a membership restatement: this is the BEHAVIOUR that membership buys.
+		// A proxy or a future backend reshaping one of these can attach a rate-limit
+		// type to it, and IsRateLimited would then read it as transient — so the
+		// deterministic check has to win, which it only does by being reached first.
+		mislabelled := &Error{HTTPStatus: 403, Code: code, Type: "rate_limit_error"}
+		if !mislabelled.IsRateLimited() {
+			t.Fatalf("%s: the test's premise is gone — IsRateLimited no longer reads Type", code)
+		}
+		if isRetriable(mislabelled) {
+			t.Errorf("%s carrying a rate_limit_error type is being replayed — a settled 403 must beat IsRateLimited", code)
+		}
+	}
+	// The set is exactly those two: a code that a refresh CAN fix must never be added
+	// here, because that is the one mistake this set makes silent.
+	if len(unfixableIdentityCodes) != 2 {
+		t.Errorf("unfixableIdentityCodes has %d members, want 2", len(unfixableIdentityCodes))
+	}
+}
+
+// The negative half of the taxonomy. A code in two category sets at once is how a
+// settled refusal starts being retried as an outage or rendered as a plan problem, and
+// every classifier below answers from a DIFFERENT map — so nothing else here would
+// notice the overlap.
+func TestNeither403LeaksIntoAnotherCategory(t *testing.T) {
+	for _, code := range []string{CodeAuthClientNotAllowed, CodeAuthPermissionDenied} {
+		e := &Error{HTTPStatus: 403, Code: code}
+		if e.IsAccountDependency() {
+			t.Errorf("%s: IsAccountDependency() = true — it would be replayed as an outage", code)
+		}
+		if e.IsSubscription() {
+			t.Errorf("%s: IsSubscription() = true — it would be rendered as a plan problem", code)
+		}
+		if e.IsUpstreamAuth() || e.IsProviderAccount() {
+			t.Errorf("%s: read as an UPSTREAM account problem — it is a verdict at our own door", code)
+		}
+		if e.IsUsageLimited() || e.IsAccountRateLimited() {
+			t.Errorf("%s: read as a 429", code)
+		}
+		if !e.IsAccountCode() {
+			t.Errorf("%s: IsAccountCode() = false — the status fallbacks can still override it", code)
+		}
 	}
 }
 

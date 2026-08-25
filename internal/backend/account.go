@@ -27,6 +27,8 @@ package backend
 //   - account_rate_limited is a 429 worth replaying after Retry-After.
 //   - usage_limit_reached is a 429 where replaying just burns the backoff budget to
 //     re-derive the same exhausted quota.
+//   - the two 403s share a remedy and differ only in what they tell a human, which is
+//     the whole reason they are not one code.
 const (
 	// No bearer credential arrived at all. Offer sign-in; never retry automatically.
 	CodeAuthRequired = "auth_required" // 401
@@ -46,6 +48,16 @@ const (
 	// longer answers on status alone: a refresh loop here re-mints a token that is
 	// wrong in exactly the same way, forever.
 	CodeAuthClientNotAllowed = "auth_client_not_allowed" // 403
+	// A credential this deployment DOES accept, presented for an operation it may not
+	// perform. The second 403, and it differs from the first in its MESSAGE rather than
+	// its remedy — both are settled, and no credential operation fixes either.
+	//
+	// Worth its own code precisely because the remedy is shared: told
+	// `auth_client_not_allowed` when their client IS accepted, whoever reads that log
+	// goes hunting a registration problem that does not exist. It is unreachable while
+	// every allowlisted client holds the whole permission set, and is carried now so a
+	// narrower client cannot make the wrong code correct-by-accident on arrival.
+	CodeAuthPermissionDenied = "auth_permission_denied" // 403
 
 	// Authenticated, but no product grants assistant access. Send them to the plans
 	// page; the login is fine and must be kept.
@@ -106,8 +118,12 @@ const (
 	// RemedyClear: delete the local credential and require a fresh sign-in. Refreshing
 	// cannot succeed — the session that would authorize it is gone.
 	RemedyClear
-	// RemedyReconfigure: the environment/client pairing is wrong. Never refresh, never
-	// replay; report the mismatch.
+	// RemedyReconfigure: this deployment refuses a credential that is valid and current
+	// — either the OAuth client that minted it is not accepted, or the credential lacks
+	// the authority for this operation. RETAIN it, never refresh, never replay, report
+	// the refusal. The action is shared by both 403s precisely because no credential
+	// operation changes the answer; what differs is what a human must be told, which is
+	// why they stayed two codes. Callers rendering for a person branch on the CODE.
 	RemedyReconfigure
 )
 
@@ -135,6 +151,22 @@ var authCodeRemedies = map[string]AuthRemedy{
 	CodeAuthTokenInvalid:     RemedyRefreshOrSignIn,
 	CodeAuthSessionRevoked:   RemedyClear,
 	CodeAuthClientNotAllowed: RemedyReconfigure,
+	CodeAuthPermissionDenied: RemedyReconfigure,
+}
+
+// unfixableIdentityCodes are the identity codes that no credential operation can
+// resolve: the token is valid, current, and refused anyway.
+//
+// A named set rather than an inline exception because it is now the ONE declaration two
+// separate rules read. IsAuth means "a credential operation can fix this", and answering
+// true for either of these licenses a refresh loop that re-mints a token wrong in exactly
+// the same way; the retry layer needs the same membership to keep a settled 403 out of
+// the transient rules (see deterministicAccountCodes, which derives from this). Written
+// as `!= CodeAuthClientNotAllowed` at each site instead, the second code would have had
+// to be remembered at both — and the one that got forgotten would fail silently.
+var unfixableIdentityCodes = map[string]bool{
+	CodeAuthClientNotAllowed: true,
+	CodeAuthPermissionDenied: true,
 }
 
 // subscriptionCodes are the two 402s: authenticated, but not currently entitled.
@@ -163,6 +195,7 @@ var identityCodes = map[string]bool{
 	CodeAuthTokenExpired:     true,
 	CodeAuthSessionRevoked:   true,
 	CodeAuthClientNotAllowed: true,
+	CodeAuthPermissionDenied: true,
 }
 
 // accountCodes is the union of every code this package recognises as an ACCOUNT
@@ -176,7 +209,7 @@ var identityCodes = map[string]bool{
 // with a 500 would become non-retriable. The code is the stable contract; the status is
 // not, and must never override it.
 var accountCodes = func() map[string]bool {
-	m := make(map[string]bool, 12)
+	m := make(map[string]bool, 13)
 	for _, set := range []map[string]bool{identityCodes, subscriptionCodes, accountDependencyCodes} {
 		for k := range set {
 			m[k] = true
@@ -217,8 +250,10 @@ func (e *Error) AuthRemedy() AuthRemedy {
 	return RemedyNone
 }
 
-// IsAccountIdentity reports one of the five identity codes specifically — as opposed
-// to IsAuth, which also admits an untyped 401 from an older backend.
+// IsAccountIdentity reports one of the six identity codes specifically — as opposed
+// to IsAuth, which also admits an untyped 401 from an older backend. The two are NOT
+// the same question: IsAuth answers "can a credential operation fix this", which is
+// false for both 403s even though each is squarely a verdict about who is calling.
 func (e *Error) IsAccountIdentity() bool { return e != nil && identityCodes[e.Code] }
 
 // IsSubscription reports that the caller is authenticated but not currently entitled.

@@ -162,12 +162,14 @@ var deterministicUpstreamCodes = map[string]bool{
 // deterministicAccountCodes are account verdicts that hold identically on every replay,
 // and that the status-based rules below would otherwise misread.
 //
-// Both entries exist because of a genuine collision:
+// Every entry exists because of a genuine collision:
 //
-//   - auth_client_not_allowed is a 403 that IsAuth deliberately no longer claims (see
-//     errors.go). It reaches the transient switch below as an ordinary 403 and is
-//     already refused there by default — this entry states the intent explicitly so a
-//     later reshuffle of the status rules cannot start replaying a configuration error.
+//   - the two unfixable 403s are ones IsAuth deliberately no longer claims (see
+//     errors.go), so the first guard above lets them through to here. They reach the
+//     status switch below as ordinary 403s and are already refused there by default —
+//     what these entries actually buy is precedence over IsRateLimited, which ORs in a
+//     `rate_limit_error` TYPE that a proxy or a future backend could plausibly attach
+//     to a 403 it reshaped. Being checked first, they cannot be reclassified by it.
 //   - usage_limit_reached shares 429 with account_rate_limited. IsRateLimited now
 //     excludes it, so this is likewise belt-and-braces on the more expensive of the two
 //     mistakes: replaying an exhausted quota spends the whole ~50-75s backoff budget to
@@ -180,11 +182,20 @@ var deterministicUpstreamCodes = map[string]bool{
 // The auth ladder owns the single refresh-and-replay; a transport-level retry underneath
 // it would multiply one deliberate replay into a loop against a credential nothing has
 // re-minted.
-var deterministicAccountCodes = map[string]bool{
-	CodeAuthClientNotAllowed:  true,
-	CodeUsageLimitReached:     true,
-	CodeCredentialUnavailable: true,
-}
+var deterministicAccountCodes = func() map[string]bool {
+	m := map[string]bool{
+		CodeUsageLimitReached:     true,
+		CodeCredentialUnavailable: true,
+	}
+	// DERIVED, not restated: every code no credential operation can fix is also one no
+	// replay can fix, and the two lists drifting apart is the failure this avoids —
+	// a third such 403 added to the taxonomy would otherwise be settled for IsAuth and
+	// replayable here.
+	for code := range unfixableIdentityCodes {
+		m[code] = true
+	}
+	return m
+}()
 
 // retriableAccountCodes are the dependency outages that must be replayed on EITHER
 // transport.
