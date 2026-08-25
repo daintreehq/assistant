@@ -1011,15 +1011,21 @@ func (c *Client) VerifyKey(ctx context.Context) (KeyVerification, error) {
 		}
 		return KeyVerification{}, err
 	}
-	// Scrub the key out of the free-text fields BEFORE anyone can render them. Detail
-	// and Label are backend-controlled strings that ride a 200 response — the success
-	// path, which no error-scrubbing wrapper covers — and they land in the doctor
-	// credential row and the debug log. A no-op when no caller key is set, which is the
-	// normal case; when one IS set, a provider that echoes it into its rejection reason
-	// would otherwise persist it in the host's native scrollback, which the attached session
-	// never clears. One choke point here beats N display-site fixes.
+	// Scrub the key out of the free-text fields BEFORE anyone can render them. Detail,
+	// Label and Reason are backend-controlled strings that ride a 200 response — the
+	// success path, which no error-scrubbing wrapper covers — and they land in the
+	// doctor credential row and the debug log. A no-op when no caller key is set, which
+	// is the normal case; when one IS set, a provider that echoes it into its rejection
+	// reason would otherwise persist it in the host's native scrollback, which the
+	// attached session never clears. One choke point here beats N display-site fixes.
+	//
+	// Reason is in the list even though it is contractually a short enum member: it is
+	// still a string this process did not author, doctor now renders an UNRECOGNISED
+	// one verbatim so a newer backend can name a condition we have no copy for, and a
+	// field whose value we do not control is a field that can carry a bearer.
 	out.Detail = c.scrubSecrets(out.Detail)
 	out.Label = c.scrubSecrets(out.Label)
+	out.Reason = c.scrubSecrets(out.Reason)
 	return out, nil
 }
 

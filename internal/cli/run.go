@@ -1158,10 +1158,20 @@ func accountDoctorCheck(a *app.App) DoctorCheck {
 // backend-health row far more often than a "your key" row, and the wording below has to
 // hold for both readings.
 func verifyCredentialDoctorCheck(ctx context.Context, a *app.App, base string) DoctorCheck {
-	c := DoctorCheck{ID: "auth.credentialUsable", Label: "upstream credential"}
 	vctx, vcancel := context.WithTimeout(ctx, 3*time.Second)
 	ver, verr := a.Backend.VerifyKey(vctx)
 	vcancel()
+	return credentialVerdictRow(ver, verr, base, a.Config.APIKey)
+}
+
+// credentialVerdictRow turns one verification answer into the row a human reads.
+//
+// Split out from the call above so it can be tested against every verdict the backend
+// can produce without standing up an App, a store and a lease — which is why the arm
+// that dereferenced a nil limit went unnoticed: nothing could reach it. It performs no
+// I/O and must not; every input it needs is a parameter.
+func credentialVerdictRow(ver backend.KeyVerification, verr error, base, callerKey string) DoctorCheck {
+	c := DoctorCheck{ID: "auth.credentialUsable", Label: "upstream credential"}
 
 	switch {
 	case errors.Is(verr, backend.ErrVerifyUnsupported):
@@ -1176,26 +1186,17 @@ func verifyCredentialDoctorCheck(ctx context.Context, a *app.App, base string) D
 		c.Status = StatusUnknown
 		c.Detail = "this local backend can't check"
 		return c
-	case isBackendAccountVerdict(verr):
-		// A valid token from an OAuth client this deployment does not accept. Neither
-		// signing in again nor correcting a key helps: the client id itself is wrong for
-		// this endpoint, so the fix is the endpoint or the build, not the credential.
+	case isBlockingAccountVerdict(verr), isBackendAuthError(verr):
+		// A definite answer at OUR door, not a failed check: this deployment will not
+		// serve this CLI, so every turn fails. Reporting it as `unknown` would leave
+		// doctor concluding "no blocking problems" for an install that cannot run at
+		// all — the exact thing this row exists to catch.
+		//
+		// The two predicates are disjoint by construction (IsAuth claims neither 403,
+		// and no settled plan verdict is an identity code), so they share an arm: the
+		// STATUS is the same for every one of them and only the advice differs.
 		c.Status = StatusFail
-		c.Detail = "this backend does not accept this client's account credentials — " + verr.Error()
-		c.Hint = "This build's OAuth client is not registered with the backend you are pointed at. Check DAINTREE_BACKEND_URL, or use a build matching this deployment."
-		return c
-	case isBackendAuthError(verr):
-		// A 401 at OUR door is a definite answer, not a failed check: this deployment
-		// will not serve this CLI, so every turn fails. Reporting it as `unknown` would
-		// leave doctor concluding "no blocking problems" for an install that cannot run
-		// at all — and the whole point of this row is to say so before a turn does.
-		c.Status = StatusFail
-		c.Detail = "this backend rejected the request outright — " + verr.Error()
-		if a.Config.APIKey != "" {
-			c.Hint = "DAINTREE_API_KEY is set and this backend refused it. Unset it, or correct it."
-		} else {
-			c.Hint = "This CLI sends no API key. The endpoint still requires one, so it is older than this build — point DAINTREE_BACKEND_URL at a current backend."
-		}
+		c.Detail, c.Hint = blockingAccountCopy(verr, callerKey)
 		return c
 	case verr != nil:
 		c.Status = StatusUnknown
@@ -1204,32 +1205,186 @@ func verifyCredentialDoctorCheck(ctx context.Context, a *app.App, base string) D
 	case !ver.Valid:
 		c.Status = StatusFail
 		c.Detail = "the provider rejected this credential: " + ver.Detail
-		c.Hint = credentialFixHint(a.Config.APIKey)
+		c.Hint = credentialFixHint(callerKey)
+		c.Data = verificationData(ver)
 		return c
 	case !ver.IsUsable():
-		// Recognised but empty fails every turn just as surely as a wrong credential —
-		// but the fix is topping up, not replacing it, so it is its own state.
-		// IsUsable, not a bare LimitRemaining test: it honours the backend's own
-		// `usable` verdict and treats "not reported" as fine, which is what an
-		// unlimited or pay-as-you-go account looks like.
+		// Recognised but unable to fund a turn fails just as surely as a wrong
+		// credential — and the fix depends on WHY, so the reason is what decides the
+		// wording here. IsUsable, not a bare LimitRemaining test: it honours the
+		// backend's own `usable` verdict and treats "not reported" as fine, which is
+		// what an unlimited or pay-as-you-go account looks like.
 		c.Status = StatusFail
-		c.Detail = "the credential is valid but has NO CREDIT remaining"
-		c.Hint = "Top up the account — every turn will fail until you do."
-		c.Data = map[string]any{"limitRemaining": *ver.LimitRemaining}
+		c.Detail, c.Hint = unusableCredentialCopy(ver)
+		c.Data = verificationData(ver)
 		return c
 	}
 	c.Status = StatusOK
-	c.Detail = "usable" + credentialOwnerSuffix(a.Config.APIKey)
+	c.Detail = "usable" + credentialOwnerSuffix(callerKey)
 	if ver.Label != "" {
 		// The provider's own safe label, when it offers one. Cerebras does not — its
 		// probe answers with a model listing — so this is normally absent rather than
 		// empty-looking, and the row must read correctly without it.
 		c.Detail += " · " + ver.Label
 	}
-	if ver.LimitRemaining != nil {
-		c.Data = map[string]any{"limitRemaining": *ver.LimitRemaining}
-	}
+	c.Data = verificationData(ver)
 	return c
+}
+
+// unusableCredentialCopy writes the row for a credential the backend calls VALID and
+// cannot fund a turn with.
+//
+// It branches on the stable reason rather than on the balance, which is the contract
+// the backend states on its side ("the CLI branches on `reason` rather than
+// reimplementing the arithmetic"). The arithmetic is also not always available: a
+// backend may report `usable:false` with no limit at all, which is the case that used
+// to panic here.
+//
+// An unrecognised reason repeats what the backend said instead of guessing. Asserting
+// "NO CREDIT remaining" for a condition this build has never heard of is the failure
+// this replaces — it sends someone to top up an account that is not short of money.
+func unusableCredentialCopy(ver backend.KeyVerification) (detail, hint string) {
+	// A KNOWN success reason arriving on an unusable verdict is a contradictory
+	// response, not an unfamiliar condition. Saying "this build has no advice for it"
+	// would be false — we know the reason perfectly well; the backend disagrees with
+	// itself, and that is what to report.
+	if ver.Reason == backend.ReasonOK {
+		return "this backend reports the credential cannot fund a turn, and gives \"ok\" as the reason",
+			"That response contradicts itself. Treat the endpoint as suspect; `--backend-url` can point at another."
+	}
+	// A backend predating `reason` reports the balance and nothing else, and IsUsable
+	// reaches this arm from the arithmetic alone. Falling through to the generic copy
+	// there would DROP the top-up advice for the one case that has always had it — the
+	// exhausted balance is right there in the response.
+	spent := ver.Reason == backend.ReasonCreditsExhausted ||
+		(ver.Reason == "" && ver.LimitRemaining != nil && *ver.LimitRemaining <= 0)
+	if spent {
+		return "the credential is valid but has NO CREDIT remaining",
+			"Top up the account — every turn will fail until you do."
+	}
+	if ver.Reason == "" {
+		return "the credential is valid, but this backend reports it cannot fund a turn",
+			"The backend gave no reason. Check the account behind this credential; every turn will fail until it can pay."
+	}
+	return "the credential is valid, but this backend reports it cannot fund a turn (" + safeReason(ver.Reason) + ")",
+		"The backend named a condition this build has no advice for. Check the account behind this credential."
+}
+
+// safeReason bounds an unrecognised reason before it is printed.
+//
+// The contract says a machine-readable enum member; what actually arrives is a string
+// from a process we do not control, and this one is rendered VERBATIM so a newer backend
+// can name a condition we have no copy for. That is worth having and it is why the value
+// needs bounding: it reaches the normal screen buffer, which the attached session never
+// clears, so a control character could rewrite the terminal and an unbounded value could
+// bury the rest of the report. The bearer itself is already scrubbed upstream in
+// VerifyKey — this covers the shape, not the secret.
+func safeReason(reason string) string {
+	const maxReasonLen = 64
+	var b strings.Builder
+	for i, r := range reason {
+		if i >= maxReasonLen {
+			b.WriteString("…")
+			break
+		}
+		if r < 0x20 || r == 0x7f {
+			b.WriteRune('?')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// verificationData carries the machine-readable half of the verdict onto the row, for
+// `doctor --json` and the support bundle.
+//
+// Both fields are OPTIONAL on the wire and are omitted rather than zero-filled: a
+// missing limit means "not reported", which an unlimited or pay-as-you-go account is,
+// and rendering that as 0 would say the exact opposite of what it means.
+//
+// The reason goes in UNBOUNDED here, unlike the human rendering. This is the machine
+// channel: the JSON encoder escapes control characters on its own, so there is no
+// terminal to protect, and truncating a legitimately long value would corrupt the one
+// copy a consumer can act on. The bearer is already scrubbed upstream in VerifyKey.
+func verificationData(ver backend.KeyVerification) map[string]any {
+	data := map[string]any{}
+	if ver.LimitRemaining != nil {
+		data["limitRemaining"] = *ver.LimitRemaining
+	}
+	if ver.Reason != "" {
+		data["reason"] = ver.Reason
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	return data
+}
+
+// blockingAccountCopy writes the detail and hint for a refusal at our own door.
+//
+// It branches on the stable CODE, which is the only thing that distinguishes refusals
+// that all arrive as 401 or 403 and all need different next steps. Branching on the
+// status instead — which this used to do, in effect, by asking only whether a caller
+// key was set — produces the failure the taxonomy exists to prevent: an enforcing
+// backend answering `auth_required` was told the endpoint must be OLDER than this
+// build, when the actual next step is to sign in.
+func blockingAccountCopy(err error, callerKey string) (detail, hint string) {
+	code := accountVerdictCode(err)
+	text := err.Error()
+
+	switch code {
+	case backend.CodeAuthRequired:
+		return "this backend requires an account and no credential was sent — " + text,
+			"Run `daintree-assistant auth login`."
+	case backend.CodeAuthTokenExpired:
+		return "the stored credential has expired — " + text,
+			"It normally renews itself. If this persists, run `daintree-assistant auth login` again."
+	case backend.CodeAuthTokenInvalid:
+		return "this backend will not accept the stored credential — " + text,
+			"Run `daintree-assistant auth login` to replace it."
+	case backend.CodeAuthSessionRevoked:
+		return "this session was ended elsewhere — " + text,
+			"Sign in again with `daintree-assistant auth login`."
+	case backend.CodeAuthPermissionDenied:
+		// The account IS recognised. Handing over the "your OAuth client is not
+		// registered" diagnosis here sends someone to check an endpoint and a build
+		// that are both fine, which is exactly why this is a separate code.
+		return "this backend accepts these credentials but not for this operation — " + text,
+			"The account is recognised and lacks the permission this CLI needs. Nothing local fixes it; ask whoever administers this deployment."
+	case backend.CodeAuthClientNotAllowed:
+		return "this backend does not accept this client's account credentials — " + text,
+			"This build's OAuth client is not registered with the backend you are pointed at. Check DAINTREE_BACKEND_URL, or use a build matching this deployment."
+	case backend.CodeSubscriptionRequired:
+		return "this account has no plan that includes the assistant — " + text,
+			"The sign-in is fine; the plan is the problem. Run `daintree-assistant auth status` for the link."
+	case backend.CodeSubscriptionInactive:
+		return "this account's plan is not currently active — " + text,
+			"Check the billing portal rather than buying again — a second checkout is how people pay twice."
+	case backend.CodeUsageLimitReached:
+		return "this account has reached its usage limit for the period — " + text,
+			"It clears when the period rolls over, or when the plan changes."
+	}
+
+	// No recognised code: an older backend, or a proxy that rewrote the body. The
+	// answer is still definite, so it still fails — but nothing here can name a reason,
+	// and the copy must not invent one.
+	detail = "this backend rejected the request outright — " + text
+	if callerKey != "" {
+		return detail, "A caller-supplied key (DAINTREE_API_KEY or --api-key-file) is set and this backend refused it. Unset it, or correct it."
+	}
+	return detail, "This endpoint refused an unauthenticated request and named no reason. Try `daintree-assistant auth login`, or point DAINTREE_BACKEND_URL at a current backend."
+}
+
+// accountVerdictCode returns the backend account code carried by err, or "" when it
+// carries none. Callers branch on this for what to TELL a person; the remedy they act
+// on stays typed (see isBlockingAccountVerdict).
+func accountVerdictCode(err error) string {
+	var berr *backend.Error
+	if errors.As(err, &berr) && berr != nil {
+		return berr.Code
+	}
+	return ""
 }
 
 // isBackendAuthError reports a 401/403 raised at the BACKEND's own door (not the
@@ -1240,23 +1395,29 @@ func isBackendAuthError(err error) bool {
 	return errors.As(err, &berr) && berr.IsAuth()
 }
 
-// isBackendAccountVerdict reports a definite, blocking account answer that IsAuth
-// deliberately does NOT claim — today `auth_client_not_allowed`.
+// isBlockingAccountVerdict reports a definite, blocking account answer that IsAuth
+// deliberately does NOT claim.
 //
 // It exists because the two questions came apart. IsAuth now means "a credential
-// operation can fix this", which auth_client_not_allowed is precisely not: the token is
-// valid and fresh, and this deployment will not accept the OAuth client that minted it.
-// But it is still a definite verdict that no turn can survive, so doctor must fail on
-// it. Without this the row falls through to the generic "could not check" arm and
-// reports `unknown`, which does not gate — leaving doctor to conclude "no blocking
-// problems" for an install that cannot run at all. That is the exact failure the
-// credential row was added to prevent, arriving through a different door.
-func isBackendAccountVerdict(err error) bool {
+// operation can fix this", which the two 403s are precisely not: the token is valid and
+// fresh, and this deployment refuses it anyway. The plan verdicts are the same shape
+// from the other direction — the login is perfect and the account still cannot run a
+// turn. Every one of them is settled, and without this arm they fall through to the
+// generic "could not check" branch and report `unknown`, which does not gate — leaving
+// doctor to conclude "no blocking problems" for an install that cannot run at all. That
+// is the exact failure the credential row was added to prevent.
+//
+// What is deliberately NOT here: the dependency codes and account_rate_limited. Those
+// genuinely mean "we could not reach a verdict", and `unknown` is the honest answer for
+// them — failing on an outage is how a gate teaches people to ignore it.
+func isBlockingAccountVerdict(err error) bool {
 	var berr *backend.Error
 	if !errors.As(err, &berr) {
 		return false
 	}
-	return berr.AuthRemedy() == backend.RemedyReconfigure
+	return berr.AuthRemedy() == backend.RemedyReconfigure ||
+		berr.IsSubscription() ||
+		berr.IsUsageLimited()
 }
 
 // credentialOwnerSuffix names WHOSE credential the row just reported on. Without it the
@@ -1264,7 +1425,10 @@ func isBackendAccountVerdict(err error) bool {
 // "the key you exported is funded" — and the reader cannot tell which from the endpoint.
 func credentialOwnerSuffix(callerKey string) string {
 	if callerKey != "" {
-		return " (yours, from DAINTREE_API_KEY)"
+		// Not "from DAINTREE_API_KEY": --api-key-file sets the same value, and naming
+		// only the variable tells someone who used the flag that a variable they never
+		// exported is in play.
+		return " (yours, from DAINTREE_API_KEY or --api-key-file)"
 	}
 	return " (the backend's own)"
 }
@@ -1274,7 +1438,7 @@ func credentialOwnerSuffix(callerKey string) string {
 // something they never pasted sends them looking for a setting that does not exist.
 func credentialFixHint(callerKey string) string {
 	if callerKey != "" {
-		return "DAINTREE_API_KEY names a credential the provider will not accept — unset it to fall back to the backend's own."
+		return "The caller-supplied key (DAINTREE_API_KEY or --api-key-file) names a credential the provider will not accept — unset it to fall back to the backend's own."
 	}
 	return "The backend's own upstream credential is rejected — this is a backend-side problem, not yours."
 }

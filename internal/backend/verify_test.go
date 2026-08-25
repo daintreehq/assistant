@@ -226,6 +226,18 @@ func TestKeyVerificationIsUsable(t *testing.T) {
 		{"older backend, spent", KeyVerification{Valid: true, LimitRemaining: f(0)}, false},
 		{"older backend, negative", KeyVerification{Valid: true, LimitRemaining: f(-2)}, false},
 		{"older backend, no limit reported", KeyVerification{Valid: true}, true},
+
+		// A stated failure reason with NO flag and NO balance. Reading the fallback
+		// literally ("nothing was reported, so nothing is wrong") would pass this green
+		// while the response's own machine-readable half says the account is spent.
+		{"reason alone, exhausted", KeyVerification{Valid: true, Reason: ReasonCreditsExhausted}, false},
+		{"reason alone, rejected", KeyVerification{Valid: true, Reason: ReasonProviderRejected}, false},
+		{"reason alone, unrecognised", KeyVerification{Valid: true, Reason: "account_suspended"}, false},
+		// `ok` is a stated SUCCESS and must not be caught by the same rule.
+		{"reason ok, nothing else", KeyVerification{Valid: true, Reason: ReasonOK}, true},
+		// The explicit flag still wins over the reason, in both directions — it is the
+		// backend's own verdict, and the reason is its label for that verdict.
+		{"flag beats a contradictory reason", KeyVerification{Valid: true, Usable: b(true), Reason: ReasonCreditsExhausted}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

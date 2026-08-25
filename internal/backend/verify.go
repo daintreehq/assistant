@@ -10,6 +10,21 @@ import "strings"
 // install — so it is still the one probe that can say "this deployment can actually run
 // a turn" before a turn is spent finding out. `doctor` is its caller now.
 
+// The stable machine-readable outcomes `/v1/daintree/auth/verify` answers with. The
+// backend composes `detail` from these (`_REASON_DETAIL` in its daintree_auth.py) and
+// its own comment says the CLI is to branch on the reason "rather than reimplementing
+// the arithmetic" — which is exactly what these are for. Detail is prose and may be
+// reworded; a reason may not.
+//
+// An UNRECOGNISED reason is not an error. A newer backend can name a condition this
+// build has no copy for, and the honest rendering is to repeat the reason it gave
+// rather than to pick the nearest one we know and assert it.
+const (
+	ReasonOK               = "ok"
+	ReasonProviderRejected = "provider_rejected"
+	ReasonCreditsExhausted = "credits_exhausted"
+)
+
 // IsUsable reports whether the account behind a VALID key can actually fund a turn.
 //
 // The backend answers this directly now (`usable`, with a stable `reason`), and its
@@ -24,6 +39,15 @@ import "strings"
 func (v KeyVerification) IsUsable() bool {
 	if v.Usable != nil {
 		return *v.Usable
+	}
+	// A reason that NAMES a failure settles it even with no `usable` flag and no
+	// balance. Without this the fallback below reads "nothing was reported" and answers
+	// yes — so `{"valid":true,"reason":"credits_exhausted"}` would pass doctor green
+	// while its own machine-readable half said the account is spent. Fail-open on a
+	// field we just declared stable is the wrong default; the flag is a pointer to keep
+	// ABSENCE from meaning false, not to let a stated failure be ignored.
+	if v.Reason != "" && v.Reason != ReasonOK {
+		return false
 	}
 	return v.LimitRemaining == nil || *v.LimitRemaining > 0
 }
