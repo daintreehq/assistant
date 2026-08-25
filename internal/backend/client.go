@@ -349,6 +349,112 @@ func (c *Client) credential(ctx context.Context, path string) (string, error) {
 	return token, nil
 }
 
+// accountAttempt records which credential a protected request was made with, so its
+// outcome can be attributed to that credential and not to whatever has replaced it.
+//
+// The zero value is inert: every method is a no-op, which is what a public path, an
+// anonymous request, or a token source that does not observe all produce. That keeps
+// the call sites free of nil checks on the hot path.
+type accountAttempt struct {
+	obs   AccountObserver
+	gen   uint64
+	token string
+}
+
+// beginAccountAttempt samples the identity generation before a request goes out.
+//
+// Sampling BEFORE rather than reading after is the whole point: a request can outlive a
+// logout, and a verdict applied against whatever generation happens to be current when
+// the answer lands would let a stale 401 clear a session the user just created.
+//
+// Nothing is observed when no credential was sent. An anonymous request's 401 says the
+// backend wants an account, not that any stored credential is bad, and feeding it to the
+// state machine would mark a perfectly good session signed-out on a deployment that had
+// simply started requiring auth on a path we called without one.
+func (c *Client) beginAccountAttempt(token string) accountAttempt {
+	if token == "" {
+		return accountAttempt{}
+	}
+	obs, ok := c.tokens.(AccountObserver)
+	if !ok {
+		return accountAttempt{}
+	}
+	return accountAttempt{obs: obs, gen: obs.Generation(), token: token}
+}
+
+// succeeded reports a protected 2xx for the credential this attempt carried.
+func (a accountAttempt) succeeded() {
+	if a.obs != nil {
+		a.obs.MarkActive(a.gen)
+	}
+}
+
+// failed hands an account verdict to the observer. Non-account errors are passed too —
+// the observer's own taxonomy check is the authority on what counts, and duplicating
+// that judgement here would let the two drift.
+func (a accountAttempt) failed(ctx context.Context, err error) {
+	if a.obs != nil {
+		a.obs.ApplyBackendVerdict(ctx, a.gen, a.token, err)
+	}
+}
+
+// wantsRefreshReplay reports an error whose ONE correct response is to refresh the
+// credential and send the request again.
+//
+// Bounded to a single replay by the caller, and gated there on nothing having been shown
+// to the user yet. Two conditions qualify and no others: an expired token (a refresh is
+// exactly the fix) and an invalid one (a refresh is worth trying when a stored session
+// exists to refresh from). A revoked session and the two 403s are deliberately excluded
+// — refreshing those mints another credential wrong in the same way, forever.
+func wantsRefreshReplay(err error) bool {
+	var be *Error
+	if !errors.As(err, &be) {
+		return false
+	}
+	switch be.AuthRemedy() {
+	case RemedyRefresh, RemedyRefreshOrSignIn:
+		return true
+	}
+	return false
+}
+
+// renewedCredential fetches the credential again after a verdict has dropped the old
+// one, and reports whether it is actually usable for a replay.
+//
+// The check is "non-empty AND different", and both halves earn their place. An empty
+// result means the refresh could not produce one — often because the provider rejected
+// the grant and the session was deleted — and replaying then sends the request with no
+// credential at all: on a backend that serves anonymous callers that SUCCEEDS, as the
+// wrong principal, and reports a confirmed session for one that has just been removed.
+// An unchanged result means no renewal happened, so the replay would re-present the
+// exact value the backend refused a moment ago.
+func (c *Client) renewedCredential(ctx context.Context, path, previous string) (string, bool) {
+	next, err := c.credential(ctx, path)
+	if err != nil || next == "" || next == previous {
+		return "", false
+	}
+	return next, true
+}
+
+// replaySafe reports that a streamed turn can still be replayed without a human noticing.
+//
+// contentStreamed alone is NOT that boundary, which is the mistake this replaces. It
+// tracks executor prose only — a preamble is painted on screen before any of it arrives,
+// so replaying after one duplicates visible text. Meta is a different objection with the
+// same answer: it proves the selector already ran, so the backend has already been paid
+// for work a replay would buy a second time.
+func (c *Client) replaySafe(contentStreamed bool, shownPreamble string, meta ...*StreamMeta) bool {
+	if contentStreamed || shownPreamble != "" {
+		return false
+	}
+	for _, m := range meta {
+		if m != nil {
+			return false
+		}
+	}
+	return true
+}
+
 // applyHeaders sets the common headers plus the bearer, if any.
 func (c *Client) applyHeaders(req *http.Request, accept, token string) {
 	req.Header.Set("Content-Type", "application/json")
@@ -561,11 +667,18 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 		// "unknown" would caveat a total that has nothing wrong with it.
 	}
 
+	// The credential this turn is about, sampled before the first attempt. See the same
+	// block in doJSONRetry for why the observation is best-effort.
+	sampledToken, _ := c.credential(ctx, respondPath)
+	acct := c.beginAccountAttempt(sampledToken)
+	refreshReplayed := false
+
 	started := time.Now()
 	for attempt := 0; ; attempt++ {
 		pendingMeta = nil // each attempt brings its own meta
 		result, serr := c.respondStreamOnce(ctx, body, cb)
 		if serr == nil {
+			acct.succeeded()
 			flushMeta() // committed success (incl. pure tool-call turns with no content)
 			// Commit exactly what was shown. Joined onto the front of the assistant
 			// content in this one place, so every caller downstream — history, the
@@ -593,16 +706,39 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 		if pendingMeta != nil || lastReceivedMeta != nil || contentStreamed {
 			abandonedSpend = true
 		}
-		// Caller cancellation (Escape / shutdown) is a clean stop, never a retry.
+		// Caller cancellation (Escape / shutdown) is a clean stop, never a retry — but
+		// the verdict that arrived first is still recorded. A revocation racing an
+		// Escape keypress must not be lost.
 		if ctx.Err() != nil {
+			acct.failed(ctx, serr)
 			flushMeta()
 			finalize(result, true)
 			return result, serr
+		}
+		// The auth ladder, gated on nothing having been SHOWN yet — the same boundary
+		// the transient retry uses, and for the same reason. Once a token has reached
+		// the caller the turn is committed: replaying it would duplicate on-screen text,
+		// and no credential problem is worth doing that over. An expired token that
+		// surfaces mid-stream therefore ends the turn, and the verdict below still
+		// reaches the state machine so the NEXT turn starts with a fresh credential.
+		if !refreshReplayed && c.replaySafe(contentStreamed, shownPreamble, pendingMeta, lastReceivedMeta) &&
+			wantsRefreshReplay(serr) {
+			refreshReplayed = true
+			acct.failed(ctx, serr)
+			next, ok := c.renewedCredential(ctx, respondPath, acct.token)
+			if !ok {
+				flushMeta()
+				finalize(result, true)
+				return result, serr
+			}
+			acct = c.beginAccountAttempt(next)
+			continue
 		}
 		be, ok := serr.(*Error)
 		// Stop if content already streamed (can't replay), the failure isn't a
 		// transient class, retries are disabled, or the attempt budget is spent.
 		if contentStreamed || !ok || !isRetriable(be) || attempt+1 >= c.retry.MaxAttempts || retriesDisabled(ctx) {
+			acct.failed(ctx, serr)
 			flushMeta()
 			finalize(result, true)
 			return result, serr
@@ -617,6 +753,9 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 			req.State = &state
 			nextBody, marshalErr := json.Marshal(req)
 			if marshalErr != nil {
+				// Practically infallible, and still a terminal exit: the failure that
+				// sent us here is reported before the marshal error replaces it.
+				acct.failed(ctx, serr)
 				flushMeta()
 				finalize(result, true)
 				return result, fmt.Errorf("backend: marshal retry request: %w", marshalErr)
@@ -629,6 +768,7 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 		// failing — so the attempt budget alone does not bound the turn. Stop once
 		// the restart-recovery window is spent and surface the failure.
 		if c.retry.exhausted(time.Since(started), delay) {
+			acct.failed(ctx, serr)
 			flushMeta()
 			finalize(result, true)
 			return result, serr
@@ -645,6 +785,7 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 		if !sleepCtx(ctx, delay) {
 			// Cancelled mid-backoff: surface the last failure (the caller reads
 			// ctx.Err() and treats it as a clean cancel).
+			acct.failed(ctx, serr)
 			flushMeta()
 			finalize(result, true)
 			return result, serr
@@ -676,7 +817,7 @@ func (c *Client) respondStreamOnce(ctx context.Context, body []byte, cb StreamCa
 	//
 	// It uses attemptCtx all the same, so the refresh honours this attempt's
 	// cancellation and deadline rather than outliving it.
-	token, err := c.credential(attemptCtx, "/v1/daintree/respond")
+	token, err := c.credential(attemptCtx, respondPath)
 	if err != nil {
 		// Scrubbed like every other error leaving this client: a token source can echo
 		// a credential it issued into its own failure text, and this one reaches the
@@ -691,7 +832,7 @@ func (c *Client) respondStreamOnce(ctx context.Context, body []byte, cb StreamCa
 	marks := newTransportRecorder()
 	attemptCtx = httptrace.WithClientTrace(attemptCtx, marks.trace())
 
-	httpReq, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, c.baseURL+"/v1/daintree/respond", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, c.baseURL+respondPath, bytes.NewReader(body))
 	if err != nil {
 		return RespondResult{}, fmt.Errorf("backend: build respond request: %w", err)
 	}
@@ -839,6 +980,12 @@ func (c *Client) RunTask(ctx context.Context, req TaskRequest) (TaskResult, erro
 // RespondOp is the CostEvent.Op value for a conversation turn. Every other value is a
 // utility task, named by its task id.
 const RespondOp = "respond"
+
+// respondPath is the streamed turn's route. Named because three places now need to
+// agree on it — the request itself, the credential sample the account ladder takes, and
+// the re-sample after a refresh — and a literal repeated at each would let one drift
+// onto a path with different auth requirements.
+const respondPath = "/v1/daintree/respond"
 
 // routingPreference returns the caller's endpoint-routing block, or nil when they
 // expressed none — which omits the block and leaves the server default in force. Sending
@@ -1113,19 +1260,66 @@ func (c *Client) doJSONRetry(ctx context.Context, method, path string, body any,
 		payload = b
 	}
 
+	// Sample the credential this call is about BEFORE the first attempt. It is fetched
+	// again per attempt inside setHeaders (so a refresh underneath is picked up); this
+	// copy exists only to attribute the OUTCOME to the right credential.
+	//
+	// A failure here is not fatal to the request: the per-attempt fetch will raise the
+	// same problem, with the error shape the caller already handles. All that is lost is
+	// the observation, and reporting a verdict against a credential we could not read
+	// would be worse than not reporting one.
+	sampled, _ := c.credential(ctx, path)
+	acct := c.beginAccountAttempt(sampled)
+	refreshReplayed := false
+
 	started := time.Now()
 	for attempt := 0; ; attempt++ {
 		err := c.doJSONOnce(ctx, method, path, payload, body != nil, out)
 		if err == nil {
+			acct.succeeded()
 			return nil
 		}
 		// Caller cancellation (or an exhausted caller-supplied deadline) is a clean
-		// stop, never a retry.
+		// stop, never a retry — but the answer that arrived before it is still an
+		// answer. A revocation that raced an Escape keypress would otherwise be
+		// discarded, leaving the dead credential on disk and the state machine
+		// believing in a session the backend has already ended.
 		if ctx.Err() != nil {
+			acct.failed(ctx, err)
 			return err
+		}
+		// The auth ladder, above the transport retry and deliberately separate from it.
+		// isRetriable refuses every identity code, so without this an expired token is a
+		// hard failure on a call a single refresh would have completed. It is NOT
+		// governed by the transient budget either: a caller that set MaxAttempts to 1
+		// asked not to replay a flaky endpoint, which is a different request from
+		// refusing to renew an expired credential once.
+		//
+		// The verdict goes to the observer FIRST — that is what drops the dead token, so
+		// the replay's setHeaders fetches a fresh one instead of re-presenting the value
+		// the backend just refused. ONE replay: a second would mean the refresh did not
+		// help, and looping on that is how a client hammers an endpoint that will keep
+		// saying no.
+		if !refreshReplayed && wantsRefreshReplay(err) {
+			refreshReplayed = true
+			acct.failed(ctx, err)
+			next, ok := c.renewedCredential(ctx, path, acct.token)
+			if !ok {
+				// No fresh credential, so there is nothing to replay WITH. Replaying
+				// anyway would re-present the token the backend just refused, or — if
+				// the refresh failed because the session is gone — send the request
+				// ANONYMOUSLY, which on an open backend succeeds as the wrong principal
+				// and reports a confirmed session that no longer exists.
+				return err
+			}
+			// The outcome of the replay belongs to the NEW token, not the one that just
+			// failed.
+			acct = c.beginAccountAttempt(next)
+			continue
 		}
 		be, ok := err.(*Error)
 		if !ok || !isRetriable(be) || attempt+1 >= c.retry.MaxAttempts || retriesDisabled(ctx) {
+			acct.failed(ctx, err)
 			return err
 		}
 		delay := c.retry.backoff(attempt, be.RetryAfter)
@@ -1133,6 +1327,12 @@ func (c *Client) doJSONRetry(ctx context.Context, method, path string, body any,
 		// of jsonAttemptTimeout before each rejection, so the attempt count alone
 		// would let a deadline-less caller stall for many minutes.
 		if c.retry.exhausted(time.Since(started), delay) {
+			// Observed on the way out like every other terminal exit. These are
+			// retriable-class errors, which sounds like nothing for the account layer
+			// — but the three dependency codes are BOTH retriable and account verdicts,
+			// and they are the ones that must reach the state machine as "we could not
+			// check" so it preserves the credential instead of inferring a logout.
+			acct.failed(ctx, err)
 			return err
 		}
 		if c.onRetry != nil {
@@ -1145,6 +1345,7 @@ func (c *Client) doJSONRetry(ctx context.Context, method, path string, body any,
 			})
 		}
 		if !sleepCtx(ctx, delay) {
+			acct.failed(ctx, err)
 			return err
 		}
 	}

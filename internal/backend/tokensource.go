@@ -45,6 +45,43 @@ type TokenSource interface {
 	Invalidate(accessToken string)
 }
 
+// AccountObserver is an optional TokenSource capability: learning the ACCOUNT-relevant
+// outcome of every protected request made with a credential it supplied.
+//
+// It exists because the two halves of the account contract were built and never joined.
+// The taxonomy in account.go decides what a backend answer means; the local state
+// machine in internal/auth decides what to do about it — and nothing carried an answer
+// from one to the other. A 401 stopped the request and vanished: no state changed, the
+// dead token was presented again on the next call, and a revoked session stayed on disk.
+//
+// Why it lives beside TokenSource rather than as a client callback: the observer has to
+// be the SAME object that issued the credential. A verdict is about one credential from
+// one login, and an observer that did not mint it cannot say whether the answer is still
+// current — which is the entire purpose of the generation below.
+type AccountObserver interface {
+	// Generation returns the current local identity generation. A caller samples it
+	// BEFORE a request and hands it back with the outcome, so an answer that arrives
+	// after a logout or a re-login is recognised as describing a session that is gone.
+	Generation() uint64
+
+	// MarkActive records that a protected request SUCCEEDED under that generation.
+	//
+	// Success is a verdict too, and the one nothing else can supply: a stored
+	// credential proves a login happened, never that the backend still honours it.
+	// Without this the only route out of "signed in, unverified" is a failure.
+	MarkActive(gen uint64)
+
+	// ApplyBackendVerdict folds an account failure into local state: refresh, clear,
+	// preserve, or ignore as stale. usedToken is the credential the request actually
+	// carried, which distinguishes a verdict about the CURRENT token from one about a
+	// token already replaced by a refresh in the same generation.
+	//
+	// It must never return an error or panic. It runs on the failure path of a request
+	// that has already failed, and a fault here would replace a diagnosable backend
+	// error with an unrelated one.
+	ApplyBackendVerdict(ctx context.Context, gen uint64, usedToken string, err error)
+}
+
 // TokenScrubber is an optional TokenSource capability: reporting the credential values
 // this source has handed out so error text echoing one can be masked.
 //

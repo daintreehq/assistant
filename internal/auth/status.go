@@ -3,7 +3,10 @@ package auth
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"time"
+
+	"github.com/daintreehq/assistant/internal/backend"
 )
 
 // status.go is the redacted account view every surface renders: the `auth status`
@@ -84,6 +87,19 @@ type StatusLinks struct {
 	Subscribe string `json:"subscribe,omitempty"`
 }
 
+// backendCodeOf returns the stable ACCOUNT code carried by a backend error, or "".
+//
+// The two taxonomies are deliberately disjoint (see internal/backend/account.go), so a
+// caller can branch on either without ambiguity — but status has to read both, because
+// it reports whatever last went wrong and that can come from either side.
+func backendCodeOf(err error) string {
+	var be *backend.Error
+	if errors.As(err, &be) && be != nil {
+		return be.Code
+	}
+	return ""
+}
+
 // SubjectHash derives the support correlation id from a subject.
 //
 // Truncated to 16 hex characters: long enough that two accounts will not collide in any
@@ -105,6 +121,7 @@ func SubjectHash(subject string) string {
 func (m *Manager) Status() Status {
 	m.mu.Lock()
 	state, access, lastErr, tier := m.state, m.access, m.lastErr, m.tier
+	verified := m.lastVerifiedAt
 	m.mu.Unlock()
 
 	s := Status{
@@ -118,12 +135,25 @@ func (m *Manager) Status() Status {
 		t := access.ExpiresAt
 		s.AccessExpiresAt = &t
 	}
+	if verified != nil {
+		t := *verified
+		s.LastVerifiedAt = &t
+	}
 	if lastErr != nil {
 		// The CODE only. A message can quote a provider's error_description, which is
 		// exactly the text this package refuses to repeat elsewhere.
-		if c := CodeOf(lastErr); c != "" {
-			s.LastErrorCode = c
-		} else {
+		//
+		// BOTH taxonomies are consulted. lastErr is now frequently a *backend.Error —
+		// the account verdicts reach here through ApplyBackendVerdict — and CodeOf only
+		// understands this package's own errors, so reading it alone rendered every
+		// backend verdict as the literal string "unknown". A stable code the backend
+		// already defined, replaced by the one word that carries no information.
+		switch {
+		case CodeOf(lastErr) != "":
+			s.LastErrorCode = CodeOf(lastErr)
+		case backendCodeOf(lastErr) != "":
+			s.LastErrorCode = backendCodeOf(lastErr)
+		default:
 			s.LastErrorCode = "unknown"
 		}
 	}

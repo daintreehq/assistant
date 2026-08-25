@@ -113,14 +113,16 @@ func NewProbeBackendClient(cfg config.AppConfig) *backend.Client {
 	return backend.NewClient(backendClientConfig(cfg, nil, nil))
 }
 
-// NewAccountTokenSource builds the account credential source for a resolved config, or
-// nil when the deprecated caller key is in play.
+// NewAccountManager builds the account manager for a resolved config, or nil when there
+// is no account for this process to have.
 //
-// Returning nil rather than an empty source is deliberate: NewClient prefers TokenSource
-// over APIKey, so handing back a source that yields "" would silently disable a key the
-// user explicitly exported, and they would have no way to tell why their override stopped
-// working.
-func NewAccountTokenSource(cfg config.AppConfig) backend.TokenSource {
+// Two ways to get nil, and both mean "no account layer here" rather than a failure. A
+// deprecated caller key overrides account identity for every request, so building a
+// manager beside it would put two credentials in play with only one able to win. And a
+// manager that cannot be constructed means no auth directory — a broken state root, not
+// a reason to refuse to start; the client falls back to sending no credential, exactly
+// as it does for a signed-out user.
+func NewAccountManager(cfg config.AppConfig) *auth.Manager {
 	if strings.TrimSpace(cfg.APIKey) != "" {
 		return nil
 	}
@@ -129,9 +131,19 @@ func NewAccountTokenSource(cfg config.AppConfig) backend.TokenSource {
 		BackendURL: cfg.BackendURL,
 	})
 	if err != nil {
-		// A manager that cannot be built means no auth directory, which is a broken
-		// state root — not a reason to refuse to start. The client falls back to sending
-		// no credential, exactly as it does for a signed-out user.
+		return nil
+	}
+	return mgr
+}
+
+// accountTokenSource adapts a manager for the client, preserving the nil contract.
+//
+// The explicit nil return is load-bearing and cannot be replaced by returning the typed
+// pointer: NewClient prefers TokenSource over APIKey, so a non-nil interface holding a
+// nil *Manager would satisfy that preference and then yield "" for every request —
+// silently disabling a key the user explicitly exported, with nothing to explain why.
+func accountTokenSource(mgr *auth.Manager) backend.TokenSource {
+	if mgr == nil {
 		return nil
 	}
 	return mgr

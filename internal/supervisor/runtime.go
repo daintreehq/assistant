@@ -121,7 +121,16 @@ type Runtime struct {
 	auth *auth.Manager
 	// authBlocked de-dupes the "paused, sign in again" report so a signed-out daemon
 	// does not write it on every 3s tick.
-	authBlocked bool
+	// authBackendURL is the endpoint r.auth was built for. Tracked separately from
+	// cfg.BackendURL, which is not updated on an attach override — so without it the
+	// comparison in rebuildAuthForBackend never matched and rebuilt every time.
+	authBackendURL string
+	authBlocked    bool
+	// authSawSession records that this daemon has observed a live session. It is what
+	// separates "a session ended" from "there has never been one" — see
+	// authorizedToSpendLocked, where blocking on the state alone stopped every anonymous
+	// install.
+	authSawSession bool
 	// authJustBlocked carries "announce this transition" out to a caller that has
 	// released r.mu, because the logger must not run under it.
 	authJustBlocked bool
@@ -367,10 +376,27 @@ func (r *Runtime) supervise(sctx context.Context) superviseReason {
 	if r.creds.BackendURL != "" {
 		overrides.BackendURL = strPtr(r.creds.BackendURL)
 	}
+	attachedBackend := r.creds.BackendURL
+	r.mu.Unlock()
+
+	// Point the account authority at the endpoint this App will ACTUALLY use before
+	// building it. The manager was constructed at startup from the daemon's own config,
+	// and the attaching session can override the endpoint — at which point a credential
+	// minted for one deployment would be presented to another, and its verdicts recorded
+	// against the wrong endpoint's state. A no-op on every launch that does not override.
+	r.rebuildAuthForBackend(sctx, attachedBackend)
+
+	// The SAME manager the spend gate consults. Without this the daemon built two — one
+	// for the gate, one inside app.Create for the requests — so every verdict the
+	// requests produced landed on an object the gate never read, and the gate went on
+	// deciding from a state that nothing could ever update.
+	r.mu.Lock()
+	authMgr := r.auth
 	r.mu.Unlock()
 
 	a, err := app.Create(app.CreateOptions{
-		Overrides: overrides,
+		Overrides:   overrides,
+		AuthManager: authMgr,
 		// Headless: no Confirm/AskChoice/AgentEvents hooks. The durable
 		// RunEventSink still records every turn event; mutations gate on wake
 		// grants (DispatchActor below).
@@ -996,7 +1022,15 @@ func (r *Runtime) authPausedForStatus() bool {
 	if r.auth == nil {
 		return false
 	}
-	switch r.auth.State() {
+	state := r.auth.State()
+	// The SAME rule the gate applies (see authorizedToSpendLocked). A status that
+	// reported a pause the gate is not enforcing — or missed one it is — would make a
+	// daemon that looks stopped and is working, or the reverse, and both are worse than
+	// no field at all.
+	if state == auth.StateSignedOut && !r.authSawSession {
+		return false
+	}
+	switch state {
 	case auth.StateRevoked, auth.StateSignedOut:
 		return true
 	}
@@ -1023,19 +1057,42 @@ func (r *Runtime) rebuildAuthForBackend(ctx context.Context, backendURL string) 
 		return
 	}
 	r.mu.Lock()
-	cur := r.cfg.BackendURL
+	cur := r.authBackendURL
+	if cur == "" {
+		cur = r.cfg.BackendURL
+	}
 	hasKey := strings.TrimSpace(r.cfg.APIKey) != ""
+	// A nil manager means construction failed earlier. "Already current" must not be
+	// concluded from the URL alone then, or the one path that could recover never runs
+	// again for the rest of the process.
+	haveManager := r.auth != nil
 	r.mu.Unlock()
-	if next == cur || hasKey {
+	if hasKey || (next == cur && haveManager) {
 		return
 	}
 	mgr, err := auth.NewManager(auth.Options{StateRoot: r.cfg.StateRoot, BackendURL: next})
 	if err != nil {
+		// FAIL CLOSED. Keeping the previous manager would hand the next App a token
+		// source scoped to the OLD endpoint — presenting a credential minted for one
+		// deployment to another, which is the exact cross-origin leak this rebuild
+		// exists to prevent. No manager means anonymous requests, which is a working
+		// install rather than a leaking one.
+		r.mu.Lock()
+		r.auth, r.authBackendURL, r.authSawSession = nil, "", false
+		r.mu.Unlock()
 		return
 	}
 	mgr.Hydrate(ctx)
 	r.mu.Lock()
 	r.auth = mgr
+	// A different endpoint is a different account. Whatever session this daemon had
+	// observed belonged to the old one, and carrying the flag over would let a logout
+	// there pause work here.
+	r.authSawSession = false
+	// Recorded so a second attach naming the same endpoint is a no-op. Compared against
+	// r.cfg.BackendURL alone this rebuilt on every launch, because r.cfg is never
+	// updated to match — one filesystem-touching construction per attach, for nothing.
+	r.authBackendURL = next
 	r.authBlocked = false
 	r.mu.Unlock()
 }

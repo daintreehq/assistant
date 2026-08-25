@@ -41,23 +41,83 @@ func manifestServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
+// activeSession puts the runtime's manager into a genuinely signed-in state, the way a
+// real login does: a stored credential and a descriptor, hydrated, then confirmed by a
+// backend request.
+//
+// MarkActive alone no longer suffices, and that is deliberate — a confirmation may only
+// CONFIRM a session that exists, never revive one that does not, or a success already in
+// flight when a logout landed would put the daemon back to work on a closed account.
+func activeSession(t *testing.T, r *Runtime) {
+	t.Helper()
+	man, err := r.auth.Manifest(context.Background())
+	if err != nil {
+		t.Fatalf("Manifest: %v", err)
+	}
+	seedLogin(t, r, man)
+	r.auth.Hydrate(context.Background())
+	r.auth.MarkActive(r.auth.Generation())
+	if got := r.auth.State(); !got.SignedIn() {
+		t.Fatalf("setup: state = %q, want a signed-in session", got)
+	}
+}
+
 // newAuthRuntime builds a Runtime with a real Manager over an isolated state root and a
 // loopback backend.
 func newAuthRuntime(t *testing.T) *Runtime {
+	r, _ := newAuthRuntimeWithPeer(t)
+	return r
+}
+
+// newAuthRuntimeWithPeer returns a Runtime and a way to build a SECOND manager over the
+// same state root and credential store — which is what "another process" means here.
+// Simulating a logout elsewhere by reaching into this manager cannot distinguish the
+// marker path from a local state write, and the marker path is the whole point.
+func newAuthRuntimeWithPeer(t *testing.T) (*Runtime, func() *auth.Manager) {
 	t.Helper()
 	srv := manifestServer(t)
-	mgr, err := auth.NewManager(auth.Options{
-		StateRoot:  t.TempDir(),
-		BackendURL: srv.URL,
-		Store:      auth.NewMemoryStore(),
-		Opener:     auth.NoOpener{},
-	})
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
+	root := t.TempDir()
+	store := auth.NewMemoryStore()
+	build := func() *auth.Manager {
+		mgr, err := auth.NewManager(auth.Options{
+			StateRoot:  root,
+			BackendURL: srv.URL,
+			Store:      store,
+			Opener:     auth.NoOpener{},
+		})
+		if err != nil {
+			t.Fatalf("NewManager: %v", err)
+		}
+		return mgr
 	}
-	r := &Runtime{auth: mgr}
+	r := &Runtime{auth: build()}
 	r.auth.Revision().MarkObserved(r.auth.Revision().Current())
-	return r
+	return r, build
+}
+
+// The regression the transition rule exists to prevent: an ordinary anonymous install,
+// where the manager reaches signed-out ON ITS OWN the first time anything asks it for a
+// credential. Blocking on that state alone stopped unattended work for every install
+// after its first request.
+func TestAnAnonymousInstallIsNotTreatedAsAnEndedSession(t *testing.T) {
+	r := newAuthRuntime(t)
+	// Exactly what a protected request does: ask for a credential. There is none, and
+	// the manager records that.
+	if tok, err := r.auth.AccessToken(context.Background()); err != nil || tok != "" {
+		t.Fatalf("AccessToken = %q, %v — want the anonymous answer", tok, err)
+	}
+	if got := r.auth.State(); got != auth.StateSignedOut {
+		t.Fatalf("setup: state = %q, want signed_out", got)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.authorizedToSpendLocked() {
+		t.Fatal("an anonymous install was blocked — every install today would stop supervising after one request")
+	}
+	if r.lastError != "" {
+		t.Errorf("a pause was reported for a session that never existed: %q", r.lastError)
+	}
 }
 
 // An install with no account at all must keep supervising. The backend's open door
@@ -125,7 +185,19 @@ func seedLogin(t *testing.T, r *Runtime, man *auth.Manifest) {
 // this check it would keep spending on an account the user believes is closed.
 func TestASignedOutDaemonRefusesToSpend(t *testing.T) {
 	r := newAuthRuntime(t)
-	// Hydrate off the lock, exactly as the runtime does it.
+	// A session that EXISTS, then ends — which is what the comment above describes and
+	// what the gate is for. A manager that merely hydrates to signed-out has never had
+	// one, and that is the anonymous install, covered separately.
+	activeSession(t, r)
+	r.mu.Lock()
+	if !r.authorizedToSpendLocked() {
+		t.Fatal("setup: an active daemon was blocked")
+	}
+	r.mu.Unlock()
+	// The user signs out. Hydrate off the lock afterwards, exactly as the runtime does.
+	if _, err := r.auth.Logout(context.Background()); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
 	r.auth.Hydrate(context.Background())
 
 	r.mu.Lock()
@@ -141,9 +213,9 @@ func TestASignedOutDaemonRefusesToSpend(t *testing.T) {
 // A logout that happened in ANOTHER process must reach this one. That is the entire
 // reason the shared marker exists.
 func TestALogoutElsewhereStopsTheDaemon(t *testing.T) {
-	r := newAuthRuntime(t)
+	r, peer := newAuthRuntimeWithPeer(t)
 	// Pretend this daemon is happily signed in.
-	r.auth.MarkActive(r.auth.Generation())
+	activeSession(t, r)
 	r.mu.Lock()
 	ok := r.authorizedToSpendLocked()
 	r.mu.Unlock()
@@ -151,10 +223,10 @@ func TestALogoutElsewhereStopsTheDaemon(t *testing.T) {
 		t.Fatal("an active daemon was blocked")
 	}
 
-	// Someone logs out in a terminal: a different process bumps the marker.
-	other := auth.NewRevision(r.auth.AuthDirPath())
-	if err := other.Bump(context.Background()); err != nil {
-		t.Fatalf("Bump: %v", err)
+	// Someone logs out in a terminal. A DIFFERENT process does it: it deletes the
+	// credential and bumps the shared marker, and this daemon is told nothing directly.
+	if _, err := peer().Logout(context.Background()); err != nil {
+		t.Fatalf("logout elsewhere: %v", err)
 	}
 
 	// The daemon notices through the same path reactWake uses.
@@ -190,9 +262,23 @@ func TestTheAuthPostureRefreshDoesNotHoldTheRuntimeMutex(t *testing.T) {
 // rest of the log.
 func TestThePauseIsReportedOncePerTransition(t *testing.T) {
 	r := newAuthRuntime(t)
-	r.auth.Hydrate(context.Background())
+	// A session has to EXIST before it can end. Hydrating a never-signed-in manager
+	// straight to signed-out is not a pause and must not report one — that is the
+	// anonymous install, which keeps working.
+	activeSession(t, r)
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if !r.authorizedToSpendLocked() {
+		t.Fatal("setup: an active daemon was blocked")
+	}
+	r.mu.Unlock()
+	// End it for real. activeSession stores a credential, so a bare Hydrate would find
+	// it and correctly report the session as still live — there would be nothing to
+	// pause about.
+	if _, err := r.auth.Logout(context.Background()); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	r.mu.Lock()
 
 	_ = r.authorizedToSpendLocked()
 	first := r.lastError

@@ -208,7 +208,25 @@ func (r *Runtime) authorizedToSpendLocked() bool {
 	// the OAuth client or granting the permission moves nothing. The daemon would stay
 	// blocked until the process restarted, long after the deployment was fixed. Letting
 	// it keep trying costs one cheap 403 per wake and recovers on its own.
-	switch r.auth.State() {
+	state := r.auth.State()
+	// Remember having HAD a session. What this gate must catch is a session ENDING, and
+	// StateSignedOut cannot say that on its own: it is equally the state of a machine
+	// that has simply never signed in — which every install is today, and which the
+	// manager now reaches on its own the first time a request asks for a credential.
+	//
+	// Blocking on the state alone therefore stopped unattended work on every anonymous
+	// install after its first request. The transition is the real signal, and it is also
+	// exactly what the guarantee was ever able to offer: a fresh daemon on a
+	// already-logged-out machine cannot tell it from a machine that never signed in,
+	// because logout deliberately erases the evidence.
+	if state.SignedIn() {
+		r.authSawSession = true
+	}
+	if state == auth.StateSignedOut && !r.authSawSession {
+		r.authBlocked = false
+		return true
+	}
+	switch state {
 	case auth.StateRevoked, auth.StateSignedOut:
 		// Reported once per transition. A daemon writing this on every 3s tick would
 		// bury the rest of the log.

@@ -213,13 +213,19 @@ func (a *App) SetBackendURL(rawURL string) (string, error) {
 	// total keeps counting across the switch instead of resetting to zero.
 	cfg := a.snapshotConfig()
 	cfg.BackendURL = target
-	// A new endpoint means a new credential key (see auth.CredentialKey), so the token
-	// source is rebuilt too — carrying the old one over would present a credential minted
-	// for one deployment to another.
-	sw.Swap(backend.NewClient(backendClientConfig(cfg, a.CostLedger, NewAccountTokenSource(cfg))))
+	// A new endpoint means a new credential key (see auth.CredentialKey), so the manager
+	// is rebuilt too — carrying the old one over would present a credential minted for
+	// one deployment to another, and would leave the new endpoint's verdicts landing on
+	// the old endpoint's state.
+	//
+	// Replaced on the App as well as handed to the client, so the two cannot diverge:
+	// every account question after a switch is about the endpoint now in use.
+	mgr := NewAccountManager(cfg)
+	sw.Swap(backend.NewClient(backendClientConfig(cfg, a.CostLedger, accountTokenSource(mgr))))
 
 	a.cfgMu.Lock()
 	a.Config.BackendURL = target
+	a.Auth = mgr
 	a.cfgMu.Unlock()
 
 	// PERSIST. A switch that evaporated on restart is the thing this command exists to

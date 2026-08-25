@@ -46,7 +46,14 @@ type Manager struct {
 	state   State
 	access  TokenSet
 	lastErr error
-	tier    StorageTier
+	// superseded holds access tokens replaced by a refresh, so an in-flight request
+	// still carrying one can have it masked out of an error the backend echoes back.
+	superseded []string
+	// lastVerifiedAt is when a protected request last succeeded under this session. It
+	// is the one thing only the BACKEND can tell us: a stored credential proves a login
+	// happened, never that the deployment still honours it.
+	lastVerifiedAt *time.Time
+	tier           StorageTier
 	// generation rises on every LOCAL identity change (login, logout, revocation).
 	//
 	// It exists because backend verdicts arrive late. A request made with token A can
@@ -228,7 +235,13 @@ func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 	// the logout it represented would never be noticed.
 	if marker := m.revision.Current(); marker != m.revision.Observed() {
 		m.mu.Lock()
+		m.rememberSupersededLocked(m.access.AccessToken)
 		m.access = TokenSet{} // whatever we cached predates an identity change
+		// The IDENTITY changed, somewhere else. Advancing the generation is what makes
+		// every request already in flight stale: without it, a 2xx for the old session
+		// lands with a generation that still matches and re-confirms a login that has
+		// been ended in another process.
+		m.generation++
 		m.mu.Unlock()
 		m.revision.MarkObserved(marker)
 	}
@@ -295,6 +308,7 @@ func (m *Manager) Invalidate(accessToken string) {
 	}
 	m.mu.Lock()
 	if m.access.AccessToken == accessToken {
+		m.rememberSupersededLocked(m.access.AccessToken)
 		m.access = TokenSet{}
 	}
 	m.mu.Unlock()
@@ -305,10 +319,41 @@ func (m *Manager) Invalidate(accessToken string) {
 func (m *Manager) Secrets() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.access.AccessToken == "" {
+	out := make([]string, 0, len(m.superseded)+1)
+	if m.access.AccessToken != "" {
+		out = append(out, m.access.AccessToken)
+	}
+	// Recently-superseded tokens too, and this is not belt-and-braces. Requests overlap:
+	// one can be refreshed out from under another that is still in flight, and when that
+	// older request's error comes back echoing its own Authorization header, the current
+	// token is not the one to mask. The refresh-and-replay ladder makes that overlap
+	// routine rather than rare.
+	out = append(out, m.superseded...)
+	if len(out) == 0 {
 		return nil
 	}
-	return []string{m.access.AccessToken}
+	return out
+}
+
+// rememberSupersededLocked keeps a token maskable after it has been replaced.
+//
+// Bounded to a handful: the window that matters is one request's lifetime, and an
+// unbounded list would grow for the life of a long-running daemon. Oldest is dropped
+// first, which is the one least likely to still be attached to anything in flight.
+func (m *Manager) rememberSupersededLocked(token string) {
+	if token == "" {
+		return
+	}
+	for _, t := range m.superseded {
+		if t == token {
+			return
+		}
+	}
+	const maxSuperseded = 4
+	m.superseded = append(m.superseded, token)
+	if len(m.superseded) > maxSuperseded {
+		m.superseded = m.superseded[len(m.superseded)-maxSuperseded:]
+	}
 }
 
 // refresh obtains a fresh access token, serialized in-process and across processes.
@@ -752,6 +797,23 @@ func (m *Manager) Logout(ctx context.Context) (revokedRemotely bool, err error) 
 // It is separate from AccessToken because it must NOT refresh: someone asking about their
 // account should not spend a rotating one-time-use token to be told what it is.
 func (m *Manager) Hydrate(ctx context.Context) (resolved bool) {
+	// Sample the generation FIRST. Everything below does network and credential-store
+	// work, and a login can complete in that window — at which point writing this
+	// hydrate's conclusion would wipe the access token the login just installed. The
+	// stored credential would survive, but the live manager would go on believing it is
+	// signed out until something re-read the store.
+	gen := m.Generation()
+	// applyIfCurrent writes hydrate's conclusion only if the identity has not moved
+	// underneath it.
+	applyIfCurrent := func(fn func()) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.generation != gen {
+			return
+		}
+		fn()
+	}
+
 	key, resolution := m.resolveKey(ctx)
 	switch resolution {
 	case keyAbsent:
@@ -759,10 +821,10 @@ func (m *Manager) Hydrate(ctx context.Context) (resolved bool) {
 		// downgrading from Unknown — that guard was the bug the daemon exposed: a daemon
 		// that had marked itself active kept believing so after a logout elsewhere
 		// removed the descriptor, which is exactly the case Hydrate re-reads for.
-		m.mu.Lock()
-		m.access = TokenSet{}
-		m.state = StateSignedOut
-		m.mu.Unlock()
+		applyIfCurrent(func() {
+			m.access = TokenSet{}
+			m.state = StateSignedOut
+		})
 		return true
 	case keyNotOffered:
 		// The backend ANSWERED and says it has no identity provider. There is no
@@ -771,10 +833,10 @@ func (m *Manager) Hydrate(ctx context.Context) (resolved bool) {
 		// which set StateTemporarilyUnavailable — a state whose SignedIn() is true — so
 		// `auth status` on a deployment working exactly as designed said "signed in —
 		// could not check just now", with authenticated:true and no session behind it.
-		m.mu.Lock()
-		m.access = TokenSet{}
-		m.state = StateAccountsUnavailable
-		m.mu.Unlock()
+		applyIfCurrent(func() {
+			m.access = TokenSet{}
+			m.state = StateAccountsUnavailable
+		})
 		return true
 	case keyUnresolved:
 		// "I could not work out which credential this is" is not "you are signed out".
@@ -789,12 +851,15 @@ func (m *Manager) Hydrate(ctx context.Context) (resolved bool) {
 			// backend would answer "signed in", with authenticated:true and no
 			// credential anywhere. Record the reason and leave the state unknown, which
 			// is what it is.
-			m.mu.Lock()
-			m.lastErr = unresolved
-			m.mu.Unlock()
+			applyIfCurrent(func() { m.lastErr = unresolved })
 			return false
 		}
-		m.recordUnavailable(unresolved)
+		applyIfCurrent(func() {
+			m.lastErr = unresolved
+			if m.state.SignedIn() || m.state == StateUnknown {
+				m.state = StateTemporarilyUnavailable
+			}
+		})
 		return false
 	}
 	store := m.ensureStore(ctx)
@@ -802,26 +867,31 @@ func (m *Manager) Hydrate(ctx context.Context) (resolved bool) {
 	switch {
 	case err == nil && stored.Valid():
 		redact.RegisterSecret(stored.RefreshToken)
-		m.mu.Lock()
-		if !m.state.SignedIn() {
-			// A stored credential proves a login exists; it proves nothing about the
-			// plan, which only the backend session endpoint can answer.
-			m.state = StateSignedInUnverified
-		}
-		m.mu.Unlock()
+		applyIfCurrent(func() {
+			if !m.state.SignedIn() {
+				// A stored credential proves a login exists; it proves nothing about the
+				// plan, which only the backend session endpoint can answer.
+				m.state = StateSignedInUnverified
+			}
+		})
 	case errors.Is(err, ErrNotFound):
-		m.mu.Lock()
-		m.state = StateSignedOut
-		m.mu.Unlock()
+		applyIfCurrent(func() { m.state = StateSignedOut })
 	case errors.Is(err, ErrStoreLocked), errors.Is(err, ErrStoreUnavailable):
-		// "We could not read it" is not "there is nothing there".
-		m.recordUnavailable(err)
+		// "We could not read it" is not "there is nothing there". Guarded like every
+		// other write here: a slow hydrate must not overwrite a login that completed
+		// while it was waiting on the credential store.
+		applyIfCurrent(func() {
+			m.lastErr = err
+			if m.state.SignedIn() || m.state == StateUnknown {
+				m.state = StateTemporarilyUnavailable
+			}
+		})
 		return false
 	case errors.Is(err, ErrStoreCorrupt):
-		m.mu.Lock()
-		m.lastErr = err
-		m.state = StateSignedOut
-		m.mu.Unlock()
+		applyIfCurrent(func() {
+			m.lastErr = err
+			m.state = StateSignedOut
+		})
 	}
 	return true
 }
@@ -855,72 +925,147 @@ func (m *Manager) Generation() uint64 {
 // about the account, and this decides what that means for the credential on this machine.
 //
 // `gen` is the generation captured before the request, and `usedToken` is the access
-// token it was made with. Both are checked before anything destructive happens, because
-// verdicts arrive late: a 401 for token A can land after the user has already signed back
-// in with token B, and acting on it unconditionally would delete a session that is fine.
-// Only RemedyClear deletes anything.
+// token it was made with. Both are checked because verdicts arrive late: a 401 for token
+// A can land after the user has already signed back in with token B, and acting on it
+// unconditionally would delete a session that is fine. Only RemedyClear deletes anything.
+//
+// The staleness check is INSIDE the same critical section as the write it guards, which
+// it was not before. Checking under the lock, releasing, and then acting is not a guard
+// at all — a logout and a fresh login fit in that window, and the verdict for the dead
+// generation then lands on the new one. For the destructive case that meant deleting a
+// credential the user had just created.
 func (m *Manager) ApplyBackendVerdict(ctx context.Context, gen uint64, usedToken string, err error) {
 	var be *backend.Error
 	if !errors.As(err, &be) {
 		return
 	}
-	m.mu.Lock()
-	stale := m.generation != gen || (usedToken != "" && m.access.AccessToken != "" && m.access.AccessToken != usedToken)
-	m.mu.Unlock()
-	if stale {
-		// The answer describes a credential this process has already moved on from.
-		return
+
+	// applyIfCurrent runs fn under the lock, but only if the verdict still describes the
+	// credential this process holds. Every non-destructive transition goes through it, so
+	// the recheck cannot be forgotten by adding a case.
+	applyIfCurrent := func(fn func()) bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.staleLocked(gen, usedToken) {
+			return false
+		}
+		fn()
+		return true
 	}
 
 	switch {
 	case be.AuthRemedy() == backend.RemedyClear:
-		m.clearSession(ctx)
+		// The destructive one. clearSession takes a cross-process file lock and deletes
+		// from the credential store, which cannot happen under m.mu — so it does its own
+		// recheck after acquiring that lock. The check here is the cheap early exit.
+		m.mu.Lock()
+		stale := m.staleLocked(gen, usedToken)
+		m.mu.Unlock()
+		if !stale {
+			m.clearSessionIfCurrent(ctx, gen, usedToken)
+		}
 	case be.AuthRemedy() == backend.RemedyRefresh, be.AuthRemedy() == backend.RemedyRefreshOrSignIn:
 		// The token is stale rather than wrong. Drop it so the next AccessToken call
 		// refreshes instead of re-presenting the value the backend just refused —
 		// which, for a token with no readable expiry, would otherwise loop forever.
-		m.Invalidate(usedToken)
-		m.setState(StateRefreshing)
+		//
+		// The compare-and-clear is the same one Invalidate performs, done here so it
+		// shares the generation recheck rather than racing it.
+		applyIfCurrent(func() {
+			if usedToken != "" && m.access.AccessToken == usedToken {
+				m.rememberSupersededLocked(m.access.AccessToken)
+				m.access = TokenSet{}
+			}
+			m.state = StateRefreshing
+		})
 	case be.AuthRemedy() == backend.RemedySignIn:
-		m.mu.Lock()
-		m.access = TokenSet{}
-		m.state = StateSignedOut
-		m.mu.Unlock()
+		applyIfCurrent(func() {
+			m.access = TokenSet{}
+			m.state = StateSignedOut
+		})
 	case be.AuthRemedy() == backend.RemedyReconfigure:
 		// A valid token this deployment will not accept. Nothing about the credential is
 		// wrong, so it is KEPT — but refreshing would only mint another token rejected in
 		// exactly the same way, and recordUnavailable (where this used to go) says a
 		// dependency blipped. That is not what happened: the backend answered, and the
 		// answer will not change until someone alters the deployment.
-		m.mu.Lock()
-		m.lastErr = err
-		m.state = StateAccessRefused
-		m.mu.Unlock()
+		applyIfCurrent(func() {
+			m.lastErr = err
+			m.state = StateAccessRefused
+		})
 	case be.Code == backend.CodeSubscriptionRequired:
-		m.setState(StateSubscriptionRequired)
+		applyIfCurrent(func() { m.state = StateSubscriptionRequired })
 	case be.Code == backend.CodeSubscriptionInactive:
-		m.setState(StateSubscriptionInactive)
+		applyIfCurrent(func() { m.state = StateSubscriptionInactive })
 	case be.IsAccountDependency():
-		m.recordUnavailable(err)
+		applyIfCurrent(func() {
+			m.lastErr = err
+			if m.state.SignedIn() || m.state == StateUnknown {
+				m.state = StateTemporarilyUnavailable
+			}
+		})
 	}
+}
+
+// staleLocked reports that a verdict describes a credential this process has moved on
+// from. Callers must hold m.mu.
+//
+// Two independent ways to be stale. The GENERATION moves on a logout or a session
+// clear, so a mismatch means the identity itself has changed. The TOKEN changes on an
+// ordinary refresh, which does NOT move the generation — so without the second check a
+// 401 for a token that was replaced seconds ago would be applied to its replacement.
+func (m *Manager) staleLocked(gen uint64, usedToken string) bool {
+	if m.generation != gen {
+		return true
+	}
+	return usedToken != "" && m.access.AccessToken != "" && m.access.AccessToken != usedToken
 }
 
 // clearSession deletes the stored credential and marks the session revoked.
 func (m *Manager) clearSession(ctx context.Context) {
+	m.clearSessionIfCurrent(ctx, m.Generation(), "")
+}
+
+// clearSessionIfCurrent deletes the stored credential, unless the identity moved while
+// the cross-process lock was being acquired.
+//
+// The recheck AFTER the lock is the load-bearing part. Acquiring it can block on another
+// process, and a local logout-then-login fits comfortably in that wait — at which point
+// deleting would destroy the credential the user has just created and leave them signed
+// out with no failure to explain it. The state write happens under the same m.mu
+// acquisition as the final check, so nothing can slip between them either.
+func (m *Manager) clearSessionIfCurrent(ctx context.Context, gen uint64, usedToken string) {
 	key, ok := m.currentKey(ctx)
 	if ok {
-		if lock, lErr := acquireCredentialLock(ctx, m.authDir, key); lErr == nil {
+		lock, lErr := acquireCredentialLock(ctx, m.authDir, key)
+		if lErr == nil {
+			m.mu.Lock()
+			stale := m.staleLocked(gen, usedToken)
+			m.mu.Unlock()
+			if stale {
+				lock.release()
+				return
+			}
 			_ = m.ensureStore(ctx).Delete(ctx, key)
-			_ = forgetKeyRef(m.authDir)
+			// The descriptor is a SINGLE file for the whole state root, while the lock
+			// above is per credential key. Removing it unconditionally would let a clear
+			// for one endpoint delete the descriptor a login for ANOTHER had just
+			// written — leaving that session unresolvable with its credential intact.
+			if recorded, ok := loadKeyRef(m.authDir); ok && recorded == key {
+				_ = forgetKeyRef(m.authDir)
+			}
 			_ = m.revision.Bump(ctx)
 			lock.release()
 		}
 	}
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.staleLocked(gen, usedToken) {
+		return
+	}
 	m.access = TokenSet{}
 	m.state = StateRevoked
 	m.generation++
-	m.mu.Unlock()
 }
 
 // currentKey resolves the credential key, preferring live discovery and falling back to
@@ -1012,7 +1157,25 @@ func (m *Manager) MarkActive(gen uint64) {
 		// show the user as signed in with no credential behind it.
 		return
 	}
+	// The generation is not enough on its own, and this is the belt to its braces. Not
+	// every way a session ends advances it — a logout in ANOTHER process reaches this one
+	// as a revision change, and a hydrate that finds the credential gone simply rewrites
+	// the state. A success already in flight when that happened would otherwise land here
+	// with a generation that still matches and put the daemon back to work on an account
+	// the user has closed.
+	//
+	// A confirmation can only ever CONFIRM: it promotes a session that still exists, and
+	// never revives one that does not.
+	if !m.state.SignedIn() {
+		return
+	}
 	m.state = StateSignedInActive
+	// A success supersedes whatever last went wrong. Without this, status reports an
+	// active session beside the error code from a dependency outage that has since
+	// cleared — which reads as an account still in trouble.
+	m.lastErr = nil
+	now := m.now()
+	m.lastVerifiedAt = &now
 }
 
 // Ensure Manager satisfies the backend seams at compile time.

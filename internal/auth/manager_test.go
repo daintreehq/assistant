@@ -504,13 +504,29 @@ func TestInvalidateOnlyClearsTheNamedToken(t *testing.T) {
 		t.Fatalf("AccessToken: %v", err)
 	}
 	m.Invalidate("some-other-stale-token")
-	if got := m.Secrets(); len(got) != 1 || got[0] != cur {
+	if currentToken(m) != cur {
 		t.Fatal("invalidating a DIFFERENT token discarded the live one")
 	}
+
 	m.Invalidate(cur)
-	if got := m.Secrets(); len(got) != 0 {
-		t.Fatalf("the named token survived Invalidate: %v", got)
+	if currentToken(m) == cur {
+		t.Fatal("the named token is still the one that would be sent")
 	}
+	// It stays MASKABLE, which is a different question. A request that went out with it
+	// can still be in flight, and its error can echo the header back; a scrub list that
+	// only knew the current token would leave the old one in terminal scrollback.
+	if !contains(m.Secrets(), cur) {
+		t.Errorf("Secrets() = %v, want the superseded token still maskable", m.Secrets())
+	}
+}
+
+func contains(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }
 
 // --- logout -------------------------------------------------------------------------
@@ -810,11 +826,12 @@ func TestProactiveRefreshWindow(t *testing.T) {
 
 // currentToken reads the manager's live access token, for tests that must pass it back
 // with a verdict.
+// currentToken reads the access token that would actually be SENT. Deliberately not via
+// Secrets(), which is the scrub list and now also carries superseded tokens.
 func currentToken(m *Manager) string {
-	if s := m.Secrets(); len(s) == 1 {
-		return s[0]
-	}
-	return ""
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.access.AccessToken
 }
 
 // THE fix for the refresh storm. Two processes sharing one credential must not refresh

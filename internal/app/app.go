@@ -17,6 +17,7 @@ import (
 
 	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/asyncwork"
+	"github.com/daintreehq/assistant/internal/auth"
 	"github.com/daintreehq/assistant/internal/backend"
 	"github.com/daintreehq/assistant/internal/config"
 	"github.com/daintreehq/assistant/internal/costledger"
@@ -66,6 +67,16 @@ type CreateOptions struct {
 	// HTTP client so unit tests need no live server. nil ⇒ the real client to the
 	// hardcoded dev endpoint.
 	BackendOverride backend.Backend
+	// AuthManager supplies an ALREADY-BUILT account manager instead of letting Create
+	// construct one.
+	//
+	// It exists for the supervisor, which builds a manager before any App so it can
+	// answer "may I spend?" on its first wake. Without this the daemon ended up with
+	// two: one behind its spend gate and a different one behind the client that makes
+	// the requests — so every verdict the requests produced landed on an object the
+	// gate never consulted, and the gate went on deciding from a state nothing updated.
+	// nil ⇒ Create builds its own, which is right for every interactive session.
+	AuthManager *auth.Manager
 	// BuildTools is the tool-registry builder seam. The full tool-family wiring is a
 	// separate wave; nil ⇒ DefaultToolBuilder (the always-safe core tools). The
 	// builder runs AFTER the registry exists but BEFORE AssertSafe.
@@ -127,7 +138,15 @@ type App struct {
 	// It is ALWAYS the *backend.Swappable below. Consumers capture this value and keep
 	// it for the App's lifetime; replacing the live client is a delegate swap, so nothing
 	// downstream has to be re-wired or can go on holding a dead endpoint.
-	Backend  backend.Backend
+	Backend backend.Backend
+	// Auth is the account manager this process's requests are credentialed by, and the
+	// one their outcomes are reported to. nil when a caller key is in play or the state
+	// root has no auth directory — the open-door case, where no account is involved.
+	//
+	// Held on the App rather than disappearing into the client because it is the object
+	// every account question is answered from: what the credential is, what the backend
+	// last said about it, and what a surface should tell the user.
+	Auth     *auth.Manager
 	Registry *tools.Registry
 
 	// CostLedger accumulates what this process has spent on the caller's own upstream
@@ -597,10 +616,18 @@ func Create(opts CreateOptions) (*App, error) {
 	// so there is one code path.
 	// Built before the client, which captures its Record method as the OnCost hook.
 	a.CostLedger = costledger.New()
+	// ONE manager per process, retained. The token source and the account observer must
+	// be the same object — a verdict is about a specific credential from a specific
+	// login, and an observer that did not issue it cannot tell a current answer from a
+	// late one.
+	a.Auth = opts.AuthManager
+	if a.Auth == nil {
+		a.Auth = NewAccountManager(cfg)
+	}
 	if opts.BackendOverride != nil {
 		a.Backend = backend.NewSwappable(opts.BackendOverride)
 	} else {
-		a.Backend = backend.NewSwappable(backend.NewClient(backendClientConfig(cfg, a.CostLedger, NewAccountTokenSource(cfg))))
+		a.Backend = backend.NewSwappable(backend.NewClient(backendClientConfig(cfg, a.CostLedger, accountTokenSource(a.Auth))))
 	}
 	// The async coordinator is built BEFORE the tool registry (the asyncx family
 	// captures it) and started later, alongside the scheduler (StartScheduler).
