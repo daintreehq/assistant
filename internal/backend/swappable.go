@@ -70,6 +70,11 @@ func (s *Swappable) Capabilities(ctx context.Context) (Capabilities, error) {
 	return s.Current().Capabilities(ctx)
 }
 
+// Account delegates the account-status read.
+func (s *Swappable) Account(ctx context.Context) (AccountStatus, error) {
+	return (*s.inner.Load()).Account(ctx)
+}
+
 func (s *Swappable) VerifyKey(ctx context.Context) (KeyVerification, error) {
 	return s.Current().VerifyKey(ctx)
 }

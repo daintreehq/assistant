@@ -23,6 +23,7 @@ type Backend interface {
 	RunTask(ctx context.Context, req TaskRequest) (TaskResult, error)
 	Capabilities(ctx context.Context) (Capabilities, error)
 	VerifyKey(ctx context.Context) (KeyVerification, error)
+	Account(ctx context.Context) (AccountStatus, error)
 	Version(ctx context.Context) (Version, error)
 	Health(ctx context.Context) error
 	Ready(ctx context.Context) error
@@ -359,6 +360,21 @@ type accountAttempt struct {
 	obs   AccountObserver
 	gen   uint64
 	token string
+	// deferSuccess suppresses the automatic MarkActive on a 2xx, leaving the verdict to
+	// whoever decodes the body.
+	//
+	// It exists for exactly one endpoint. /v1/daintree/account answers 200 for a caller
+	// with NO plan — that is the whole design, since it is a status read rather than
+	// paid work — so the transport's "a protected request succeeded, therefore this
+	// session is active" inference is precisely wrong there. Left in place it would
+	// promote the state to signed_in_active a moment before the decoded
+	// `subscription_required` demoted it again, and any reader in that window (the
+	// supervisor's spend gate is one) would see a session cleared to spend money it is
+	// not entitled to spend.
+	//
+	// A malformed body lands the same way and should: nothing is confirmed, the
+	// credential is untouched, and the caller reports "could not verify".
+	deferSuccess bool
 }
 
 // beginAccountAttempt samples the identity generation before a request goes out.
@@ -371,7 +387,7 @@ type accountAttempt struct {
 // backend wants an account, not that any stored credential is bad, and feeding it to the
 // state machine would mark a perfectly good session signed-out on a deployment that had
 // simply started requiring auth on a path we called without one.
-func (c *Client) beginAccountAttempt(token string) accountAttempt {
+func (c *Client) beginAccountAttempt(path, token string) accountAttempt {
 	if token == "" {
 		return accountAttempt{}
 	}
@@ -379,12 +395,18 @@ func (c *Client) beginAccountAttempt(token string) accountAttempt {
 	if !ok {
 		return accountAttempt{}
 	}
-	return accountAttempt{obs: obs, gen: obs.Generation(), token: token}
+	return accountAttempt{
+		obs:          obs,
+		gen:          obs.Generation(),
+		token:        token,
+		deferSuccess: path == AccountStatusPath,
+	}
 }
 
-// succeeded reports a protected 2xx for the credential this attempt carried.
+// succeeded reports a protected 2xx for the credential this attempt carried, unless the
+// endpoint's own body is the authoritative verdict (see deferSuccess).
 func (a accountAttempt) succeeded() {
-	if a.obs != nil {
+	if a.obs != nil && !a.deferSuccess {
 		a.obs.MarkActive(a.gen)
 	}
 }
@@ -670,7 +692,7 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 	// The credential this turn is about, sampled before the first attempt. See the same
 	// block in doJSONRetry for why the observation is best-effort.
 	sampledToken, _ := c.credential(ctx, respondPath)
-	acct := c.beginAccountAttempt(sampledToken)
+	acct := c.beginAccountAttempt(respondPath, sampledToken)
 	refreshReplayed := false
 
 	started := time.Now()
@@ -731,7 +753,7 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 				finalize(result, true)
 				return result, serr
 			}
-			acct = c.beginAccountAttempt(next)
+			acct = c.beginAccountAttempt(respondPath, next)
 			continue
 		}
 		be, ok := serr.(*Error)
@@ -1269,7 +1291,7 @@ func (c *Client) doJSONRetry(ctx context.Context, method, path string, body any,
 	// the observation, and reporting a verdict against a credential we could not read
 	// would be worse than not reporting one.
 	sampled, _ := c.credential(ctx, path)
-	acct := c.beginAccountAttempt(sampled)
+	acct := c.beginAccountAttempt(path, sampled)
 	refreshReplayed := false
 
 	started := time.Now()
@@ -1314,7 +1336,7 @@ func (c *Client) doJSONRetry(ctx context.Context, method, path string, body any,
 			}
 			// The outcome of the replay belongs to the NEW token, not the one that just
 			// failed.
-			acct = c.beginAccountAttempt(next)
+			acct = c.beginAccountAttempt(path, next)
 			continue
 		}
 		be, ok := err.(*Error)

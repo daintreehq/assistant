@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 
 	"github.com/daintreehq/assistant/internal/backend"
@@ -12,8 +13,8 @@ import (
 // points at the hardcoded dev endpoint (backend.DefaultBaseURL) and must never be
 // required by a unit test, so any test that runs a turn or a utility task injects one
 // of these via CreateOptions{BackendOverride: ...}. It satisfies the full
-// backend.Backend surface (RespondStream, RunTask, Capabilities, Version, Health,
-// Ready, BaseURL) and is safe for concurrent use.
+// backend.Backend surface (RespondStream, RunTask, Capabilities, Account, VerifyKey,
+// Version, Health, Ready, BaseURL) and is safe for concurrent use.
 type fakeBackend struct {
 	// respond overrides RespondStream; nil ⇒ the default single-round "ok" reply that
 	// drives cb.OnMeta + cb.OnContent and returns matching content with no tool calls.
@@ -23,6 +24,9 @@ type fakeBackend struct {
 	// caps overrides Capabilities; nil ⇒ a zero descriptor (a backend that advertises
 	// nothing, which is what every capability gate must fail closed against).
 	caps func() (backend.Capabilities, error)
+	// account overrides Account; nil ⇒ an error, since a fake that silently answered
+	// "signed in and entitled" would let a test pass on an account state it never set up.
+	account func() (backend.AccountStatus, error)
 
 	mu       sync.Mutex
 	lastReq  backend.RespondRequest
@@ -56,6 +60,13 @@ func (f *fakeBackend) RunTask(ctx context.Context, req backend.TaskRequest) (bac
 		return f.task(ctx, req)
 	}
 	return backend.TaskResult{Task: req.Task, Output: json.RawMessage("{}"), Model: "daintree-assistant"}, nil
+}
+
+func (f *fakeBackend) Account(context.Context) (backend.AccountStatus, error) {
+	if f.account != nil {
+		return f.account()
+	}
+	return backend.AccountStatus{}, errors.New("fake backend: no account status configured")
 }
 
 func (f *fakeBackend) VerifyKey(context.Context) (backend.KeyVerification, error) {

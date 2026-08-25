@@ -15,6 +15,16 @@ func (s stubBackend) RespondStream(context.Context, RespondRequest, StreamCallba
 func (s stubBackend) RunTask(context.Context, TaskRequest) (TaskResult, error) {
 	return TaskResult{}, nil
 }
+func (s stubBackend) Account(context.Context) (AccountStatus, error) {
+	// A contract-VALID body, not merely a populated struct: a stub that could not have
+	// come off a real wire is a stub a reader stops trusting.
+	return AccountStatus{
+		Version:            AccountStatusVersion,
+		Access:             AccessUnverified,
+		SubscriptionStatus: s.name,
+		CheckedAt:          "2026-08-25T12:00:00Z",
+	}, nil
+}
 func (s stubBackend) VerifyKey(context.Context) (KeyVerification, error) {
 	return KeyVerification{Valid: true, Label: s.name}, nil
 }
@@ -48,6 +58,16 @@ func TestSwappableDelegatesAndSwaps(t *testing.T) {
 	if caps.ServerVersion != "second" {
 		t.Fatalf("Capabilities went to %q, want second", caps.ServerVersion)
 	}
+	// Account is delegated too. It is the newest method, so it is also the one most
+	// likely to be added to the interface and forgotten here — where "forgotten" means
+	// a `/backend` switch reads the account of the deployment it just left.
+	acct, err := s.Account(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acct.SubscriptionStatus != "second" {
+		t.Fatalf("Account went to %q, want second", acct.SubscriptionStatus)
+	}
 }
 
 // The whole point of the wrapper: /login swaps the client while the scheduler tick, the
@@ -74,6 +94,7 @@ func TestSwappableIsRaceFreeUnderConcurrentSwap(t *testing.T) {
 						return
 					}
 					_ = s.Health(context.Background())
+					_, _ = s.Account(context.Background())
 				}
 			}
 		}()

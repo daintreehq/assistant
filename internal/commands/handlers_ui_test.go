@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -541,6 +542,10 @@ func (fakeBackend) RunTask(_ context.Context, req backend.TaskRequest) (backend.
 		out = json.RawMessage(`{"facts":[]}`)
 	}
 	return backend.TaskResult{Task: req.Task, Output: out}, nil
+}
+
+func (fakeBackend) Account(context.Context) (backend.AccountStatus, error) {
+	return backend.AccountStatus{}, errors.New("fake backend: account status not served")
 }
 
 func (fakeBackend) VerifyKey(context.Context) (backend.KeyVerification, error) {

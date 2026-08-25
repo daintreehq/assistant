@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sync"
 	"testing"
@@ -39,6 +40,20 @@ func (f *fakeObserver) AccessToken(context.Context) (string, error) {
 
 func (f *fakeObserver) Invalidate(string) {}
 
+// Secrets makes the fake a TokenScrubber, exactly as the real *auth.Manager is.
+//
+// Without it the fake silently disables every scrub in the client, so a test that
+// checked "the bearer did not survive into this field" would pass against a build that
+// scrubbed nothing at all — the one shape of green that is worse than red.
+func (f *fakeObserver) Secrets() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.tokens) == 0 {
+		return nil
+	}
+	return append([]string(nil), f.tokens...)
+}
+
 func (f *fakeObserver) Generation() uint64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -56,6 +71,23 @@ func (f *fakeObserver) ApplyBackendVerdict(_ context.Context, _ uint64, _ string
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.verdicts = append(f.verdicts, err)
+}
+
+// verdictCodes reports the account code of each verdict observed, so a test can pin
+// WHICH failure drove a refresh rather than merely that one happened.
+func (f *fakeObserver) verdictCodes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	codes := make([]string, 0, len(f.verdicts))
+	for _, err := range f.verdicts {
+		var be *Error
+		if errors.As(err, &be) {
+			codes = append(codes, be.Code)
+			continue
+		}
+		codes = append(codes, "")
+	}
+	return codes
 }
 
 func (f *fakeObserver) counts() (active, verdicts int) {
