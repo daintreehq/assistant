@@ -4,6 +4,10 @@
 # credential-shaped string in this repository is acceptable ONLY IF IT SAYS IT IS
 # INVENTED.
 #
+# There is one deliberate exception, in `.gitleaksignore`: a fixture already committed
+# before this rule existed can never grow a marker, because history is immutable. Those
+# are adjudicated one at a time, by fingerprint, with the reasoning recorded there.
+#
 # That rule replaced a list of allowlisted test-file paths, which was the obvious approach
 # and the wrong one. A path allowlist suppresses EVERY rule for those paths forever, so a
 # genuine key pasted into any allowlisted test file becomes invisible — and the repository's
@@ -15,14 +19,34 @@
 # and `…-fake123…`; making that mandatory costs nothing and documents intent. A real
 # credential does not contain the word "fake", so it still trips the scan wherever it sits.
 #
-# Keep this in step with `fixtureMarkers` in internal/redact/repo_scan_test.go — the two
-# scanners cover different ground (gitleaks reads git HISTORY, the Go test reads the
-# WORKING TREE) and should agree on what an obvious fixture looks like.
+# The companion list is `fixtureMarkers` in internal/redact/repo_scan_test.go. The two
+# scanners cover different ground — gitleaks reads git HISTORY, the Go test reads the
+# WORKING TREE — and the lists are NOT identical today. The differences, and which
+# direction each one leans, because that is what decides whether a gap matters:
+#
+#   - `xxx` is accepted by the Go test and not here. Safe direction: a value it lets
+#     through the working-tree gate still meets gitleaks the moment it is committed.
+#   - `secret` is accepted HERE and not by the Go test. Unsafe direction, and the one
+#     real weakness in this file: `generic-api-key` fires on keyed values, so a genuine
+#     password or user-defined key that happens to contain the English word is allowed
+#     globally and forever, and the Go test cannot rescue it because it only matches
+#     issuer-prefixed formats. Dropping it exposes four historical findings in
+#     internal/config/config_test.go and tests/config.test.ts that each need their own
+#     provenance review first — which is why it is still here, and stated rather than
+#     left to be discovered.
 #
 # NOTE the SINGULAR [allowlist]. The plural [[allowlists]] form arrived in gitleaks v8.25;
 # the version pinned in .github/workflows/ci.yml is older, and its decoder silently ignores
 # a table it does not recognise — so the plural form would have produced an allowlist that
 # looked present and did nothing.
+#
+# There is a SECOND allowlist, in `.gitleaksignore`, and the split is deliberate. This file
+# describes what an acceptable fixture LOOKS LIKE, so it answers for values not yet written.
+# That cannot help with a value already in the history: history is immutable, and a fixture
+# committed before the marker rule existed will never grow one. `.gitleaksignore` takes a
+# per-finding fingerprint (commit + file + rule + line) for exactly those, and nothing
+# broader. Prefer the marker rule; reach for a fingerprint only when the finding is already
+# committed, and record there why it is not a leak.
 
 title = "daintree-assistant"
 

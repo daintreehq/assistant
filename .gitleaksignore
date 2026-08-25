@@ -1,0 +1,36 @@
+# gitleaks fingerprint allowlist — `<commit>:<file>:<rule>:<line>`.
+#
+# This is the NARROWEST tool gitleaks offers, and that is why it is the one used here.
+# The key is `commit + file + rule + start line`, matched by exact string equality — no
+# globbing, no prefix match (v8.24.3 detect.go, AddFinding). It does not weaken
+# `generic-api-key` and it does not exempt a path, so a real credential committed to the
+# same file tomorrow still trips the scan.
+#
+# One caveat a reviewer needs: the key carries no column and no secret, so TWO findings
+# of the same rule starting on the same line would both be suppressed. Read the whole
+# line before adding an entry, not just the reported value.
+#
+# The alternatives were both worse. Adding a path to `[allowlist].paths` in
+# .gitleaks.toml turns off EVERY rule for that file forever — the blind spot that
+# file's own header explains was removed once already. Widening the fixture-marker
+# regexes to match this value would have to match something generic enough to match
+# real credentials too.
+#
+# Why this is not a leak, established without printing the value: the finding is one
+# row of a table-driven test whose whole purpose is to feed credential-SHAPED strings
+# to the redactor. Its siblings on the surrounding lines are `hunter2hunter2`,
+# `abc123abc123abc`, `s3cr3tvalue123` and `p4ssw0rdxyz`, and the flagged value is
+# 20 characters of the same hand-typed filler — a short generic prefix, an ordinary
+# English word, then a dozen characters of deterministic alternating filler, which no
+# issued credential looks like. It matches no provider's live-key format; only the
+# contextual `generic-api-key` rule fires on it. It was
+# already replaced at HEAD by a value carrying an explicit `fake` marker, so this
+# entry covers the history alone; deleting a fixture at the tip does not remove it
+# from the commits that carried it, which is the entire point of scanning history.
+# The whole line was read: it holds that one value twice, as the input and as the
+# expected output of the same case, and nothing else.
+#
+# Nothing was rotated because there is nothing to rotate. Add an entry here ONLY
+# after establishing the same thing about it, and never to quiet a value whose
+# origin is unclear — an unexplained finding is the one this file must not absorb.
+70ee3d86388e766de97398270447dec6d49c9ac2:internal/host/redact_confirm_test.go:generic-api-key:26
