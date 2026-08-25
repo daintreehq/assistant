@@ -33,9 +33,14 @@ type deployment struct {
 	responses []func(w http.ResponseWriter)
 
 	protectedCalls atomic.Int64
-	bearers        chan string
-	issued         atomic.Int64
-	refreshTokens  map[string]bool
+	// accountResponses scripts /v1/daintree/account, and accountCalls counts it. Kept
+	// separate from the protected route's pair so a test can assert "exactly one
+	// account request" without a turn's calls muddying the count.
+	accountResponses []func(w http.ResponseWriter)
+	accountCalls     atomic.Int64
+	bearers          chan string
+	issued           atomic.Int64
+	refreshTokens    map[string]bool
 }
 
 func newDeployment(t *testing.T) *deployment {
@@ -101,9 +106,46 @@ func newDeployment(t *testing.T) *deployment {
 		next(w)
 	})
 
+	// The account status route, scripted independently of the protected route above so
+	// a test can drive the two in one run — which is the point of several of the
+	// account tests: what a status read does must not depend on what a turn just did.
+	mux.HandleFunc(backend.AccountStatusPath, func(w http.ResponseWriter, r *http.Request) {
+		d.accountCalls.Add(1)
+		d.mu.Lock()
+		var next func(w http.ResponseWriter)
+		switch {
+		case len(d.accountResponses) > 1:
+			next, d.accountResponses = d.accountResponses[0], d.accountResponses[1:]
+		case len(d.accountResponses) == 1:
+			next = d.accountResponses[0]
+		}
+		d.mu.Unlock()
+		if next == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		next(w)
+	})
+
 	d.srv = httptest.NewServer(mux)
 	t.Cleanup(d.srv.Close)
 	return d
+}
+
+// scriptAccount sets the account route's answers, in order. The last one repeats.
+func (d *deployment) scriptAccount(fns ...func(w http.ResponseWriter)) {
+	d.mu.Lock()
+	d.accountResponses = fns
+	d.mu.Unlock()
+}
+
+// accountBody writes one version-1 account status document.
+func accountBody(body string) func(w http.ResponseWriter) {
+	return func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}
 }
 
 func (d *deployment) manifest() Manifest {

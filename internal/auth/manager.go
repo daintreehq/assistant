@@ -53,7 +53,10 @@ type Manager struct {
 	// is the one thing only the BACKEND can tell us: a stored credential proves a login
 	// happened, never that the deployment still honours it.
 	lastVerifiedAt *time.Time
-	tier           StorageTier
+	// account is what the backend last said about this session — email, plan, billing
+	// verdict. MEMORY ONLY and generation-stamped; see accountsnapshot.go.
+	account accountSnapshot
+	tier    StorageTier
 	// generation rises on every LOCAL identity change (login, logout, revocation).
 	//
 	// It exists because backend verdicts arrive late. A request made with token A can
@@ -1173,13 +1176,29 @@ func (m *Manager) MarkActive(gen uint64) {
 	if !m.state.SignedIn() {
 		return
 	}
-	m.state = StateSignedInActive
 	// A success supersedes whatever last went wrong. Without this, status reports an
 	// active session beside the error code from a dependency outage that has since
 	// cleared — which reads as an account still in trouble.
 	m.lastErr = nil
 	now := m.now()
 	m.lastVerifiedAt = &now
+	// A PLAN verdict is not overwritten, and this is the one thing MarkActive
+	// deliberately cannot do.
+	//
+	// It knows only that a protected request returned 2xx, and most protected endpoints
+	// answer 2xx regardless of entitlement — /v1/daintree/capabilities does, and it runs
+	// at boot. So promoting on any success would take a session that the account
+	// endpoint had just reported as subscription_required and mark it active and cleared
+	// to spend, on the strength of a call that never consulted billing.
+	//
+	// The cost of holding back is that a checkout completed elsewhere is not noticed by
+	// a turn succeeding; the user runs `auth status --refresh`, which is the documented
+	// remedy and the one call that actually asks. The cost of the other direction is
+	// spending against an account that has no plan, so this fails toward asking again.
+	if m.state.NeedsPlan() {
+		return
+	}
+	m.state = StateSignedInActive
 }
 
 // Ensure Manager satisfies the backend seams at compile time.

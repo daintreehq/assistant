@@ -68,8 +68,19 @@ type Status struct {
 	// StorageTier says where the credential actually lives. TierMemory MUST be surfaced:
 	// the session works and then disappears on exit.
 	StorageTier StorageTier `json:"storageTier"`
-	// LastVerifiedAt is when the backend last confirmed this session.
+	// LastVerifiedAt is when the backend last confirmed this SESSION — any protected
+	// request succeeding counts, so it answers "is this login still good".
 	LastVerifiedAt *time.Time `json:"lastVerifiedAt,omitempty"`
+	// EntitlementCheckedAt is when the billing answer itself was established, as the
+	// BACKEND reported it.
+	//
+	// Separate from LastVerifiedAt because the two drift apart in the direction that
+	// misleads. Any successful protected call moves LastVerifiedAt, so a session
+	// confirmed a second ago can sit beside a plan that was last looked up an hour ago
+	// — and rendering only the newer of the two would present a stale entitlement as
+	// freshly checked. That is precisely the claim a person needs to be able to
+	// distrust, which is also why EntitlementStale exists.
+	EntitlementCheckedAt *time.Time `json:"entitlementCheckedAt,omitempty"`
 	// LastErrorCode is the stable code of the most recent failure, never its message —
 	// a message can quote a provider, and a code cannot.
 	LastErrorCode string `json:"lastErrorCode,omitempty"`
@@ -119,9 +130,16 @@ func SubjectHash(subject string) string {
 // the keychain is locked, and while another process holds the credential lock —
 // precisely the situations in which someone asks what is going on.
 func (m *Manager) Status() Status {
+	// One read of the shared marker, used for BOTH the reported revision and the
+	// snapshot's staleness check. Reading it twice could report one marker while
+	// validating against another, and it happens outside the lock because it is a file
+	// read (see accountSnapshotLocked).
+	marker := m.revision.Current()
+
 	m.mu.Lock()
 	state, access, lastErr, tier := m.state, m.access, m.lastErr, m.tier
 	verified := m.lastVerifiedAt
+	snap, hasSnap := m.accountSnapshotLocked(marker)
 	m.mu.Unlock()
 
 	s := Status{
@@ -129,7 +147,7 @@ func (m *Manager) Status() Status {
 		Authenticated: state.SignedIn(),
 		BackendURL:    m.backendURL,
 		StorageTier:   tier,
-		AuthRevision:  m.revision.Current().String(),
+		AuthRevision:  marker.String(),
 	}
 	if !access.ExpiresAt.IsZero() {
 		t := access.ExpiresAt
@@ -138,6 +156,26 @@ func (m *Manager) Status() Status {
 	if verified != nil {
 		t := *verified
 		s.LastVerifiedAt = &t
+	}
+	// The account fields the backend supplied. They are populated ONLY from a snapshot
+	// belonging to the current identity — accountSnapshotLocked enforces that — so a
+	// logout cannot leave the previous account's email on a status line, and neither can
+	// a verdict that arrived for a session this process has moved on from.
+	//
+	// A RETAINED snapshot is deliberately still rendered when a later check could not
+	// reach the backend. Blanking the plan on an outage would tell someone their
+	// subscription had gone away because their wifi did; the honest reading is "this is
+	// what we last knew, and here is when" — which is what LastVerifiedAt is for.
+	if hasSnap {
+		s.Email = snap.email
+		s.SubjectHash = snap.subjectHash
+		s.Plan = snap.planID
+		s.EntitlementSource = snap.entitlementSource
+		s.EntitlementStale = snap.entitlementStale
+		if !snap.checkedAt.IsZero() {
+			t := snap.checkedAt
+			s.EntitlementCheckedAt = &t
+		}
 	}
 	if lastErr != nil {
 		// The CODE only. A message can quote a provider's error_description, which is
@@ -213,6 +251,13 @@ func (s Status) WithAvailability(a Availability) Status {
 	if !configured {
 		s.State = StateAccountsUnavailable
 		s.Authenticated = false
+		// The account fields go with it. They can only have come from a snapshot taken
+		// while this deployment DID have accounts, and an email beside "this backend has
+		// no accounts" is not a partial truth — it is two statements that cannot both
+		// hold, on the one line someone reads to find out what is going on.
+		s.Email, s.SubjectHash, s.Plan = "", "", ""
+		s.EntitlementSource, s.EntitlementStale = "", false
+		s.EntitlementCheckedAt = nil
 	}
 	return s
 }
