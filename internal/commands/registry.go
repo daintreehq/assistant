@@ -34,7 +34,7 @@ var COMMAND_REGISTRY = []CommandMeta{
 	{Name: "audit", Syntax: "/audit [n]", Palette: "recent tool calls · export", Help: "recent calls (def 15); export <json|csv>"},
 	{Name: "explain", Syntax: "/explain [runId]", Palette: "reconstruct a run's timeline", Help: "replay a run; no id lists recent runs"},
 	{Name: "models", Syntax: "/models", Palette: "backend-owned model routing", Help: "show backend-owned model routing"},
-	{Name: "cost", Syntax: "/cost", Palette: "what this session has spent", Help: "session spend on your own upstream key"},
+	{Name: "cost", Syntax: "/cost", Palette: "what this session has spent", Help: "upstream cost this session ran up, as the backend reported it"},
 	{Name: "backend", Syntax: "/backend [target]", Palette: "which backend answers", Help: "switch backend (remembered); no arg lists, 'default' forgets"},
 	{Name: "routing", Syntax: "/routing", Palette: "which endpoints serve you", Help: "endpoint routing: privacy filter and ranking"},
 	{Name: "permissions", Syntax: "/permissions [tier]", Palette: "supervisor | operator | system", Help: "show or set tier (supervisor|operator|system)"},

@@ -15,8 +15,34 @@ guarantees, and the SQLite schema is a single clean baseline rather than a migra
   publishes `configured` and `required`; the one this build points at today publishes
   neither, so nothing changes for anyone — `auth status` says
   `accounts  not offered by this backend`.
-- **The backend's account verdicts now change local state.** A confirmed request marks
-  the session active, an expired credential is refreshed and the request replayed once
+- **`auth status --refresh` asks the backend who you are and what your plan permits.**
+  It makes one request to `/v1/daintree/account` — two if an expired token has to be
+  renewed and the request replayed, none if the deployment has no accounts — and fills in
+  whichever of the email, plan, entitlement source and check time the backend reports. Before this it renewed the Supabase token and then
+  printed plan fields nothing populated, so a fresh process could never learn that a
+  checkout had succeeded. Plain `auth status` still makes no account request: it stays
+  fast and offline-capable, which is what you want when the network is the problem.
+  Nothing about the plan is written to disk — a plan on disk is a plan that can be wrong.
+- **`auth login` names the plan, and never calls a billing problem a login failure.**
+  Signing in successfully with no plan is a success: it says so, keeps the credential,
+  exits 0, and shows where to choose one. A LAPSED plan gets the billing portal instead —
+  a second checkout is how people pay twice. A billing outage says the plan could not be
+  checked and leaves the session alone.
+- **A turn that stops at the account door now says so.** Account verdicts used to arrive
+  as `Model error: backend: http 401/402/403/429/503 …`, which describes a billing or
+  sign-in problem as a model problem. Twelve of the thirteen account codes now open with
+  `Account problem:` and name the one thing to do, keeping "could not check" firmly apart
+  from "not subscribed". The thirteenth, a per-account request-rate limit, keeps the
+  ordinary rate-limit reply because it clears on its own.
+- **Corrected who owns the upstream credential across every user-facing surface.** Messages
+  said the provider had rejected "your API key", offered a top-up link for an account you
+  do not hold, and pointed at `/login` — a command that does not exist. The backend funds
+  every model call from its own credential; `DAINTREE_API_KEY` and `--api-key-file` say
+  who is CALLING and are never spent upstream.
+- **The backend's account verdicts now change local state.** An eligible protected 2xx
+  marks the session active — with two exceptions, both deliberate: the account endpoint's
+  own 200 confirms nothing (it answers 200 for a caller with no plan) and a success never
+  overwrites a known missing or inactive plan; an expired credential is refreshed and the request replayed once
   (never after anything visible has streamed), a revoked session is deleted locally, and
   plan or dependency failures leave it alone. Unattended supervision stops when a session
   it was using ends.

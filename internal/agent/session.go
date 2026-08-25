@@ -2072,7 +2072,7 @@ func (s *Session) classifyBackendError(err error) string {
 //   - DEPENDENCY — nothing was established. This must never read as "not subscribed":
 //     the credential is good, the answer simply could not be obtained.
 //
-// Every reply starts with the registered "Account:" wake prefix (wake.go). That
+// Every reply starts with the registered "Account problem:" wake prefix (wake.go). That
 // registration is load-bearing rather than bookkeeping: without it the supervisor's
 // unattended wake would mistake a turn that stopped at the account door for a real
 // answer and record the work it was supervising as summarized.

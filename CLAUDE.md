@@ -115,11 +115,37 @@ supervisor's spend gate, because a verdict landing on an object the gate never r
 the bug that shape exists to prevent. Verdicts arrive late, so every write rechecks the
 identity generation inside the section that performs it.
 
-**The one remaining gap, and it is a real one:** a turn still surfaces most account
-failures as a generic "Model error" (`agent/session.go` `classifyBackendError` — only
-`account_rate_limited` gets its own wording, via `IsRateLimited`), and the host protocol
-emits `turn-error` for all of them. Nothing reads `App.Auth` to render account STATE:
-its only readers construct the token source and replace it on a `/backend` switch.
+**The account answer now reaches the CLI's own surfaces — the `auth` commands and a
+turn's prose — but not yet the typed host protocol.** `backend.Account(ctx)` reads
+`GET /v1/daintree/account` under a validated version-1 contract
+(`internal/backend/accountstatus.go`); a malformed body raises a LOCAL
+`account_contract_invalid` that is deliberately outside `accountCodes`, so it can never
+read as signed-out or unsubscribed. `auth.Manager` holds the answer in a memory-only
+snapshot stamped with the generation AND the shared revision marker
+(`internal/auth/accountsnapshot.go`) — never on disk, because a plan on disk is a plan
+that can be wrong. Two commands ask: `auth status --refresh` and `auth login` (once,
+best-effort, to name the plan); a plain `auth status` never does. A turn renders twelve
+of the thirteen account codes through `agent/session.go` `accountFailureAdvice`, whose
+replies open with the registered `Account problem:` wake prefix — `account_rate_limited`
+is the exception and keeps the ordinary rate-limit reply.
+
+Three rules in that layer are load-bearing and easy to undo:
+
+- The account endpoint's own 200 must not confirm the session
+  (`accountAttempt.deferSuccess`). It answers 200 for a caller with NO plan, so the
+  transport's "a protected request succeeded, therefore this session is active"
+  inference is exactly wrong there.
+- `MarkActive` must not overwrite a subscription verdict. Most protected endpoints
+  answer 2xx regardless of entitlement — capabilities does, and it runs at boot.
+- The post-login plan check runs through a NON-observing client
+  (`app.NewUnobservingAccountBackendClient`). The observing one acts on what it hears,
+  and a revoked verdict reaches `RemedyClear`, which would delete the refresh token
+  seconds after login persisted it.
+
+**What is still missing:** the host protocol still emits a generic `turn-error` for
+account failures rather than a typed account event, and nothing reads `App.Auth` to
+render account STATE in the attached session — its only readers construct the token
+source and replace it on a `/backend` switch.
 
 Two further seams are load-bearing and must stay:
 
@@ -134,17 +160,24 @@ Two further seams are load-bearing and must stay:
   who pays. Nothing sets either on a normal install; they stay live, with the header, the
   shape check and `backend.ScrubKey`, so a per-account credential later becomes a VALUE
   flowing through existing plumbing rather than new plumbing. A NAMED key that cannot be
-  read is fatal, never a fallback — falling through to the backend's own would bill the
-  wrong account behind a successful-looking run.
+  read is fatal, never a fallback — falling through would run the turn as a DIFFERENT
+  principal (anonymous, or the managed sign-in) behind a successful-looking run, and on a
+  deployment that meters by account it would consume the wrong one's entitlement.
 - **`App.Backend` is always a `backend.Swappable`.** Every consumer holds the wrapper, so
   a client rebuild reaches Session, watchers, asyncwork and the workflow layer without
-  re-wiring. Nothing swaps today; in-place re-authentication is what it is kept for.
+  re-wiring. `/backend` swaps it (`internal/app/backendswitch.go`), rebuilding the client
+  and the account manager together — a credential minted for one deployment must never be
+  presented to another. An ordinary token refresh does NOT come through here; TokenSource
+  changes the credential for the same endpoint, one level below.
 
 `POST /v1/daintree/auth/verify` answers for whichever key the request WOULD spend — the
-backend's own, on every normal install — so it is the one probe that can say "this
-deployment can actually run a turn" before a turn is spent finding out. `doctor` is its
-only caller (`upstream credential` row), and it branches on the stable `reason`, never on
-the prose `detail`. The CLI must never probe a provider itself.
+backend's own, on every install — so it is the one probe that can say "this deployment
+can actually run a turn" before a turn is spent finding out. `doctor` is its only caller
+(`upstream credential` row), and it branches on the stable `reason`, never on the prose
+`detail`. The CLI must never probe a provider itself. That row always attributes the
+credential to the DEPLOYMENT: a caller-supplied bearer is an account token that is never
+sent upstream, so describing the verified credential as the user's — which the copy used
+to do whenever one was set — sends them to replace a value that could not be the cause.
 
 **The OAuth shape is fixed and pinned.** The callback is exactly
 `http://127.0.0.1:42813/oauth/callback` — Supabase matches redirect URIs exactly, so
@@ -592,7 +625,9 @@ defaults to the deployed backend, and pointing it at `http://127.0.0.1:8473` IS 
 dev loop) · `DAINTREE_ALLOW_INSECURE_BACKEND` (trusted-env ONLY; authorizes a non-loopback
 plaintext `http://` endpoint, which is otherwise refused — see `backend.ValidatePlaintextRemote`)
 · `DAINTREE_API_KEY` (OPTIONAL bearer, trusted-env ONLY, unset on a normal
-install — when set it overrides the backend's own upstream credential for this session) ·
+install — when set it overrides the managed account sign-in as the CALLER's bearer; it
+never reaches the provider and the backend still funds the turn from its own upstream
+credential) ·
 `DAINTREE_MCP_URL` / `DAINTREE_MCP_TOKEN` /
 `DAINTREE_PROJECT_ID` / `DAINTREE_WINDOW_ID` (injected by Daintree) ·
 `DAINTREE_ROUTING_PRIVACY` / `DAINTREE_ROUTING_SORT` / `DAINTREE_ROUTING_ONLY` /

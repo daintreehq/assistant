@@ -358,8 +358,11 @@ func TestAnUnknownAvailabilityLeavesTheSnapshotAlone(t *testing.T) {
 	}
 }
 
-// Nothing about the account reaches disk. A plan on disk is a plan that can be wrong,
-// and a fresh process must ask again — which is the whole point of `--refresh`.
+// No account DETAIL reaches disk — no email, no plan, no entitlement verdict. A plan on
+// disk is a plan that can be wrong, and a fresh process must ask again, which is the whole
+// point of `--refresh`. The credential itself is a different matter and does persist: the
+// refresh token in the OS keychain, plus a non-secret descriptor naming which credential
+// it is.
 func TestAnAccountSnapshotIsNeverPersisted(t *testing.T) {
 	p := newIDP(t)
 	store := NewMemoryStore()

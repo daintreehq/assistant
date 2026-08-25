@@ -92,12 +92,13 @@ func RunDoctor(ctx context.Context, a *app.App) []DoctorCheck {
 	// having no key is the normal working state — reporting it as a failed check would
 	// put a permanent red line on every healthy install.
 	//
-	// A key is worth a row only when one is actually being sent, because then it
-	// CHANGES which account funds the turn, and an inherited or stale DAINTREE_API_KEY
-	// is otherwise invisible. The value itself is never printed: naming the source is
-	// what makes it actionable.
+	// A key is worth a row only when one is actually being sent, because then it CHANGES
+	// WHICH ACCOUNT THE REQUEST IS FROM — never who funds it, which is the backend's own
+	// upstream credential either way — and an inherited or stale DAINTREE_API_KEY is
+	// otherwise invisible. The value itself is never printed: naming the source is what
+	// makes it actionable.
 	if cfg.APIKey != "" {
-		push("bearer token", true, "sent from DAINTREE_API_KEY — this key funds the turn, not the backend's", "")
+		push("bearer token", true, "sent from DAINTREE_API_KEY — it identifies the CALLER; the backend still funds the turn", "")
 	}
 	bctx, bcancel := context.WithTimeout(ctx, doctorProbeTimeout)
 	herr := a.Backend.Health(bctx)

@@ -1078,13 +1078,14 @@ func backendDoctorChecks(ctx context.Context, a *app.App) []DoctorCheck {
 	// There is deliberately no "signed in" row. The backend holds its own upstream
 	// credential and serves a request that carries no Authorization header, so a CLI
 	// with no key is a healthy CLI — a red row there would fire on every install.
-	// A key is reported only when one is actually being sent, since it then changes
-	// which account funds the turn. The value is never printed; naming the source is
-	// what makes an inherited or stale value actionable.
+	// A key is reported only when one is actually being sent, since it then changes WHO
+	// THE REQUEST IS FROM — not who pays, which is always the backend's own upstream
+	// credential. The value is never printed; naming the source is what makes an
+	// inherited or stale value actionable.
 	if a.Config.APIKey != "" {
 		out = append(out, DoctorCheck{
 			ID: "auth.bearer", Label: "bearer token", Status: StatusOK,
-			Detail: "sent from DAINTREE_API_KEY — this key funds the turn, not the backend's",
+			Detail: "sent from DAINTREE_API_KEY — it identifies the CALLER; the backend still funds the turn",
 		})
 	}
 

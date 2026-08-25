@@ -31,7 +31,7 @@ reachable from the native UI.
 | `/audit [n]` | recent calls (def 15); export &lt;json\|csv&gt; |
 | `/explain [runId]` | replay a run; no id lists recent runs |
 | `/models` | show backend-owned model routing |
-| `/cost` | session spend on your own upstream key |
+| `/cost` | upstream cost this session ran up, as the backend reported it |
 | `/backend [target]` | switch backend (remembered); no arg lists, 'default' forgets |
 | `/routing` | endpoint routing: privacy filter and ranking |
 | `/permissions [tier]` | show or set tier (supervisor\|operator\|system) |

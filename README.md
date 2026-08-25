@@ -67,6 +67,13 @@ is needed is the BACKEND's answer, and the deployed one does not ask. `daintree-
 auth status` says which of those you are looking at: `accounts  not offered by this
 backend` means there is nothing to do.
 
+`auth status` reports what this process already knows and never asks about the account,
+which is what you want when the thing you are debugging is the network. **`auth status
+--refresh` is the mode that asks the backend** who is signed in and what their plan
+permits — the command to run after completing a checkout, since nothing about a plan is
+kept on disk and a fresh process starts by knowing only that a credential exists.
+(`auth login` asks once too, to name your plan.)
+
 One thing that trips people up: `go install` writes to `$(go env GOPATH)/bin` (usually
 `~/go/bin`), **which is not on `PATH` by default on macOS** — so the install succeeds and
 the command is then not found. Fix it with

@@ -101,11 +101,19 @@ func TestCostTextHedgesAnIncompleteSession(t *testing.T) {
 	if !strings.Contains(got, "90.0%") {
 		t.Errorf("panel omits the prompt-cache ratio:\n%s", got)
 	}
-	// The dashboard caveat is not optional: these figures are for trend, and a user
-	// reconciling them against their real bill and finding a gap must not read it as
-	// a defect.
-	if !strings.Contains(got, "dashboard is the authority") {
-		t.Errorf("panel omits the authority caveat:\n%s", got)
+	// The standing caveat is not optional: these figures are for proportion and trend,
+	// and the spend is the DEPLOYMENT's rather than the reader's. It used to send them
+	// to "your OpenRouter dashboard" for the real number — a dashboard they do not have,
+	// for an account they do not hold, since the backend funds every call from its own
+	// credential.
+	if !strings.Contains(got, "proportion and trend") {
+		t.Errorf("panel omits the trend caveat:\n%s", got)
+	}
+	if !strings.Contains(got, "not yours") {
+		t.Errorf("panel does not say whose spend this is:\n%s", got)
+	}
+	if strings.Contains(got, "your bill") || strings.Contains(got, "your OpenRouter") {
+		t.Errorf("panel attributes the spend to the reader:\n%s", got)
 	}
 }
 
@@ -119,7 +127,7 @@ func TestCostTextWithNoSpendYet(t *testing.T) {
 	if strings.Contains(got, "≥") {
 		t.Errorf("an empty session must not be hedged — there is nothing to hedge: %q", got)
 	}
-	if !strings.Contains(got, "dashboard is the authority") {
+	if !strings.Contains(got, "proportion and trend") || !strings.Contains(got, "not yours") {
 		t.Errorf("empty panel omits the caveat: %q", got)
 	}
 }

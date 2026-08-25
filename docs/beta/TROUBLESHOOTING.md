@@ -37,20 +37,23 @@ without `-e` a `false` result still exits 0.
 
 ## `auth.credentialUsable` — the provider rejected this credential
 
-There is nothing for you to paste: this row reports on the **backend's own** upstream
-provider credential, and its detail says so (`the backend's own`). It is not a question
-about your account — `daintree-assistant auth status` answers that one. A rejection here
-is ours to fix; report it.
+There is nothing for you to paste, and there is no case where this one is yours. The row
+reports on the **backend's own** upstream provider credential — the one the deployment
+spends — and its detail says so. It is not a question about your account;
+`daintree-assistant auth status` answers that one. A rejection here is ours to fix;
+report it.
 
-The one case where it is yours: if the detail reads `(yours, from DAINTREE_API_KEY)`, you
-have that variable exported and the backend is spending YOUR key instead of its own.
-Unset it to fall back.
+`DAINTREE_API_KEY` and `--api-key-file` do not change that, even though the row mentions
+one when it is set. They supply a bearer that says who is CALLING, never who pays: the
+backend funds every model call from its own credential either way. So a credential
+rejected upstream cannot have been yours, and unsetting the variable will not fix it.
 
 ## `auth.credentialUsable` — valid but NO CREDIT remaining
 
-Real, and every turn will fail until the account behind it is topped up. Same ownership
-rule as above: check whose credential the row names. Remember that background work spends
-too — watcher checks and async completions are model calls.
+Real, and every turn will fail until the account behind it is topped up — but that
+account is the deployment's, not yours, so it cannot be topped up from here. Report it.
+Remember that background work spends too: watcher checks and async completions are model
+calls.
 
 ## `auth.credentialUsable` — this backend does not serve `/v1/daintree/auth/verify`
 
@@ -59,6 +62,46 @@ so nothing was learned either way. Either the endpoint is out of date or somethi
 corporate proxy, a captive portal) is intercepting the route. Retry off the proxy, or
 point `DAINTREE_BACKEND_URL` at a local backend meanwhile. A **loopback** endpoint is
 allowed to lack this route — that is the development loop — but a remote one is not.
+
+## A turn ended with `Account problem: …`
+
+The turn stopped at the account door rather than at the model, and the message names the
+one thing to do. Three groups, and they need opposite responses:
+
+| What it says | What it means | What to do |
+| --- | --- | --- |
+| requires an account / session was ended elsewhere | identity | `daintree-assistant auth login` |
+| would not accept the stored credential for this turn | the credential may simply not have been renewed on this turn | try again first; only run `auth login` if it persists |
+| does not accept this client's credentials / not for this operation | the deployment refuses a credential that is FINE | nothing local helps — signing in again produces the same result |
+| no plan that includes the assistant | the sign-in is good, the plan is missing | `auth status --refresh`, which prints the subscribe link when the deployment publishes one |
+| plan is not currently active | a plan exists and has lapsed | the **billing portal** — a second checkout is how people pay twice |
+| reached its usage limit for the period | the plan's cap is spent | wait for the period to roll over, or change the plan |
+| could not be checked just now | a dependency is down, nothing was established | wait and retry; your sign-in is unaffected |
+
+The last row is the one worth reading twice: "could not check" is never "you are not
+subscribed", and nothing in that state should send you to a login or a checkout.
+
+A per-account request-rate limit is the exception to all of this: it arrives as an
+ordinary `Model rate-limited:` reply rather than `Account problem:`, because it clears on
+its own within seconds.
+
+If it says the machine **could not produce a credential**, no request was made at all.
+That covers a locked or unavailable keychain, and also a refresh or discovery that could
+not complete. Run `daintree-assistant auth status` to see which: against a store that
+cannot be written, signing in again hits the same failure, whereas a refresh grant that
+has genuinely ended does need a fresh login.
+
+## `auth status` shows a plan, but says it could not be checked
+
+Both are true, and the pairing is deliberate. When a `--refresh` cannot reach the backend,
+the plan this process last learned stays on the block rather than blanking — blanking
+would report a subscription as gone because the network was. What changes is the state and
+the timestamps: `plan checked` says how old the billing answer is, `verified` says when
+the session itself was last confirmed, and `plan source  cache (may be out of date)`
+appears when the backend answered from its own cache rather than a live lookup.
+
+Read the timestamps before acting on the plan. Nothing about it is stored between
+processes, so a brand-new process shows no plan at all until something asks.
 
 ## `backend.reachable` — UNREACHABLE
 

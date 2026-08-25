@@ -99,7 +99,7 @@ only as a session total because "why was that turn expensive?" is a question you
 by reading a log, and because `selector` is the share prompt work can actually move.
 Read it next to `usage.cachedTokens / usage.promptTokens`: the prompt-cache hit ratio is
 what the backend's byte-stable prompt assembly buys, and a collapse in it is the first
-symptom of a regression that costs the user money directly.
+symptom of a regression that costs real money upstream — the deployment's, and enough of it to matter.
 
 #### Where a slow turn went
 

@@ -16,9 +16,11 @@ to attach. **Do not attach a debug log**; it contains your whole conversation.
 
 1. **Daintree MCP token** — close and reopen the Daintree window. Daintree rotates the
    per-session bearer on every re-provision, so a fresh session invalidates the old one.
-2. **`DAINTREE_API_KEY`, if you set one** — the CLI does not ask for or store an upstream
-   key, so most installs have none. If you exported one, revoke it at the provider and
-   unset the variable.
+2. **`DAINTREE_API_KEY`, if you set one** — the CLI does not ask for or store any
+   credential of this kind, so most installs have none. If you exported one, it is an
+   ACCOUNT bearer for the Daintree backend, not a provider key: unset the variable, then
+   revoke or rotate it wherever it was issued. It never reached a model provider, so
+   there is nothing to revoke there.
 3. **Anything else** (a PAT in a terminal, an env var an agent printed) — rotate at the
    source. The assistant only ever handled a copy.
 

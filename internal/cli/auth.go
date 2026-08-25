@@ -293,7 +293,14 @@ func reportPlanAfterLogin(ctx context.Context, w authWriter, mgr *auth.Manager, 
 	// as its only view of account state, and a failed plan check that produced nothing
 	// on stdout left it unable to tell "no plan", "could not check" and "no check was
 	// made" apart — the human sentences go to stderr under --json and it never sees them.
-	w.event(authEvent{Type: "auth:status", Env: st.Environment, Extra: st})
+	//
+	// The failure rides the event's own `code`, not the status payload. It cannot ride
+	// the payload: Status.LastErrorCode reflects what was recorded AGAINST THE SESSION,
+	// and this check is deliberately non-mutating (see
+	// NewUnobservingAccountBackendClient), so nothing was recorded and nothing should be.
+	// Putting it on the envelope says what happened without pretending the session
+	// carries a fault it does not.
+	w.event(authEvent{Type: "auth:status", Env: st.Environment, Code: backendCodeOf(err), Extra: st})
 
 	if err != nil {
 		reportPlanCheckFailure(w, err)
@@ -437,6 +444,15 @@ func refreshAccount(ctx context.Context, w authWriter, mgr *auth.Manager, cfg co
 		return
 	}
 	mgr.ApplyAccountStatus(gen, acct)
+}
+
+// backendCodeOf returns the stable account code an error carries, or "".
+func backendCodeOf(err error) string {
+	var be *backend.Error
+	if errors.As(err, &be) && be != nil {
+		return be.Code
+	}
+	return ""
 }
 
 // backendMessage renders a backend error for a human, preferring the stable code over

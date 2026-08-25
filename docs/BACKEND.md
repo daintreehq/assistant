@@ -97,8 +97,9 @@ POST /v1/daintree/auth/verify
       "label": "...", "limit_remaining": 1.23}
 ```
 
-It asks the provider directly (a model listing — no tokens spent) about whichever key
-this request would spend. `valid:false` comes back as **200**, not 401: "this key is
+It asks the provider directly (a model listing — no tokens spent) about the key this
+request would spend, which is the BACKEND's own on every install — a caller bearer is an
+account token and never reaches the provider. `valid:false` comes back as **200**, not 401: "this key is
 invalid" is a successful answer to the question, and a 401 would tell the client to retry
 the same header. A provider we cannot reach propagates as 502 `upstream_error`, because
 then we do not know — and "could not check" must never be reported as "invalid".
@@ -114,9 +115,11 @@ only `valid` reports health and then fails on the first real request.
 a model listing — so both are normally absent, and the doctor row is written to read
 correctly without them.
 
-`doctor`'s `upstream credential` row is the whole consumer. It reports on the backend's
-own key on a normal install and on yours when `DAINTREE_API_KEY` is set, which is why it
-names the owner in its detail and routes a rejection to whoever can actually fix it.
+`doctor`'s `upstream credential` row is the whole consumer. It always reports on the
+backend's OWN key — that is the credential `/auth/verify` answers for — so it attributes
+the credential to the deployment and routes every rejection there. When
+`DAINTREE_API_KEY` is set the row says so, as context: an account bearer in play is worth
+knowing about, and worth explicitly ruling out as the cause.
 
 **A backend that does not serve the route at all** is scoped by
 `backend.AllowsUnverifiedSignIn`:
@@ -141,8 +144,9 @@ Transport failures and other 5xx do **not** — those mean "could not check", wh
 ### Key hygiene: the client scrubs on the way out
 
 On the normal path there is no caller key for anyone to echo, so this costs nothing. When
-`DAINTREE_API_KEY` IS set the bearer is a spendable credential and an upstream we do not
-control can echo the `Authorization` header back at us. Every path where that could happen
+`DAINTREE_API_KEY` IS set the bearer identifies an account, and a backend or an
+intermediary we do not control can echo the `Authorization` header back at us — enough to
+impersonate that account, whether or not it can spend anything. Every path where that could happen
 is scrubbed **inside the client**, not at the display sites — there are many sinks (turn
 error rendering, doctor rows, the retry hook, the debug-log writer) and exactly one place
 they all get their values from:
@@ -180,8 +184,8 @@ a direct provider call here would break both properties.
 
 `DAINTREE_BACKEND_URL` and `DAINTREE_API_KEY` are **trusted-env only** — a bound project's
 `.env` can supply neither. That is a security boundary, not tidiness: the URL decides
-where a turn is sent, and the key, when present, is spendable, so a cloned repo must not
-be able to inject either.
+where a turn is sent, and the key, when present, decides which account it is sent AS, so a
+cloned repo must not be able to inject either.
 
 The URL override is the whole endpoint mechanism now, and the local dev loop in its
 entirety:
@@ -398,9 +402,9 @@ the CLI classifies from the code itself, so this table is the contract:
 
 | code | status | retried? | whose problem |
 |---|---|---|---|
-| `provider_invalid_api_key` | 401 | no | the credential funding the turn — the backend's own unless `DAINTREE_API_KEY` is set |
-| `provider_insufficient_credits` | 402 | no | that account's balance — add credit |
-| `provider_key_forbidden` | 403 | no | that key's model permissions / spend limit / guardrails |
+| `provider_invalid_api_key` | 401 | no | the credential funding the turn — always the backend's own; a caller bearer never reaches the provider |
+| `provider_insufficient_credits` | 402 | no | that account's balance. It is the DEPLOYMENT's account, so it cannot be topped up from the CLI — report it |
+| `provider_key_forbidden` | 403 | no | that key's model permissions / spend limit / guardrails, again the deployment's |
 | `upstream_no_compliant_provider` | 503 | no | your routing policy matched no endpoint |
 | `upstream_rate_limited` | 429 | **yes** | transient (honours `Retry-After`) |
 | `upstream_timeout` | 504 | **yes** | transient |

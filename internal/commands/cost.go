@@ -10,11 +10,13 @@ import (
 	"github.com/daintreehq/assistant/internal/costledger"
 )
 
-// cost.go renders `/cost`: what this session has spent on the user's own upstream key.
+// cost.go renders `/cost`: the upstream cost this session ran up, as the backend reported
+// it.
 //
-// The tester pays the model bill and this prompt is large, so cost visibility is the
-// difference between a tester who trusts the tool and one who quietly stops using it
-// because they cannot tell what it is spending.
+// The money is the DEPLOYMENT's — the backend funds every model call from its own
+// provider credential, and the CLI holds none. This is still worth showing: the prompt is
+// large, an orchestration session can fan out a lot of work, and a tester who cannot see
+// what a run costs cannot tell an expensive mistake from a cheap one.
 //
 // Every rendering decision here follows from one rule: ABSENT MEANS UNKNOWN, NEVER FREE.
 // A total that silently coerced an unreported call to zero would under-report someone's
@@ -43,7 +45,7 @@ func renderCostPanel(s costledger.Snapshot) string {
 	// right even if a backend starts or stops reporting mid-session.
 	if s.Unreported == s.Calls {
 		b.WriteString(fmt.Sprintf("This backend reported no cost for any of the %d billed call(s) this session,\n"+
-			"so there is nothing to total. Your OpenRouter dashboard has the real figures.\n\n", s.Calls))
+			"so there is nothing to total. Only the backend's own provider account has the real figures.\n\n", s.Calls))
 		b.WriteString(costFootnote)
 		return b.String()
 	}
@@ -95,11 +97,11 @@ func renderCostPanel(s costledger.Snapshot) string {
 // costFootnote is the standing caveat. It appears whether or not anything has been spent
 // yet, because the two claims it makes are always true and both matter before a user
 // starts reasoning about the numbers.
-const costFootnote = "These are OpenRouter's own reported figures, not estimates — but the OpenRouter\n" +
-	"dashboard is the authority on your bill. Use these for proportion and trend.\n" +
+const costFootnote = "These are the provider's own reported figures, not estimates. The spend is the\n" +
+	"backend deployment's, not yours — use these for proportion and trend.\n" +
 	"Counted since this process launched, or since the last /clear; turns the supervisor\n" +
 	"daemon ran while detached are not included. Runbook learning, when enabled, is billed\n" +
-	"by OpenRouter but reported by nothing and so appears in no total here."
+	"upstream but reported by nothing and so appears in no total here."
 
 // costLine renders one category's spend plus its call count.
 func costLine(s costledger.OpSummary) string {

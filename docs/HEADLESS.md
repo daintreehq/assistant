@@ -29,8 +29,13 @@ for a test harness. See `docs/DAINTREE_HOST.md`.
 { "mcpServers": { "daintree": {
     "command": "/path/to/bin/daintree-assistant",
     "args": ["mcp", "--stdio"],
-    "env": { "DAINTREE_API_KEY": "sk-or-v1-…" } } } }
+    "env": {} } } }
 ```
+
+The `env` block is empty on purpose: the backend funds every model call from its own
+credential, so a headless MCP server needs no key at all. `DAINTREE_API_KEY` belongs there
+only on a deployment with accounts, and then it is an ACCOUNT bearer naming which caller
+the requests are from — never a provider key, and never a thing that pays.
 
 Two decisions shape this surface, both forced by what an MCP client is.
 
@@ -48,11 +53,11 @@ a close/open pair, never a reconnect.
 
 Endpoints and credentials are the exception, and they are **pinned at launch**. See
 [the process policy](#the-process-policy-is-the-authority-ceiling) below: they decide
-where the conversation goes and whose credential pays for it, which makes them the
+where the conversation goes and which account it is made from, which makes them the
 operator's call rather than an argument the caller can reach.
 
-**No secret is a tool argument.** The backend key is named by `apiKeyFile` and the Daintree
-MCP bearer by `mcpTokenFile` — paths, never values. Both are chosen by a *model* on this
+**No secret is a tool argument.** The backend account bearer is named by `apiKeyFile` and
+the Daintree MCP bearer by `mcpTokenFile` — paths, never values. Both are chosen by a *model* on this
 surface, and that bearer authorises system-tier Daintree actions for its whole validity
 window: inline, it could be echoed back by a prompt injection, logged by your MCP client, or
 captured by traces outside this repository. Omit `mcpTokenFile` to inherit
@@ -541,7 +546,8 @@ Four rules worth knowing before you script against them:
   ignore entirely. Neither pays for anything. If a deployment does require an account,
   sign in interactively once (`daintree-assistant auth login`) and headless runs on that
   machine pick the session up from the keychain — there is no headless login flow,
-  because the authorization code arrives through a browser.
+  because the authorization code arrives through a browser. See
+  [`auth status --json`](#auth-status---json) for reading account state from a script.
 - **The key never rides argv.** `ps` is world-readable, so `--api-key-file` takes a
   path. The file is read with a bounded read (a FIFO would otherwise defeat
   `--timeout`) and checked with the same shape rule `DAINTREE_API_KEY` gets, so a stray
@@ -552,6 +558,78 @@ Four rules worth knowing before you script against them:
   turn as a different principal and hide the mistake behind a successful-looking run.
 - **An explicitly false boolean wins.** `--auto-approve=false` beats
   `DAINTREE_ASSISTANT_AUTO_APPROVE=1`. An *absent* flag leaves the env in charge.
+
+### `auth status --json`
+
+`auth status --json` writes exactly one NDJSON line to stdout and nothing else; human
+text goes to stderr, so a stray sentence can never corrupt the stream. The line is a
+versioned event whose `data` is the redacted account snapshot:
+
+```json
+{"v":1,"type":"auth:status","environment":"staging","data":{
+  "state":"signed_in_active","authenticated":true,
+  "environment":"staging","backendUrl":"https://assistant.daintree.org",
+  "configured":true,"authRequired":false,
+  "email":"person@example.com","subjectHash":"0123456789abcdef",
+  "planId":"standard","entitlementSource":"polar",
+  "entitlementCheckedAt":"2026-08-25T12:00:00Z",
+  "lastVerifiedAt":"2026-08-25T12:04:11Z",
+  "storageTier":"keychain",
+  "links":{"account":"https://staging.daintree.org/account"},
+  "authRevision":"3f9a1c02b7e45d18:7"}}
+```
+
+Most fields are `omitempty`, so read the example as "what a fully-populated line looks
+like" rather than a fixed shape. `entitlementStale` is absent when false; `email`,
+`planId` and `entitlementSource` are all optional in the backend contract and absent when
+it does not report them; `links` is always present and may be `{}`.
+
+Four properties a consumer has to respect:
+
+- **`state` is an OPEN domain.** New values are added whenever the account layer learns
+  to tell apart two situations it used to collapse, and two arrived at once for exactly
+  that reason. A consumer that switches without a default, or validates `state` against a
+  closed enum, breaks on the next one. Branch on the coarse fields — `authenticated`,
+  `configured`, `authRequired` — and render `state` as an opaque string.
+- **`configured` and `authRequired` are POINTERS, and absent means "we could not ask".**
+  A bare `false` would decode as "this deployment has no accounts", which during an
+  outage tells someone their sign-in is unnecessary. Absent is a third answer; treat it
+  as unknown rather than as no.
+- **The account fields are only populated after a live check.** They come from
+  `--refresh`, which makes the one request to `/v1/daintree/account`. A plain read is
+  offline-capable and reports what the process already knows, so a fresh process shows
+  `state: signed_in_unverified` and no plan until something asks. Nothing about the plan
+  is persisted — deliberately, since a plan on disk is a plan that can be wrong.
+- **Nothing here is ever a credential.** There is no field that can hold an access token,
+  a refresh token or an authorization URL, the subject appears only as a one-way hash,
+  and a backend URL carrying userinfo is redacted before it reaches the line.
+
+Two timestamps, answering different questions. `lastVerifiedAt` moves whenever ANY
+protected request succeeds, so it says "this login still works". `entitlementCheckedAt`
+is the backend's own `checked_at` for the billing answer and moves only when the account
+endpoint is asked. A session confirmed a second ago can therefore sit beside an hour-old
+plan, which is exactly the pair `entitlementStale` exists to qualify.
+
+A retained snapshot survives a later failure on purpose: if a `--refresh` cannot reach the
+backend, the previous answer's plan fields stay on the line rather than blanking, because
+blanking would report a subscription as gone when the network was. Branch on `state` and
+`lastErrorCode`, and read `entitlementCheckedAt` for age — never treat the presence of a
+plan as proof it was just checked.
+
+Exit codes: `0` for any answer the command could construct, including a missing plan, a
+lapsed plan, a refused client and a dependency outage — none of those is fixed by signing
+in. `3` means signed out or revoked, and is the only code a script should react to by
+prompting for a login. `1` and `2` are still ordinary command failures (a manager that
+could not be built, bad arguments or configuration) and carry no status line.
+
+`auth login --json` emits a multi-line event stream — `auth:starting`, then
+`auth:browser_opened` or `auth:manual_url_required`, `auth:waiting`, `auth:authenticated`
+— and closes a successful sign-in with the same `auth:status` line, on every plan outcome
+including a failed check. When the check failed, the event's top-level `code` names the
+reason; the status payload itself carries no `lastErrorCode` for it, because the
+post-login check is deliberately non-mutating and does not record anything against the
+session. Cancellation, a deployment with no accounts, and a genuine sign-in failure end on
+`auth:cancelled`, `auth:not_offered` and `auth:error` respectively, with no status line.
 
 ### Isolation
 

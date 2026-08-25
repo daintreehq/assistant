@@ -40,7 +40,8 @@ conversation is compacted or cleared. Recalled and pinned **memories** ride alon
 
 ### What stays here
 
-- Your API key, beyond the single hop above (bearer token, request-scoped).
+- Your account bearer, if you have one, beyond the single hop above (request-scoped, and
+  sent only to the Assistant backend — never onward to a model provider).
 - The Daintree MCP token.
 - Files no tool read on your behalf.
 - The debug log and the audit trail — local, unless you send a bundle.

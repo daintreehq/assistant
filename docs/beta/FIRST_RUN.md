@@ -55,16 +55,37 @@ not ask. `auth status` tells you which:
   state        this backend has no accounts
 ```
 
-If it ever says `accounts  required`, that is when you sign in. Two notes for when you do.
+If it ever says `accounts  required`, that is when you sign in. Three notes for when you do.
+
 The refresh token lives in the macOS Keychain or the Linux Secret Service and nowhere
 else, so on a box with neither there is no persistence at all and the login is gone when
 the command exits (`auth status` says `credentials  this process only`). And `auth logout`
 signs out THIS machine only — there is no remote sign-out — while `auth disconnect` prints
 the account page, which is where access can be revoked for every device.
 
+The third is about the plan. Nothing about it is stored on your machine, deliberately: a
+plan on disk is a plan that can go stale, so a fresh process starts knowing only that a
+credential exists. Plain `auth status` stays fast and works offline; **`auth status
+--refresh` is the one that asks the backend**, and it is what to run after buying or
+changing a plan. It reports four things that look alike and are not:
+
+```
+  state        signed in
+  state        signed in — no plan yet
+  state        signed in — plan inactive
+  state        signed in — could not check just now
+```
+
+The first three describe your account; the fourth describes the backend, and is never a
+statement that you are unsubscribed. A lapsed plan needs the billing portal rather than a
+second checkout — the command says which case you are in, and prints the relevant link
+when the deployment publishes one (both the account and subscribe URLs are optional).
+
 No model-provider credential is stored on your machine, and nothing reaches a model
-provider from it directly: the CLI sends its requests to the backend with no
-`Authorization` header, and the backend does the rest. The CLI does store project-scoped
+provider from it directly. On the deployment you are pointed at today the CLI sends no
+`Authorization` header at all; on one that has accounts it sends your account token as a
+bearer to the DAINTREE BACKEND — a statement about who is calling, never forwarded to a
+model provider. The backend does the rest. The CLI does store project-scoped
 conversation and operational state locally (`state.db` under `~/.daintree/assistant-cli/`)
 so sessions, memories, supervision, audit, and recovery can work — see
 [`PRIVACY_AND_DATA.md`](PRIVACY_AND_DATA.md) for exactly what and for how long.

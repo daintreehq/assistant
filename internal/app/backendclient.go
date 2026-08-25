@@ -154,10 +154,13 @@ func NewAccountBackendClient(cfg config.AppConfig, mgr *auth.Manager) *backend.C
 // straight after a successful `auth login`.
 //
 // It deliberately does NOT observe, and that is the whole reason it exists. The observing
-// client acts on what it hears: a `auth_session_revoked` — or any untyped 401 from a
-// proxy, a misconfigured deployment, or a backend mid-deploy — reaches RemedyClear and
-// DELETES the refresh token. Moments after a login persisted it. The user would be told
-// "Signed in.", the command would exit 0, and the credential would be gone.
+// client acts on what it hears, and `auth_session_revoked` reaches RemedyClear, which
+// DELETES the refresh token — moments after a login persisted it. The user would be told
+// "Signed in.", the command would exit 0, and the credential would be gone. A backend
+// mid-deploy, a proxy rewriting a body, or a misconfigured deployment all produce that
+// code as easily as a real revocation does. (An untyped 401 is less severe — it maps to
+// RemedySignIn and deletes nothing — but it would still report the fresh session as
+// signed out.)
 //
 // A post-login entitlement check is a courtesy: it exists to name the plan, and it has no
 // business revoking a session that was minted seconds ago by a token exchange the
