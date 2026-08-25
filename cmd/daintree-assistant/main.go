@@ -217,9 +217,10 @@ func parseArgsInto(args []string) (parsedArgs, *flag.FlagSet, error) {
 		yes      = fs.Bool("yes", false, "")
 		noBackup = fs.Bool("no-backup", false, "")
 		// `auth` flags. --no-open prints the sign-in URL instead of launching a browser
-		// (for an SSH session whose browser lives elsewhere); --refresh forces a fresh
-		// session check rather than trusting cached entitlement, which is what someone
-		// reaches for immediately after completing a checkout.
+		// (for an SSH session whose browser lives elsewhere); --refresh makes the ONE
+		// live account request, which is what someone reaches for immediately after
+		// completing a checkout. Without it status is offline-capable and reports only
+		// what this process already knows.
 		authNoOpen  = fs.Bool("no-open", false, "")
 		authRefresh = fs.Bool("refresh", false, "")
 		// `support-bundle` flags.
@@ -557,7 +558,7 @@ func checkRouteScopedFlags(fs *flag.FlagSet, parsed parsedArgs) error {
 	}
 	if flagWasSet(fs, "refresh") {
 		if route != routeAuth || parsed.Auth.Action != cli.AuthStatus {
-			return errors.New("--refresh only applies to \"auth status\"; it forces a live session check")
+			return errors.New("--refresh only applies to \"auth status\"; it asks the backend for the account and plan")
 		}
 	}
 	// --yes already means "skip the confirmation" on reset; auth disconnect is the second
@@ -745,7 +746,7 @@ func writeUsage(w io.Writer, buildVersion string) {
 	fmt.Fprintln(w, "  --runbook ID          load this backend runbook on every turn (repeatable)")
 	fmt.Fprintln(w, "  --list-runbooks       print the runbooks this backend can load, and exit")
 	fmt.Fprintln(w, "  --no-open           auth login: print the sign-in URL instead of opening a browser")
-	fmt.Fprintln(w, "  --refresh           auth status: force a live session check (after a checkout)")
+	fmt.Fprintln(w, "  --refresh           auth status: ask the backend for the account and plan (after a checkout)")
 	fmt.Fprintln(w, "  --yes               skip a confirmation (reset, auth disconnect; required without a TTY)")
 	fmt.Fprintln(w, "  --no-backup         skip the reset's timestamped backup")
 	fmt.Fprintln(w, "  --out PATH          support-bundle destination")

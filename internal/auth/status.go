@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/daintreehq/assistant/internal/backend"
@@ -111,6 +113,24 @@ func backendCodeOf(err error) string {
 	return ""
 }
 
+// sanitizeURLForDisplay strips userinfo from a URL before it can be rendered.
+//
+// It lives HERE, at the point Status is built, rather than at each surface that prints
+// one. The type's whole premise is that nothing in it is a credential, and the backend
+// URL is operator-supplied: nothing upstream rejects userinfo in an https:// endpoint, so
+// `DAINTREE_BACKEND_URL=https://user:secret@example.test` would otherwise put `secret`
+// into a struct that goes to stdout, to the NDJSON event stream, and into a support
+// bundle. Sanitizing at each caller was how `auth login --json` came to emit it while
+// `auth status --json` did not.
+func sanitizeURLForDisplay(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.User == nil {
+		return raw
+	}
+	u.User = url.User("«redacted»")
+	return u.String()
+}
+
 // SubjectHash derives the support correlation id from a subject.
 //
 // Truncated to 16 hex characters: long enough that two accounts will not collide in any
@@ -145,7 +165,7 @@ func (m *Manager) Status() Status {
 	s := Status{
 		State:         state,
 		Authenticated: state.SignedIn(),
-		BackendURL:    m.backendURL,
+		BackendURL:    sanitizeURLForDisplay(m.backendURL),
 		StorageTier:   tier,
 		AuthRevision:  marker.String(),
 	}
@@ -255,9 +275,19 @@ func (s Status) WithAvailability(a Availability) Status {
 		// while this deployment DID have accounts, and an email beside "this backend has
 		// no accounts" is not a partial truth — it is two statements that cannot both
 		// hold, on the one line someone reads to find out what is going on.
+		// EVERY session-derived field goes, not only the account ones. A block that says
+		// "this backend has no accounts" beside "verified 10 minutes ago", "session
+		// renews in 58m" or a leftover entitlement error code is not partially right —
+		// each of those describes a session that, by the deployment's own answer, does
+		// not exist. They can only be left over from when the deployment did have
+		// accounts, or from a different endpoint entirely.
 		s.Email, s.SubjectHash, s.Plan = "", "", ""
 		s.EntitlementSource, s.EntitlementStale = "", false
 		s.EntitlementCheckedAt = nil
+		s.AccessExpiresAt, s.LastVerifiedAt = nil, nil
+		s.LastErrorCode = ""
+		s.SessionMaxAgeSeconds = 0
+		s.Links = StatusLinks{}
 	}
 	return s
 }

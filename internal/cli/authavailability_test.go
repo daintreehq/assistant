@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/daintreehq/assistant/internal/auth"
 	"github.com/daintreehq/assistant/internal/config"
@@ -28,13 +29,27 @@ var statusShapes = []struct {
 }{
 	{
 		name: "accounts not offered",
-		st: auth.Status{StorageTier: auth.TierKeychain}.
-			WithAvailability(auth.Availability{Known: true}),
+		// Seeded with a full session's worth of leftovers — an expiring access token, a
+		// verification time, a plan, an error code — because those are exactly what a
+		// machine that signed in BEFORE the deployment turned accounts off would be
+		// carrying. Starting from a blank status would let every one of them survive
+		// unnoticed.
+		st: auth.Status{
+			State: auth.StateSignedInActive, StorageTier: auth.TierKeychain,
+			Plan: "pro", EntitlementSource: "polar", LastErrorCode: "entitlement_unavailable",
+			SessionMaxAgeSeconds: 2592000,
+			AccessExpiresAt:      ptrTime(time.Now().Add(time.Hour)),
+			LastVerifiedAt:       ptrTime(time.Now().Add(-time.Minute)),
+		}.WithAvailability(auth.Availability{Known: true}),
 		wantHuman: []string{"not offered by this backend", "no accounts", "Nothing to do"},
 		// The two forbidden readings, checked as literal text rather than as state
-		// constants — what a person sees is the thing the rule is about.
-		bannedHuman: []string{"could not check", "Run `daintree-assistant auth login`"},
-		wantExit:    0,
+		// constants — what a person sees is the thing the rule is about. The rest are
+		// session facts that cannot be true of a deployment with no accounts.
+		bannedHuman: []string{
+			"could not check", "Run `daintree-assistant auth login`",
+			"renews in", "verified", "plan ", "last error", "sign-in for",
+		},
+		wantExit: 0,
 	},
 	{
 		name: "accounts supported, not required",
@@ -87,6 +102,15 @@ func TestTheFourDeploymentShapesRenderDistinctly(t *testing.T) {
 				t.Errorf("renders identically to %q — the shapes are indistinguishable", prev)
 			}
 			seen[got] = tc.name
+
+			// The exit code, which scripts branch on. It was recorded in this table and
+			// never asserted, so every expectation in the column was dead data — exit 3
+			// means "not signed in", and a deployment with no accounts returning it
+			// would have every such script try to log in against an endpoint with
+			// nothing to log in to.
+			if exit := authStatusExit(tc.st); exit != tc.wantExit {
+				t.Errorf("exit = %d, want %d", exit, tc.wantExit)
+			}
 		})
 	}
 }
@@ -192,3 +216,6 @@ func assertJSONField(t *testing.T, data map[string]any, field string, want any) 
 		t.Errorf("%s = %v, want %v", field, got, want)
 	}
 }
+
+// ptrTime is a local helper for the table above.
+func ptrTime(t time.Time) *time.Time { return &t }

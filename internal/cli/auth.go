@@ -3,14 +3,16 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/daintreehq/assistant/internal/app"
 	"github.com/daintreehq/assistant/internal/auth"
+	"github.com/daintreehq/assistant/internal/backend"
 	"github.com/daintreehq/assistant/internal/config"
 	"github.com/daintreehq/assistant/internal/supervisor"
 )
@@ -163,7 +165,7 @@ func RunAuth(ctx context.Context, opts Options, authOpts AuthOptions) int {
 
 	switch authOpts.Action {
 	case AuthLogin:
-		return runAuthLogin(ctx, w, mgr, authOpts)
+		return runAuthLogin(ctx, w, mgr, cfg, authOpts)
 	case AuthStatus:
 		return runAuthStatus(ctx, w, mgr, cfg, authOpts)
 	case AuthLogout:
@@ -199,7 +201,7 @@ func authMessage(err error) string {
 	return strings.TrimPrefix(err.Error(), "auth: ")
 }
 
-func runAuthLogin(ctx context.Context, w authWriter, mgr *auth.Manager, opts AuthOptions) int {
+func runAuthLogin(ctx context.Context, w authWriter, mgr *auth.Manager, cfg config.AppConfig, opts AuthOptions) int {
 	w.human("Signing in to Daintree…")
 
 	progress := func(event, detail string) {
@@ -254,7 +256,93 @@ func runAuthLogin(ctx context.Context, w authWriter, mgr *auth.Manager, opts Aut
 		w.human("Warning: no system credential store is available, so this sign-in will")
 		w.human("         not persist after this process exits.")
 	}
+	// The login's OWN manifest, not a fresh lookup. Login has already validated one and
+	// may have consumed the discovery cache doing it, so re-fetching risks a failure
+	// that would silently drop the subscribe and billing links from the very message
+	// that exists to show them.
+	reportPlanAfterLogin(ctx, w, mgr, cfg, res.Manifest)
 	return 0
+}
+
+// reportPlanAfterLogin makes ONE best-effort account check and says what it found.
+//
+// The rule it exists to enforce: OAUTH SUCCESS AND PAID ENTITLEMENT ARE SEPARATE
+// OUTCOMES. A valid account with no plan has signed in perfectly — reporting "login
+// failed" there sends someone to re-authenticate their way out of a billing problem,
+// which cannot work. So every branch below keeps the credential and every branch exits
+// 0; what changes is the sentence and the link.
+//
+// Best-effort throughout. The login has already succeeded and been persisted by the time
+// this runs, so nothing here may undo it: a billing outage means the plan is unknown,
+// not that the sign-in was bad.
+func reportPlanAfterLogin(ctx context.Context, w authWriter, mgr *auth.Manager, cfg config.AppConfig, man *auth.Manifest) {
+	gen := mgr.Generation()
+	// The UNOBSERVING client. A courtesy entitlement check must not be able to revoke
+	// the session the token exchange just created — see NewUnobservingAccountBackendClient.
+	acct, err := app.NewUnobservingAccountBackendClient(cfg, mgr).Account(ctx)
+	if err == nil {
+		mgr.ApplyAccountStatus(gen, acct)
+	}
+
+	st := mgr.Status().WithManifest(man)
+	// The same versioned event type `auth status` emits, carrying the same payload —
+	// deliberately NOT a new type, because the shared schema lives in the Daintree app
+	// and this side cannot check that a new one would be accepted.
+	//
+	// Emitted on EVERY outcome, including the failures below. Daintree reads this stream
+	// as its only view of account state, and a failed plan check that produced nothing
+	// on stdout left it unable to tell "no plan", "could not check" and "no check was
+	// made" apart — the human sentences go to stderr under --json and it never sees them.
+	w.event(authEvent{Type: "auth:status", Env: st.Environment, Extra: st})
+
+	if err != nil {
+		reportPlanCheckFailure(w, err)
+		return
+	}
+
+	switch {
+	case st.State == auth.StateSignedInActive && st.Plan != "":
+		w.human("Your %s plan is active.", st.Plan)
+	case st.State == auth.StateSubscriptionRequired:
+		w.human("This account does not have a plan that includes the assistant yet.")
+		if st.Links.Subscribe != "" {
+			w.human("Choose a plan: %s", st.Links.Subscribe)
+		}
+	case st.State == auth.StateSubscriptionInactive:
+		// The account URL, never the checkout. Sending someone with a lapsed
+		// subscription to buy a second one is how people end up paying twice.
+		w.human("This account's plan is not currently active.")
+		if st.Links.Account != "" {
+			w.human("Manage billing: %s", st.Links.Account)
+		}
+	default:
+		// Signed in, and the plan is a question this deployment did not answer —
+		// `unverified` on a rollout with no entitlement lookup configured.
+		w.human("Signed in. This backend did not report a plan for this account.")
+	}
+}
+
+// reportPlanCheckFailure says what could not be checked, without ever suggesting the
+// sign-in itself went wrong.
+func reportPlanCheckFailure(w authWriter, err error) {
+	var be *backend.Error
+	if !errors.As(err, &be) {
+		w.human("Signed in. The plan could not be checked just now.")
+		return
+	}
+	switch {
+	case be.AuthRemedy() == backend.RemedyReconfigure:
+		// The credential is fine and this deployment will not act on it. Offering a
+		// second login here opens a loop that mints another credential wrong in exactly
+		// the same way.
+		w.human("Signed in, but this backend does not accept this client's credentials.")
+		w.human("Signing in again produces the same result; this needs a change at the backend.")
+	case be.IsAccountDependency():
+		w.human("Signed in. The plan could not be checked — the billing service is unavailable.")
+		w.human("Your sign-in is unaffected; try `daintree-assistant auth status --refresh` later.")
+	default:
+		w.human("Signed in. The plan could not be checked (%s).", backendMessage(err))
+	}
 }
 
 func runAuthStatus(ctx context.Context, w authWriter, mgr *auth.Manager, cfg config.AppConfig, opts AuthOptions) int {
@@ -263,42 +351,37 @@ func runAuthStatus(ctx context.Context, w authWriter, mgr *auth.Manager, cfg con
 	// login reports "unknown", which is the one answer that is never useful.
 	mgr.Hydrate(ctx)
 
-	// --refresh forces a live credential check rather than trusting what is on disk. It
-	// is what someone runs right after completing a checkout, so it must actually reach
-	// the network; a flag that silently did nothing would be worse than not having one.
+	// Availability is resolved BEFORE the refresh, because it decides whether there is
+	// anything to refresh. A deployment with no identity provider has no account to ask
+	// about, and asking anyway spends a round trip to be told 404.
+	avail := mgr.Availability(ctx)
+
+	// --refresh is the only path that makes an ACCOUNT request. Not the only path that
+	// touches the network at all — discovery above may fetch the manifest when it has no
+	// cached answer, and must, since the deployment's shape is the first thing status
+	// reports. The distinction is the one that matters: a plain status read never reaches
+	// the billing authority, so it stays answerable while the backend is down, which is
+	// precisely when someone runs it.
 	if opts.Refresh {
-		if _, err := mgr.AccessToken(ctx); err != nil && !auth.IsCancelled(err) {
-			// Recorded in the status below rather than failing outright: "could not
-			// verify" is a legitimate thing for status to report.
-			w.human("Could not verify the session: %s", authMessage(err))
-		}
+		refreshAccount(ctx, w, mgr, cfg, avail)
 	}
 
-	// Best-effort: a manifest fills in the environment and links, and its absence must
-	// not stop status answering. "The backend is unreachable" is precisely when someone
-	// runs this.
+	// Read the status AFTER the refresh, so a live answer is reflected rather than the
+	// pre-call state.
 	//
-	// Availability is read WHETHER OR NOT the manifest validated, because the one case
-	// it answers for — a deployment with no identity provider — is the case that makes
-	// the manifest fail. Reading it only on success is how "this backend has no
-	// accounts" came to be indistinguishable from "we could not reach it".
+	// A manifest fills in the environment and links, best-effort: its absence must not
+	// stop status answering, because "the backend is unreachable" is precisely when
+	// someone runs this. Availability is applied WHETHER OR NOT the manifest validated,
+	// because the one case it answers for — a deployment with no identity provider — is
+	// the case that makes the manifest fail. Reading it only on success is how "this
+	// backend has no accounts" came to be indistinguishable from "we could not reach it".
 	st := mgr.Status()
 	if man, err := mgr.Manifest(ctx); err == nil {
 		st = st.WithManifest(man)
 	}
-	st = st.WithAvailability(mgr.Availability(ctx))
-	st.BackendURL = sanitizeURLForDisplay(st.BackendURL)
+	st = st.WithAvailability(avail)
 
-	exit := 0
-	// NeedsLogin, not "is not signed in". A deployment with no accounts is not signed in
-	// and never will be, and returning the not-signed-in code for it would have every
-	// script that branches on it try to log in against an endpoint with nothing to log
-	// in to.
-	if st.State.NeedsLogin() {
-		// A distinct exit code so a script can branch on "not signed in" without parsing
-		// prose, while keeping it separate from an outright failure.
-		exit = 3
-	}
+	exit := authStatusExit(st)
 
 	if w.json {
 		// ONE LINE. json.MarshalIndent would emit a multi-line document, and the first
@@ -312,19 +395,78 @@ func runAuthStatus(ctx context.Context, w authWriter, mgr *auth.Manager, cfg con
 	return exit
 }
 
-// sanitizeURLForDisplay strips credentials from a URL before it is printed.
+// refreshAccount performs the ONE live account check behind `auth status --refresh`.
 //
-// The backend URL is operator-supplied and reaches stdout in both output modes. Nothing
-// upstream rejects userinfo in an https:// endpoint, so
-// `DAINTREE_BACKEND_URL=https://user:secret@example.test` would otherwise put `secret` on
-// standard output of a command whose entire premise is that it prints no credentials.
-func sanitizeURLForDisplay(raw string) string {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u.User == nil {
-		return raw
+// Exactly one request, and only when there is something to ask. Every failure is
+// reported and swallowed: "could not verify" is a legitimate thing for status to report,
+// and a status command that exited non-zero because billing was down would be worse than
+// one that says so.
+//
+// It deliberately does NOT call ApplyBackendVerdict on the error. The manager IS the
+// client's AccountObserver, so the client has already folded the verdict into local
+// state — refreshing a token, clearing a revoked credential, recording a dependency
+// outage — before the error ever reached here. Applying it a second time would run the
+// destructive branch twice against a generation the first one moved.
+func refreshAccount(ctx context.Context, w authWriter, mgr *auth.Manager, cfg config.AppConfig, avail auth.Availability) {
+	// A KNOWN "no accounts here" ends it. There is no credential to renew and no account
+	// endpoint to ask, and touching the credential store would report a keychain problem
+	// on a deployment where the answer is simply "nothing to do".
+	if avail.Known && !avail.Configured {
+		return
 	}
-	u.User = url.User("«redacted»")
-	return u.String()
+
+	// The token first: the account read is protected, and a credential that cannot be
+	// produced is a different failure from one the backend rejected. Cancellation is
+	// silent — the user stopped it.
+	if _, err := mgr.AccessToken(ctx); err != nil {
+		if !auth.IsCancelled(err) {
+			w.human("Could not verify the session: %s", authMessage(err))
+		}
+		return
+	}
+
+	// Sample the generation BEFORE the request. A status read can outlive a logout in
+	// another process, and the answer must be recognisable as describing a session that
+	// has since ended.
+	gen := mgr.Generation()
+	acct, err := app.NewAccountBackendClient(cfg, mgr).Account(ctx)
+	if err != nil {
+		if !auth.IsCancelled(err) {
+			w.human("Could not check the plan: %s", backendMessage(err))
+		}
+		return
+	}
+	mgr.ApplyAccountStatus(gen, acct)
+}
+
+// backendMessage renders a backend error for a human, preferring the stable code over
+// prose the backend authored. The message is still shown — it is the part that says
+// which dependency — but a caller reading the line gets the code first.
+func backendMessage(err error) string {
+	var be *backend.Error
+	if errors.As(err, &be) && be.Code != "" {
+		return be.Code
+	}
+	return err.Error()
+}
+
+// authStatusExit is the exit code for a rendered status.
+//
+// NeedsLogin, not "is not signed in". A deployment with no accounts is not signed in and
+// never will be, and returning the not-signed-in code for it would have every script that
+// branches on it try to log in against an endpoint with nothing to log in to. A plan
+// problem, a dependency outage and a refused client are all exit 0 for the same reason
+// in reverse: they are real answers, and none of them is fixed by signing in.
+//
+// Split out from the command so the table of deployment shapes can assert it without
+// standing up a manager and a backend.
+func authStatusExit(st auth.Status) int {
+	if st.State.NeedsLogin() {
+		// A distinct exit code so a script can branch on "not signed in" without parsing
+		// prose, while keeping it separate from an outright failure.
+		return 3
+	}
+	return 0
 }
 
 // renderAuthStatus writes the human status block.
@@ -342,6 +484,22 @@ func renderAuthStatus(w authWriter, st auth.Status, cfg config.AppConfig) {
 	if st.Plan != "" {
 		w.human("  plan         %s", st.Plan)
 	}
+	// Where the billing answer came from, and how old it is. Both are shown because
+	// "you are subscribed" and "you were subscribed when we last managed to ask" are
+	// different claims, and only one of them is safe to act on.
+	if st.EntitlementSource != "" {
+		source := st.EntitlementSource
+		if st.EntitlementStale {
+			source += " (cached — may be out of date)"
+		}
+		w.human("  plan source  %s", source)
+	}
+	if st.EntitlementCheckedAt != nil {
+		w.human("  plan checked %s", st.EntitlementCheckedAt.Local().Format(time.RFC1123))
+	}
+	if st.LastVerifiedAt != nil {
+		w.human("  verified     %s", st.LastVerifiedAt.Local().Format(time.RFC1123))
+	}
 	if st.AccessExpiresAt != nil {
 		if d := st.AccessExpiresIn(time.Now()); d > 0 {
 			w.human("  session      renews in %s", roundDuration(d))
@@ -353,6 +511,13 @@ func renderAuthStatus(w authWriter, st auth.Status, cfg config.AppConfig) {
 		w.human("  sign-in for  %d days", st.SessionMaxAgeSeconds/86400)
 	}
 	w.human("  credentials  %s", authTierLabel(st.StorageTier))
+	// Driven by the TIER, not by the state. The state now follows the account verdict —
+	// a confirmed plan overwrites StateStorageUnavailable — so a warning that keyed off
+	// the state string would vanish the moment a plan check succeeded, which is the one
+	// run where the user is most likely to be reading this block.
+	if st.StorageTier == auth.TierMemory {
+		w.human("               this sign-in disappears when this process exits")
+	}
 	if st.LastErrorCode != "" {
 		w.human("  last error   %s", st.LastErrorCode)
 	}
@@ -368,9 +533,31 @@ func renderAuthStatus(w authWriter, st auth.Status, cfg config.AppConfig) {
 	case st.State.NeedsLogin():
 		w.human("")
 		w.human("Run `daintree-assistant auth login` to sign in.")
-	case st.State.NeedsPlan() && st.Links.Subscribe != "":
+	case st.State == auth.StateSubscriptionRequired && st.Links.Subscribe != "":
 		w.human("")
 		w.human("Choose a plan: %s", st.Links.Subscribe)
+	case st.State == auth.StateSubscriptionInactive:
+		w.human("")
+		// The billing portal, never a second checkout. The two plan states share
+		// NeedsPlan() and must not share this line: telling someone whose payment
+		// failed to choose a plan is how they end up paying for two.
+		w.human("Your plan is not currently active. Check billing rather than buying again:")
+		if st.Links.Account != "" {
+			w.human("  %s", st.Links.Account)
+		} else {
+			w.human("  open your Daintree account page")
+		}
+	case st.State.NeedsPlan():
+		w.human("")
+		w.human("This account needs a plan. Run `daintree-assistant auth status --refresh`")
+		w.human("after buying one to pick it up.")
+	case st.State == auth.StateSignedInUnverified:
+		w.human("")
+		w.human("Run `daintree-assistant auth status --refresh` to check the account and plan.")
+	case st.State == auth.StateTemporarilyUnavailable:
+		w.human("")
+		w.human("The account could not be checked just now. Your sign-in is unaffected;")
+		w.human("try `daintree-assistant auth status --refresh` again shortly.")
 	case st.State == auth.StateAccountsUnavailable:
 		w.human("")
 		w.human("This backend serves requests without an account. Nothing to do.")
