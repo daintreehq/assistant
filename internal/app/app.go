@@ -466,6 +466,25 @@ func (a *App) snapshotConfig() config.AppConfig {
 	return a.Config
 }
 
+// AuthManager returns the account manager currently in force.
+//
+// EVERY read of `Auth` from outside this package must come through here, for the same
+// reason `SnapshotConfig` exists: `/backend` REPLACES the manager on a switch — a new
+// endpoint means a new credential key, so carrying the old one over would present a
+// credential minted for one deployment to another — and it does so under `cfgMu`. A
+// direct `a.Auth` read races that write.
+//
+// It began to matter when sign-in became a slash command: before that the only reader
+// took its reference at construction, so there was nothing to race. A `/login` running
+// on a worker while `/backend` swaps the manager underneath it is a genuine data race,
+// and the half that is not a race — signing in to the endpoint you have just left — is
+// not much better.
+func (a *App) AuthManager() *auth.Manager {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.Auth
+}
+
 // Create builds the App in the canonical construction order. A failure at any
 // stage closes whatever was already opened and returns the error.
 func Create(opts CreateOptions) (*App, error) {

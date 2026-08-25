@@ -24,6 +24,28 @@ type CommandResult struct {
 // command is handled by both). clearHostTerminal is called on /clear by the caller
 // (the REPL owns stdout), signalled via CommandResult.ConversationCleared.
 func HandleSlashCommand(ctx context.Context, line string, a *app.App, r *render.Renderer) CommandResult {
+	return HandleSlashCommandWithProgress(ctx, line, a, r, nil)
+}
+
+// HandleSlashCommandWithProgress is HandleSlashCommand plus an EXTRA progress sink,
+// called alongside the renderer's own stage lines rather than instead of them.
+//
+// It exists for the embedded host, which needs the identical command surface — same
+// handler, same output, byte for byte — while also being able to show progress
+// somewhere that is not a terminal. Routing that host through the UI handler instead
+// would have been the smaller diff and the wrong one: `/help` there appends the
+// cockpit's KEY CHEAT-SHEET, which describes keys an embedded panel does not have, and
+// `/doctor` formats through a different function. Both would have changed under a host
+// that only asked for a progress channel.
+//
+// nil is the ordinary case and costs nothing.
+func HandleSlashCommandWithProgress(
+	ctx context.Context,
+	line string,
+	a *app.App,
+	r *render.Renderer,
+	progress func(stage string),
+) CommandResult {
 	cmd, _, rest := parseCommand(line)
 	if cmd == "" {
 		return CommandResult{Handled: false}
@@ -50,6 +72,15 @@ func HandleSlashCommand(ctx context.Context, line string, a *app.App, r *render.
 		// progress from the slow model-backed commands (/compact) prints as it
 		// happens so the REPL is never silent for the whole run.
 		res := HandleUICommandWithProgress(ctx, line, a, func(stage string) {
+			// EITHER the sink or the renderer, never both. A caller that supplied a sink
+			// has its own place to show stages, and echoing them into the rendered text
+			// as well would make the finished card open by repeating progress the caller
+			// had already displayed — "· Opening your browser…" shown once live and then
+			// again, past tense, at the top of the result.
+			if progress != nil {
+				progress(stage)
+				return
+			}
 			r.Line("· " + stage)
 		})
 		if !res.Handled {

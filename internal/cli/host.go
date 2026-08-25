@@ -233,15 +233,41 @@ func (h *hostAppAdapter) SetHooks(hooks host.AppHooks) {
 // the registry test asserts every command is served by both surfaces, so an embedded
 // host cannot quietly support a different set from the one the CLI documents.
 func (h *hostAppAdapter) RunCommand(ctx context.Context, line string) host.CommandOutcome {
+	return h.RunCommandWithProgress(ctx, line, nil)
+}
+
+// RunCommandWithProgress is RunCommand plus the stage reporter the slow commands use.
+// See host.CommandProgressRunner for why this is a second method rather than a wider
+// RunCommand signature.
+func (h *hostAppAdapter) RunCommandWithProgress(
+	ctx context.Context,
+	line string,
+	progress func(stage string),
+) host.CommandOutcome {
 	if !commands.IsKnownCommand(line) {
 		return host.CommandOutcome{Unknown: true}
 	}
 	var buf bytes.Buffer
-	res := commands.HandleSlashCommand(ctx, line, h.app, render.New(&buf))
+	// STILL the REPL handler, with a progress sink threaded through it — not the UI one.
+	// Sharing this handler is the point (the registry test asserts every command is
+	// served by both surfaces), and the two are not interchangeable: the UI arm of
+	// `/help` appends a key cheat-sheet describing keys an embedded panel does not have,
+	// and `/doctor` formats through a different function. A host that asked only for a
+	// progress channel must not silently get different output for either.
+	//
+	// The renderer's own stage lines land in `buf`, which nobody reads until the command
+	// has finished; `progress` is what reaches the panel while it is still running.
+	res := commands.HandleSlashCommandWithProgress(ctx, line, h.app, render.New(&buf), progress)
 	if !res.Handled {
 		return host.CommandOutcome{Unknown: true}
 	}
 	return host.CommandOutcome{Text: buf.String(), Quit: res.Quit, ConversationCleared: res.ConversationCleared}
+}
+
+// IsSlowCommand answers host.CommandProgressRunner from the registry — the same table
+// that decides everything else about a command.
+func (h *hostAppAdapter) IsSlowCommand(line string) bool {
+	return commands.IsSlowCommand(line)
 }
 
 // CommandCatalog mirrors the CLI's own registry, so the two surfaces cannot offer

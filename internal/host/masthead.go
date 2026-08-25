@@ -35,17 +35,27 @@ func tierGloss(t domain.Tier) string {
 	}
 }
 
-// mastheadBackend names a NON-DEFAULT backend endpoint, or "" for the deployed one.
+// mastheadBackend names the backend endpoint this session talks to. Always.
 //
-// Only a deviation is announced: the deployed backend is what every install talks to
-// and needs no statement. The masthead carries no other endpoint readout
-// of which backend answered a turn, so an endpoint exported in another terminal is
-// otherwise completely invisible — and a transcript that does not say it was talking to
-// a local backend is a transcript that cannot be trusted.
+// It used to announce only a DEVIATION, on the reasoning that the deployed backend is
+// what every install talks to and needs no statement. That held while an embedding host
+// pinned the endpoint and the deployed one was the exception. It stopped holding when
+// the endpoint became the session's own, remembered across restarts and switchable with
+// `/backend`: the deployed backend is now what an unconfigured install ARRIVES at rather
+// than what it was configured for, and it is the one that sends the conversation, the
+// project context and every tool result off the machine.
+//
+// Announcing only the exception made those two cases identical on screen — a session
+// talking to a local backend and a session shipping everything to a server both showed
+// nothing — and the quiet one was the one that left the box. The masthead carries no
+// other endpoint readout, so silence here is silence everywhere.
 func mastheadBackend(baseURL string) string {
 	u := strings.TrimSpace(baseURL)
-	if u == "" || u == backend.DefaultBaseURL {
-		return ""
+	if u == "" {
+		// An empty config resolves to the deployed default downstream (see
+		// backend.NewClient), so the masthead has to say the same thing rather than
+		// reporting the absence it was handed.
+		u = backend.DefaultBaseURL
 	}
 	safe := mcp.SanitizeURL(u)
 	if safe == "" {
