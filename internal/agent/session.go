@@ -1999,7 +1999,7 @@ func (s *Session) classifyBackendError(err error) string {
 	// accountFailureAdvice deliberately returns "" for it: it IS a rate limit, and that
 	// branch carries the health badge which clears on the next good usage report.
 	if errors.As(err, &be) {
-		if msg := accountFailureAdvice(be); msg != "" {
+		if msg := accountFailureAdvice(be, s.accountLinks()); msg != "" {
 			s.events.Phase(domain.PhaseFailed)
 			s.events.Error(msg)
 			return msg
@@ -2054,21 +2054,77 @@ func (s *Session) classifyBackendError(err error) string {
 	return msg
 }
 
+// accountLinks reads the validated browser destinations for the deployment this session
+// is pointed at. The provider is optional (nil in most tests, and nil in any process with
+// no account layer), and a nil one answers exactly as an unconfigured deployment does:
+// zero links, which advice renders as no link at all rather than a guess.
+//
+// Called while composing an error string, so it must stay free: the seam behind it reads
+// an already-validated manifest out of memory, performs no I/O and starts no discovery,
+// which is what keeps one account operation costing one discovery attempt.
+func (s *Session) accountLinks() AccountLinks {
+	if s.deps.AccountLinks == nil {
+		return AccountLinks{}
+	}
+	return s.deps.AccountLinks()
+}
+
+// adviceLink renders " <label>: <url>", or "" when there is no URL to render.
+//
+// The empty case is the documented degradation and not an edge case: AccountLinks is the
+// zero value whenever discovery has not succeeded against this deployment, and advice must
+// then name the command and offer nothing to click. A dangling label with nothing after it
+// — what a naive concatenation produces — is the one outcome worse than no link at all,
+// so the label and the URL are emitted together or not at all.
+//
+// The checks are defence in depth, not validation. These links arrive already validated
+// and origin-pinned (auth.Manifest.Validate → Status.WithManifest → StatusLinks), and this
+// exists only so that a provider which ever returned something else could not put a bare
+// fragment — or a string with a space in it, which a reader's terminal or renderer would
+// break in the middle — in front of someone as though it were a destination.
+//
+// The scheme comparison is case-INSENSITIVE deliberately. Validation parses with net/url,
+// which lowercases the scheme it reports while the manifest's original string is what gets
+// kept, so a legitimately validated `HTTPS://…` reaches here verbatim. Matching only the
+// lowercase form would silently degrade a good link to no link at all — the one failure
+// this helper is not allowed to invent.
+func adviceLink(label, url string) string {
+	url = strings.TrimSpace(url)
+	lower := strings.ToLower(url)
+	if !strings.HasPrefix(lower, "https://") && !strings.HasPrefix(lower, "http://") {
+		return ""
+	}
+	if strings.ContainsAny(url, " \t\r\n") {
+		return ""
+	}
+	return " " + label + ": " + url
+}
+
 // accountFailureAdvice renders the user-facing reply for the backend's ACCOUNT taxonomy,
 // or "" when the error carries none of those codes.
 //
-// Every line names a CLI-owned command or a URL, and none of them names a cockpit slash
-// command: there is no `/login` and no `/auth`, deliberately, because the CLI is the only
-// desktop authentication surface. Native Daintree has no sign-in UI to fall back on, so
-// a message that points at a command which does not exist leaves a user with no way
-// forward at all.
+// The remedy leads with a slash command in THIS assistant. `/login`, `/logout` and
+// `/account` are registered engine commands (internal/commands/registry.go), dispatched
+// for the embedded host and the line REPL alike — so native Daintree, which renders this
+// reply in a panel and may be the whole of the reader's desktop, has a way forward that
+// does not require finding a terminal. The standalone `daintree-assistant auth …`
+// equivalents are named SECOND, as an alternative rather than a prerequisite. This is a
+// deliberate reversal: the comment here used to assert that there was no `/login` and no
+// `/auth`, which was true of the build it was written against and is not true of this one.
+//
+// links is the ONLY source of a URL in this function. Nothing is assembled from the
+// backend hostname and nothing is lifted out of `be` — the backend authors be.Message and
+// it can quote a provider verbatim, so the branch is on be.Code and the text is ours. When
+// discovery has not succeeded here the links are empty and every reply degrades to naming
+// the command, which is the only accepted no-link shape.
 //
 // The three groups need three different next steps and must never be collapsed:
 //
-//   - IDENTITY — sign in again, except for the two 403s, where a fresh credential is
-//     refused identically and saying otherwise opens a loop with no exit.
-//   - PLAN — the sign-in is FINE. A missing plan gets the plans page; a lapsed one gets
-//     billing, never a second checkout, which is how people pay twice.
+//   - IDENTITY — sign in, except for the two 403s, where a fresh credential is refused
+//     identically and saying otherwise opens a loop with no exit.
+//   - PLAN — the sign-in is FINE, so neither of these offers one. A missing plan gets the
+//     plans page; a lapsed one gets the account page, never a second checkout, which is
+//     how people pay twice.
 //   - DEPENDENCY — nothing was established. This must never read as "not subscribed":
 //     the credential is good, the answer simply could not be obtained.
 //
@@ -2076,11 +2132,22 @@ func (s *Session) classifyBackendError(err error) string {
 // registration is load-bearing rather than bookkeeping: without it the supervisor's
 // unattended wake would mistake a turn that stopped at the account door for a real
 // answer and record the work it was supervising as summarized.
-func accountFailureAdvice(be *backend.Error) string {
-	const refresh = "run `daintree-assistant auth status --refresh` for the details and the link"
+func accountFailureAdvice(be *backend.Error, links AccountLinks) string {
+	// Named after the slash command in every identity reply, never instead of it. A
+	// reader embedded in Daintree has no terminal in reach; a reader who lives in one
+	// should not have to learn a second surface to sign in.
+	const alsoStandalone = " `daintree-assistant auth login` does the same from a terminal."
+	// Each branch reads the ONE link that is its own remedy, at the point it renders it.
+	// Nothing is precomputed above the switch: a lapsed subscription must not so much as
+	// have a checkout URL in hand, so that the branch below cannot grow one by accident.
 	switch be.Code {
 	case backend.CodeAuthRequired:
-		return "Account problem: this backend requires an account and no credential was sent. Run `daintree-assistant auth login` in your terminal to sign in."
+		// The one code where the reader may hold no account at all — nothing was sent,
+		// so nothing is known about them — which is why the browser flow is described as
+		// sign in OR create rather than just sign in.
+		return "Account problem: this backend requires an account and no credential was sent." +
+			" Run `/login` in this Assistant to sign in — it opens your browser, where you can sign in or create an account." +
+			alsoStandalone + adviceLink("Create an account or choose a plan", links.Subscribe)
 	case backend.CodeAuthTokenExpired, backend.CodeAuthTokenInvalid:
 		// Deliberately does NOT say the renewal was attempted and failed. It usually was
 		// — the client refreshes and replays once — but not always: a turn that has
@@ -2089,22 +2156,40 @@ func accountFailureAdvice(be *backend.Error) string {
 		// failure that did not happen is the same small lie the upstream-unavailable
 		// message avoids, and it matters here because it makes a sign-in sound
 		// mandatory when simply asking again would have worked.
-		return "Account problem: this backend would not accept the stored credential for this turn. Try again; if it persists, run `daintree-assistant auth login` to sign in again."
+		return "Account problem: this backend would not accept the stored credential for this turn." +
+			" Try again; if it persists, run `/login` in this Assistant to sign in again." +
+			alsoStandalone + adviceLink("Create an account or choose a plan", links.Subscribe)
 	case backend.CodeAuthSessionRevoked:
-		return "Account problem: this session was ended elsewhere — a sign-out, or access revoked for this account. Run `daintree-assistant auth login` to sign in again."
+		return "Account problem: this session was ended elsewhere — a sign-out, or access revoked for this account." +
+			" Run `/login` in this Assistant to sign in again." + alsoStandalone +
+			adviceLink("Create an account or choose a plan", links.Subscribe)
 	case backend.CodeAuthClientNotAllowed:
-		// Deliberately does NOT suggest signing in again. The credential is valid and
-		// current; another one would be refused in exactly the same way, forever.
+		// Deliberately does NOT suggest signing in again, by either route. The credential
+		// is valid and current; another one would be refused in exactly the same way,
+		// forever, and a panel that offers `/login` here is a loop with no exit.
 		return "Account problem: this backend does not accept this client's account credentials. Signing in again produces the same result — this needs a change at the backend, or a build matching this deployment."
 	case backend.CodeAuthPermissionDenied:
 		// The account IS recognised. Handing over the "your client is not registered"
-		// diagnosis here would send someone to check a registration that is fine.
+		// diagnosis here would send someone to check a registration that is fine, and
+		// offering a sign-in would send them through a flow that changes nothing.
 		return "Account problem: this backend accepts your credentials but not for this operation. Nothing local fixes it; ask whoever administers this deployment."
 	case backend.CodeSubscriptionRequired:
-		return "Account problem: this account has no plan that includes the assistant. Your sign-in is fine — the plan is the problem, so " + refresh + "."
+		// `/account` is named first because it is the surface that reports what this
+		// account actually holds; the plans page is offered beside it, and only when
+		// discovery validated one. No sign-in appears: the credential was accepted.
+		//
+		// "Choose a plan", not the identity codes' "Create an account or choose a plan":
+		// this reader demonstrably HAS an account, and offering to create one invites a
+		// duplicate. It is also the wording /account already uses for the same state.
+		return "Account problem: this account has no plan that includes the assistant. Your sign-in is fine — the plan is the problem, so run `/account` in this Assistant for the details." +
+			adviceLink("Choose a plan", links.Subscribe)
 	case backend.CodeSubscriptionInactive:
-		// Billing, never a second checkout.
-		return "Account problem: this account's plan is not currently active. Check billing rather than buying again — " + refresh + "."
+		// The ACCOUNT page, never the plans page: a lapsed subscription pointed at a
+		// checkout is how someone ends up paying for a second one. links.Subscribe is
+		// deliberately not read in this branch, so the wrong link cannot appear even if
+		// the other one is missing.
+		return "Account problem: this account's plan is not currently active. Your sign-in is fine — check billing rather than buying again, so run `/account` in this Assistant for the details." +
+			adviceLink("Your account and billing", links.Account)
 	case backend.CodeUsageLimitReached:
 		return "Account problem: this account has reached its usage limit for the period. It clears when the period rolls over, or when the plan changes."
 	case backend.CodeAuthDependencyUnavailable, backend.CodeEntitlementUnavailable,
@@ -2143,8 +2228,9 @@ func upstreamFailureAdvice(be *backend.Error) string {
 	switch be.Code {
 	case backend.CodeProviderInvalidAPIKey:
 		// The rejected credential is the BACKEND's, not the user's. This message used to
-		// say "your API key" and send the reader to `/login` — a command that does not
-		// exist, to replace a key they have never held. The CLI ships no provider
+		// say "your API key" and send the reader to `/login` to replace a key they have
+		// never held. `/login` is a real command today, which changes nothing here: no
+		// sign-in reaches a credential the deployment owns. The CLI ships no provider
 		// credential at all; the deployment funds every call with its own.
 		return "Model unavailable: the provider rejected the credential this backend spends. That credential belongs to the deployment, not to your account — nothing on this machine changes it, so report it to whoever runs this backend."
 	case backend.CodeProviderInsufficientCredit:

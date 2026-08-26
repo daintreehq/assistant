@@ -61,8 +61,9 @@ func TestUpstreamFailureAdviceIgnoresUnknownCodes(t *testing.T) {
 //
 // The backend funds every model call with its own key; the CLI ships none. So none of
 // these may say "your API key", offer a place for the user to top up, or point at a
-// sign-in — all three did, and the first sent the reader to `/login`, a cockpit command
-// that does not exist, to replace a credential they have never seen.
+// sign-in — all three did, and the first sent the reader to `/login` to replace a
+// credential they have never seen. That command exists today, which does not make it the
+// right answer here: signing in again cannot change a key the deployment holds.
 func TestProviderCredentialAdviceDoesNotBlameTheUsersKey(t *testing.T) {
 	for _, code := range []string{
 		backend.CodeProviderInvalidAPIKey,
@@ -70,7 +71,14 @@ func TestProviderCredentialAdviceDoesNotBlameTheUsersKey(t *testing.T) {
 		backend.CodeProviderKeyForbidden,
 	} {
 		msg := upstreamFailureAdvice(&backend.Error{Code: code})
-		for _, banned := range []string{"your API key", "your OpenRouter account", "openrouter.ai/credits", "/login"} {
+		// `/login` and `/account` are real engine commands now, which makes naming one
+		// here worse rather than better: the reader would run a command that works, watch
+		// it report a perfectly healthy account, and be no closer to the deployment
+		// credential that actually failed.
+		for _, banned := range []string{
+			"your API key", "your OpenRouter account", "openrouter.ai/credits",
+			"/login", "auth login", "/account",
+		} {
 			if strings.Contains(msg, banned) {
 				t.Errorf("%s says %q, which describes a credential the user does not hold: %q", code, banned, msg)
 			}
