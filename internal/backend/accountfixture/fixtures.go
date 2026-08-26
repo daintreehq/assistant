@@ -149,6 +149,19 @@ func Malformed() []string {
 // report months later.
 const SubjectHash = "b4c864ea44cbb4a1"
 
+// Email is the display address the fixtures that carry one use.
+//
+// Exported so a test can assert on it without restating the literal — a suite that hard
+// codes its own copy stops testing the shared body the moment the body changes, and does
+// so by passing.
+const Email = "operator@example.com"
+
+// CheckedAt is the entitlement time the fresh fixtures carry, as sent.
+//
+// GrantedStaleCache deliberately carries an OLDER one; anything asserting on the age gap
+// should read both rather than assume.
+const CheckedAt = "2026-08-25T09:14:00Z"
+
 // Subject is the raw subject SubjectHash is derived from. Present so a test can prove
 // the derivation rather than restate its output.
 const Subject = "8f14e45f-ea8b-4c1d-9b2a-0000feedface"

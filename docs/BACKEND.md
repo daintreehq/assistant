@@ -56,6 +56,34 @@ protected/public split matters here: `/healthz`, `/readyz`, `/version` and the d
 endpoint itself never wait on a credential, because they are exactly what someone probes
 when their login is broken.
 
+**`GET /v1/daintree/account` is TWO documents under one version.** Every response carries
+`version`, `access` and a valid 16-hex `subject_hash`, and may carry `email`. An
+`unverified` response stops there: identity is established, entitlement was never looked
+up, so it carries no plan, no source, no stale flag and no `checked_at` — there was
+nothing to timestamp. The other three report a completed lookup and must carry
+`checked_at`, `entitlement_source` and `entitlement_stale` together; `granted` also
+requires a `plan_id`. The stale flag is decoded presence-aware for a reason: absent reads
+as "not stale", so a lookup that never said would be rendered as "we checked, and this is
+current". It is the only field whose wire presence survives decoding — a `null` string is
+indistinguishable from an omission — so the `unverified` rules are checked on the decoded
+value.
+
+This decoder is a SUBSET of the server's contract, not a mirror of it. It ignores unknown
+fields (the server forbids extras) and does not repeat every cross-field rule the server
+already enforces. It is the part that decides what a user is told, and a body that breaks
+it is a LOCAL `account_contract_invalid` (`internal/backend/accountstatus.go`) sitting
+deliberately outside `accountCodes` — malformed data is a statement about the backend, and
+must never reach a user as "you are signed out" or "you are not subscribed". The canonical
+bodies live in `internal/backend/accountfixture` and are decoded by every package that
+reads this contract.
+
+**One read serves every surface** (`internal/app/accountrefresh.go`). `auth status
+--refresh` and `/account` read as the user asking, through the OBSERVING client, so a
+revocation clears the credential. The checks after `auth login` and `/login` are a
+COURTESY and run unobserving — a plan report must not be able to revoke a session the
+token exchange completed seconds earlier. A plain `auth status` makes no account request
+at all.
+
 **The backend's account verdicts change local state.** The codes in `account.go` are not
 just for display: a protected 2xx confirms the session, `auth_token_expired` gets one
 refresh and one replay (never after anything visible has streamed), `auth_session_revoked`
@@ -67,7 +95,7 @@ Three surfaces carry that, and what each one actually does:
 | surface | state today | what it does |
 |---|---|---|
 | `DAINTREE_API_KEY` → `cfg.APIKey` → `Authorization: Bearer` | unset on a normal install | supplies a bearer identifying the CALLER. It does not fund anything: in `open` mode the backend does not read it, and in `observe`/`enforce` it is verified as an account token. Every model call is funded by the server's own credential regardless. It takes precedence over the account manager on this side, so setting both is a configuration mistake rather than a precedence question |
-| `App.Backend` is a `backend.Swappable` | `/backend` swaps it | a different deployment is a different account authority too, so the swap rebuilds the client AND the manager. An ordinary token refresh does not come through here — `TokenSource` changes the credential for the same endpoint, one level below |
+| `App.Backend` is a `backend.Swappable` | `/backend` swaps it | a different deployment is a different account authority too, so the swap rebuilds the client AND the manager. An ordinary token refresh does not come through here — `TokenSource` changes the credential for the same endpoint, one level below. An account read that CROSSES a swap is discarded, not applied: `App.RefreshAccount` fetches outside `cfgMu` and commits under it, and `/backend` needs the write lock, so an answer describing the endpoint a session has just left can never reach the new endpoint's manager. The same `Discarded` outcome also covers a login, logout or revocation moving the generation mid-read |
 | `POST /v1/daintree/auth/verify` | `doctor` is the only caller | answers for the PROVIDER credential the request would spend — the backend's own, normally — so it is the one probe that says "this deployment can actually run a turn". It is not a question about the caller's account |
 
 A **malformed** bearer is still a `401 invalid_api_key`, and that asymmetry is deliberate:

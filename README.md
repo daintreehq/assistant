@@ -74,6 +74,10 @@ permits — the command to run after completing a checkout, since nothing about 
 kept on disk and a fresh process starts by knowing only that a credential exists.
 (`auth login` asks once too, to name your plan.)
 
+Inside a running session the same three things are `/login`, `/logout` and `/account`, on
+the same manager and the same account read — `/account` asks the backend, so a plan bought
+on the website becomes active there without signing in again.
+
 One thing that trips people up: `go install` writes to `$(go env GOPATH)/bin` (usually
 `~/go/bin`), **which is not on `PATH` by default on macOS** — so the install succeeds and
 the command is then not found. Fix it with

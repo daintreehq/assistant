@@ -66,8 +66,8 @@ the account page, which is where access can be revoked for every device.
 The third is about the plan. Nothing about it is stored on your machine, deliberately: a
 plan on disk is a plan that can go stale, so a fresh process starts knowing only that a
 credential exists. Plain `auth status` stays fast and works offline; **`auth status
---refresh` is the one that asks the backend**, and it is what to run after buying or
-changing a plan. It reports four things that look alike and are not:
+--refresh` is the mode that asks the backend**, and it is what to run after buying or
+changing a plan. (Inside a running session, `/account` asks the same question.) It reports four things that look alike and are not:
 
 ```
   state        signed in

@@ -73,7 +73,7 @@ one thing to do. Three groups, and they need opposite responses:
 | requires an account / session was ended elsewhere | identity | `daintree-assistant auth login` |
 | would not accept the stored credential for this turn | the credential may simply not have been renewed on this turn | try again first; only run `auth login` if it persists |
 | does not accept this client's credentials / not for this operation | the deployment refuses a credential that is FINE | nothing local helps — signing in again produces the same result |
-| no plan that includes the assistant | the sign-in is good, the plan is missing | `auth status --refresh`, which prints the subscribe link when the deployment publishes one |
+| no plan that includes the assistant | the sign-in is good, the plan is missing | `auth status --refresh`, or `/account` inside a session — both ask the backend and print the subscribe link when the deployment publishes one |
 | plan is not currently active | a plan exists and has lapsed | the **billing portal** — a second checkout is how people pay twice |
 | reached its usage limit for the period | the plan's cap is spent | wait for the period to roll over, or change the plan |
 | could not be checked just now | a dependency is down, nothing was established | wait and retry; your sign-in is unaffected |

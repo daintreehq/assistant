@@ -81,12 +81,24 @@ func marshalEvent(typ, sessionID string, seq uint64, fields map[string]any) ([]b
 // The masthead fields below carry what the cockpit's own masthead stated, already
 // resolved (see masthead.go). They exist for the same reason AutoApprove does: they are
 // session facts that a protocol-only consumer has no other way to learn. Tier and
-// TierGloss say what this session is permitted to do; Backend says which endpoint
-// answers a turn, and is the ONLY readout of that since sign-in went away; Routing says
-// what privacy/selection policy was requested; LogFile says where the trace goes, which
-// is unanswerable from outside because the engine picks the filename. Empty means "the
-// default, which needs no announcement" — except LogFile, where empty means logging is
-// off.
+// TierGloss say what this session is permitted to do; Routing says what
+// privacy/selection policy was requested; LogFile says where the trace goes, which is
+// unanswerable from outside because the engine picks the filename. For those, empty means
+// "the default, which needs no announcement" — except LogFile, where empty means logging
+// is off.
+//
+// BACKEND IS THE EXCEPTION: it names the endpoint on every session, deviation or not.
+// (It is still omitted when it sanitizes to empty — an endpoint that cannot be safely
+// rendered is a misconfiguration, and a blank field is the fail-closed answer. A consumer
+// reads an absent one as "unknown", never as "the deployed default".) It once followed the same rule and named
+// only a deviation, on the reasoning that the deployed backend is what every install
+// talks to. That inverted when the endpoint became the session's own, remembered across
+// restarts and switchable with `/backend`: the deployed one is now what an unconfigured
+// install ARRIVES at rather than what it was configured for, and it is the one that sends
+// the conversation, the project context and every tool result off the machine. Announcing
+// only the exception made those two cases identical on screen, and the silent one was the
+// one that left the box. A consumer must therefore NOT read the field's presence as
+// "a custom endpoint" — read the value.
 type EvReady struct {
 	ProtocolVersion  int
 	ResumedSessionID string

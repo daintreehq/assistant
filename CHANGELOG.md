@@ -28,6 +28,25 @@ guarantees, and the SQLite schema is a single clean baseline rather than a migra
   exits 0, and shows where to choose one. A LAPSED plan gets the billing portal instead —
   a second checkout is how people pay twice. A billing outage says the plan could not be
   checked and leaves the session alone.
+- **`/login`, `/logout` and `/account`, inside a running session.** Sign-in was always the
+  engine's own business — the PKCE exchange, the browser, the loopback listener and the
+  keychain all live here — but there was no way to REACH it from a session, so an
+  embedding host had to shell out to the subcommands from its own settings screen. These
+  are the same manager and the same account read as the `auth` commands, so the two
+  surfaces cannot disagree about the STATE of a credential — they word it differently,
+  because a card in a panel and a terminal status block are not the same shape.
+- **`/account` asks the backend rather than reciting what this process remembers.** It
+  used to format an in-process snapshot, which in a session that had never made an account
+  request is almost nothing: a perfectly good keychain sign-in showed no plan and a state
+  line saying the backend had not confirmed anything, while `auth status --refresh`
+  against the same credential named the plan. It also means a plan bought on the website
+  becomes active on the next `/account` that successfully reaches the backend — no second
+  sign-in to pick up a purchase you have already paid for. A read that fails says so and
+  leaves the last known state alone; it never reports a billing outage as "no plan".
+- **A sign-in that cannot open a browser now says what to run.** "Re-run with `--no-open`"
+  means nothing inside a panel that has no flags and no prompt; the remedy is now the whole
+  command, and it is attached to the sign-in rather than to one launcher, so it appears
+  however the browser failed.
 - **A turn that stops at the account door now says so.** Account verdicts used to arrive
   as `Model error: backend: http 401/402/403/429/503 …`, which describes a billing or
   sign-in problem as a model problem. Twelve of the thirteen account codes now open with
@@ -36,7 +55,7 @@ guarantees, and the SQLite schema is a single clean baseline rather than a migra
   ordinary rate-limit reply because it clears on its own.
 - **Corrected who owns the upstream credential across every user-facing surface.** Messages
   said the provider had rejected "your API key", offered a top-up link for an account you
-  do not hold, and pointed at `/login` — a command that does not exist. The backend funds
+  do not hold, and pointed at `/login` at a time when no such command existed. The backend funds
   every model call from its own credential; `DAINTREE_API_KEY` and `--api-key-file` say
   who is CALLING and are never spent upstream.
 - **The backend's account verdicts now change local state.** An eligible protected 2xx
@@ -47,6 +66,38 @@ guarantees, and the SQLite schema is a single clean baseline rather than a migra
   plan or dependency failures leave it alone. Unattended supervision stops when a session
   it was using ends.
 - `DAINTREE_API_KEY` is unchanged and still not a way to pay: it says who is calling.
+
+### Fixed — account correctness
+
+- **A late revocation could delete the credential a sign-in had just stored**, while the
+  sign-in reported success. Two windows, both closed: one inside a single process (the new
+  identity is now published before the credential lock is released) and a wider one across
+  processes, where a revocation raised elsewhere could not see a login that had happened
+  here and stayed wrong until its next token read. The safe error is now the other way
+  round — a revocation may be deferred, never a good credential deleted.
+- **A cancelled sign-in could resurrect a session that ended while it was open.** Signing
+  out during a five-minute browser round trip, then cancelling the sign-in, restored the
+  old "signed in" state with no credential behind it. The guard compares this process's
+  own identity, so it covers a sign-out or a revocation in the SAME session; one in
+  another process is still only noticed on the next token read.
+- **A session kept reporting itself able to spend after another process signed out.** The
+  token was already gone; only the state disagreed — and that state is what the background
+  supervisor consults before an unattended turn. Deliberately narrow: a sign-in still
+  running, a memory-only credential and a refused one all keep saying so, because each is
+  a diagnosis "signed out" would hide.
+- **A sign-in no longer claims the current backend when `/backend` moved under it.**
+  Switching endpoints while a browser sign-in was open left the credential stored for the
+  endpoint it started against and the card announcing "Signed in" above the new endpoint's
+  signed-out state. It now says which happened.
+- **A sign-in that cannot record itself no longer half-succeeds.** If the shared revision
+  could not be bumped, the credential stayed written while the command reported failure —
+  so a fresh process would load a session this one said it could not create. It is now
+  rolled back, and "login failed" is true.
+- **The CLI rejected a valid backend response.** It required a `checked_at` timestamp on
+  every reply, including the identity-only one the backend sends when entitlement lookup
+  is not configured — turning a correct answer into "could not verify your plan". The
+  contract now matches the server on both halves: that reply carries no entitlement fields
+  at all, and a completed lookup must carry all of them.
 
 ### Changed — no API key to paste
 

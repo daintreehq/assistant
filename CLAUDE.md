@@ -115,19 +115,59 @@ supervisor's spend gate, because a verdict landing on an object the gate never r
 the bug that shape exists to prevent. Verdicts arrive late, so every write rechecks the
 identity generation inside the section that performs it.
 
-**The account answer now reaches the CLI's own surfaces — the `auth` commands and a
-turn's prose — but not yet the typed host protocol.** `backend.Account(ctx)` reads
-`GET /v1/daintree/account` under a validated version-1 contract
-(`internal/backend/accountstatus.go`); a malformed body raises a LOCAL
+**The account answer reaches every CLI surface — the `auth` commands, the embedded
+`/login` `/logout` `/account`, and a turn's prose — but not yet the typed host protocol.**
+`backend.Account(ctx)` reads `GET /v1/daintree/account` under a validated version-1
+contract (`internal/backend/accountstatus.go`); a malformed body raises a LOCAL
 `account_contract_invalid` that is deliberately outside `accountCodes`, so it can never
 read as signed-out or unsubscribed. `auth.Manager` holds the answer in a memory-only
 snapshot stamped with the generation AND the shared revision marker
 (`internal/auth/accountsnapshot.go`) — never on disk, because a plan on disk is a plan
-that can be wrong. Two commands ask: `auth status --refresh` and `auth login` (once,
-best-effort, to name the plan); a plain `auth status` never does. A turn renders twelve
-of the thirteen account codes through `agent/session.go` `accountFailureAdvice`, whose
-replies open with the registered `Account problem:` wake prefix — `account_rate_limited`
-is the exception and keeps the ordinary rate-limit reply.
+that can be wrong. A turn renders twelve of the thirteen account codes through
+`agent/session.go` `accountFailureAdvice`, whose replies open with the registered
+`Account problem:` wake prefix — `account_rate_limited` is the exception and keeps the
+ordinary rate-limit reply.
+
+**Version 1 is TWO documents, not one with optional parts** — the fork in
+`AccountStatus.validate` is the shape of the contract, not a convenience. Every response
+carries `version`, `access` and a valid `subject_hash` (the route is protected, so there is
+always a subject to hash), and may carry `email`. Beyond that they diverge:
+
+- **`unverified`** says identity is established and entitlement was never looked up, so it
+  carries none of the lookup's results. Demanding a `checked_at` from it — as this decoder
+  once did — turns the backend's correct answer into "could not verify your plan".
+- **The three checked verdicts** report a completed lookup and must carry `checked_at`
+  (RFC 3339 with an offset, and not the zero time, which no consumer can tell apart from
+  no check at all), `entitlement_source` AND `entitlement_stale`. `granted` additionally
+  requires a `plan_id`; the two subscription verdicts may omit plan and status.
+
+`entitlement_stale` is decoded through a POINTER because an absent flag reads as `false`
+through `Stale()` and would render "we checked, and this is current" for a response that
+claimed nothing. It is the ONLY field whose wire presence is preserved: a `null` or `""`
+string decodes the same as an omission, so the `unverified` rules are enforced on the
+decoded value, not on literal absence. The decoder is deliberately NOT a mirror of the
+server's — it ignores unknown fields where the server forbids extras, and it does not
+re-check every cross-field rule the server already enforces (`source=cache` with
+`stale=false`, for one). It is the subset that decides what a user is told. Bounds are
+WIDER than the server's where the two count in different units: the backend bounds `email`
+in code points and this counts bytes, so a 320-byte cap would refuse a server-valid
+accented address. The canonical wire bodies live once, in
+`internal/backend/accountfixture`, and are decoded by the `backend`, `auth`, `cli` and
+`commands` suites alike — four hand-written copies of one response is how both ends of a
+contract come to be green against documents that do not match.
+
+**One account read serves every surface** (`internal/app/accountrefresh.go`):
+`App.RefreshAccount` for a session, `RefreshAccountWith` for the standalone `auth`
+subcommands, which run in a process with no App at all. `auth status --refresh` and
+`/account` read as the user asking — OBSERVING, so a revocation clears the credential;
+the checks after `auth login` and `/login` are a COURTESY and run unobserving, because a
+plan report has no business revoking a session minted seconds ago. A plain `auth status`
+never asks. The App path fetches outside `cfgMu` and commits under it, so an answer for an
+endpoint a `/backend` switch has left is never applied — and `ApplyAccountStatus` REPORTS
+whether it committed, because it declines silently whenever the identity moved and "no
+error" was being read as "applied". `AccountRefresh.Discarded` covers BOTH causes — the
+endpoint moved, or a login/logout/revocation moved the generation — and the surfaces
+render it as "the account changed while this was being checked", never as a plan verdict.
 
 Three rules in that layer are load-bearing and easy to undo:
 
@@ -141,11 +181,22 @@ Three rules in that layer are load-bearing and easy to undo:
   (`app.NewUnobservingAccountBackendClient`). The observing one acts on what it hears,
   and a revoked verdict reaches `RemedyClear`, which would delete the refresh token
   seconds after login persisted it.
+- **`Login` publishes its new identity BEFORE releasing the credential lock, and a
+  clearer consults the SHARED REVISION after taking it.** Both halves guard the same
+  failure — a late revocation deleting the credential a login has just stored, while the
+  login reports success and `Persisted: true`. The first closes a window inside one
+  process; the second closes the wider one across processes, where a clearer's own
+  generation cannot see a login that happened elsewhere and stays wrong until its next
+  `AccessToken`. Declining a genuine revocation is the safe error here: the unobserved
+  marker makes the next `AccessToken` drop the cached access token and re-resolve the
+  current credential anyway, whereas deleting the wrong one has no recovery. `internal/auth/relogin_test.go` pins both, through the
+  `loginAfterCredentialUnlock` seam — the windows are too narrow for a stress test to
+  reach, which was verified rather than assumed.
 
 **What is still missing:** the host protocol still emits a generic `turn-error` for
-account failures rather than a typed account event, and nothing reads `App.Auth` to
-render account STATE in the attached session — its only readers construct the token
-source and replace it on a `/backend` switch.
+account failures rather than a typed account event. Account STATE now reaches an attached
+session through the `/account` card rather than a typed event, which is a command result
+a host renders as text — a native panel still has no structured account state to bind to.
 
 Two further seams are load-bearing and must stay:
 

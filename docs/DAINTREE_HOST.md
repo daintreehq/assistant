@@ -34,7 +34,7 @@ stderr**, so anything mentioned only there is invisible to an embedding host.
 | `autoApprove` | This session runs mutating tools with **no** confirmation | always present (boolean) |
 | `tier` | Permission tier in force (`supervisor` / `operator` / `system`) | unset |
 | `tierGloss` | Plain-language reading of `tier` | unknown tier |
-| `backend` | A **non-default** backend endpoint, named and sanitized | the deployed default |
+| `backend` | The backend endpoint this session talks to, named and sanitized | only when it cannot be safely rendered (see below) |
 | `routing` | A **non-default** endpoint-routing policy, as one line | the default policy |
 | `logFile` | Absolute path of this session's debug log | debug logging is off |
 
@@ -45,9 +45,23 @@ Two rules hold for all of them:
   endpoint is called, which routing policy is default, what a tier permits. A host that
   re-derived them would need a second copy of all of that, wrong the first time any of it
   changed. See [`internal/host/masthead.go`](../internal/host/masthead.go).
-- **Absent means "the default, which needs no announcement"** — except `logFile`, where
-  absent means logging is off. Only a *deviation* is reported, so a host can render these
-  unconditionally and stay quiet in the common case.
+- **Absent means "the default, which needs no announcement"** for `tier`, `tierGloss` and
+  `routing`: only a *deviation* is reported, so a host can render these unconditionally
+  and stay quiet in the common case. `logFile` is different — absent means logging is off.
+
+  **`backend` is different again, and a host must not read its presence as "a custom
+  endpoint".** It names the endpoint on every session, deviation or not. It once followed
+  the deviation rule, on the reasoning that the deployed backend is what every install
+  talks to; that inverted when the endpoint became the session's own, remembered across
+  restarts and switchable with `/backend`. The deployed one is now what an unconfigured
+  install *arrives at*, and it is the one that sends the conversation, the project context
+  and every tool result off the machine — so announcing only the exception made those two
+  cases identical on screen, and the silent one was the one that left the box.
+
+  It can still be absent, in one case: an endpoint that cannot be safely rendered
+  sanitizes to empty and is omitted rather than shown. That is a misconfiguration (a
+  value with no host, for instance), not a default — read an absent `backend` as
+  "unknown", never as "the deployed one".
 
 `logFile` in particular cannot be worked out from outside: the engine picks the filename
 (`<date>-<sessionId>.log`), so a host that guessed it would show a path that does not
@@ -163,7 +177,7 @@ makes them checkable.
 ### The reply: `host:ready`
 
 ```json
-{"type":"host:ready","sessionId":"ses_…","seq":1,"protocolVersion":3,"autoApprove":false,"version":"1.4.2","resumedSessionId":"ses_prev"}
+{"type":"host:ready","sessionId":"ses_…","seq":1,"protocolVersion":3,"autoApprove":false,"version":"1.4.2","backend":"https://assistant.daintree.org","resumedSessionId":"ses_prev"}
 ```
 
 `version` is the engine build string, so a host no longer has to shell out to `--version`
@@ -204,7 +218,7 @@ session; a consumer that sees a gap knows it lost something.
 
 | Event | Payload |
 | --- | --- |
-| `host:ready` | `protocolVersion`, `autoApprove`, `version?`, `resumedSessionId?` |
+| `host:ready` | `protocolVersion`, `autoApprove`, `version?`, `backend?`, `tier?`, `tierGloss?`, `routing?`, `logFile?`, `resumedSessionId?` — see the masthead table above for what each absence means |
 | `host:error` | `code`, `message` |
 | `host:shutdown` | `reason` (`hibernate`/`revoke`/`error`/`exit`), `resumeSessionId?` |
 | `turn:start` | `turnId`, `role` (`user`/`assistant`), `startedAt` |

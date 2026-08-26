@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/backend/accountfixture"
 )
 
 // accountsnapshot_test.go covers the memory-only account view: what the backend said,
@@ -18,9 +19,10 @@ import (
 // point, because the failure this whole layer exists to prevent is a state machine whose
 // transitions are all tested and never reached.
 
-const activeAccountBody = `{"version":1,"email":"person@example.com","subject_hash":"0123456789abcdef",` +
-	`"access":"granted","plan_id":"standard","subscription_status":"active",` +
-	`"entitlement_source":"polar","entitlement_stale":false,"checked_at":"2026-08-25T12:00:00Z"}`
+// activeAccountBody is THE canonical granted response, not a copy of it. Four packages
+// decode this contract, and four hand-written examples of one response is how both ends
+// of it came to be green against documents that did not match.
+var activeAccountBody = accountfixture.String(accountfixture.GrantedStandard)
 
 // statusFor builds an AccountStatus the way the client would hand one over.
 func statusFor(t *testing.T, access, plan, source string) backend.AccountStatus {
@@ -34,14 +36,14 @@ func statusFor(t *testing.T, access, plan, source string) backend.AccountStatus 
 	fresh := false
 	st := backend.AccountStatus{
 		Version:            backend.AccountStatusVersion,
-		Email:              "person@example.com",
+		Email:              accountfixture.Email,
 		SubjectHash:        "0123456789abcdef",
 		Access:             access,
 		PlanID:             plan,
 		SubscriptionStatus: "active",
 		EntitlementSource:  source,
 		EntitlementStale:   &fresh,
-		CheckedAt:          "2026-08-25T12:00:00Z",
+		CheckedAt:          accountfixture.CheckedAt,
 	}
 	parsed, err := time.Parse(time.RFC3339, st.CheckedAt)
 	if err != nil {
@@ -97,7 +99,7 @@ func TestAccountStatusProjectsEveryVerdict(t *testing.T) {
 			if st.State != tc.want {
 				t.Errorf("state = %q, want %q", st.State, tc.want)
 			}
-			if st.Email != "person@example.com" {
+			if st.Email != accountfixture.Email {
 				t.Errorf("email = %q", st.Email)
 			}
 			if st.SubjectHash != "0123456789abcdef" {
@@ -427,7 +429,7 @@ func TestAccountReadThroughARealClientLandsOnTheManager(t *testing.T) {
 	if got.State != StateSignedInActive {
 		t.Errorf("state = %q, want %q", got.State, StateSignedInActive)
 	}
-	if got.Plan != backend.PlanStandard || got.Email != "person@example.com" {
+	if got.Plan != backend.PlanStandard || got.Email != accountfixture.Email {
 		t.Errorf("the account did not reach the manager: %+v", got)
 	}
 	if n := d.accountCalls.Load(); n != 1 {
@@ -442,10 +444,10 @@ func TestAPlanlessAccountReadNeverReportsAnActiveSession(t *testing.T) {
 	d := newDeployment(t)
 	m, c, _ := signedIn(t, d, NewMemoryStore())
 	d.scriptAccount(accountBody(
-		`{"version":1,"email":"person@example.com","subject_hash":"0123456789abcdef",` +
+		`{"version":1,"email":"` + accountfixture.Email + `","subject_hash":"0123456789abcdef",` +
 			`"access":"subscription_required","subscription_status":"none",` +
 			`"entitlement_source":"polar","entitlement_stale":false,` +
-			`"checked_at":"2026-08-25T12:00:00Z"}`))
+			`"checked_at":"` + accountfixture.CheckedAt + `"}`))
 
 	gen := m.Generation()
 	st, err := c.Account(context.Background())
@@ -586,10 +588,10 @@ func TestAnUnrelatedSuccessCannotEraseAPlanVerdict(t *testing.T) {
 	d := newDeployment(t)
 	m, c, _ := signedIn(t, d, NewMemoryStore())
 	d.scriptAccount(accountBody(
-		`{"version":1,"email":"person@example.com","subject_hash":"0123456789abcdef",` +
+		`{"version":1,"email":"` + accountfixture.Email + `","subject_hash":"0123456789abcdef",` +
 			`"access":"subscription_required","subscription_status":"none",` +
 			`"entitlement_source":"polar","entitlement_stale":false,` +
-			`"checked_at":"2026-08-25T12:00:00Z"}`))
+			`"checked_at":"` + accountfixture.CheckedAt + `"}`))
 
 	gen := m.Generation()
 	st, err := c.Account(context.Background())
@@ -661,7 +663,7 @@ func TestTheEntitlementTimeIsTheBackendsAndDoesNotDrift(t *testing.T) {
 	}
 	m.ApplyAccountStatus(gen, st)
 
-	want, err := time.Parse(time.RFC3339, "2026-08-25T12:00:00Z")
+	want, err := time.Parse(time.RFC3339, accountfixture.CheckedAt)
 	if err != nil {
 		t.Fatal(err)
 	}
