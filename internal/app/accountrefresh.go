@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"time"
 
 	"github.com/daintreehq/assistant/internal/auth"
 	"github.com/daintreehq/assistant/internal/backend"
@@ -23,6 +24,20 @@ import (
 //
 // So the sequence lives here once. Everything below it is about the two ways this
 // operation can be handed a stale identity between its start and its finish.
+
+// AccountOperationBudget bounds ONE user-visible account operation end to end.
+//
+// Fifteen seconds: long enough that a slow-but-working backend still answers, short
+// enough that a broken one is reported while the user is still watching. It is a ceiling
+// on the whole sequence rather than a timeout on any step, so a fast discovery leaves
+// more of it for the request and vice versa.
+//
+// EXPORTED because the operation does not start here. `auth status` and `/account` both
+// hydrate and resolve availability before they reach this file, and a clock started
+// below them would leave those outside the cap — which is the stacking this exists to
+// stop. They apply it at their own entry points; the one in fetchAccount is the backstop
+// for any caller that does not.
+const AccountOperationBudget = 15 * time.Second
 
 // AccountRefresh is the outcome of one live account read.
 //
@@ -188,6 +203,22 @@ func fetchAccount(ctx context.Context, cfg config.AppConfig, mgr *auth.Manager, 
 		}
 		return fetchedAccount{Skipped: true}
 	}
+
+	// A BACKSTOP, not the operation's own ceiling.
+	//
+	// Everything below is individually bounded already — discovery at ten seconds, the
+	// account request at the client's own sixty — and that is exactly the problem: the
+	// bounds STACK. A `/account` against an unreachable backend walked hydration,
+	// availability and the status read in series, and a person who pressed a key sat in
+	// front of a blank terminal for well over a minute before being told anything at all.
+	// No individual timeout was wrong; nobody owned the sum.
+	//
+	// The budget belongs here because this is the only layer that knows an OPERATION is
+	// happening. A partial answer is fine — every path below reports its own failure, and
+	// "could not check just now" is a perfectly good thing to say after fifteen seconds.
+	// Waiting longer does not make it a better one.
+	ctx, cancel := context.WithTimeout(ctx, AccountOperationBudget)
+	defer cancel()
 
 	// A KNOWN "no accounts here" ends it before any credential is touched. Asking anyway
 	// spends a round trip to be told 404, and reaching for the credential store would

@@ -319,6 +319,13 @@ func (m *Manager) everSignedInHere() bool {
 	return m.localSessionEvidence() == keyRefPresent
 }
 
+// rotationPersistBudget bounds the write that stores a rotated refresh token.
+//
+// It exists so that write is bounded by SOMETHING after being detached from the caller's
+// context — see refresh. Generous, because the alternative to finishing is a spent token
+// nobody recorded, and short enough that a wedged credential service cannot hang a turn.
+const rotationPersistBudget = 10 * time.Second
+
 // AccessToken implements backend.TokenSource.
 //
 // This is the hot path: every protected backend request calls it. It must be cheap when
@@ -690,9 +697,23 @@ func (m *Manager) refresh(ctx context.Context) (TokenSet, error) {
 	// Persist BEFORE the new access token is used. If the write fails, the rotation has
 	// already happened upstream — the old refresh token is spent — so continuing with an
 	// unpersisted one would leave the next process unable to refresh at all.
+	//
+	// AND THE WRITE IS NOT THE CALLER'S TO CANCEL, which is why it gets its own context.
+	//
+	// The rotation is already done at the provider by the time we get here, so the token
+	// in `stored` is spent whatever this process does next. A caller-imposed deadline —
+	// an interactive account read now carries one — could otherwise expire in the gap
+	// between the provider answering and the keyring write landing, and the cancellation
+	// would propagate into the store. The new token would be dropped, the old one is
+	// already spent, and a read-only status check would have destroyed the session it was
+	// asking about. A bounded write of its own is the only shape where the deadline
+	// governs how long we WAIT and not whether we finish.
 	if set.RefreshToken != "" && set.RefreshToken != stored.RefreshToken {
 		stored.RefreshToken = set.RefreshToken
-		if err := store.Save(ctx, key, stored); err != nil {
+		saveCtx, cancelSave := context.WithTimeout(context.WithoutCancel(ctx), rotationPersistBudget)
+		err := store.Save(saveCtx, key, stored)
+		cancelSave()
+		if err != nil {
 			m.recordUnavailable(err)
 			return TokenSet{}, wrapError(CodeStorageUnavailable, "could not store the rotated session", err)
 		}

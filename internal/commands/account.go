@@ -195,6 +195,12 @@ func accountText(ctx context.Context, a *app.App) string {
 	// immediately after a successful /login reports "unknown", which is the one answer
 	// that is never useful. It also has to precede the read below, which needs a
 	// credential to present.
+	// One ceiling for the whole command, started before the first blocking step. The
+	// individual bounds below stack otherwise, and a card that takes the sum of them is
+	// a card nobody waits for. See app.AccountOperationBudget.
+	ctx, cancel := context.WithTimeout(ctx, app.AccountOperationBudget)
+	defer cancel()
+
 	mgr.Hydrate(ctx)
 
 	// OBSERVING, because the user asked: a revocation should clear the credential, an

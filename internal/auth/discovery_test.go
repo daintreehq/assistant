@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -405,13 +406,30 @@ func TestAnInvalidManifestIsRejectedAndNotCached(t *testing.T) {
 	defer srv.Close()
 
 	d := NewDiscoverer(srv.URL, nil)
-	for i := 0; i < 2; i++ {
+	base := time.Now()
+	d.now = func() time.Time { return base }
+	for i := 0; i < 3; i++ {
 		if _, err := d.Manifest(context.Background()); err == nil {
 			t.Fatalf("call %d: an off-issuer token endpoint was accepted", i)
 		}
 	}
-	if atomic.LoadInt32(&hits) != 2 {
-		t.Fatalf("server saw %d requests; a rejected manifest must not be cached", hits)
+	// The DOCUMENT is never cached — every call above had to reject it, and none was
+	// served a manifest. What IS reused is the verdict, for discoveryFailureTTL, so the
+	// three attempts one user operation makes cost one round trip instead of three.
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("server saw %d requests, want 1 — the rejection is not being memoized", got)
+	}
+	if d.cached != nil {
+		t.Fatal("a manifest that failed validation was stored")
+	}
+
+	// And the verdict expires, so a redeploy that fixes the manifest is picked up.
+	d.now = func() time.Time { return base.Add(discoveryFailureTTL + time.Second) }
+	if _, err := d.Manifest(context.Background()); err == nil {
+		t.Fatal("an off-issuer token endpoint was accepted after the window")
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("server saw %d requests, want 2 — the remembered rejection never expired", got)
 	}
 }
 
@@ -797,5 +815,315 @@ func TestTheRealBackendFieldsAreTolerated(t *testing.T) {
 	}
 	if m.SessionPolicy.SessionMaxAgeSeconds != 2592000 {
 		t.Fatalf("session policy did not decode: %+v", m.SessionPolicy)
+	}
+}
+
+// --- one operation, one attempt ---------------------------------------------------------
+
+// deadServer is a backend that accepts the connection and never answers, which is what an
+// unreachable-but-routable endpoint actually looks like. A refused connection fails fast
+// and would not exercise the timeout these tests are about.
+func deadServer(t *testing.T, hits *int32) string {
+	t.Helper()
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits != nil {
+			atomic.AddInt32(hits, 1)
+		}
+		select {
+		case <-block:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() { close(block); srv.Close() })
+	return srv.URL
+}
+
+// A failed discovery is remembered for a short window, so the three or four attempts one
+// user command makes cost ONE round trip rather than three or four full timeouts.
+//
+// This is the difference between a `/account` that says "could not reach the backend"
+// after one timeout and one that says it after four in series. Nothing about the second
+// attempt was going to learn anything the first had not.
+func TestAFailedDiscoveryIsNotRepeatedWithinOneOperation(t *testing.T) {
+	var hits int32
+	var base = time.Now()
+	d := NewDiscoverer(deadServer(t, &hits), &http.Client{Timeout: 150 * time.Millisecond})
+	d.now = func() time.Time { return base }
+
+	start := time.Now()
+	for i := 0; i < 4; i++ {
+		if _, err := d.Manifest(context.Background()); err == nil {
+			t.Fatalf("call %d: an unreachable backend produced a manifest", i)
+		}
+	}
+	elapsed := time.Since(start)
+
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("server saw %d requests, want 1 — every attempt paid its own timeout", got)
+	}
+	// The wall-clock half of the same claim: three of the four calls must not have waited.
+	if budget := 2 * 150 * time.Millisecond; elapsed > budget {
+		t.Errorf("four calls took %s, want under %s — the failures are not being memoized", elapsed, budget)
+	}
+}
+
+// The window is a bound on re-asking, not a cache of the outage: the next command tries
+// again, so a user who fixes their network is not made to wait it out.
+func TestARememberedDiscoveryFailureExpires(t *testing.T) {
+	var hits int32
+	base := time.Now()
+	d := NewDiscoverer(deadServer(t, &hits), &http.Client{Timeout: 150 * time.Millisecond})
+	d.now = func() time.Time { return base }
+
+	if _, err := d.Manifest(context.Background()); err == nil {
+		t.Fatal("an unreachable backend produced a manifest")
+	}
+	d.now = func() time.Time { return base.Add(discoveryFailureTTL + time.Second) }
+	if _, err := d.Manifest(context.Background()); err == nil {
+		t.Fatal("an unreachable backend produced a manifest after the window")
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Errorf("server saw %d requests, want 2 — the remembered failure never expired", got)
+	}
+}
+
+// Concurrent callers share one fetch. Without this the lock is released before the
+// network call — correctly, since holding a mutex across one serialises every reader —
+// and N callers arriving together made N identical requests.
+func TestConcurrentCallersShareOneDiscoveryFetch(t *testing.T) {
+	var hits int32
+	body, err := json.Marshal(validManifest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The handler BLOCKS until every caller has arrived, so the requests genuinely
+	// overlap. With an immediately-answering server the first call completes before the
+	// others start and the ordinary success cache absorbs them — the test would pass
+	// without inflight existing at all.
+	const callers = 8
+	arrived := make(chan struct{}, callers)
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		arrived <- struct{}{}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	d := NewDiscoverer(srv.URL, nil)
+	var wg sync.WaitGroup
+	errs := make([]error, callers)
+	started := make(chan struct{}, callers)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			started <- struct{}{}
+			_, errs[i] = d.Manifest(context.Background())
+		}(i)
+	}
+	for i := 0; i < callers; i++ {
+		<-started
+	}
+	// One request must have reached the server; the rest must be waiting on it rather
+	// than queued behind it in the transport.
+	<-arrived
+	close(release)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("caller %d: %v", i, err)
+		}
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("server saw %d requests, want 1 — concurrent callers each fetched", got)
+	}
+}
+
+// A leader that gives up must not fail the callers that joined it. The shared request
+// runs on whichever context arrived first, so without this a Ctrl-C in one place would
+// report the backend as unreachable everywhere.
+func TestAJoinerSurvivesTheLeadersCancellation(t *testing.T) {
+	var hits int32
+	body, err := json.Marshal(validManifest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstArrived := make(chan struct{})
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&hits, 1)
+		if n == 1 {
+			once.Do(func() { close(firstArrived) })
+			<-r.Context().Done() // the leader's request dies with its context
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	d := NewDiscoverer(srv.URL, nil)
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		_, _ = d.Manifest(leaderCtx)
+	}()
+	<-firstArrived
+
+	joinerDone := make(chan error, 1)
+	go func() {
+		_, err := d.Manifest(context.Background())
+		joinerDone <- err
+	}()
+	// Give the joiner a moment to attach to the leader's call before killing it.
+	time.Sleep(50 * time.Millisecond)
+	cancelLeader()
+	<-leaderDone
+
+	select {
+	case err := <-joinerDone:
+		if err != nil {
+			t.Fatalf("a joiner inherited the leader's cancellation: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the joiner never completed after the leader was cancelled")
+	}
+}
+
+// Invalidate promises the NEXT caller a refetch. A caller arriving after it must not be
+// handed the answer — or the error — belonging to the endpoint it just discarded.
+func TestACallerAfterInvalidateDoesNotJoinTheOldFetch(t *testing.T) {
+	var hits int32
+	body, err := json.Marshal(validManifest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstArrived := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&hits, 1) == 1 {
+			once.Do(func() { close(firstArrived) })
+			<-release
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	d := NewDiscoverer(srv.URL, nil)
+	go func() { _, _ = d.Manifest(context.Background()) }()
+	<-firstArrived
+
+	d.Invalidate()
+	second := make(chan error, 1)
+	go func() {
+		_, err := d.Manifest(context.Background())
+		second <- err
+	}()
+
+	select {
+	case err := <-second:
+		if err != nil {
+			t.Fatalf("a caller after Invalidate joined the discarded fetch: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the post-Invalidate caller never completed")
+	}
+	close(release)
+	if got := atomic.LoadInt32(&hits); got < 2 {
+		t.Errorf("server saw %d requests, want at least 2 — Invalidate did not force a refetch", got)
+	}
+}
+
+// An advisory number must not be able to reject the document it rides in. Validate's
+// zeroing rule only helps if the decoder gets that far.
+func TestAnUndecodableSessionPolicyDoesNotRejectTheManifest(t *testing.T) {
+	for _, raw := range []string{
+		`{"access_token_seconds":9223372036854775808,"session_max_age_seconds":1}`,
+		`{"access_token_seconds":"an hour"}`,
+		`"not even an object"`,
+	} {
+		var p SessionPolicy
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Errorf("%s: decoding an advisory field failed the document: %v", raw, err)
+		}
+		if p.AccessTokenSeconds != 0 {
+			t.Errorf("%s: access_token_seconds = %d, want 0", raw, p.AccessTokenSeconds)
+		}
+	}
+}
+
+// The rollout window. `configured` and `required` are what a manifest carries, so its
+// staleness is how long a long-lived process acts on the PREVIOUS posture during an
+// open -> observe -> enforce roll.
+func TestAvailabilityFollowsALiveRolloutTransition(t *testing.T) {
+	var required atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != DiscoveryPath {
+			http.NotFound(w, r)
+			return
+		}
+		m := validManifest()
+		m.Required = required.Load()
+		body, _ := json.Marshal(m)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	base := time.Now()
+	d := NewDiscoverer(srv.URL, nil)
+	d.now = func() time.Time { return base }
+	if av := d.Availability(context.Background()); !av.Known || av.Required {
+		t.Fatalf("before the roll: %+v, want known and not required", av)
+	}
+
+	required.Store(true) // the operator flips observe -> enforce
+	d.now = func() time.Time { return base.Add(manifestCacheTTL + time.Second) }
+	if av := d.Availability(context.Background()); !av.Known || !av.Required {
+		t.Errorf("after the roll: %+v, want required — the posture went stale", av)
+	}
+}
+
+// An implausible advisory lifetime is dropped, never rendered and never fatal. The
+// manifest's OAuth configuration is good; only the status line's numbers are absurd.
+func TestImplausibleSessionPolicyValuesAreDropped(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		access, maxAge int
+	}{
+		{"negative", -1, -86400},
+		{"absurd", 1 << 31, 1 << 31},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := validManifest()
+			m.SessionPolicy = SessionPolicy{AccessTokenSeconds: tc.access, SessionMaxAgeSeconds: tc.maxAge}
+			if err := m.Validate(RedirectURI()); err != nil {
+				t.Fatalf("an otherwise valid manifest was refused over an advisory number: %v", err)
+			}
+			if m.SessionPolicy.AccessTokenSeconds != 0 || m.SessionPolicy.SessionMaxAgeSeconds != 0 {
+				t.Errorf("session policy = %+v, want both dropped to 0", m.SessionPolicy)
+			}
+		})
+	}
+}
+
+// A plausible one survives untouched — the bound must not eat real values.
+func TestAPlausibleSessionPolicySurvives(t *testing.T) {
+	m := validManifest()
+	m.SessionPolicy = SessionPolicy{AccessTokenSeconds: 3600, SessionMaxAgeSeconds: 30 * 86400}
+	if err := m.Validate(RedirectURI()); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if m.SessionPolicy.AccessTokenSeconds != 3600 || m.SessionPolicy.SessionMaxAgeSeconds != 30*86400 {
+		t.Errorf("session policy = %+v, want it unchanged", m.SessionPolicy)
 	}
 }

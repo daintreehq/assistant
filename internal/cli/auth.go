@@ -355,6 +355,16 @@ func reportPlanCheckFailure(w authWriter, err error) {
 }
 
 func runAuthStatus(ctx context.Context, w authWriter, mgr *auth.Manager, cfg config.AppConfig, opts AuthOptions) int {
+	// THE BUDGET STARTS HERE, before the first thing that can block.
+	//
+	// Every step below is bounded on its own — hydrate by the credential store, discovery
+	// by its ten seconds, the account read by its own budget — and the whole point is
+	// that those bounds STACK. Starting the clock inside the account read left the two
+	// preflights outside it, so a slow-but-working discovery still put a person in front
+	// of a blank terminal for the sum rather than the cap. One command, one ceiling.
+	ctx, cancel := context.WithTimeout(ctx, app.AccountOperationBudget)
+	defer cancel()
+
 	// Hydrate FIRST. Status is deliberately I/O-free, so a manager freshly built in this
 	// process knows nothing — without this, `auth status` immediately after a successful
 	// login reports "unknown", which is the one answer that is never useful.

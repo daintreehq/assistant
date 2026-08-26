@@ -62,10 +62,39 @@ const manifestTimeout = 10 * time.Second
 // be allowed to sit in memory.
 const maxManifestBytes = 64 << 10
 
-// manifestCacheTTL is how long a validated manifest is reused. It is non-secret and
-// nearly static, so re-fetching per operation is waste — but it CAN change on a
-// redeploy, so it must not be cached for the process lifetime.
-const manifestCacheTTL = 5 * time.Minute
+// manifestCacheTTL is how long a validated manifest, and the availability recorded
+// beside it, are reused. It is non-secret and nearly static, so re-fetching per
+// operation is waste — but it CAN change on a redeploy, so it must not be cached for
+// the process lifetime.
+//
+// SIXTY SECONDS, matching the backend's own discovery cache policy, and it used to be
+// five minutes. The manifest is what carries `configured` and `required`, so its
+// staleness window is how long a long-lived process — a native panel, a supervisor
+// daemon — keeps acting on the PREVIOUS posture during an open -> observe -> enforce
+// rollout. At five minutes an operator flips the switch and then waits, with no way to
+// tell a process that has not noticed yet from one that is genuinely misconfigured. The
+// same window covers a changed issuer, client id or endpoint set. Restarting long-lived
+// processes between rollout stages is still the operator's defence in depth; this makes
+// it a belt rather than the only strap.
+const manifestCacheTTL = 60 * time.Second
+
+// discoveryFailureTTL is how long a FAILED discovery is remembered, so one user
+// operation performs one attempt rather than several.
+//
+// The manifest cache only ever holds successes, so nothing collapsed repeats of a
+// failure. `auth status` asks three times over its own execution — hydrate, then
+// availability, then the manifest — and the embedded `/account` asks four. Against an
+// unreachable backend each one paid the full ten-second timeout in series, so a single
+// command sat there for thirty to forty seconds before saying anything, and every one of
+// those attempts was re-learning what the first had already established.
+//
+// SHORT on purpose. This is not a cache of the outage, it is a bound on how often one
+// operation may re-ask; a few seconds collapses the calls within a command while leaving
+// the next command — the one the user runs after fixing the network — free to try
+// immediately. The failure is stored WITH ITS CODE, because the three answers a caller
+// must keep apart (accounts-not-configured, an invalid manifest, a dependency that is
+// down) differ only by that.
+const discoveryFailureTTL = 5 * time.Second
 
 // allowedScopes is the closed set this client will request. Supabase supports standard
 // OAuth scopes but not application-defined ones, so there is nothing to widen this to;
@@ -132,6 +161,54 @@ type SessionPolicy struct {
 	AccessTokenSeconds   int `json:"access_token_seconds"`
 	SessionMaxAgeSeconds int `json:"session_max_age_seconds"`
 }
+
+// UnmarshalJSON decodes the advisory lifetimes WITHOUT letting either of them fail the
+// document they arrive in.
+//
+// Validate zeroes an implausible value rather than refusing the manifest, on the grounds
+// that nothing schedules off these numbers and a status line is not worth taking sign-in
+// down for. That reasoning only holds if Validate gets to run — and it does not for a
+// value the standard decoder rejects outright. A JSON integer larger than an int64, or a
+// string where a number belongs, failed the parse before any of this was reached, so an
+// otherwise perfectly good manifest became `auth_discovery_invalid` over a field the CLI
+// treats as a hint. Anything unusable lands as zero and Validate's rule then covers the
+// merely implausible.
+func (p *SessionPolicy) UnmarshalJSON(raw []byte) error {
+	var wire struct {
+		AccessTokenSeconds   json.Number `json:"access_token_seconds"`
+		SessionMaxAgeSeconds json.Number `json:"session_max_age_seconds"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		// Not even the right SHAPE. The object is advisory in its entirety, so an
+		// unreadable one is simply absent — the same outcome as omitting it.
+		*p = SessionPolicy{}
+		return nil
+	}
+	*p = SessionPolicy{
+		AccessTokenSeconds:   plausibleSeconds(wire.AccessTokenSeconds),
+		SessionMaxAgeSeconds: plausibleSeconds(wire.SessionMaxAgeSeconds),
+	}
+	return nil
+}
+
+// plausibleSeconds converts an advisory duration, resolving anything unusable to zero.
+func plausibleSeconds(n json.Number) int {
+	if n == "" {
+		return 0
+	}
+	v, err := n.Int64()
+	if err != nil || v < 0 || v > maxSessionPolicySeconds {
+		return 0
+	}
+	return int(v)
+}
+
+// maxSessionPolicySeconds bounds both advisory lifetimes at ten years.
+//
+// Deliberately generous — this is not a policy about how long a session SHOULD last,
+// which is the deployment's business, only a bound past which a number is describing
+// something other than a login. See Validate, which zeroes rather than refuses.
+const maxSessionPolicySeconds = 10 * 365 * 24 * 60 * 60
 
 // Manifest is the backend's non-secret OAuth environment description.
 type Manifest struct {
@@ -340,6 +417,26 @@ func (m *Manifest) Validate(expectedRedirect string) error {
 				"%s points at %s, which is not a Daintree site", l.name, safeEcho(u.Host)))
 		}
 	}
+
+	// The advisory lifetimes are DROPPED rather than refused when they are implausible.
+	//
+	// Every other field here is load-bearing, so a bad one fails the whole manifest.
+	// These two are not: nothing schedules off them — the refresh timer reads the access
+	// token's real expiry — and their only consumer is `auth status`, which prints
+	// "sign-in for %d days". So refusing the document over them would take down sign-in
+	// on a deployment whose OAuth configuration is perfectly good, to protect a status
+	// line. Dropping is proportionate: the line simply does not appear.
+	//
+	// Unbounded, they went to the user verbatim. A negative value silently failed the
+	// renderer's own `> 0` guard, and 2^31-1 seconds printed as "sign-in for 24855 days"
+	// — a manifest asserting something absurd about the user's own session, with the
+	// assistant's voice behind it.
+	if m.SessionPolicy.AccessTokenSeconds < 0 || m.SessionPolicy.AccessTokenSeconds > maxSessionPolicySeconds {
+		m.SessionPolicy.AccessTokenSeconds = 0
+	}
+	if m.SessionPolicy.SessionMaxAgeSeconds < 0 || m.SessionPolicy.SessionMaxAgeSeconds > maxSessionPolicySeconds {
+		m.SessionPolicy.SessionMaxAgeSeconds = 0
+	}
 	return nil
 }
 
@@ -519,7 +616,37 @@ type Discoverer struct {
 	// afterwards. Without it Invalidate is advisory: the stale fetch simply wins the
 	// race and the next caller gets the manifest we just discarded.
 	generation uint64
-	now        func() time.Time
+	// lastErr and lastErrAt memoize a FAILED fetch for discoveryFailureTTL. Only the
+	// error is kept — never a manifest — so a malformed or hostile document can no more
+	// be served from here than from `cached`, which stores nothing that failed Validate.
+	// Cleared by any success and by Invalidate, so a recovered backend is noticed by the
+	// first call after the window rather than waited out.
+	lastErr   error
+	lastErrAt time.Time
+	// inflight collapses concurrent callers onto ONE fetch.
+	//
+	// The lock is deliberately released before fetch (it is a network call and holding a
+	// mutex across one would serialise every reader behind the slowest), which meant N
+	// concurrent callers made N requests — and on the paths that ask two or three times
+	// in a row, those are the SAME request. A caller that arrives while a fetch is
+	// running now waits for it and takes its answer, success or failure alike.
+	inflight *discoveryCall
+	now      func() time.Time
+}
+
+// discoveryCall is one in-progress fetch that later callers can join.
+type discoveryCall struct {
+	done chan struct{}
+	// gen is the generation the fetch was started under. A joiner checks it, because
+	// Invalidate advances the generation to force a refetch and a caller arriving after
+	// one must not be handed the answer to the question it just invalidated.
+	gen uint64
+	man *Manifest
+	err error
+	// leaderCancelled records that the fetch ended because the LEADER's context went
+	// away, not because the backend did. A joiner with a live context of its own must
+	// not inherit somebody else's deadline as a verdict about the deployment.
+	leaderCancelled bool
 }
 
 // NewDiscoverer builds a Discoverer for a backend base URL. A nil httpClient gets a
@@ -558,19 +685,93 @@ func NewDiscoverer(baseURL string, httpClient *http.Client) *Discoverer {
 // A cached manifest is only ever a VALIDATED one: Validate runs before anything is
 // stored, so no caller can receive a manifest that failed a check.
 func (d *Discoverer) Manifest(ctx context.Context) (*Manifest, error) {
+	for {
+		if m, err, done := d.manifestOnce(ctx); done {
+			return m, err
+		}
+	}
+}
+
+// manifestOnce is one pass of Manifest. done=false means "a fetch we joined ended on
+// somebody else's cancellation; try again with our own context".
+func (d *Discoverer) manifestOnce(ctx context.Context) (*Manifest, error, bool) {
 	d.mu.Lock()
 	if d.cached != nil && d.now().Sub(d.fetchedAt) < manifestCacheTTL {
 		m := d.cached.clone()
 		d.mu.Unlock()
-		return m, nil
+		return m, nil, true
 	}
+	// A REMEMBERED FAILURE, served without another round trip.
+	//
+	// Its code is preserved exactly, so a caller still distinguishes "this deployment
+	// has no accounts" from "the manifest was invalid" from "the dependency is down" —
+	// those three drive completely different copy, and collapsing them here would undo
+	// the reason discovery has three codes at all.
+	if d.lastErr != nil && d.now().Sub(d.lastErrAt) < discoveryFailureTTL {
+		err := d.lastErr
+		d.mu.Unlock()
+		return nil, err, true
+	}
+	// Somebody is already asking. Join them rather than issuing a second identical
+	// request — this is what turns `auth status`'s three sequential attempts, and any
+	// genuinely concurrent pair, into one.
+	//
+	// ONLY a call started under the CURRENT generation. Invalidate exists to force the
+	// next caller to refetch, and joining a fetch that began before it would hand that
+	// caller the very answer the invalidation discarded — or, once the leader notices the
+	// mismatch, the "configuration changed" error, which is a fact about the endpoint the
+	// caller has already left.
+	if call := d.inflight; call != nil && call.gen == d.generation {
+		d.mu.Unlock()
+		select {
+		case <-call.done:
+			// A LEADER'S CANCELLATION IS NOT AN ANSWER.
+			//
+			// The shared request runs on whichever context got there first, so a caller
+			// that gave up — a short deadline, a Ctrl-C — would otherwise fail every
+			// caller that had joined it, including ones with plenty of time left and a
+			// perfectly healthy backend answering. Retry from the top with our own
+			// context instead; by now the inflight slot is clear, so this becomes a
+			// fresh fetch rather than a spin.
+			if call.leaderCancelled && ctx.Err() == nil {
+				return nil, nil, false
+			}
+			return call.man.clone(), call.err, true
+		case <-ctx.Done():
+			return nil, ctx.Err(), true
+		}
+	}
+	call := &discoveryCall{done: make(chan struct{}), gen: d.generation}
+	d.inflight = call
 	etag := d.etag
 	gen := d.generation
 	d.mu.Unlock()
 
+	// The joiners are released on EVERY exit from here, including the error paths, or a
+	// caller that arrived a moment ago would block until its own context expired.
+	defer func() {
+		d.mu.Lock()
+		if d.inflight == call {
+			d.inflight = nil
+		}
+		d.mu.Unlock()
+		close(call.done)
+	}()
+
 	m, newETag, notModified, err := d.fetch(ctx, etag)
 	if err != nil {
-		return nil, err
+		d.mu.Lock()
+		// A cancelled or expired CALLER context is not evidence about the backend, so it
+		// is never memoized: the next caller has its own deadline and deserves its own
+		// attempt. Only a real answer — or a real failure to get one — is remembered.
+		if ctx.Err() == nil && d.generation == gen {
+			d.lastErr, d.lastErrAt = err, d.now()
+		}
+		d.mu.Unlock()
+		call.err = err
+		// Flagged so a joiner with time left retries instead of adopting our deadline.
+		call.leaderCancelled = ctx.Err() != nil
+		return nil, err, true
 	}
 
 	d.mu.Lock()
@@ -578,18 +779,28 @@ func (d *Discoverer) Manifest(ctx context.Context) (*Manifest, error) {
 	// The endpoint may have changed under this fetch. Storing now would serve backend
 	// A's manifest to a caller that has since switched to backend B.
 	if d.generation != gen {
-		return nil, newError(CodeDiscoveryUnavailable, "the sign-in configuration changed while it was being fetched")
+		// NOT memoized: the endpoint moved, so this says nothing about the one the
+		// caller now cares about, and remembering it would make the first call after a
+		// `/backend` switch fail for a reason belonging to the endpoint it just left.
+		err := newError(CodeDiscoveryUnavailable, "the sign-in configuration changed while it was being fetched")
+		call.err = err
+		return nil, err, true
 	}
 	if notModified {
 		if d.cached == nil {
 			// A 304 with nothing cached means the ETag we sent came from a previous
 			// process or a cleared cache. Treat it as unusable rather than inventing a
-			// manifest; the next call re-fetches unconditionally.
+			// manifest; the next call re-fetches unconditionally — which is why this one
+			// is NOT memoized either.
 			d.etag = ""
-			return nil, newError(CodeDiscoveryUnavailable, "the backend reported the auth configuration unchanged, but this process has no copy of it")
+			err := newError(CodeDiscoveryUnavailable, "the backend reported the auth configuration unchanged, but this process has no copy of it")
+			call.err = err
+			return nil, err, true
 		}
 		d.fetchedAt = d.now()
-		return d.cached.clone(), nil
+		d.lastErr, d.lastErrAt = nil, time.Time{}
+		call.man = d.cached.clone()
+		return d.cached.clone(), nil, true
 	}
 	// Validate BEFORE storing, so nothing that failed a check can ever be cached or
 	// returned. It also normalises whitespace onto m, so the stored copy is canonical.
@@ -612,12 +823,22 @@ func (d *Discoverer) Manifest(ctx context.Context) (*Manifest, error) {
 		d.availabilityAt = d.now()
 	}
 	if verr != nil {
-		return nil, verr
+		// Memoized like any other failure, and for the same reason: an invalid manifest —
+		// or the unconfigured shape, which is CodeAccountsUnavailable — does not become
+		// valid because the same command asks a second time three milliseconds later.
+		// The DOCUMENT is still not cached; only the verdict on it is.
+		d.lastErr, d.lastErrAt = verr, d.now()
+		call.err = verr
+		return nil, verr, true
 	}
 	d.cached = m.clone()
 	d.etag = newETag
 	d.fetchedAt = d.now()
-	return m.clone(), nil
+	// A success retires the remembered failure immediately, so a recovered backend is
+	// never held back by a window that has not elapsed.
+	d.lastErr, d.lastErrAt = nil, time.Time{}
+	call.man = m.clone()
+	return m.clone(), nil, true
 }
 
 // Availability reports what this deployment says about accounts, fetching if needed.
@@ -747,5 +968,14 @@ func (d *Discoverer) Invalidate() {
 	// and keeping it would let `auth status` report backend A's "no accounts here"
 	// about backend B — the same mistake the cached manifest is dropped to avoid.
 	d.availability, d.availabilityAt = Availability{}, time.Time{}
+	// And so does the remembered failure, for exactly the same reason: it describes the
+	// endpoint we were pointed at. Holding it would make the first call after a switch
+	// fail instantly with the previous backend's outage.
+	d.lastErr, d.lastErrAt = nil, time.Time{}
+	// The in-flight fetch is UNPUBLISHED, not stopped. It still owns and closes its own
+	// channel, and its deferred clear checks identity before touching this field, so
+	// dropping the reference here is safe — it simply stops the next caller joining a
+	// question that was asked about the endpoint we have just left.
+	d.inflight = nil
 	d.generation++
 }
