@@ -748,11 +748,13 @@ func RunOneShot(ctx context.Context, opts Options) int {
 				SessionID: a.SessionID,
 				Project:   a.Config.ProjectPath,
 				Tier:      string(a.Tier()),
-				// SanitizeURL, not the raw config value: DAINTREE_BACKEND_URL and
-				// --backend-url are never normalized, so an endpoint carrying userinfo
-				// or a query token would otherwise be published verbatim on stdout and
-				// straight into a CI log. It fails closed (an unparseable endpoint
-				// becomes ""), which is the right trade for a diagnostic field.
+				// SanitizeURL, not the raw config value — defence in depth. Every
+				// endpoint source now goes through backend.NormalizeBaseURL at startup,
+				// so userinfo and query tokens no longer reach this field at all. It
+				// stays sanitized anyway because this line is published verbatim on
+				// stdout and straight into a CI log, and a diagnostic field should not
+				// be the thing that has to be right. It fails closed (an unparseable
+				// endpoint becomes ""), which is the right trade here.
 				BackendURL:   mcp.SanitizeURL(a.Config.BackendURL),
 				LogPath:      logPath,
 				Version:      buildVersion,

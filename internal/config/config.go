@@ -24,6 +24,7 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -104,6 +105,21 @@ type AppConfig struct {
 	// check is NOT covered here — that is a direct, actionable LoadConfig error
 	// instead, since the caller just typed or exported the bad value THIS launch.
 	EndpointInsecureRejected error
+	// EndpointShapeRejected is non-nil when a STORED endpoint preference (and nothing
+	// else) was refused by backend.NormalizeBaseURL for its SHAPE rather than for
+	// being plaintext: embedded userinfo, a query string or fragment, a non-HTTP
+	// scheme, no host, control characters, an absurd length. The resolved BackendURL
+	// falls back to the deployed default, exactly as for EndpointInsecureRejected.
+	//
+	// It is a SEPARATE field rather than a second use of that one because the two say
+	// different things to a user. "Plaintext to a remote host" is a security refusal
+	// they may well have meant and can authorize; "malformed" is a file to repair.
+	// A caller that could not tell them apart would report the second as the first.
+	//
+	// Its message never echoes the stored value — a rejected endpoint is exactly the
+	// kind that carries `user:password@` or `?token=`, and this reaches /status and
+	// the debug log. See NormalizeBaseURL's redaction rule.
+	EndpointShapeRejected error
 	// BackendURLPinnedByEnv reports that DAINTREE_BACKEND_URL (or --backend-url) is
 	// deciding the endpoint, so a STORED choice is being overridden.
 	//
@@ -472,20 +488,48 @@ func loadConfig(overrides ConfigOverrides, ensureStateDir bool) (AppConfig, erro
 	// Trusted-only, like Tier/AutoApprove/Offline above: a bound project's .env must
 	// not be able to authorize plaintext for an endpoint it does not control.
 	cfg.AllowInsecureBackend = resolveBool(overrides.AllowInsecureBackend, e.trustedGet("DAINTREE_ALLOW_INSECURE_BACKEND"))
-	if err := backend.ValidatePlaintextRemote(cfg.BackendURL, cfg.AllowInsecureBackend); err != nil {
+	// ONE validator, for all four startup sources at once — and it is the SAME one the
+	// interactive `/backend <url>` runs (app.ResolveBackendTarget). Startup used to apply
+	// only the plaintext rule, so `https://user:pass@host` (which Go turns into a Basic
+	// Authorization header on every request), `https://host?token=x` (which the API path
+	// is joined onto, so nothing ever reaches the API) and `ftp://host` were all accepted
+	// at launch while being flatly refused mid-session. Same input, two answers, decided
+	// by which door it came through.
+	//
+	// It also settles the SPELLING. NormalizeBaseURL returns a canonical form, so
+	// DAINTREE_BACKEND_URL=https://x/ and `/backend https://x` are now one value rather
+	// than two that compare unequal at every string check and render differently in every
+	// diagnostic.
+	canonical, endpointErr := backend.NormalizeBaseURL(cfg.BackendURL, cfg.AllowInsecureBackend)
+	if endpointErr == nil {
+		cfg.BackendURL = canonical
+	} else {
 		// An override or trusted env chose this URL for THIS launch: a direct,
 		// actionable failure — the caller just typed or exported the bad value.
+		// Matches FirstString's own TrimSpace, so "the value that won" and "the value
+		// we blame" can never be different strings.
 		explicit := strings.TrimSpace(deref(overrides.BackendURL)) != "" || strings.TrimSpace(envURL) != ""
 		if explicit {
-			return AppConfig{}, err
+			return AppConfig{}, fmt.Errorf("backend endpoint: %w", endpointErr)
 		}
 		// Nothing this launch chose it — it can only be the STORED preference (the
-		// compiled-in default is always https:// and can never fail this check).
-		// Same contract as EndpointLoadError just above: a stored preference must
-		// not be able to brick a launch, least of all the one command (`/backend
-		// default`) that could otherwise fix it — fall back instead, and surface
-		// the rejection for a caller to report.
-		cfg.EndpointInsecureRejected = err
+		// compiled-in default is validated by this same function in the test suite
+		// and cannot fail it). Same contract as EndpointLoadError just above: a
+		// stored preference must not be able to brick a launch, least of all the one
+		// command (`/backend default`) that could otherwise fix it — fall back
+		// instead, and surface the rejection for a caller to report.
+		//
+		// The two diagnostics stay SEPARATE because a surface says different things
+		// about them: "your remembered endpoint is plaintext to a remote host" is a
+		// security refusal a user may have meant and can authorize, while "your
+		// remembered endpoint is malformed" is a repair job. Collapsing them into
+		// EndpointInsecureRejected would report the second as the first.
+		var plaintext *backend.PlaintextRemoteError
+		if errors.As(endpointErr, &plaintext) {
+			cfg.EndpointInsecureRejected = endpointErr
+		} else {
+			cfg.EndpointShapeRejected = endpointErr
+		}
 		cfg.BackendURL = backend.DefaultBaseURL
 	}
 	cfg.APIKey = FirstString(
@@ -629,6 +673,11 @@ func DescribeConfig(cfg AppConfig) map[string]string {
 	}
 	if cfg.EndpointInsecureRejected != nil {
 		out["endpointInsecureRejected"] = cfg.EndpointInsecureRejected.Error()
+	}
+	// Safe to render verbatim: NormalizeBaseURL's errors are structural by
+	// construction and never quote the value that failed.
+	if cfg.EndpointShapeRejected != nil {
+		out["endpointShapeRejected"] = cfg.EndpointShapeRejected.Error()
 	}
 	if cfg.McpURL == "" {
 		out["mcpUrl"] = "(unset → degraded local mode)"

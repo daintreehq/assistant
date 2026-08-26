@@ -3,7 +3,6 @@ package app
 import (
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 
 	"github.com/daintreehq/assistant/internal/agent"
@@ -40,34 +39,22 @@ var BackendChoices = []BackendChoice{
 // the default ever moved.
 const BackendResetAlias = "default"
 
-// maxBackendURLLength bounds a custom endpoint. Any real one is far shorter; the cap
-// only stops an absurd value being persisted and rendered.
-const maxBackendURLLength = 2048
-
 // ResolveBackendTarget maps what a user typed to a base URL. An alias, a bare number
 // (the menu position, which is what people actually type after reading a list), or a URL.
 //
-// A custom URL is VALIDATED, not taken as typed. Everything this rejects is something
-// that fails silently or dangerously if it is allowed through:
+// The URL half is NOT decided here. It is backend.NormalizeBaseURL — the one validator
+// every endpoint source runs through, startup's four included. This function used to hold
+// its own copy of those checks, which is exactly how `--backend-url` and
+// DAINTREE_BACKEND_URL came to accept shapes (userinfo, a query token, `ftp://`) that
+// this command refused: two doors, two answers, same URL. What stays here is the part
+// that is genuinely local — resolving an ALIAS, a menu NUMBER, and `default`, none of
+// which mean anything at startup.
 //
-//   - **userinfo** (`https://user:pass@host`). Go's http.Client turns URL userinfo into a
-//     Basic `Authorization` header automatically when no other one is set, so this
-//     quietly starts authenticating every request with a credential nothing in this
-//     process knows it is sending. It would also be persisted in cleartext and rendered.
-//   - **query or fragment**. The client joins the API path onto this base, so
-//     `https://host?token=x` becomes `https://host?token=x/v1/daintree/respond` and the
-//     request lands on `/`. A fragment is never sent at all. Both produce a baffling
-//     404 rather than an obviously wrong endpoint.
-//   - **plaintext http:// to a REMOTE host**. Every turn carries the whole conversation,
-//     the project context, tool arguments and tool results across that wire, and an
-//     on-path attacker can also rewrite the streamed response to inject tool calls that
-//     then run under the session's tier and grants. Loopback is exempt: there is no
-//     network to intercept, and it is the local development loop.
-//   - **control characters**, which would otherwise reach the terminal through the
-//     masthead and command cards before request construction ever rejected them.
-//
-// The old sign-in flow normalised endpoints and was deleted with it; this is that
-// guarantee restored at the one door a custom endpoint now comes through.
+// The other deliberate difference is the insecure escape hatch, and it survives as the
+// `false` below. Startup honours --allow-insecure-backend / DAINTREE_ALLOW_INSECURE_BACKEND
+// because the person launching the process is the person authorizing it; a running
+// session must not be able to talk itself onto a plaintext remote endpoint from the
+// inside, so there is no hatch in here and there must not become one.
 func ResolveBackendTarget(arg string) (string, error) {
 	a := strings.TrimSpace(arg)
 	if a == "" {
@@ -83,38 +70,29 @@ func ResolveBackendTarget(arg string) (string, error) {
 	}
 	lower := strings.ToLower(a)
 	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
-		return "", fmt.Errorf("%q is not one of %s, %s, a menu number, or a URL — a custom endpoint needs its scheme (http:// or https://)",
-			a, backendAliasList(), BackendResetAlias)
+		// This is the "you meant an alias and mistyped it" branch, so the error names the
+		// aliases that WOULD have worked — and does NOT quote back what was typed. That
+		// echo used to be here and looked harmless, because the value is not a URL. But
+		// this branch is reached by anything without an http(s) scheme, which includes
+		// `ftp://user:pass@host` and a bare token pasted into the wrong prompt, and the
+		// message reaches the terminal and the debug log. No punctuation rule can prove
+		// an arbitrary string is not a secret, and the user can see what they typed one
+		// line above; the list of aliases is the half that actually helps.
+		return "", fmt.Errorf("that is not one of %s, %s, a menu number, or a URL — a custom endpoint needs its scheme (http:// or https://)",
+			backendAliasList(), BackendResetAlias)
 	}
-	if len(a) > maxBackendURLLength {
-		return "", fmt.Errorf("endpoint is too long (%d bytes, max %d)", len(a), maxBackendURLLength)
-	}
-	for _, r := range a {
-		if r < 0x20 || r == 0x7f {
-			return "", errors.New("endpoint contains control characters — check for a stray paste")
-		}
-	}
-	u, err := url.Parse(a)
+	target, err := backend.NormalizeBaseURL(a, false)
 	if err != nil {
-		return "", fmt.Errorf("%q is not a usable URL: %w", a, err)
+		var plaintext *backend.PlaintextRemoteError
+		if errors.As(err, &plaintext) {
+			// Same refusal, different remedy. The shared message offers the startup
+			// escape hatch, and pointing an in-session user at a launch flag they cannot
+			// reach from here would read as an instruction they are failing to follow.
+			return "", fmt.Errorf("%s is plaintext http to a remote host — every turn would cross that wire in the clear. Use https://, or a loopback address for local development", plaintext.Host)
+		}
+		return "", err
 	}
-	if u.Host == "" {
-		return "", fmt.Errorf("%q has no host", a)
-	}
-	if u.User != nil {
-		return "", errors.New("an endpoint must not embed a username or password — Go would send it as an Authorization header on every request")
-	}
-	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-		return "", errors.New("an endpoint must not carry a query string or fragment — the API path is joined onto it, so the request would never reach the API")
-	}
-	if u.Scheme == "http" && !backend.IsLoopbackURL(a) {
-		return "", fmt.Errorf("%s is plaintext http to a remote host — every turn would cross that wire in the clear. Use https://, or a loopback address for local development", u.Host)
-	}
-	// Rebuild from the parsed form rather than returning the input, so the stored and
-	// displayed value is the canonical one and two spellings of the same endpoint
-	// compare equal.
-	u.Path = strings.TrimRight(u.Path, "/")
-	return u.String(), nil
+	return target, nil
 }
 
 func backendAliasList() string {
@@ -196,6 +174,7 @@ func (a *App) SetBackendURL(rawURL string) (string, error) {
 		if err := config.SaveBackendURL(a.snapshotConfig().EndpointPath, target); err != nil {
 			return target, fmt.Errorf("already using this endpoint — but could not save the choice: %w", err)
 		}
+		a.clearEndpointRejections()
 		return target, nil
 	}
 	// BEFORE the swap. If a turn is running we must change nothing at all — a swap that
@@ -227,6 +206,7 @@ func (a *App) SetBackendURL(rawURL string) (string, error) {
 	a.Config.BackendURL = target
 	a.Auth = mgr
 	a.cfgMu.Unlock()
+	a.clearEndpointRejections()
 
 	// PERSIST. A switch that evaporated on restart is the thing this command exists to
 	// stop: the daily case is a developer on a local backend who dips into the deployed
@@ -276,11 +256,28 @@ func (a *App) DescribeBackendChoices() string {
 
 	cfg := a.snapshotConfig()
 	stored, storedErr := config.LoadBackendURL(cfg.EndpointPath)
+	// Both rejections read the same to a user of this listing — the preference is on disk
+	// and is not what is answering — so they collapse to one line here. They stay separate
+	// on AppConfig because the REMEDY differs (one is authorizable, the other is a repair).
+	refused := cfg.EndpointInsecureRejected
+	if refused == nil {
+		refused = cfg.EndpointShapeRejected
+	}
 	switch {
 	case storedErr != nil:
 		// Surfaced, not swallowed. A preference that exists but cannot be read means
 		// this session is on the default WITHOUT the user having chosen it.
 		fmt.Fprintf(&b, "\nA remembered choice exists but could not be read, so it is being ignored:\n  %s\n", storedErr)
+	case refused != nil:
+		// A preference that READ cleanly and was then refused by the endpoint validator
+		// at startup — plaintext to a remote host, or a malformed shape such as embedded
+		// userinfo. Listing it as a plain "Remembered: …" is how someone ends up staring
+		// at a session running on the deployed default while this very command tells them
+		// they chose something else. And this IS the command that repairs it, which is the
+		// whole reason a bad preference falls back instead of bricking the launch, so the
+		// listing has to name both the reason and the two ways out.
+		fmt.Fprintf(&b, "\nA remembered choice exists but was refused at startup, so it is being ignored:\n  %s\n", refused)
+		fmt.Fprintf(&b, "`/backend %s` forgets it; `/backend <url>` replaces it.\n", BackendResetAlias)
 	case stored != "":
 		fmt.Fprintf(&b, "\nRemembered: %s\n", mcp.SanitizeURL(stored))
 	}
@@ -292,6 +289,20 @@ func (a *App) DescribeBackendChoices() string {
 		b.WriteString("remembered choice on every launch. Unset it for `/backend` to stick.\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// clearEndpointRejections drops a startup rejection of the STORED preference once that
+// preference has been rewritten.
+//
+// LoadConfig recorded it about a file that no longer exists: leaving it set makes
+// DescribeBackendChoices keep warning about a preference the user has already repaired,
+// which is worse than the silence it replaced — the warning names a remedy they just
+// applied.
+func (a *App) clearEndpointRejections() {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	a.Config.EndpointInsecureRejected = nil
+	a.Config.EndpointShapeRejected = nil
 }
 
 // ResetBackendURL forgets the stored choice and returns this session to the deployed

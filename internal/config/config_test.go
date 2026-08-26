@@ -241,6 +241,102 @@ func TestLoadConfig_StoredInsecureBackendFallsBackInsteadOfBricking(t *testing.T
 	}
 }
 
+// The gap that sat next to the one above for as long as it existed: a stored preference
+// was only ever checked for PLAINTEXT, so `https://user:pass@host` and
+// `https://host?token=x` survived the load, became cfg.BackendURL, and were dialed —
+// the first attaching a Basic Authorization header to every request this CLI swears it
+// does not send. Now they are refused by the same validator `/backend` runs, under the
+// same must-not-brick contract as the plaintext case.
+func TestLoadConfig_StoredMalformedBackendFallsBackInsteadOfBricking(t *testing.T) {
+	for name, stored := range map[string]string{
+		"userinfo":           "https://user:supersecret@backend.example",
+		"query token":        "https://backend.example?token=supersecret",
+		"fragment":           "https://backend.example#frag",
+		"unsupported scheme": "ftp://backend.example",
+		"no host":            "https://",
+	} {
+		t.Run(name, func(t *testing.T) {
+			isolatedHome(t)
+			stateDir := t.TempDir()
+			if err := SaveBackendURL(EndpointPath(stateDir), stored); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg := mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir)})
+			if cfg.BackendURL != backend.DefaultBaseURL {
+				t.Errorf("backendUrl = %q, want the default fallback — a bad stored preference must never be dialed, and must never brick the launch either", cfg.BackendURL)
+			}
+			if cfg.EndpointShapeRejected == nil {
+				t.Error("EndpointShapeRejected should be set so `/backend` can explain the fallback")
+			}
+			// The two diagnostics mean different things to a user: one is a security
+			// refusal they can authorize, the other is a file to repair. Reporting a
+			// malformed preference as "insecure" sends them to the wrong remedy.
+			if cfg.EndpointInsecureRejected != nil {
+				t.Error("a malformed stored preference was reported as the plaintext refusal")
+			}
+			if cfg.EndpointShapeRejected != nil && strings.Contains(cfg.EndpointShapeRejected.Error(), "supersecret") {
+				t.Errorf("the diagnostic echoed the stored secret: %v", cfg.EndpointShapeRejected)
+			}
+		})
+	}
+}
+
+// The other half of the same contract, for the doors a human or a harness chose THIS
+// launch: fail outright rather than fall back. A silent fallback would run the whole
+// session against an endpoint nobody named — and the message must not carry the value
+// back out, since that is exactly where a password in a URL ends up on a terminal.
+func TestLoadConfig_ExplicitMalformedBackendFailsWithoutEchoingIt(t *testing.T) {
+	for name, bad := range map[string]string{
+		"userinfo":           "https://user:supersecret@backend.example",
+		"query token":        "https://backend.example?token=supersecret",
+		"unsupported scheme": "ftp://user:supersecret@backend.example",
+		"unparseable":        "https://user:supersecret@[::1",
+	} {
+		t.Run(name, func(t *testing.T) {
+			isolatedHome(t)
+			// Via the flag…
+			_, err := LoadConfig(ConfigOverrides{StateDir: strptr(t.TempDir()), BackendURL: strptr(bad)})
+			if err == nil {
+				t.Fatal("--backend-url must fail the launch on a bad endpoint")
+			}
+			if strings.Contains(err.Error(), "supersecret") {
+				t.Errorf("the refusal echoed the secret back: %v", err)
+			}
+			// …and via the trusted env var, which is the same decision.
+			t.Setenv("DAINTREE_BACKEND_URL", bad)
+			if _, err := LoadConfig(ConfigOverrides{StateDir: strptr(t.TempDir())}); err == nil {
+				t.Fatal("DAINTREE_BACKEND_URL must fail the launch on a bad endpoint")
+			} else if strings.Contains(err.Error(), "supersecret") {
+				t.Errorf("the refusal echoed the secret back: %v", err)
+			}
+		})
+	}
+}
+
+// One endpoint, one spelling, whichever door it came through. A trailing slash is
+// harmless when the API path is joined on, but it makes DAINTREE_BACKEND_URL=https://x/
+// and `/backend https://x` two different values for the same endpoint — which is a
+// string comparison that answers "no" to the endpoint you are already on, and two
+// different-looking values in every diagnostic.
+func TestLoadConfig_CanonicalizesTheResolvedEndpoint(t *testing.T) {
+	isolatedHome(t)
+	stateDir := t.TempDir()
+	if err := SaveBackendURL(EndpointPath(stateDir), "https://stored.example/"); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir)}).BackendURL; got != "https://stored.example" {
+		t.Errorf("stored preference resolved to %q, want the canonical form", got)
+	}
+	if got := mustLoad(t, ConfigOverrides{StateDir: strptr(t.TempDir()), BackendURL: strptr("  https://flag.example/  ")}).BackendURL; got != "https://flag.example" {
+		t.Errorf("--backend-url resolved to %q, want the canonical form", got)
+	}
+	t.Setenv("DAINTREE_BACKEND_URL", "https://env.example/prefix/")
+	if got := mustLoad(t, ConfigOverrides{StateDir: strptr(t.TempDir())}).BackendURL; got != "https://env.example/prefix" {
+		t.Errorf("DAINTREE_BACKEND_URL resolved to %q, want the canonical form", got)
+	}
+}
+
 func TestLoadConfig_ProjectInstructionsPassthrough(t *testing.T) {
 	stateDir := t.TempDir()
 	// loadConfig carries pre-loaded content; it never reads the FS for this.

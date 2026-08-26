@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/daintreehq/assistant/internal/backend"
 	"github.com/daintreehq/assistant/internal/config"
 	"github.com/daintreehq/assistant/internal/tools"
 )
@@ -122,15 +123,41 @@ func TestPromptContextRejectsUnstrippableEndpoint(t *testing.T) {
 	}
 }
 
-// The assistant backend URL is model-visible through context.snapshot, and a custom
-// endpoint can carry userinfo — DAINTREE_BACKEND_URL is taken as given, with no
-// normalisation step to strip it. It must be sanitized on the way to the model exactly
-// like an MCP endpoint.
+// The assistant backend URL is model-visible through context.snapshot, so it must be
+// sanitized on the way to the model exactly like an MCP endpoint.
+//
+// This is DEFENCE IN DEPTH now, and the comment that used to sit here said the opposite:
+// it claimed DAINTREE_BACKEND_URL was taken as given with no normalisation step, which
+// was true and is the hole this test was written around. Startup runs every endpoint
+// source through backend.NormalizeBaseURL, so a userinfo endpoint is refused at load and
+// can no longer reach the config at all — asserted first, below. The sanitizing still has
+// to hold, because the value reaching the tool is whatever the LIVE client reports, and a
+// client can be replaced at runtime; the swap below stands in for that.
 func TestSnapshotToolSanitizesBackendURL(t *testing.T) {
-	t.Setenv("DAINTREE_BACKEND_URL", "https://user:supersecret@backend.example")
+	const secret = "supersecret"
+	const withUserinfo = "https://user:" + secret + "@backend.example"
+
+	// Half one: it cannot get in through the front door any more.
+	t.Setenv("DAINTREE_BACKEND_URL", withUserinfo)
+	dir := t.TempDir()
+	if _, err := Create(CreateOptions{Overrides: config.ConfigOverrides{
+		Offline: boolPtr(true), StateDir: &dir, ProjectPath: &dir, Tier: strPtr("operator"),
+	}}); err == nil {
+		t.Fatal("a backend endpoint carrying userinfo must be refused at startup — Go would send it as an Authorization header on every request")
+	} else if strings.Contains(err.Error(), secret) {
+		t.Fatalf("the startup refusal echoed the password back: %v", err)
+	}
+
+	// Half two: and if one ever reaches the live client regardless, the model never sees it.
+	t.Setenv("DAINTREE_BACKEND_URL", "")
 	t.Setenv("DAINTREE_API_KEY", "sk-test-key")
 	a := newOfflineApp(t)
 	defer a.Shutdown()
+	sw, ok := a.Backend.(*backend.Swappable)
+	if !ok {
+		t.Fatal("App.Backend is not a Swappable — the wiring invariant App.Create establishes")
+	}
+	sw.Swap(backend.NewClient(backend.ClientConfig{BaseURL: withUserinfo}))
 
 	tool := a.Registry.Get("context.snapshot")
 	if tool == nil {
@@ -140,7 +167,7 @@ func TestSnapshotToolSanitizesBackendURL(t *testing.T) {
 	if !res.Ok {
 		t.Fatalf("snapshot must never fail: %+v", res.Error)
 	}
-	if strings.Contains(res.Summary, "supersecret") {
+	if strings.Contains(res.Summary, secret) {
 		t.Errorf("backend credential reached the model: %q", res.Summary)
 	}
 	if !strings.Contains(res.Summary, "https://backend.example") {

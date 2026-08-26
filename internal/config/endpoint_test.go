@@ -107,3 +107,32 @@ func TestEndpoint_DescribeConfigNeverLeaksTheKey(t *testing.T) {
 		t.Fatalf("backendUrl = %q, want %q", desc["backendUrl"], cfg.BackendURL)
 	}
 }
+
+// The stored preference is the one endpoint source a user cannot fix from the command
+// line, so when it is refused the reason has to be carried rather than swallowed —
+// otherwise the session silently runs on the deployed default and nothing can say why.
+// DescribeConfig is the redacted view of a resolved config (`/backend` is what actually
+// renders this rejection to a human, in app.DescribeBackendChoices), and it is checked
+// here as the boundary it is: everything it emits is quotable into a bug report, so a
+// refused endpoint's userinfo or query token must not survive the trip into it.
+func TestEndpoint_DescribeConfigReportsARefusedPreferenceWithoutLeakingIt(t *testing.T) {
+	isolatedHome(t)
+	stateDir := t.TempDir()
+	if err := SaveBackendURL(EndpointPath(stateDir), "https://user:verysecret0123@stored.example"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir)})
+
+	desc := DescribeConfig(cfg)
+	if desc["endpointShapeRejected"] == "" {
+		t.Fatal("a refused stored preference must be reported, or the session silently runs on an endpoint nobody chose")
+	}
+	for key, val := range desc {
+		if strings.Contains(val, "verysecret0123") {
+			t.Fatalf("DescribeConfig[%q] leaked the refused endpoint's credential: %q", key, val)
+		}
+	}
+	if desc["backendUrl"] != backend.DefaultBaseURL {
+		t.Errorf("backendUrl = %q, want the default fallback", desc["backendUrl"])
+	}
+}
