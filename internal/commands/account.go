@@ -2,7 +2,6 @@ package commands
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -270,9 +269,13 @@ func refreshNote(res app.AccountRefresh, after auth.Status) string {
 // people to check a backend that was answering fine. It is also the only one of the three
 // that is fixable, which is why it is the only one carrying a next action.
 //
-// The generic line is left for the third: an App with a manager the deployment simply has
-// no use for. It stays a statement about availability and never about a fault, because
-// every install today runs against a backend with no identity provider at all.
+// The generic line is what remains, and it is now close to unreachable — which is the
+// point. It fires for no App at all, and for the narrow race where `/backend` installs a
+// working manager between the caller's nil check and this one. A deployment that simply
+// has no identity provider never arrives here, because that deployment still BUILDS a
+// manager: whether accounts exist is the backend's answer, carried by auth.Availability
+// and rendered from the state line, not something a nil manager was ever evidence of.
+// Keeping the sentence purely about availability is what stops it being read as a fault.
 func noAccountManagerText(a *app.App) string {
 	if a == nil {
 		return "Accounts are not available in this session."
@@ -282,7 +285,7 @@ func noAccountManagerText(a *app.App) string {
 			"account to sign in to or out of. Unset it to use a managed sign-in."
 	}
 	if fault := a.AccountLayerFault(); fault != nil {
-		msg := "Accounts are unavailable in this session: " + accountFaultMessage(fault) + ".\n" +
+		msg := "Accounts are unavailable in this session: " + app.AccountFaultMessage(fault) + ".\n" +
 			"That is a fault on this machine, not on the backend — turns still work, but\n" +
 			"signing in cannot. Run `daintree-assistant doctor` for the path it needs, fix\n" +
 			"it, then start a new session."
@@ -292,21 +295,6 @@ func noAccountManagerText(a *app.App) string {
 		return msg
 	}
 	return "Accounts are not available in this session."
-}
-
-// accountFaultMessage renders a construction fault WITHOUT the local error code.
-//
-// Every other card here goes through authMessage, code and all, because those codes name
-// something the user just did — a busy callback port, a declined consent. This one names
-// nothing of the sort: creating the auth directory is wrapped as `auth_exchange_failed`,
-// and no token exchange has happened or could have. Printing that code sends a reader
-// hunting a sign-in attempt that was never made.
-func accountFaultMessage(err error) string {
-	var ae *auth.Error
-	if errors.As(err, &ae) && ae != nil && ae.Message != "" {
-		return ae.Message
-	}
-	return authMessage(err)
 }
 
 // accountSummary is the shared body of /account and the tail of a successful /login.

@@ -13,7 +13,6 @@ import (
 
 	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/app"
-	"github.com/daintreehq/assistant/internal/auth"
 	"github.com/daintreehq/assistant/internal/backend"
 	"github.com/daintreehq/assistant/internal/cli/jsonout"
 	"github.com/daintreehq/assistant/internal/cli/render"
@@ -1160,14 +1159,19 @@ func accountDoctorCheck(a *app.App) DoctorCheck {
 	}
 	if fault := a.AccountLayerFault(); fault != nil {
 		c.Status = StatusFail
-		c.Detail = "sign-in is unavailable on this machine: " + fault.Error()
+		c.Detail = "sign-in is unavailable on this machine: " + app.AccountFaultMessage(fault)
 		// The PATH belongs here and nowhere else. A doctor row is meant to be pasted into
-		// an issue and is already full of state-dir paths (see CheckStateDir), and this
-		// fault is unactionable without knowing which directory could not be created —
-		// where a turn's prose keeps to the fault itself.
+		// an issue and already prints state-dir paths, and this fault is unactionable
+		// without naming the directory that could not be created — where a turn's prose
+		// keeps to the fault itself.
 		c.Hint = "Sign-in needs a writable `auth` directory under " + a.Config.StateRoot +
 			". Fix its permissions, or set DAINTREE_ASSISTANT_STATE_DIR to a writable path."
-		c.Data = map[string]any{"stateRoot": a.Config.StateRoot, "code": auth.CodeOf(fault)}
+		// A BOOLEAN, not the error's own code. The code reads `auth_exchange_failed`,
+		// which is reused from the token exchange and describes something that never
+		// happened here; a consumer branching on it would route a broken state root into
+		// sign-in-retry handling. This flag says the one thing that is actually true and
+		// is stable to match on.
+		c.Data = map[string]any{"stateRoot": a.Config.StateRoot, "accountLayerFault": true}
 		return c
 	}
 	c.Status = StatusOK

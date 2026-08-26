@@ -288,6 +288,31 @@ func accountLayerFault(cfg config.AppConfig) error {
 	return ErrAccountLayerUnbuilt
 }
 
+// AccountFaultMessage renders a construction fault as a human sentence, WITHOUT the local
+// auth code the error carries.
+//
+// The code is dropped deliberately, and only for this fault. Everywhere else a local auth
+// code is worth printing because it names something the user just did — a busy callback
+// port, a declined consent — and it is the term to search for. This one names something
+// that never happened: creating the auth directory is wrapped as `auth_exchange_failed`,
+// so printing it sends a reader hunting a token exchange that no code path attempted.
+//
+// The wrapped cause is dropped with it, and that is the path boundary. os.MkdirAll's error
+// embeds the directory it could not create, so echoing the cause would put a state-root
+// path into a turn's prose. The path belongs in `doctor`, which is a diagnostic surface
+// that already prints state-dir paths and is meant to be pasted somewhere; a conversation
+// is not that surface, so this returns the fault and the fault only.
+func AccountFaultMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	var ae *auth.Error
+	if errors.As(err, &ae) && ae != nil && ae.Message != "" {
+		return ae.Message
+	}
+	return strings.TrimPrefix(err.Error(), "auth: ")
+}
+
 // accountTokenSource adapts a manager for the client, preserving the nil contract.
 //
 // The explicit nil return is load-bearing and cannot be replaced by returning the typed
