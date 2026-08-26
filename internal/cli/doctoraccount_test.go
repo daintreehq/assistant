@@ -52,8 +52,20 @@ func TestAccountDoctorCheckFailsOnAnUnbuildableAuthStateRoot(t *testing.T) {
 	if c.Data["stateRoot"] != root {
 		t.Errorf("data carries stateRoot %v, want %q", c.Data["stateRoot"], root)
 	}
-	if code, _ := c.Data["code"].(string); code == "" {
-		t.Error("no stable auth code in the JSON form, so a script cannot branch on it")
+	// A stable BOOLEAN rather than the error's own code. The code is `auth_exchange_failed`,
+	// reused from the token exchange, and a script branching on it would route a broken
+	// state root into sign-in-retry handling for an exchange that never ran.
+	if c.Data["accountLayerFault"] != true {
+		t.Errorf("no stable marker in the JSON form, so a script cannot branch on it: %v", c.Data)
+	}
+	// The DETAIL is the sentence a human reads, and it carries neither the misleading code
+	// nor the path — the path is the hint's job, checked above. Doctor is the one surface
+	// allowed to print it at all, and even here it is confined to the actionable line.
+	if strings.Contains(c.Detail, "auth_exchange_failed") {
+		t.Errorf("the raw error code leaked into the detail: %q", c.Detail)
+	}
+	if strings.Contains(c.Detail, root) {
+		t.Errorf("the state root leaked into the detail rather than the hint: %q", c.Detail)
 	}
 }
 
