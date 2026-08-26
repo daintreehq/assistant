@@ -361,7 +361,7 @@ func accountStateLabel(s auth.State) string {
 	case auth.StateSignedInActive:
 		return "signed in"
 	case auth.StateSignedInUnverified:
-		return "signed in (not yet verified against the backend)"
+		return "signed in (plan not checked)"
 	case auth.StateSubscriptionRequired:
 		return "signed in — no plan"
 	case auth.StateSubscriptionInactive:

@@ -992,8 +992,14 @@ func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
 // it is attached to, by sending a `/account` command frame over the host protocol and
 // rendering the `command:result` (docs/DAINTREE_HOST.md); a script gets it from
 // `auth status --json` in a process it owns. Both already run as the user. This socket
-// answers a narrower question — can the DAEMON still spend — and widening it would put
-// personal data on a channel whose only gate is a directory mode.
+// answers a narrower question — the daemon's own account STATE and whether it considers
+// itself paused — and widening it would put personal data on a channel whose only gate is
+// a directory mode.
+//
+// `paused` here is NOT the wake gate's answer, and the two disagree on one case: wake.go
+// lets a never-signed-in installation run anonymously (`StateSignedOut && !authSawSession`),
+// while this reports any signed-out state as paused. authPausedForStatus below implements
+// the exception and has no production caller. Reconciling them is a separate change.
 func (r *Runtime) authPostureLocked() (state string, paused bool, revision string) {
 	if r.auth == nil {
 		return "", false, ""

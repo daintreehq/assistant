@@ -58,10 +58,13 @@ guarantees, and the SQLite schema is a single clean baseline rather than a migra
   do not hold, and pointed at `/login` at a time when no such command existed. The backend funds
   every model call from its own credential; `DAINTREE_API_KEY` and `--api-key-file` say
   who is CALLING and are never spent upstream.
-- **The backend's account verdicts now change local state.** An eligible protected 2xx
-  marks the session active — with two exceptions, both deliberate: the account endpoint's
-  own 200 confirms nothing (it answers 200 for a caller with no plan) and a success never
-  overwrites a known missing or inactive plan; an expired credential is refreshed and the request replayed once
+- **The backend's account verdicts now change local state.** A protected 2xx records that
+  the CREDENTIAL is still honoured and nothing more — entitlement has exactly one source,
+  a decoded account-v1 body saying `access=granted`, so a session that never reads its
+  account stays `signed_in_unverified` rather than being promoted by a request that never
+  consulted billing. The account endpoint's own 200 records nothing at all (it answers 200
+  for a caller with no plan, and its body may still fail validation); an expired credential
+  is refreshed and the request replayed once
   (never after anything visible has streamed), a revoked session is deleted locally, and
   plan or dependency failures leave it alone. Unattended supervision stops when a session
   it was using ends.

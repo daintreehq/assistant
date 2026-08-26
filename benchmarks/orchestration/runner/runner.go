@@ -252,6 +252,21 @@ func parseJSONL(out []byte, rr *scenario.RunResult) {
 			if c, ok := raw["content"].(string); ok {
 				rr.FinalContent = c
 			}
+			// The envelope's error is the only place a run says WHY it failed.
+			if e, ok := raw["error"].(map[string]any); ok {
+				code, _ := e["code"].(string)
+				msg, _ := e["message"].(string)
+				switch {
+				case code != "" && msg != "":
+					rr.ErrorMessage = code + ": " + msg
+				case msg != "":
+					rr.ErrorMessage = msg
+				default:
+					rr.ErrorMessage = code
+				}
+			} else if e, ok := raw["error"].(string); ok {
+				rr.ErrorMessage = e
+			}
 		}
 	}
 }

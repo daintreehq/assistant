@@ -41,6 +41,13 @@ type RunResult struct {
 	FinalContent string
 	Status       string // success | error | cancelled
 	ExitCode     int
+	// ErrorMessage is the result envelope's own error text, when it carried one.
+	//
+	// Kept because a scenario that fails for an ENVIRONMENTAL reason — a backend that
+	// will not serve this caller, an endpoint that is down — otherwise reports only
+	// "terminal status = error", identically for every scenario and for every cause.
+	// The run already knew why; it was being discarded here.
+	ErrorMessage string
 	Duration     time.Duration
 	Rounds       int // backend.respond.done count from the debug log
 	Usage        UsageTotals
@@ -133,6 +140,10 @@ func ResultSuccess() Check {
 			return fmt.Errorf("run hit the %s scenario timeout (turn never ended)", r.Duration.Round(time.Second))
 		}
 		if r.Status != "success" {
+			if r.ErrorMessage != "" {
+				return fmt.Errorf("terminal status = %q (exit %d), want success: %s",
+					r.Status, r.ExitCode, r.ErrorMessage)
+			}
 			return fmt.Errorf("terminal status = %q (exit %d), want success", r.Status, r.ExitCode)
 		}
 		return nil

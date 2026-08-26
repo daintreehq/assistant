@@ -249,6 +249,8 @@ func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 		// lands with a generation that still matches and re-confirms a login that has
 		// been ended in another process.
 		m.generation++
+		// The verification time belongs to the identity that earned it. See Logout.
+		m.lastVerifiedAt = nil
 		m.mu.Unlock()
 		m.revision.MarkObserved(marker)
 	}
@@ -828,6 +830,10 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 	m.access = set
 	m.lastErr = nil
 	m.generation++
+	// A NEW identity has verified nothing yet. Inheriting the previous one's timestamp
+	// would let a login whose courtesy account read fails report itself as freshly
+	// checked on the strength of the session it replaced. See Logout.
+	m.lastVerifiedAt = nil
 	if persisted {
 		m.state = StateSignedInUnverified
 	} else {
@@ -906,6 +912,15 @@ func (m *Manager) Logout(ctx context.Context) (revokedRemotely bool, err error) 
 	m.access = TokenSet{}
 	m.state = StateSignedOut
 	m.generation++ // a late verdict from a pre-logout request must not resurrect anything
+	// CLEARED WITH THE SESSION, and every identity boundary does the same.
+	//
+	// lastVerifiedAt says "this deployment honoured THIS credential at this time". It is
+	// the only thing MarkIdentityLive records, so it is the whole of what a protected
+	// success is worth — and it is scoped to one identity in exactly the way the account
+	// snapshot is, except that the snapshot is generation-stamped and validated on read
+	// while this is a bare timestamp. Left behind, `auth status` reports signed out
+	// beside a verification time, and the next login inherits it.
+	m.lastVerifiedAt = nil
 	m.mu.Unlock()
 
 	// The revision moves even if the delete failed: every other process must stop using
@@ -1224,6 +1239,8 @@ func (m *Manager) clearSessionIfCurrent(ctx context.Context, gen uint64, usedTok
 	m.access = TokenSet{}
 	m.state = StateRevoked
 	m.generation++
+	// The revoked session's verification time goes with it. See Logout.
+	m.lastVerifiedAt = nil
 }
 
 // currentKey resolves the credential key, preferring live discovery and falling back to
@@ -1353,8 +1370,15 @@ func (m *Manager) MarkIdentityLive(gen uint64) {
 	// whatever the error explained. This one leaves the state alone, so clearing would
 	// split the pair: a status reading `temporarily_unavailable` or `access_refused`
 	// with no code beside it names a problem and then refuses to say which, and the
-	// advice every surface renders is chosen from that pair. The error and the state it
-	// produced are retired together, by the account read that supersedes both.
+	// advice every surface renders is chosen from that pair. A successful account read
+	// retires both together (accountsnapshot.go), and so do a successful refresh and a
+	// successful login.
+	//
+	// That is NOT a general invariant of this type, and claiming it would be a lie: an
+	// identity remedy moves the state without touching lastErr, so a later verdict can
+	// still land beside an older code from a different cause. Narrowing that is its own
+	// change; what this comment defends is only the case it created — a liveness stamp
+	// must not silently erase the diagnosis for a state it is leaving in place.
 	now := m.now()
 	m.lastVerifiedAt = &now
 }

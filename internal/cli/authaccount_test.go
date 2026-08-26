@@ -220,7 +220,7 @@ func TestRefreshRendersEachPlanOutcomeWithItsOwnRemedy(t *testing.T) {
 		{
 			name:        "an unverified rollout says so rather than inventing a verdict",
 			body:        `{"version":1,"email":"a@b.test","subject_hash":"` + accountfixture.SubjectHash + `","access":"unverified"}`,
-			wantHuman:   []string{"not verified this session", "--refresh"},
+			wantHuman:   []string{"plan not checked", "--refresh"},
 			bannedHuman: []string{"auth login", "Choose a plan"},
 		},
 	}

@@ -596,15 +596,16 @@ func TestALateSuccessCannotVouchForASessionEndedElsewhere(t *testing.T) {
 	// The late 2xx for the request that was already in flight.
 	m.MarkIdentityLive(inFlightGen)
 
-	// Nothing is recorded for it. The stamp is all this call can write now, so "was it
-	// dropped" is exactly "did the verification time move" — and the clock steps on
-	// every read, so an applied call could not possibly land on the same instant.
-	got := m.Status().LastVerifiedAt
-	if got == nil {
-		t.Fatal("the earlier confirmation was erased")
-	}
-	if !got.Equal(*confirmed) {
-		t.Errorf("verification time moved to %s from %s — a success in flight during a logout elsewhere vouched for the session", got, confirmed)
+	// Nothing is recorded for it, and nothing survives from before either.
+	//
+	// Noticing the identity change already cleared the stamp — a verification time
+	// belongs to the identity that earned it, and leaving it would let `auth status`
+	// report the replacement session as freshly checked on the strength of the one it
+	// replaced. So the late call has to write nothing at all: the assertion is that the
+	// field is still nil, which fails both ways an applied call could go, since the
+	// clock steps on every read and any write would land on a new instant.
+	if got := m.Status().LastVerifiedAt; got != nil {
+		t.Errorf("verification time = %s (was %s before the identity changed) — a success in flight during a logout elsewhere vouched for the session", got, confirmed)
 	}
 }
 

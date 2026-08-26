@@ -111,8 +111,11 @@ descriptor removal and the revision bump are each attempted and their errors ign
 the local state is authoritative and the stored copy may briefly outlive it.) The seam is
 `backend.AccountObserver`,
 implemented by `*auth.Manager` and held on `App.Auth` — ONE per process, shared with the
-supervisor's spend gate, because a verdict landing on an object the gate never reads is
-the bug that shape exists to prevent. Verdicts arrive late, so every write rechecks the
+supervisor's wake gate, because a verdict landing on an object the gate never reads is
+the bug that shape exists to prevent. (That gate branches on the STATE directly —
+`StateRevoked`, and `StateSignedOut` only once a session has been seen, so a
+never-signed-in install still runs anonymously; `CanSpend()` has no production caller
+yet, so the first one should read `state.go` before adopting it.) Verdicts arrive late, so every write rechecks the
 identity generation inside the section that performs it.
 
 **The account answer reaches every CLI surface — the `auth` commands, the embedded
@@ -173,12 +176,30 @@ render it as "the account changed while this was being checked", never as a plan
 
 Three rules in that layer are load-bearing and easy to undo:
 
-- The account endpoint's own 200 must not confirm the session
-  (`accountAttempt.deferSuccess`). It answers 200 for a caller with NO plan, so the
-  transport's "a protected request succeeded, therefore this session is active"
-  inference is exactly wrong there.
-- `MarkActive` must not overwrite a subscription verdict. Most protected endpoints
-  answer 2xx regardless of entitlement — capabilities does, and it runs at boot.
+- **A protected 2xx confirms the CREDENTIAL and never the PLAN.**
+  `AccountObserver.MarkIdentityLive` stamps `lastVerifiedAt` and changes no state at
+  all. It was `MarkActive`, and it promoted any signed-in state to
+  `StateSignedInActive` — which means signed in AND ENTITLED, and is the only state
+  `CanSpend()` is true for. But nearly every protected route answers 2xx without ever
+  consulting billing (`/v1/daintree/capabilities` does, and it runs at boot), so the
+  first call of every session minted an entitlement out of a request that had never
+  asked about one. `StateSignedInActive` now has exactly ONE source: a decoded
+  account-v1 body saying `access=granted`, through `ApplyAccountStatus`. The
+  consequence is deliberate — nothing at boot reads the account, so a HYDRATED
+  credential for which no account read has succeeded stays `signed_in_unverified`
+  indefinitely, and "signed in, plan not checked" is precisely what is known. (`/login`
+  and `auth login` do run a courtesy account read, so a fresh sign-in normally resolves;
+  it is the restored-from-keychain session that sits there.) Note the state name is now
+  about ENTITLEMENT, not identity: `LastVerifiedAt` can carry a fresh timestamp beside
+  it, because `MarkIdentityLive` proves the credential and says nothing about billing.
+  It also does NOT clear `lastErr`, since it no longer moves the state past what the
+  error explains — clearing would leave `temporarily_unavailable` or `access_refused`
+  naming a problem with no code beside it. A successful account read, refresh or login
+  retires both; that is not a general invariant of the type, and an identity remedy can
+  still leave an older code beside a newer state.
+- The account endpoint's own 200 must not stamp liveness either
+  (`accountAttempt.deferSuccess`). The transport would otherwise record a verification
+  from a body the decoder is about to REJECT as `account_contract_invalid`.
 - The post-login plan check runs through a NON-observing client
   (`app.NewUnobservingAccountBackendClient`). The observing one acts on what it hears,
   and a revoked verdict reaches `RemedyClear`, which would delete the refresh token

@@ -36,8 +36,14 @@ const (
 	StateSignedOut State = "signed_out"
 	// StateAuthorizing: a browser login is in progress.
 	StateAuthorizing State = "authorizing"
-	// StateSignedInUnverified: a credential exists but the backend has not confirmed it
-	// this process. Offline startup lands here.
+	// StateSignedInUnverified: a credential exists and no account projection has been
+	// read this process, so ENTITLEMENT is unknown. Offline startup lands here, and so
+	// does an ordinary session that simply never asks.
+	//
+	// It does NOT mean the credential is unproven. MarkIdentityLive records a protected
+	// 2xx and deliberately leaves this state alone, so `LastVerifiedAt` can carry a
+	// fresh timestamp while the state still reads unverified — the two answer different
+	// questions, and only an account-v1 body answers the second one.
 	StateSignedInUnverified State = "signed_in_unverified"
 	// StateSignedInActive: signed in and entitled.
 	StateSignedInActive State = "signed_in_active"
