@@ -215,9 +215,15 @@ func TestAccountAdviceGivesEachGroupItsOwnRemedy(t *testing.T) {
 		{backend.CodeEntitlementUnavailable, []string{"could not be checked", "unaffected"}, []string{"`/login`", "auth login", "no plan", "not subscribed"}},
 		{backend.CodeUsageAccountingUnavailable, []string{"could not be checked", "unaffected"}, []string{"`/login`", "auth login", "no plan", "not subscribed"}},
 		// Local. No request was made, so this is not the backend rejecting anything —
-		// and sending someone to sign in when the keychain is locked walks them into a
-		// browser flow that fails at the same write.
-		{backend.CodeCredentialUnavailable, []string{"keychain", "auth status"}, []string{"`/login`", "auth login", "no plan"}},
+		// and sending someone to sign in when nothing here can hold a credential walks
+		// them into a browser flow that fails at the same write.
+		//
+		// "keychain" is BANNED rather than required, which is the reverse of what this
+		// row used to say. The code has two causes now — a locked keychain, and an
+		// account layer that could not be built at all — and naming either one sends
+		// half of these readers to check something that was never the problem. The reply
+		// routes to the surfaces that CAN tell them apart instead.
+		{backend.CodeCredentialUnavailable, []string{"`/account`", "doctor", "never rejected"}, []string{"`/login`", "auth login", "no plan", "keychain"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.code, func(t *testing.T) {
@@ -241,10 +247,31 @@ func TestAccountAdviceGivesEachGroupItsOwnRemedy(t *testing.T) {
 // subscription_inactive must reach the account page and never the plans page.
 func TestAdviceRendersOnlyTheValidatedLinkForItsRemedy(t *testing.T) {
 	const subscribeLine = "Create an account or choose a plan: https://staging.daintree.org/subscribe"
-	for _, code := range identityAdviceCodes {
+
+	// auth_required is the ONE identity code that offers it. Nothing was sent, so nothing
+	// is known about the reader and they may hold no account at all.
+	signedOut := accountFailureAdvice(&backend.Error{Code: backend.CodeAuthRequired}, testAccountLinks)
+	if !strings.Contains(signedOut, subscribeLine) {
+		t.Errorf("auth_required does not offer the validated create-or-choose page: %q", signedOut)
+	}
+
+	// The other three prove the opposite. An expired, invalid or revoked credential is a
+	// credential that EXISTED, so its holder has an account and a create-or-choose-a-plan
+	// page invites a duplicate — the same reason subscription_required says "Choose a
+	// plan". It also matters beyond wording: subscribe_url is contracted as a subscribe
+	// destination only, so today's redirect from it into sign-in is a property of that
+	// site and not of the wire contract, and must not be leaned on as a login route.
+	for _, code := range []string{
+		backend.CodeAuthTokenExpired,
+		backend.CodeAuthTokenInvalid,
+		backend.CodeAuthSessionRevoked,
+	} {
 		msg := accountFailureAdvice(&backend.Error{Code: code}, testAccountLinks)
-		if !strings.Contains(msg, subscribeLine) {
-			t.Errorf("%s does not offer the validated plans page: %q", code, msg)
+		if strings.Contains(msg, testAccountLinks.Subscribe) {
+			t.Errorf("%s offers a subscribe link to a reader who demonstrably has an account: %q", code, msg)
+		}
+		if !strings.Contains(msg, "`/login`") {
+			t.Errorf("%s dropped the sign-in remedy along with the link: %q", code, msg)
 		}
 	}
 

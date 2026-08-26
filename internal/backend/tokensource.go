@@ -138,10 +138,10 @@ func (s StaticTokenSource) Secrets() []string {
 // credential.
 //
 // It is what the account layer installs when it could not be CONSTRUCTED — an unwritable
-// state root, a plain file where the `auth` directory belongs, EACCES, ENOSPC. Until that
-// wiring lands this type has no production caller; the alternative it is there to replace
-// is NoTokenSource, under which the client omits the Authorization header and the turn
-// goes out as an anonymous principal. Against a
+// state root, a plain file where the `auth` directory belongs, EACCES, ENOSPC — see
+// app.credentialSource, which is what discriminates that from a deliberate caller key.
+// The alternative it replaced is NoTokenSource, under which the client omits the
+// Authorization header and the turn goes out as an anonymous principal. Against a
 // deployment whose door is open that SUCCEEDS, and this machine's local fault is quietly
 // billed to whoever the open door resolves to; against one that enforces accounts it
 // comes back as a generic server rejection naming the deployment, for a problem that is

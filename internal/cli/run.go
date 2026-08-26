@@ -1144,15 +1144,23 @@ func backendDoctorChecks(ctx context.Context, a *app.App) []DoctorCheck {
 // only — and it is the one condition this row used to report as plain OK, which is doctor
 // concluding no problem about a machine that cannot sign in at all.
 //
-// WARN rather than FAIL, and the line between them is drawn where this file draws it
+// FAIL, and it used to be a WARN. The line between them is drawn where this file draws it
 // everywhere else: a fail is what makes Summary.Healthy false and the exit code non-zero,
-// so it has to mean the install cannot run. This one does not. Sign-in is optional — every
-// deployment today answers `configured:false` and serves anonymous requests — so an install
-// with a broken auth directory still runs every turn. The case where it genuinely cannot,
-// a deployment that REQUIRES an account, is already a fail two rows down: the credential
-// probe is backend-aware and 401s at our own door (isBackendAuthError), where this row can
-// only see a directory. Failing here as well would gate a working install on a broken
-// optional feature, which is how a release gate becomes noise people learn to skip.
+// so it has to mean the install cannot run. The old reasoning was that this one does not —
+// sign-in being optional, an install with a broken auth directory still ran every turn
+// against a deployment that serves anonymous requests.
+//
+// That is no longer true, and the change was deliberate. A state root the account layer
+// cannot be built under now installs a fail-closed credential source, so every WORK route
+// aborts before the request leaves the process (see app.credentialSource). The install
+// does not run a degraded turn; it runs no turn at all. A row that warned here would let
+// doctor exit zero on a machine where nothing works — the exact "concluding no problem
+// about a machine that cannot sign in" failure the row was added to prevent, moved one
+// notch along.
+//
+// The credential probe two rows down does not cover it either, in the direction that
+// matters: it is backend-aware and reports what the DEPLOYMENT says, and on this fault it
+// cannot reach the deployment at all. This row is the one that can see the cause.
 func accountDoctorCheck(a *app.App) DoctorCheck {
 	c := DoctorCheck{ID: "auth.account", Label: "account"}
 	if a.Config.APIKeyDeprecated {
@@ -1166,8 +1174,8 @@ func accountDoctorCheck(a *app.App) DoctorCheck {
 		return c
 	}
 	if fault := a.AccountLayerFault(); fault != nil {
-		c.Status = StatusWarn
-		c.Detail = "sign-in is unavailable on this machine: " + app.AccountFaultMessage(fault)
+		c.Status = StatusFail
+		c.Detail = "no turn can run on this machine: " + app.AccountFaultMessage(fault)
 		// The PATH belongs here and nowhere else. A doctor row is meant to be pasted into
 		// an issue and already prints state-dir paths, and this fault is unactionable
 		// without naming the directory that could not be created — where a turn's prose

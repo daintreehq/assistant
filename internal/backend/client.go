@@ -949,10 +949,13 @@ func (c *Client) Respond(ctx context.Context, req RespondRequest) (RespondRespon
 	var out RespondResponse
 	spendAbandoned, err := c.doJSONTracked(ctx, http.MethodPost, "/v1/daintree/respond", req, &out)
 	if err != nil {
-		if spendAbandoned {
-			// Failed outright, but an attempt this call replaced may already have spent
-			// money nothing else will ever report — the same exit the streamed path
-			// takes for abandonedSpend.
+		// The SAME rule RunTask applies, asked in the same order and for the same reason.
+		// Only the abandoned-attempt half was asked here, so a single terminal
+		// `upstream_unavailable` — a turn the backend may well have paid for and then
+		// failed to deliver — reported nothing at all, while the identical error on a
+		// task correctly caveated the total. One transport spending one credential must
+		// not keep two accounting rules.
+		if spendAbandoned || taskMayHaveBilled(err) {
 			c.reportCost(CostEvent{Op: RespondOp, Complete: false})
 		}
 		return RespondResponse{}, err
@@ -1091,6 +1094,21 @@ func (c *Client) reportRespondCost(res RespondResult, abandonedSpend bool) {
 // It answers for the error IN HAND, which on a retried call is the last attempt only.
 // Whether an earlier attempt billed is a different question, answered by the
 // spendAbandoned result of doJSONTracked and combined by the caller.
+// billedVerdictCodes are the stable codes that mean the model ALREADY RAN and this is the
+// verdict on what it produced. They are the one group whose spend is not in doubt.
+//
+// It overlaps nonRetriableAppCodes in retry.go and is deliberately a separate set: that
+// one answers "would a replay reach the same answer", this one answers "was money spent",
+// and the two questions have different memberships as soon as a code is added that is
+// retriable but billed. `internal_error` is excluded for exactly that reason — it is the
+// backend failing in a way that says nothing either way about whether a generation ran,
+// so it belongs in the conservative fallthrough rather than being asserted as billed.
+var billedVerdictCodes = map[string]bool{
+	// A completion ran and its output did not satisfy the task's contract. The repair
+	// pass this usually follows is billed too.
+	"task_output_invalid": true,
+}
+
 func taskMayHaveBilled(err error) bool {
 	var be *Error
 	if !errors.As(err, &be) {
@@ -1100,6 +1118,18 @@ func taskMayHaveBilled(err error) bool {
 		return true
 	}
 	switch {
+	case billedVerdictCodes[be.Code]:
+		// FIRST, above every other arm including the status-shaped ones. These codes mean
+		// the model demonstrably RAN and this is the verdict on its output, so the money
+		// is already spent whatever status the envelope happens to be wearing.
+		//
+		// Ordering is the whole point. `task_output_invalid` at a 400, 401, 403 or 426
+		// used to be answered by an arm below that reads the number — and every one of
+		// those arms returns false. That is the dangerous direction: over-caveating an
+		// accurate total is a cosmetic annoyance, while reporting a real charge as free
+		// is a number the user cannot recover. A code that names spend must never be
+		// overridable by a status, which is exactly what putting it last permitted.
+		return true
 	case be.IsConnect(), be.IsContract(), be.IsProtocolMismatch():
 		return false
 	case be.Code == CodeCredentialUnavailable:
@@ -1109,12 +1139,21 @@ func taskMayHaveBilled(err error) bool {
 		// failure to permanently caveat the session total as a lower bound over spend
 		// that provably never happened.
 		return false
-	case be.IsAccountIdentity(), be.IsSubscription(), be.IsAccountDependency(),
-		be.Code == CodeInvalidAPIKey:
-		// The backend refused at its own door, before any provider call. `invalid_api_key`
-		// — a malformed bearer, the one door code with no constant in this package — is
-		// named here rather than left to the status arm below, which was the only thing
-		// catching it.
+	case be.IsAccountCode(), be.Code == CodeInvalidAPIKey:
+		// The backend refused at its own door, before any provider call.
+		//
+		// IsAccountCode is the WHOLE account union, deliberately, rather than the three
+		// predicates (identity, subscription, dependency) this used to name one by one.
+		// That enumeration silently omitted the two 429s — `usage_limit_reached` and
+		// `account_rate_limited` — which are account verdicts like any other and equally
+		// never reach a model call. The cost of the omission grew once a replaced attempt
+		// could poison a total: a retried `account_rate_limited` followed by a perfectly
+		// good answer reported that answer's exact cost as a floor, over spend that
+		// provably never happened. Asking the union means a code added to it later is
+		// classified correctly here without anyone remembering to come back.
+		//
+		// `invalid_api_key` — a malformed bearer, the one door code belonging to neither
+		// taxonomy — is named beside it rather than left to the status arm below.
 		return false
 	case be.Code == CodeProviderInvalidAPIKey, be.Code == CodeProviderKeyForbidden,
 		be.Code == CodeProviderInsufficientCredit, be.Code == CodeUpstreamNoCompliantProvider:

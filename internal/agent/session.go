@@ -2100,8 +2100,12 @@ func adviceLink(label, url string) string {
 	return " " + label + ": " + url
 }
 
-// accountFailureAdvice renders the user-facing reply for the backend's ACCOUNT taxonomy,
-// or "" when the error carries none of those codes.
+// accountFailureAdvice renders the user-facing reply for the backend's ACCOUNT taxonomy —
+// plus `credential_unavailable`, which is LOCAL and not a backend verdict at all, and is
+// answered here because to a reader it is the same question: something about my account
+// stopped this turn. That one is flagged where it is handled.
+//
+// Returns "" when the error carries none of those codes.
 //
 // The remedy leads with a slash command in THIS assistant. `/login`, `/logout` and
 // `/account` are registered engine commands (internal/commands/registry.go), dispatched
@@ -2144,7 +2148,17 @@ func accountFailureAdvice(be *backend.Error, links AccountLinks) string {
 	case backend.CodeAuthRequired:
 		// The one code where the reader may hold no account at all — nothing was sent,
 		// so nothing is known about them — which is why the browser flow is described as
-		// sign in OR create rather than just sign in.
+		// sign in OR create rather than just sign in, and why this is the ONLY identity
+		// code that offers the subscribe link.
+		//
+		// The other three prove the opposite. An expired, invalid or revoked credential
+		// is a credential that EXISTED, so its holder has an account and pointing them at
+		// a create-or-choose-a-plan page invites a duplicate — the same argument that
+		// makes subscription_required below say "Choose a plan" instead. It is also more
+		// than a wording nicety: subscribe_url is contracted as a subscribe destination
+		// and nothing else (see auth.Manifest), so the fact that today's deployment
+		// happens to redirect a signed-out visitor into sign-in is a property of that
+		// site, not of the wire contract, and must not be leaned on as a login route.
 		return "Account problem: this backend requires an account and no credential was sent." +
 			" Run `/login` in this Assistant to sign in — it opens your browser, where you can sign in or create an account." +
 			alsoStandalone + adviceLink("Create an account or choose a plan", links.Subscribe)
@@ -2158,11 +2172,10 @@ func accountFailureAdvice(be *backend.Error, links AccountLinks) string {
 		// mandatory when simply asking again would have worked.
 		return "Account problem: this backend would not accept the stored credential for this turn." +
 			" Try again; if it persists, run `/login` in this Assistant to sign in again." +
-			alsoStandalone + adviceLink("Create an account or choose a plan", links.Subscribe)
+			alsoStandalone
 	case backend.CodeAuthSessionRevoked:
 		return "Account problem: this session was ended elsewhere — a sign-out, or access revoked for this account." +
-			" Run `/login` in this Assistant to sign in again." + alsoStandalone +
-			adviceLink("Create an account or choose a plan", links.Subscribe)
+			" Run `/login` in this Assistant to sign in again." + alsoStandalone
 	case backend.CodeAuthClientNotAllowed:
 		// Deliberately does NOT suggest signing in again, by either route. The credential
 		// is valid and current; another one would be refused in exactly the same way,
@@ -2199,9 +2212,22 @@ func accountFailureAdvice(be *backend.Error, links AccountLinks) string {
 		return "Account problem: your account could not be checked just now — a service the backend depends on is unavailable. Your sign-in is unaffected; try again shortly."
 	case backend.CodeCredentialUnavailable:
 		// LOCAL, and specifically not auth_required: no request was made at all. Telling
-		// someone to sign in when the real fault is a locked keychain sends them through
-		// a browser flow that will fail at the same write.
-		return "Account problem: this machine could not produce an account credential — usually a locked or unavailable keychain. The backend never rejected anything; run `daintree-assistant auth status` for what this machine can see."
+		// someone to sign in when nothing on this machine can hold a credential sends
+		// them through a browser flow that fails at the same write.
+		//
+		// Deliberately does NOT name a cause any more. This code now has two of them —
+		// a locked or unavailable keychain, and an account layer that could not be BUILT
+		// at all (an unwritable state root, EACCES, a plain file where the `auth`
+		// directory belongs) — and they need different repairs. Naming the keychain sent
+		// half of those readers to check something that was never the problem. The code
+		// itself cannot tell them apart, so the reply says what is certainly true and
+		// routes to the surface that CAN: `/account` renders the specific fault sentence
+		// for either cause, and `doctor` adds the path.
+		//
+		// `/account` leads for the same reason `/login` leads above: a reader embedded in
+		// Daintree may have no terminal in reach, and this was the last account reply
+		// still reachable only from one.
+		return "Account problem: this machine could not produce an account credential, so nothing was sent and the backend never rejected anything. Run `/account` in this Assistant for what this machine can see, or `daintree-assistant doctor` from a terminal for the full diagnosis."
 	}
 	// account_rate_limited is deliberately absent: it is a genuine rate limit, and the
 	// branch above it already renders one with the health badge that clears on the next

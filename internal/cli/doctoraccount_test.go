@@ -38,13 +38,14 @@ func TestAccountDoctorCheckFailsOnAnUnbuildableAuthStateRoot(t *testing.T) {
 		BackendURL: "https://assistant.daintree.org",
 	}})
 
-	// WARN, not FAIL: a fail makes Summary.Healthy false and the exit code non-zero,
-	// which has to mean the install cannot run — and it can, because sign-in is optional
-	// and every deployment today serves anonymous requests. The case where it genuinely
-	// cannot is a deployment that requires an account, and the backend-aware credential
-	// row already fails for that one.
-	if c.Status != StatusWarn {
-		t.Fatalf("status %q for a state root the account layer cannot be built under, want warn", c.Status)
+	// FAIL, and it was a WARN until the account layer began failing closed. A fail makes
+	// Summary.Healthy false and the exit code non-zero, which has to mean the install
+	// cannot run — and on this fault it cannot: every work route now aborts before the
+	// request leaves the process, so there is no degraded-but-working reading left to
+	// protect. The backend-aware credential row does not cover it either, because on this
+	// fault it cannot reach the backend to ask.
+	if c.Status != StatusFail {
+		t.Fatalf("status %q for a state root the account layer cannot be built under, want fail", c.Status)
 	}
 	if c.Hint == "" {
 		t.Error("a reported fault with no hint is a support ticket by construction")
@@ -110,21 +111,24 @@ func TestAccountDoctorCheckKeepsTheCallerKeyWarning(t *testing.T) {
 	}
 }
 
-// The row must not be the thing that gates a working install. A broken auth directory on
-// an open deployment leaves every turn working, so the report stays healthy and doctor
-// still exits zero — the loud version of this belongs to the credential row, which can
-// actually see whether the backend refuses an anonymous request.
-func TestAccountLayerFaultDoesNotGateAnOtherwiseHealthyReport(t *testing.T) {
+// This assertion is the REVERSE of what it used to be, and the reversal is the point.
+//
+// It used to require that a broken auth directory left the report healthy, on the premise
+// that such an install still ran every turn against a deployment serving anonymous
+// requests. A state root the account layer cannot be built under now fails every work
+// route closed before the request leaves the process, so that premise is gone: doctor
+// exiting zero here would tell someone their machine is fine when no turn can run on it.
+func TestAccountLayerFaultGatesTheReport(t *testing.T) {
 	r := &DoctorReport{}
 	r.Add(accountDoctorCheck(&app.App{Config: config.AppConfig{
 		StateRoot:  brokenAuthStateRoot(t),
 		BackendURL: "https://assistant.daintree.org",
 	}}))
 	r.Finalize()
-	if !r.Summary.Healthy {
-		t.Fatal("a broken auth directory made the whole report unhealthy — doctor now exits non-zero on an install that runs every turn")
+	if r.Summary.Healthy {
+		t.Fatal("a broken auth directory left the report healthy — doctor exits zero on an install where every turn fails closed")
 	}
-	if r.Summary.Warn != 1 {
-		t.Fatalf("warn count %d, want the fault reported exactly once", r.Summary.Warn)
+	if r.Summary.Fail != 1 {
+		t.Fatalf("fail count %d, want the fault reported exactly once", r.Summary.Fail)
 	}
 }
