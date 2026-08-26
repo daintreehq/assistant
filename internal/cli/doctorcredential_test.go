@@ -180,7 +180,8 @@ func TestATransportFailureStaysUnknown(t *testing.T) {
 // deployment, whether or not a caller-supplied bearer is set.
 //
 // This row reports /v1/daintree/auth/verify, which answers for the credential the backend
-// would SPEND, and the backend spends its own on every install. DAINTREE_API_KEY and
+// would SPEND, and that is the backend's own upstream credential on every install —
+// because the CLI ships no provider key and signing in does not give it one. DAINTREE_API_KEY and
 // --api-key-file supply an ACCOUNT bearer: they say who is CALLING, never who pays. The
 // copy used to route a rejection at the user whenever one was set, which told them their
 // key had been refused upstream when their key never reached the provider at all — and

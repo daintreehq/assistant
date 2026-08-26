@@ -52,9 +52,14 @@ const (
 	// CodeAccountsUnavailable: the backend answered, and says it has no account layer.
 	//
 	// Distinct from CodeDiscoveryInvalid because nothing is wrong. A deployment can
-	// legitimately run with no identity provider — that is what every install does today
-	// — and reporting it as a broken configuration would send someone looking for a fault
-	// that does not exist.
+	// legitimately run with no identity provider at all, and reporting that as a broken
+	// configuration would send someone looking for a fault that does not exist.
+	//
+	// Narrower than it sounds: this is the answer to a manifest that explicitly reports
+	// `configured:false`, NOT to any deployment that merely does not require an account.
+	// One running `observe` has an identity provider and verifies the bearers it is
+	// given while still serving anonymous requests, and a backend serving no discovery
+	// route at all answers CodeDiscoveryUnavailable instead.
 	CodeAccountsUnavailable = "auth_accounts_unavailable"
 	// CodeDiscoveryInvalid: the manifest was fetched and REJECTED. Not transient, and
 	// not to be retried: the endpoint described an OAuth configuration this build will

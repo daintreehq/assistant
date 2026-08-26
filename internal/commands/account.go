@@ -317,10 +317,13 @@ func noAccountManagerText(a *app.App) string {
 			"account to sign in to or out of. Unset it to use a managed sign-in."
 	}
 	if fault := a.AccountLayerFault(); fault != nil {
-		// Deliberately not "turns still work". They do on an open deployment, which is
-		// every install today, and they do NOT on one that requires an account — this
-		// session has no credential to present and never will. Promising the first would
-		// be read as "ignore this", which is exactly wrong on the second.
+		// Deliberately not "turns still work". They do not: a state root the account layer
+		// could not be built under installs a fail-closed credential source, so every work
+		// route in this session aborts before the request leaves the process. That was
+		// already the wrong promise when an open deployment would have served the turn
+		// anonymously — it read as "ignore this", which was exactly wrong against a
+		// deployment requiring an account — and now there is no reading under which it
+		// holds.
 		msg := "Accounts are unavailable in this session: " + app.AccountFaultMessage(fault) + ".\n" +
 			"That is a fault on this machine, not on the backend, and signing in cannot\n" +
 			"work until it is fixed. Run `daintree-assistant doctor` for the path it needs,\n" +

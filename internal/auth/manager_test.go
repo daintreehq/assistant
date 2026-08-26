@@ -227,8 +227,9 @@ func TestBeingSignedOutSendsNoHeaderRatherThanFailing(t *testing.T) {
 }
 
 // ...and it must cost nothing. Discovery on every request would make the signed-out path
-// — which is every install today — depend on a backend endpoint older deployments do not
-// even serve.
+// depend on a backend endpoint older deployments do not even serve — and would turn an
+// ordinary never-signed-in run into one that preflights discovery before every turn,
+// which is precisely what it does not do.
 func TestTheSignedOutPathMakesNoNetworkCall(t *testing.T) {
 	p := newIDP(t)
 	m := newManager(t, p, NewMemoryStore())

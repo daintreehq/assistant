@@ -95,9 +95,9 @@ func newAuthRuntimeWithPeer(t *testing.T) (*Runtime, func() *auth.Manager) {
 	return r, build
 }
 
-// The regression the transition rule exists to prevent: an ordinary anonymous install,
-// where the manager reaches signed-out ON ITS OWN the first time anything asks it for a
-// credential. Blocking on that state alone stopped unattended work for every install
+// The regression the transition rule exists to prevent: a never-signed-in install, where
+// the manager reaches signed-out ON ITS OWN the first time anything asks it for a
+// credential. Blocking on that state alone stopped unattended work on such an install
 // after its first request.
 func TestAnAnonymousInstallIsNotTreatedAsAnEndedSession(t *testing.T) {
 	r := newAuthRuntime(t)
@@ -113,28 +113,34 @@ func TestAnAnonymousInstallIsNotTreatedAsAnEndedSession(t *testing.T) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if !r.authorizedToSpendLocked() {
-		t.Fatal("an anonymous install was blocked — every install today would stop supervising after one request")
+		t.Fatal("a never-signed-in install was blocked — it would stop supervising after one request")
 	}
 	if r.lastError != "" {
 		t.Errorf("a pause was reported for a session that never existed: %q", r.lastError)
 	}
 }
 
-// An install with no account at all must keep supervising. The backend's open door
-// serves anonymous requests, and refusing here would disable unattended work for every
-// existing user — a far worse outcome than the one the gate exists to prevent.
+// A daemon with no account LAYER must not be refused by this gate. nil means one of two
+// things — a deprecated caller key naming the principal, or a manager that could not be
+// constructed — and the gate's job is spotting a session that ENDED, which is neither.
+// (Note it does NOT mean a missing auth directory: AuthDir creates one.)
+//
+// This is about the GATE only. Whether such a turn then succeeds is decided one level
+// down: a caller key is presented and the work proceeds, while a manager that could not
+// be BUILT now yields a fail-closed credential source, so the attempt aborts locally.
+// Blocking here would conflate the two and disable the first along with the second.
 func TestADaemonWithNoAccountLayerKeepsWorking(t *testing.T) {
 	r := &Runtime{} // auth == nil: a deprecated caller key is set, or no auth dir
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if !r.authorizedToSpendLocked() {
-		t.Fatal("a daemon with no account layer refused to work — every current install would stop supervising")
+		t.Fatal("a daemon with no account layer was refused by the gate — a caller-key install would stop supervising")
 	}
 }
 
-// The ORDINARY anonymous install: a real Manager that has simply never signed in. This is
-// what every current user looks like, and it must keep supervising — the backend's open
-// door serves anonymous requests.
+// The never-signed-in install: a real Manager that has simply never signed in. It must
+// keep supervising — an anonymous request is a first-class path, and the backend's answer
+// is what decides whether it is served.
 //
 // The nil-Manager test above does not cover this: nil is the configuration-absent case,
 // not the never-signed-in one.

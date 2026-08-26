@@ -24,12 +24,15 @@ import (
 
 // backendClientConfig builds the backend client options from resolved config.
 //
-// cfg.APIKey is empty on virtually every install, and the client is built the same way
-// either way: it simply omits the Authorization header, which is exactly what the
-// backend's open door expects. A key that IS present rides along as the CALLER's
-// bearer — it says who is asking, never what pays. The backend funds the turn from its
-// own upstream credential either way, so setting one changes which principal the
-// request is attributed to and nothing about the money.
+// cfg.APIKey is empty on virtually every install, and an empty one does NOT mean the
+// client sends nothing: credentialSource below decides between three outcomes — a managed
+// sign-in's token source, a fail-closed source when the account layer could not be built,
+// and nil, which lets NewClient fall back to the caller key or to no header at all.
+//
+// A key that IS present rides along as the CALLER's bearer — it says who is asking, never
+// what pays. The backend funds the turn from its own upstream credential either way, so
+// setting one changes which principal the request is attributed to and nothing about the
+// money.
 //
 // ledger, when non-nil, receives a CostEvent for every billed upstream call the built
 // client makes. It stays a parameter rather than being read off the App so an unbilled
@@ -197,12 +200,26 @@ func NewAccountBackendClient(cfg config.AppConfig, mgr *auth.Manager) *backend.C
 // login prints, which is why the two non-destructive 402s are excluded too. See
 // courtesySettleCodes, where each exclusion carries its own reason.
 //
-// One honest limit on the destruction claim: obtaining the credential in the first place
-// is still the manager's own business, and a refresh whose grant the provider rejects ends
-// the session wherever it happens. That is true of every caller of AccessToken and was true
-// of this path before it observed anything at all. What this type guarantees is narrower
-// and is the guarantee that was missing: nothing the BACKEND SAYS ABOUT THIS REQUEST can
-// destroy anything.
+// Two honest limits, both worth stating because the obvious readings of this type are
+// wider than what it delivers.
+//
+// The destruction claim is about THIS OBSERVER, not about the request. Obtaining the
+// credential in the first place is still the manager's own business, and a refresh whose
+// grant the provider rejects ends the session wherever it happens — the client evaluates
+// refresh-replay independently of anything here, so an expiry landing mid-read can reach
+// it. That was true of every caller of AccessToken and was true of this path before it
+// observed anything at all. What this type guarantees is narrower and is the guarantee
+// that was missing: nothing it FORWARDS can destroy anything.
+//
+// And a settled refusal lives in memory only, because no account state is written to disk
+// — a plan on disk is a plan that can be wrong. So it reaches the surfaces sharing THIS
+// manager: the login's own report, and, in a session, `/account` and a turn's prose. A
+// later standalone `auth status` builds a fresh manager and, for a PERSISTED credential,
+// hydrates it and lands back on `signed_in_unverified`; it is `auth status --refresh` that
+// asks again and settles it again. (Where no credential store was reachable the login
+// warned it would not persist, and a later process has nothing to hydrate at all.)
+// Claiming every surface now agrees would overstate it in the one direction a reader
+// would check.
 func NewCourtesyAccountBackendClient(cfg config.AppConfig, mgr *auth.Manager) *backend.Client {
 	if mgr == nil {
 		return backend.NewClient(accountClientConfig(cfg, nil))

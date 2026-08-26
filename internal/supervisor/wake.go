@@ -191,11 +191,13 @@ func (r *Runtime) refreshAuthPosture(ctx context.Context) {
 // PURE: it reads cached state and does no I/O whatever, which is what makes it safe to
 // call with r.mu held. refreshAuthPosture does the reading, off the lock, first.
 //
-// It is conservative in one direction only. An install with NO account at all is
-// permitted, because the backend's open door still serves anonymous requests and
-// refusing here would disable unattended supervision for every existing user. What it
-// refuses is a session that DID exist and has since ended — the case where continuing
-// means spending someone's money after they told us to stop.
+// It is conservative in one direction only. An install with NO account layer is
+// permitted here, because refusing would also disable a deliberate caller-key install,
+// and because whether such a turn can actually run is decided one level down — a caller
+// key is presented, while an unbuildable layer yields a fail-closed credential source and
+// the attempt aborts locally. What this gate refuses is a session that DID exist and has
+// since ended — the case where continuing means spending someone's money after they told
+// us to stop.
 func (r *Runtime) authorizedToSpendLocked() bool {
 	if r.auth == nil {
 		return true // no account layer configured: the open door applies
@@ -212,8 +214,8 @@ func (r *Runtime) authorizedToSpendLocked() bool {
 	state := r.auth.State()
 	// Remember having HAD a session. What this gate must catch is a session ENDING, and
 	// StateSignedOut cannot say that on its own: it is equally the state of a machine
-	// that has simply never signed in — which every install is today, and which the
-	// manager now reaches on its own the first time a request asks for a credential.
+	// that has simply never signed in, which the manager reaches on its own the first
+	// time a request asks for a credential.
 	//
 	// Blocking on the state alone therefore stopped unattended work on every anonymous
 	// install after its first request. The transition is the real signal, and it is also

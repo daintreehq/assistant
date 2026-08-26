@@ -37,12 +37,14 @@ const ProtocolVersion = 3
 
 // DefaultBaseURL is the deployed backend, and the endpoint a fresh install uses.
 //
-// AN ANONYMOUS PRINCIPAL IS A VALID CALLER, and on this deployment it is the only one:
-// the backend holds its own upstream credential and funds every turn from it, so a
-// request carries no Authorization header at all. A deployment CAN configure accounts
-// (see internal/auth), in which case the account's access token rides protected paths —
-// but that is the deployment's answer, discovered per endpoint, not a property of this
-// build. `DAINTREE_API_KEY` remains supported on top of either, and is unset on a normal
+// AN ANONYMOUS PRINCIPAL IS A VALID CALLER, and stays one — it is what a local backend,
+// the e2e fakes, and any deployment short of `enforce` serve, and the backend funds every
+// turn from its own upstream credential either way. What this comment must NOT do is say
+// it is the only caller HERE: this endpoint is a secured staging deployment whose identity
+// posture moves by configuration, so any sentence naming what it asks for today can be
+// made wrong by a revision of it that changes no code here. A deployment that configures accounts (see internal/auth) gets the
+// account's access token on protected paths; that is the deployment's answer, discovered
+// per endpoint, not a property of this build. `DAINTREE_API_KEY` remains supported on top of either, and is unset on a normal
 // install — but it is not a way to PAY. It wins over this client's account manager, and
 // the backend either ignores it entirely (open mode) or verifies it as an ACCOUNT token;
 // every model call is funded by the server's own credential regardless.

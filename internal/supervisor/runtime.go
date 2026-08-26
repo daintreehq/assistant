@@ -195,9 +195,13 @@ func Run(ctx context.Context, opts Options) int {
 	// "may I spend?" on its very first wake — a daemon that had to construct one
 	// mid-decision would either block the decision or default to yes.
 	//
-	// A nil manager (no auth directory, or a deprecated caller key in play) means the
-	// open door applies and unattended work proceeds, which is what every install does
-	// today.
+	// A nil manager here has two readings and they no longer share an outcome. A
+	// deprecated caller key in play is deliberate: that key names the principal, and
+	// requests are attempted with it. A manager that could not be BUILT is a fault, and
+	// if app.Create's own retry cannot build one either, credentialSource turns it into a
+	// fail-closed token source — the work is attempted and aborts locally rather than
+	// going out anonymously. Neither is "the open door applies", which is what this said
+	// when an unbuildable auth directory still produced a working anonymous install.
 	if strings.TrimSpace(cfg.APIKey) == "" {
 		if mgr, aerr := auth.NewManager(auth.Options{StateRoot: cfg.StateRoot, BackendURL: cfg.BackendURL}); aerr == nil {
 			r.auth = mgr
@@ -1083,11 +1087,24 @@ func (r *Runtime) rebuildAuthForBackend(ctx context.Context, backendURL string) 
 	}
 	mgr, err := auth.NewManager(auth.Options{StateRoot: r.cfg.StateRoot, BackendURL: next})
 	if err != nil {
-		// FAIL CLOSED. Keeping the previous manager would hand the next App a token
-		// source scoped to the OLD endpoint — presenting a credential minted for one
-		// deployment to another, which is the exact cross-origin leak this rebuild
-		// exists to prevent. No manager means anonymous requests, which is a working
-		// install rather than a leaking one.
+		// FAIL CLOSED, in both senses now. Keeping the previous manager would hand the
+		// next App a token source scoped to the OLD endpoint — presenting a credential
+		// minted for one deployment to another, which is the exact cross-origin leak this
+		// rebuild exists to prevent.
+		//
+		// Dropping it no longer means "anonymous requests, which is a working install",
+		// but the outcome is conditional and the condition matters. app.Create RETRIES
+		// construction for the nil it is handed, so a failure that has since cleared
+		// simply yields a healthy manager and the next span proceeds — while this
+		// Runtime's own field stays nil until refreshAuthPosture runs again. Only when
+		// that retry ALSO fails does credentialSource re-derive the fault and install an
+		// UnavailableTokenSource, and only then do the next App's work routes abort
+		// before a request leaves the process.
+		//
+		// So: a persistently broken state root now STOPS unattended work rather than
+		// degrading it to anonymous, which is a change in behaviour and not just in
+		// wording. A transient failure here costs nothing. A deliberate caller key is
+		// untouched by either.
 		r.mu.Lock()
 		r.auth, r.authBackendURL, r.authSawSession = nil, "", false
 		r.mu.Unlock()

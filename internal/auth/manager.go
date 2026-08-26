@@ -409,9 +409,11 @@ func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 	// logout, so its absence is a definitive local "no" — and answering it here costs one
 	// stat instead of a discovery round trip.
 	//
-	// Without this short-circuit the signed-out path — which is every install today —
-	// would try to fetch the auth manifest before every single request, fail (an older
-	// backend does not serve one), and abort the call. A user who has never signed in
+	// Without this short-circuit the signed-out path would try to fetch the auth manifest
+	// before every single request, fail (an older backend does not serve one), and abort
+	// the call. It is also what keeps an ordinary never-signed-in run from performing a
+	// discovery preflight at all: nothing consults the manifest to decide what a request
+	// carries, and the backend's answer is what decides. A user who has never signed in
 	// would find the assistant unable to reach a backend that was perfectly willing to
 	// serve them anonymously.
 	//
@@ -485,8 +487,9 @@ func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 	set, err := m.refresh(ctx)
 	if err != nil {
 		// NOT SIGNED IN IS NOT AN ERROR HERE. It means "send no Authorization header",
-		// which is exactly what the backend's open door expects today and what every
-		// existing install does.
+		// and an anonymous request is a first-class path — what a local backend, a fake,
+		// and any deployment not enforcing accounts will serve. Whether THIS deployment
+		// serves it is the backend's answer, not something to decide here.
 		//
 		// Returning an error instead would abort the request in setHeaders — so on a
 		// machine that has simply never signed in, every protected call would fail

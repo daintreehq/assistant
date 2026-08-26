@@ -28,9 +28,11 @@ import (
 // utility task can all be in flight at once, and each will ask independently.
 type TokenSource interface {
 	// AccessToken returns the credential to send, or "" to send no Authorization
-	// header at all. An empty string with a nil error is the NORMAL case today — the
-	// backend's open door expects an unauthenticated request — so callers must not
-	// treat it as a failure.
+	// header at all. An empty string with a nil error is an ORDINARY answer, not a
+	// failure: it is what a signed-out machine says, and an anonymous request is a
+	// first-class path that the backend either serves or refuses. An implementation that
+	// cannot tell whether it holds a credential must return an ERROR instead — see
+	// UnavailableTokenSource, and the fail-closed rule it exists for.
 	//
 	// A non-nil error means the credential could not be obtained (storage failure, a
 	// refresh that could not complete). The request must not be sent: proceeding

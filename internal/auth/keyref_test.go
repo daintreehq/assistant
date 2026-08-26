@@ -416,8 +416,8 @@ func TestAMemoryTierSessionSurvivesItsAccessTokenExpiring(t *testing.T) {
 
 // The same claim from the other side: with no descriptor and no login in this process,
 // the short-circuit still answers cheaply and makes NO network call. The remembered key
-// must not have turned a fast signed-out path into a discovery round trip on the install
-// shape that is every install today.
+// must not have turned a fast signed-out path into a discovery round trip on the shape
+// every machine presents before its first sign-in.
 func TestNoLoginInThisProcessStillShortCircuitsWithoutNetwork(t *testing.T) {
 	p := newIDP(t)
 	m := newManager(t, p, NewMemoryStore())
