@@ -31,8 +31,9 @@
 //     it is why subagent.run is itself a read-risk tool.
 //   - **Bounded.** Rounds, wall clock, per-result size, and total transcript size
 //     are all capped. A runaway sub-agent costs a known maximum and then reports
-//     what it has, marked partial — it never silently spends the user's key
-//     forever, and it never returns nothing after spending it.
+//     what it has, marked partial — it never silently burns turns against the
+//     backend's upstream credential forever, and it never returns nothing after
+//     having spent them.
 //   - **Never fatal to the caller.** Every failure — a backend error, a bad tool
 //     call, a cancel, an exhausted budget — resolves to a Report with a Status,
 //     not an error the calling tool has to invent a message for. A sub-agent that

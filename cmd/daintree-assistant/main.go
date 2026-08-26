@@ -389,12 +389,23 @@ func parseArgsInto(args []string) (parsedArgs, *flag.FlagSet, error) {
 		return parsed, fs, nil
 	}
 	// `auth <action> --json` is carved out here for the same reason `doctor --json` is,
-	// and for this command it is not optional. Account state lives in the CLI, so a host
-	// embedding this binary reads it the way a script does — by driving
-	// `auth status --json` / `auth login --json` and parsing the events. If --json left
-	// "auth" as a prompt, that caller would silently start running the word "auth" as a
-	// conversation turn — spending a turn to produce prose where a machine-readable
-	// status was expected.
+	// and for this command it is not optional. Account state lives in the CLI, so a
+	// SCRIPT — a CI job, a provisioning step, another agent — reads it by driving
+	// `auth status --json` / `auth login --json` and parsing the events.
+	//
+	// An embedded host does NOT come through here. Daintree drives `host --stdio` and
+	// asks the LIVE session for the same state by sending a `command` frame carrying
+	// `/login`, `/logout`, `/account` or `/backend`, then rendering the `command:result`
+	// it gets back (docs/DAINTREE_HOST.md). That is not an arbitrary preference: a
+	// script wants an answer from a fresh process it owns, whereas a host wants the
+	// answer for the session it is already attached to, on the very account manager that
+	// session's turns spend through. Shelling out a second process would answer about a
+	// manager nothing in the conversation is using — and it would have to re-resolve the
+	// endpoint from disk to find one at all.
+	//
+	// If --json left "auth" as a prompt, the script caller would silently start running
+	// the word "auth" as a conversation turn — spending a turn to produce prose where a
+	// machine-readable status was expected.
 	if len(positionals) >= 1 && positionals[0] == "auth" && !forcePrompt {
 		if *stdio {
 			return parsedArgs{}, nil, stdioRequiresHostError()

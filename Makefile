@@ -14,23 +14,33 @@ LDFLAGS   := -X main.version=$(VERSION)
 # Reproducible builds: -trimpath strips local filesystem paths from the binary.
 GOFLAGS   := -trimpath
 
-# Install location. Daintree's host does NOT hardcode a path — it locates the
-# binary by a shell PATH lookup (`which` on Unix, `where` on Windows), with the
-# DAINTREE_CLI_PATH_PREPEND env var taking precedence and an npm-global-prefix
-# shim as the last-resort fallback (daintree/electron/services/
-# CliAvailabilityService.ts). So the rule is simply: the binary must sit in a
-# directory that is ON $PATH, and there must be exactly ONE copy — a second copy
-# elsewhere on $PATH can win the lookup and shadow this one.
+# Install location. This target produces a STANDALONE binary — for a shell, a
+# script, an `mcp --stdio` client, a benchmark harness — so the only rule is that
+# it lands in a directory that is ON $PATH, and that there is exactly ONE copy: a
+# second copy elsewhere on $PATH wins the lookup and shadows this one, and the
+# symptom is a feature that mysteriously does not exist rather than a version
+# mismatch. `doctor` lists every copy it can find, for exactly that reason.
 #
-# We default to the first PATH dir Daintree already resolves to per platform.
-# Forcing GOBIN means `go install` writes ONLY here, never the default
+# What this does NOT do is feed the Daintree desktop app. Daintree PINS this
+# engine as the `vendor/daintree-assistant` submodule and builds it into its own
+# `resources/assistant/` (daintree/electron/services/assistant-host/
+# resolveAssistantBinary.ts); there is deliberately no PATH fallback there,
+# because the host protocol moves in lockstep with the engine and binding to
+# whatever copy a user happened to install is how protocol skew happens — the
+# failure being an inscrutable protocol rejection, not a missing binary. To
+# develop the engine against the app, point DAINTREE_ASSISTANT_BIN at the
+# submodule's own build output; `make install` here will not be noticed by it.
+#
+# We default to the conventional on-PATH directory per platform. Forcing GOBIN
+# means `go install` writes ONLY here, never additionally to the default
 # $(go env GOPATH)/bin, so we never leave a shadowing second copy.
 #
 # Override freely:  make install INSTALL_DIR=/some/dir/on/PATH
 ifeq ($(OS),Windows_NT)
   # GNU make on Windows. Go names the artifact daintree-assistant.exe; Windows
   # resolves it via PATHEXT, so no suffix handling is needed here. %APPDATA%\npm
-  # is on PATH by default and is also where the host's npm-prefix fallback looks.
+  # is on PATH by default, which is the only reason it is the default here.
+  # (Background supervision does not exist on Windows at all — see CLAUDE.md.)
   INSTALL_DIR ?= $(APPDATA)\npm
 else
   UNAME_S := $(shell uname -s)
@@ -56,7 +66,7 @@ build:
 	@mkdir -p $(BIN_DIR)
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN) $(PKG)
 
-## install: install ONLY to $(INSTALL_DIR) (where Daintree's host expects it).
+## install: install ONLY to $(INSTALL_DIR) (an on-PATH dir, for standalone use).
 install:
 	GOBIN=$(INSTALL_DIR) go install $(GOFLAGS) -ldflags "$(LDFLAGS)" $(PKG)
 

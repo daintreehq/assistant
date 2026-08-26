@@ -411,9 +411,15 @@ func loadConfig(overrides ConfigOverrides, ensureStateDir bool) (AppConfig, erro
 	explicitStateDir := FirstString(deref(overrides.StateDir), e.trustedGet("DAINTREE_ASSISTANT_STATE_DIR"))
 	// A missing home is FATAL unless the state dir was named explicitly. Ignoring the
 	// error yields a RELATIVE stateRoot (".daintree/assistant-cli"), which resolves
-	// against the working directory — i.e. inside the bound project. The state dir now
-	// holds the API key, so that silently writes a spendable secret into the user's
-	// repository, where 0600 does not save it from a stray `git add`. Fail loudly.
+	// against the working directory — i.e. inside the bound project. That silently
+	// writes the assistant's whole private state — conversations, the audit trail,
+	// automation grants, memories, the account descriptor and the `/backend` preference
+	// — into the user's repository, where 0600 does nothing to save it from a stray
+	// `git add`. (No provider credential is among them; the refresh token lives only in
+	// the OS keychain. Committing a transcript is quite bad enough.) Worse, "the working
+	// directory" is not one place: the daemon runs with the PROJECT as its cwd, so the
+	// two processes that share a project would silently disagree about where its state
+	// is. Fail loudly.
 	if (homeErr != nil || strings.TrimSpace(home) == "") && explicitStateDir == "" {
 		return AppConfig{}, fmt.Errorf("cannot resolve a home directory for the state dir (set DAINTREE_ASSISTANT_STATE_DIR): %w", homeErr)
 	}
@@ -433,7 +439,9 @@ func loadConfig(overrides ConfigOverrides, ensureStateDir bool) (AppConfig, erro
 	// spawnDaemon sets the child's cwd to the PROJECT path while handing it this same
 	// string. `--state-dir .state` launched from /tmp/harness would then give the
 	// foreground /tmp/harness/.state and the daemon <project>/.state — different flocks,
-	// different databases, and a credentials.json created inside the user's repository.
+	// different databases, and the state root's own files (auth/credential.json, the
+	// revision marker, endpoint.json, the lock files) scattered into the user's
+	// repository, where the ownership lease they exist to enforce is worthless.
 	if abs, err := filepath.Abs(cfg.StateDir); err == nil {
 		cfg.StateDir = abs
 	}

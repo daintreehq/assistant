@@ -1099,9 +1099,12 @@ func backendDoctorChecks(ctx context.Context, a *app.App) []DoctorCheck {
 	hctx, hcancel := context.WithTimeout(ctx, 3*time.Second)
 	herr := a.Backend.Health(hctx)
 	hcancel()
-	// Sanitized for the same reason as the MCP URL: a custom backend URL arrives from the
-	// trusted env or the stored sign-in, neither of which passes through
-	// credentials.NormalizeBaseURL, so it can carry userinfo.
+	// Sanitized for the same reason as the MCP URL, and belt-and-braces at this point:
+	// every endpoint source — `--backend-url`, the trusted env, the stored `/backend`
+	// preference, the compiled-in default — now goes through backend.NormalizeBaseURL,
+	// which refuses userinfo, so this should already be clean. It stays sanitized because
+	// `doctor` output exists to be pasted into an issue or a CI log verbatim, and a
+	// diagnostic line should not be the thing that has to be right.
 	base := mcp.SanitizeURL(a.Backend.BaseURL())
 	if herr != nil {
 		out = append(out, DoctorCheck{

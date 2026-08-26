@@ -11,8 +11,8 @@
 //
 // # Reading the "DeepSeek" comments in this repo
 //
-// The backend reaches EVERY model through OpenRouter, using the caller's own key. So
-// wherever a comment here or in internal/agent / internal/backend says "DeepSeek 400s
+// The backend reaches EVERY model through OpenRouter, funded by a credential the SERVER
+// holds — this process ships none and asks for none. So wherever a comment here or in internal/agent / internal/backend says "DeepSeek 400s
 // if …" or "DeepSeek requires …", read it as *the behaviour of the DeepSeek route
 // (`deepseek/deepseek-v4-flash-0731`) as observed through OpenRouter* — the constraint
 // is real and load-bearing, but it belongs to that model route, not to OpenRouter and

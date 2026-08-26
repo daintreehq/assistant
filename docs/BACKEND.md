@@ -106,12 +106,22 @@ for the same reason, one layer earlier — nobody is prompted any more, so a man
 arrives from the environment and would otherwise die inside `net/http` as "invalid header
 field value" on every turn, naming neither the variable nor the cause.
 
-The two 401s remain distinct by **code**, never by status:
+These two conditions remain distinct by **code**, never by status:
 
-| condition | response | CLI predicate | meaning |
+| condition | code | CLI predicate | meaning |
 |---|---|---|---|
-| malformed bearer (when one is sent at all) | `401 invalid_api_key` | `Error.IsAuth()` | fix your header |
-| well-formed key the provider rejects | `401 provider_invalid_api_key` | `Error.IsUpstreamAuth()` | fix the account behind the key |
+| malformed bearer (when one is sent at all) | `invalid_api_key` | `Error.IsAuth()` | fix your header |
+| well-formed key the provider rejects | `provider_invalid_api_key` | `Error.IsUpstreamAuth()` | fix the account behind the key |
+
+The status is not the contract for either row. `invalid_api_key` is a 401 by nature — it is
+this request's own header that is wrong. `provider_invalid_api_key` is not: it reports the
+DEPLOYMENT's own upstream credential failing, a server-side fault, and it has been served as
+a 401 while moving to a 5xx. **Do not encode either number.** The CLI is indifferent by
+construction: `Error.IsAuth()` short-circuits on the provider codes before it ever consults a
+status, and `deterministicUpstreamCodes` in the retry layer lists `provider_invalid_api_key`
+by code, so both the classification and the no-retry decision hold at any status — including
+the `HTTPStatus == 0` a mid-stream SSE error carries. That is what lets the two repos move
+this one independently instead of in a flag day.
 
 `IsAuth()` deliberately excludes the provider codes: telling someone whose credential the
 provider revoked to "check you pasted it in full" sends them round a re-entry loop that
@@ -215,8 +225,36 @@ a direct provider call here would break both properties.
 where a turn is sent, and the key, when present, decides which account it is sent AS, so a
 cloned repo must not be able to inject either.
 
-The URL override is the whole endpoint mechanism now, and the local dev loop in its
-entirety:
+**The URL override is not the whole endpoint mechanism** — an interactive `/backend`
+choice is persisted too. Four sources resolve, highest first:
+
+1. `--backend-url <url>` on the command line.
+2. `DAINTREE_BACKEND_URL` (trusted env).
+3. The endpoint stored by `/backend` — a 0600 `endpoint.json` at the per-user state root
+   holding **only** `{backend_url}` (`internal/config/endpoint.go`). It is a preference,
+   never a credential.
+4. `backend.DefaultBaseURL`.
+
+Env outranks the stored preference deliberately: a harness, an e2e run or CI must never be
+silently redirected by a choice someone made in an interactive session months ago. Because
+that ordering otherwise reads as a broken `/backend`, `cfg.BackendURLPinnedByEnv` makes the
+command say which layer won. `/backend` with no argument reports the resolved endpoint,
+`/backend <target>` (`local`, `official`, a number, or a URL) swaps the `Swappable` in place
+**and** persists, and `/backend default` forgets.
+
+A stored preference that fails validation degrades to the default rather than bricking the
+launch — the same contract as an unreadable one — and the reason is surfaced so the CLI can
+name it instead of silently dialling somewhere else. Two diagnostics, deliberately not one:
+`cfg.EndpointInsecureRejected` for plaintext to a remote host, which is a security refusal a
+user may have meant and can authorize, and `cfg.EndpointShapeRejected` for everything else
+(userinfo, a query string, a bad scheme, an unparseable URL), which is a repair job.
+Collapsing them would report a malformed endpoint as a security decision.
+
+All four sources go through `backend.NormalizeBaseURL`, which is the single door: one
+validator, so a value the interactive command flatly refuses cannot be quietly accepted at
+launch instead.
+
+The env override is still the local dev loop in its entirety:
 
 ```bash
 cd ../assistant-backend
@@ -230,10 +268,12 @@ fake that serves no discovery route leaves account state UNKNOWN rather than "no
 here" — but a machine with no stored credential short-circuits to an anonymous request
 either way, so nothing gates them.
 
-A remote endpoint's plaintext `http://` is refused by default: `config.LoadConfig` refuses a non-loopback `http://`
-backend URL by default (`backend.ValidatePlaintextRemote`) — a request may carry no
-bearer, but a turn's prose, tool arguments and results all cross that wire, and plaintext to
-anything but this machine is a confidentiality failure regardless. Loopback (the local dev
+A remote endpoint's plaintext `http://` is refused by default, and `config.LoadConfig` gets
+that from the same single door as everything else: `backend.NormalizeBaseURL` applies the
+plaintext rule (`backend.ValidatePlaintextRemote`) alongside the shape rules, so there is one
+decision rather than two that can drift. A request may carry no bearer, but a turn's prose,
+tool arguments and results all cross that wire, and plaintext to anything but this machine is
+a confidentiality failure regardless. Loopback (the local dev
 loop above) stays permitted unconditionally. The escape hatch for a deliberately plaintext
 remote endpoint is `--allow-insecure-backend` / `DAINTREE_ALLOW_INSECURE_BACKEND=1`
 (trusted-env only).
@@ -428,9 +468,9 @@ The backend used to collapse every upstream 401/402/403/404 and every 5xx into o
 only three of them are transient. **`retryable` is server-side and is NOT serialised** —
 the CLI classifies from the code itself, so this table is the contract:
 
-| code | status | retried? | whose problem |
+| code | status today | retried? | whose problem |
 |---|---|---|---|
-| `provider_invalid_api_key` | 401 | no | the credential funding the turn — always the backend's own; a caller bearer never reaches the provider |
+| `provider_invalid_api_key` | 401 → 5xx (in flight) | no | the credential funding the turn — always the backend's own; a caller bearer never reaches the provider |
 | `provider_insufficient_credits` | 402 | no | that account's balance. It is the DEPLOYMENT's account, so it cannot be topped up from the CLI — report it |
 | `provider_key_forbidden` | 403 | no | that key's model permissions / spend limit / guardrails, again the deployment's |
 | `upstream_no_compliant_provider` | 503 | no | your routing policy matched no endpoint |
@@ -442,6 +482,12 @@ the CLI classifies from the code itself, so this table is the contract:
 | `upstream_error` | 502 | stream only | the pre-split catch-all — still emitted for a stream error the backend could not classify, and by the key-verification path when the provider could not be reached; a genuine "we don't know", which is why the stream form is worth one more attempt while the pre-stream form (an application verdict) is not |
 
 Two rules make this work, and both are easy to get wrong:
+
+The `status today` column is orientation, not contract, and `provider_invalid_api_key` is the
+live example of why: it reports the deployment's own upstream credential failing, a
+server-side fault wearing a client-error number, and it is moving from 401 to a 5xx. Nothing
+on this side changes when it lands, precisely because of the first rule below — a CLI that had
+keyed on the number would have needed a synchronised release of both repos.
 
 1. **Classify on the code, never the status.** The backend emits `meta` before it opens
    the upstream stream, so most of this taxonomy arrives as a terminal SSE `error` event

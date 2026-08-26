@@ -302,11 +302,15 @@ func accountStatus(ctx context.Context, mgr *auth.Manager) auth.Status {
 		st = st.WithManifest(man)
 	}
 	st = st.WithAvailability(mgr.Availability(ctx))
-	// The endpoint is operator-supplied and may carry userinfo — `https://user:secret@host`
-	// is a valid thing to have typed into `/backend`. This renders into the transcript
-	// and onto the host's NDJSON stream, so it goes through the same fail-closed
-	// sanitizer every other displayed URL uses: a blank endpoint costs a reader one
-	// fact, a leaked credential is unrecoverable.
+	// Belt and braces. An endpoint can no longer carry userinfo: every source goes
+	// through backend.NormalizeBaseURL, which refuses `https://user:secret@host`
+	// outright — at startup (config.LoadConfig) and on the interactive `/backend <url>`
+	// path (app.backendswitch) alike — so by the time it reaches here it should be
+	// clean. It is sanitized anyway because this value renders into the transcript AND
+	// onto the host's NDJSON stream, both of which get pasted into issues and logs
+	// verbatim; a displayed URL should not be the thing that has to be right. The
+	// sanitizer fails closed, and that is the correct trade here: a blank endpoint costs
+	// a reader one fact, a leaked credential is unrecoverable.
 	st.BackendURL = mcp.SanitizeURL(st.BackendURL)
 	return st
 }

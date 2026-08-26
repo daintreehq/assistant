@@ -56,8 +56,18 @@ const DefaultBaseURL = "https://assistant.daintree.org"
 
 // LocalBaseURL is the local development backend (`python -m daintree_assistant_server`
 // from ../assistant-backend). It is what DAINTREE_BACKEND_URL is usually pointed at for
-// the dev loop, e2e tests and benchmarks. There is no endpoint menu any more — the
-// trusted env var is the whole mechanism — so this is the value a developer exports.
+// the dev loop, e2e tests and benchmarks, and it is what `/backend local` selects.
+//
+// The env var is NOT the whole mechanism, and believing it is sends someone hunting an
+// exported variable to explain an endpoint that nothing exported. Four sources resolve,
+// highest first: `--backend-url`, the trusted `DAINTREE_BACKEND_URL`, the preference
+// `/backend` PERSISTED on disk (internal/config/endpoint.go — a 0600 endpoint.json at
+// the per-user state root holding only `{backend_url}`, a preference and never a
+// credential), and DefaultBaseURL above. Env deliberately outranks the stored preference
+// so a harness, an e2e run or CI is never silently redirected by a choice a human made
+// months ago in an interactive session — and because that ordering otherwise reads as a
+// broken `/backend`, cfg.BackendURLPinnedByEnv exists so the command can say so. Every
+// one of the four goes through NormalizeBaseURL (endpoint.go), which is the single door.
 const LocalBaseURL = "http://127.0.0.1:8473"
 
 // AllowsUnverifiedSignIn reports whether an endpoint is excused from proving it can

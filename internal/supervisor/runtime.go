@@ -987,9 +987,13 @@ func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
 //
 // It reports the STATE and never the email, the subject, or anything else identifying.
 // The control socket's authorization model is filesystem permissions on the state dir,
-// which is the right boundary for coordination and the wrong one for personal data —
-// Daintree reads account display data through `auth status --json` instead, a process the
-// user's own session owns.
+// which is the right boundary for coordination and the wrong one for personal data.
+// Nothing needs identity here anyway: Daintree gets account DISPLAY data from the session
+// it is attached to, by sending a `/account` command frame over the host protocol and
+// rendering the `command:result` (docs/DAINTREE_HOST.md); a script gets it from
+// `auth status --json` in a process it owns. Both already run as the user. This socket
+// answers a narrower question — can the DAEMON still spend — and widening it would put
+// personal data on a channel whose only gate is a directory mode.
 func (r *Runtime) authPostureLocked() (state string, paused bool, revision string) {
 	if r.auth == nil {
 		return "", false, ""
@@ -1001,11 +1005,12 @@ func (r *Runtime) authPostureLocked() (state string, paused bool, revision strin
 
 // authStateForStatus reports the daemon's account state. Must be called with r.mu held.
 //
-// It reports the STATE and never the email, the subject, or anything else identifying.
-// The control socket's authorization model is filesystem permissions on the state dir,
-// which is the right boundary for coordination and the wrong one for personal data —
-// Daintree reads account display data through `auth status --json` instead, a process
-// the user's own session owns.
+// It reports the STATE and never the email, the subject, or anything else identifying,
+// for the same reason authPostureLocked does: the control socket is gated by filesystem
+// permissions on the state dir, which is the right boundary for coordination and the
+// wrong one for personal data. Account display data reaches Daintree from the attached
+// session instead — a `/account` command frame over the host protocol, rendered from the
+// `command:result` — and reaches a script through `auth status --json`.
 func (r *Runtime) authStateForStatus() string {
 	if r.auth == nil {
 		return ""

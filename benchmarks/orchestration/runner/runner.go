@@ -146,14 +146,18 @@ func RunScenario(ctx context.Context, bin string, sc scenario.Scenario, opts Opt
 		"DAINTREE_PROJECT_ID=",
 		"DAINTREE_WINDOW_ID=",
 	)
-	// The CLI refuses to run signed out, and the state-dir override above deliberately
-	// hides the developer's stored sign-in — so DAINTREE_API_KEY must be exported for a
-	// benchmark run. It is inherited from os.Environ() above; fail loudly here rather
-	// than let every scenario fail identically with a sign-in error.
-	if strings.TrimSpace(os.Getenv("DAINTREE_API_KEY")) == "" {
-		res.Error = "benchmark requires DAINTREE_API_KEY (the caller key that funds the backend's model calls)"
-		return res
-	}
+	// DAINTREE_API_KEY is deliberately NOT required, and is inherited from os.Environ()
+	// above when it happens to be set. The CLI does not refuse to run signed out: the
+	// backend holds the upstream credential and funds every model call from it, so a
+	// benchmark goes out as an anonymous principal — which is exactly the configuration
+	// a normal install runs in, and therefore the one worth measuring. Demanding the
+	// variable here, as this once did, failed every scenario identically on every machine
+	// set up the ordinary way.
+	//
+	// The state-dir override above still hides any stored sign-in, so when the variable
+	// IS exported it is the only caller identity a scenario runs under. That is the
+	// deliberate way to benchmark a deployment that meters by account; it changes who is
+	// CALLING, never what pays.
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

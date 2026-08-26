@@ -196,6 +196,9 @@ Every command is an object with a string `sessionId` and a string `type`.
 | `prompt` | `text` | Start a user turn. Sent while a turn is running, it is **folded into** the in-flight turn as an interjection rather than rejected. |
 | `approval:decide` | `approvalId`, `decision` | Answer a parked confirmation. |
 | `question:answer` | `questionId`, `choiceIndex` | Answer a multiple-choice question. `choiceIndex` is 0-based; **negative means dismissed**, which cancels the tool call rather than answering it. Required and must be a number — a missing one would default to 0 and silently answer "the first option" for a user who never chose. |
+| `command` | `line` | Run a slash command the host's own composer resolved — the raw line, e.g. `"/account"`. An accepted command produces exactly one `command:result`; a REFUSED one produces a `host:error` and no result (see below). Commands are not conversation: sending `/status` as a `prompt` produces an answer about the *word* status, spends a turn doing it, and leaves the user believing they ran something. |
+| `operations` | — | Ask for the current operations reading. Answered with one `operations:snapshot`. A **poll, not a subscription** — pushing every store change to a host that may not be showing the deck is a great deal of traffic for a view nobody is looking at. |
+| `interject:retract` | — | Take back the most recent buffered interjection (LIFO). Answered with `interject:retracted`, which reports whether anything was actually taken back. |
 | `interrupt` | — | Cancel the running turn. Leaves autonomous wake work alone. |
 | `hibernate` | — | Graceful teardown, reason `hibernate`. |
 | `shutdown` | — | Graceful teardown, reason `exit`. |
@@ -225,7 +228,8 @@ session; a consumer that sees a gap knows it lost something.
 | `turn:phase` | `phase` — the canonical `domain.RunPhase` |
 | `turn:token` | `turnId`, `chunk` — streamed prose, for liveness only |
 | `turn:reasoning` | `turnId`, the round's thinking |
-| `turn:interjection` | `text` — a message typed *while* the turn ran |
+| `turn:interjection` | `text`, `turnId?` — a message typed *while* the turn ran, emitted at the moment the loop folded it into history |
+| `interject:retracted` | `retracted`, `text?` — the answer to `interject:retract`. `text` is present only when `retracted` is true, echoed verbatim so the composer gets back exactly what was typed |
 | `turn:end` | `turnId`, `endedAt`, `outcome?`, `content?` |
 | `tool:batch` | `calls` — the whole batch announced as queued, before sequential dispatch |
 | `tool:started` | `toolCallId`, `toolId`, `argsSummary`, `startedAt`, `danger`, `turnId?` |
@@ -236,10 +240,66 @@ session; a consumer that sees a gap knows it lost something.
 | `approval:decided` | `approvalId`, `decision`, `decidedAt` |
 | `question:requested` | `questionId`, `question`, `options[{label,text}]`, `default`, `requestedAt`, `turnId?`, `toolCallId?` |
 | `question:answered` | `questionId`, `choiceIndex`, `cancelled`, `answeredAt`, `label?`, `text?` |
+| `command:result` | `command`, `text`, `conversationCleared` (**always present**), `quit?`, `unknown?`, `turnId?` — the answer to one inbound `command`. See [the clear rule](#a-host-must-never-infer-the-clear-from-the-command-text) |
+| `operations:snapshot` | `inbox[]`, `workflows[]`, `agents[]`, `async[]`, `timers[]`, `audit[]` — the answer to one inbound `operations`. Row shapes below |
+| `mcp:status` | `connected`, `toolCount?`, `error?` — whether the Daintree control plane is reachable and how many tools it offers |
 | `usage` | per-round token accounting |
 | `cost` | `total`, `complete` |
 | `notice` | `level`, `message` |
 | `model:rate-limited` | emitted when the provider throttled us after the retry budget |
+
+### A slash command can be refused, and then there is no `command:result`
+
+`/login`, `/logout` and `/account` are SLOW — `/login` opens a browser and then waits up to
+five minutes for a loopback callback — so they run on a worker instead of blocking the
+single-threaded command loop, which would otherwise accept no interrupt, no approval and no
+quit for those five minutes. Only one runs at a time: a second slow command arriving while
+one is still deciding is **rejected**, answered with a `host:error` carrying code
+`command-busy` and no `command:result`. Queuing them instead would settle the two in
+whichever order the network returned rather than the order they were typed, and a `/logout`
+sent after a `/login` landing first leaves the session signed in. A command arriving during
+teardown is refused the same way.
+
+So a host must clear its pending-command state on `command:result` **or** a `host:error` —
+binding it to the result alone leaves a refused command spinning forever.
+
+### `mcp:status` is a different question from "is the engine up"
+
+`host:ready` says this process is running; it says nothing about whether it can *do*
+anything. A session that answers questions but cannot spawn an agent, under a status line
+reading "Connected", is the most misleading state this protocol can produce — so control-plane
+reachability is carried separately. `toolCount` is **omitted** until the catalog has actually
+been fetched, which is not the same as a catalog of zero tools, and `error` names the reason
+when `connected` is false.
+
+It is emitted at boot and again after every completed slash command — `/reconnect` exists
+precisely to change this, so re-reporting beats leaving a stale reading on screen. It is
+**not** pushed by the engine's own mid-session reconnect, so a host holding a
+`connected:false` that wants a current answer should send a command rather than wait.
+
+### `operations:snapshot` row shapes
+
+Six arrays. Every `at` / `startedAt` / `dueAt` is a Unix millisecond timestamp. The arrays
+are always present, empty rather than omitted, and every field of a row is always present —
+a row is a fixed shape, so an empty string means "the engine does not have this", never "an
+engine too old to say".
+
+| Array | Row fields | Contents |
+| --- | --- | --- |
+| `inbox` | `id`, `severity`, `source`, `summary`, `at` | the attention queue, severity `attention` and above |
+| `workflows` | `id`, `goal`, `status`, `progress`, `next`, `blocked` | open execution graphs — **the engine populates none today**; the shape is fixed so a host can bind to it before the producer lands |
+| `agents` | `id`, `title`, `goal`, `badge`, `agentState`, `preview`, `startedAt`, `needsAttention` | live watchers. `badge` and `preview` arrive empty: the cockpit merged a watcher with its terminal's tail, but that needs a live MCP read, so it is left to the host, which already has the terminal on screen |
+| `async` | `id`, `title`, `tool`, `startedAt` | live async futures |
+| `timers` | `id`, `label`, `dueAt` | scheduled timers |
+| `audit` | `tool`, `outcome`, `durationMs`, `at` | the 8 most recent tool calls, newest first |
+
+Free text is redacted (`redact.String`) on the fields most likely to carry a credential —
+`summary`, `goal`, `title`, `label`, and above all the agent `preview`, which is whatever the
+agent last printed. It is **not** blanket coverage: `progress` and `next` go out raw, so do
+not treat a snapshot as a scrubbed document.
+
+These are data, not drawn lines: the engine stays the single source of the facts and the host
+decides presentation.
 
 ### `turn:end` is the authority, not the token stream
 

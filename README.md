@@ -141,10 +141,16 @@ go test ./...       # no network — fakes for MCP and the backend
 go vet ./... && gofmt -l .
 ```
 
-`make install` forces `GOBIN` so it cannot leave a second copy behind. Daintree finds the
-CLI by a `PATH` lookup, so a stale copy earlier on `PATH` silently wins — and the symptom
-is not "wrong version" but a feature that mysteriously does not exist. `doctor` lists
-every copy it finds.
+`make install` forces `GOBIN` so it cannot leave a second copy behind, and `doctor` lists
+every copy it finds. That matters for **your shell**: a stale binary earlier on `PATH`
+silently wins the lookup, and the symptom is not "wrong version" but a feature that
+mysteriously does not exist.
+
+It does not affect the Daintree app, which never looks on `PATH`. Daintree pins this
+engine as a submodule and builds its own copy into the packaged app, because the host
+protocol moves in lockstep with the engine — so an installed copy of unknown vintage is
+the one thing it must not bind to. Installing here gives you the standalone CLI; it does
+not update the app.
 
 ## Documentation
 
