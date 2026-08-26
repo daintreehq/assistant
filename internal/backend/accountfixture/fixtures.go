@@ -77,8 +77,12 @@ const (
 	// instant the reader would have to guess a zone for.
 	BadCheckedWithoutCheckedAt = "bad_checked_without_checked_at"
 	BadCheckedAtNaive          = "bad_checked_at_naive"
-	// A live answer calling itself stale.
+	// A live answer calling itself stale, and a cached answer calling itself fresh. Source
+	// and freshness are one fact, so each half of the pair has its own way of lying about
+	// it; the second is the costlier one, because it renders as "we checked, and this is
+	// current" about somebody's billing.
 	BadStaleWithoutCache = "bad_stale_without_cache"
+	BadCacheMarkedFresh  = "bad_cache_marked_fresh"
 	// A completed lookup that names no authority, and one that will not say whether its
 	// answer is fresh. The second is the subtle one: absent staleness reads as "not
 	// stale" through the accessor, so a body that never made the claim would be rendered
@@ -129,6 +133,7 @@ func Malformed() []string {
 		BadCheckedWithoutCheckedAt,
 		BadCheckedAtNaive,
 		BadStaleWithoutCache,
+		BadCacheMarkedFresh,
 		BadCheckedWithoutSource,
 		BadCheckedWithoutStale,
 		BadCheckedAtYearOne,

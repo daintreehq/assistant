@@ -212,6 +212,64 @@ func TestAStaleCachedGrantKeepsBothItsPlanAndItsDoubt(t *testing.T) {
 	}
 }
 
+// Source and freshness are a CLOSED TABLE of two pairs, and both mismatches are refused.
+//
+// The half that is easy to leave open is `cache` with `entitlement_stale: false`, because
+// nothing downstream trips over it: Stale() answers false, the source is not a field any
+// renderer branches on, and the line the user reads becomes "we checked, and this is
+// current" about their own billing — a freshness claim the cached answer never made. That
+// is the same fabrication the pointer decoding of entitlement_stale exists to stop a body
+// committing by omission, so leaving the pair open would have let it be committed outright
+// instead.
+//
+// The refusal is a statement about the BACKEND, so it is asserted here to stay one: a
+// contract error classified as RemedyClear would delete a working credential over a server
+// bug, and one that read as a subscription verdict would send a paying customer to a
+// checkout page. RemedyNone is what keeps both doors shut.
+func TestEntitlementSourceAndFreshnessAreRefusedUnlessTheyAgree(t *testing.T) {
+	const base = `{"version":1,"subject_hash":"` + accountfixture.SubjectHash +
+		`","access":"granted","plan_id":"pro","checked_at":"2026-08-25T09:14:00Z","entitlement_source":`
+
+	valid := map[string]string{
+		"a live lookup is fresh":   base + `"polar","entitlement_stale":false}`,
+		"a cached answer is stale": base + `"cache","entitlement_stale":true}`,
+	}
+	for name, body := range valid {
+		t.Run(name, func(t *testing.T) {
+			if _, err := serveBody(t, body).Account(context.Background()); err != nil {
+				t.Fatalf("refused a legitimate source/freshness pair: %v", err)
+			}
+		})
+	}
+
+	invalid := map[string]string{
+		"a live lookup calling itself stale":   base + `"polar","entitlement_stale":true}`,
+		"a cached answer calling itself fresh": base + `"cache","entitlement_stale":false}`,
+	}
+	for name, body := range invalid {
+		t.Run(name, func(t *testing.T) {
+			got, err := serveBody(t, body).Account(context.Background())
+			if err == nil {
+				t.Fatalf("accepted a contradictory source/freshness pair: %+v", got)
+			}
+			be, ok := err.(*Error)
+			if !ok || be.Code != CodeAccountContractInvalid {
+				t.Fatalf("err = %v, want a local %s", err, CodeAccountContractInvalid)
+			}
+			// Never an account verdict, and never a reason to touch the credential.
+			if be.IsAuth() || be.IsSubscription() || be.IsAccountCode() || be.IsAccountDependency() {
+				t.Errorf("a contract failure was classified as an account verdict (code %q)", be.Code)
+			}
+			if be.AuthRemedy() != RemedyNone {
+				t.Errorf("a contract failure asked the auth layer to act: %v", be.AuthRemedy())
+			}
+			if got != (AccountStatus{}) {
+				t.Errorf("a refused body still returned data: %+v", got)
+			}
+		})
+	}
+}
+
 // A checked verdict must name its authority AND say whether its answer is fresh — on all
 // three, not only on `granted`.
 //

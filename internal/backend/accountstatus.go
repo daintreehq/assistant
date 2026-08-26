@@ -53,9 +53,11 @@ const (
 	PlanPro      = "pro"
 )
 
-// Where the entitlement answer came from. `cache` is the only source a stale answer may
-// carry — a live billing lookup cannot be stale by definition, so the combination is a
-// contradiction rather than a curiosity.
+// Where the entitlement answer came from. Source and freshness are ONE fact wearing two
+// field names: `polar` is a live billing lookup, which cannot be stale by definition, and
+// `cache` is the fallback served when that lookup could not be made, which cannot be
+// fresh. Either mismatch is a contradiction rather than a curiosity, and validateChecked
+// refuses both.
 const (
 	EntitlementSourcePolar = "polar"
 	EntitlementSourceCache = "cache"
@@ -321,6 +323,19 @@ func (a *AccountStatus) validateChecked() error {
 	// their billing. The backend enforces the same pairing on the way out.
 	if a.Stale() && a.EntitlementSource != EntitlementSourceCache {
 		return accountContractError("entitlement marked stale without a cache source")
+	}
+	// And the same pairing read the other way, which is the half that actually hurts. The
+	// cache is the fallback served when the live provider could not be reached, so a
+	// cached answer is stale by construction and `cache` beside `entitlement_stale: false`
+	// is one body making both claims at once. The two do not cancel out: Stale() answers
+	// false, and the response is rendered as "we checked, and this is current" — a
+	// freshness claim about somebody's billing that the cached answer never made, and the
+	// precise fabrication the pointer decoding above exists to keep a body from committing
+	// by omission. Leaving this direction open let it be committed outright instead. The
+	// backend enforces the same pairing on the way out, in both directions, so nothing a
+	// healthy deployment sends is refused by either guard.
+	if a.EntitlementSource == EntitlementSourceCache && !a.Stale() {
+		return accountContractError("entitlement came from a cache but was not marked stale")
 	}
 
 	// REQUIRED here, and only here. A lookup happened, so it happened at a time, and

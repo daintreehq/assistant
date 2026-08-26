@@ -205,6 +205,11 @@ func TestAccountRejectsMalformedBodiesAsProtocolErrors(t *testing.T) {
 		{"unknown plan", `{"version":1,"subject_hash":"0123456789abcdef","access":"granted","plan_id":"platinum","entitlement_source":"polar","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid, "unrecognised plan id"},
 		{"unknown entitlement source", `{"version":1,"subject_hash":"0123456789abcdef","access":"granted","plan_id":"pro","entitlement_source":"guesswork","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid, "unrecognised entitlement source"},
 		{"stale without a cache source", `{"version":1,"subject_hash":"0123456789abcdef","access":"granted","plan_id":"pro","entitlement_source":"polar","entitlement_stale":true,"checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid, "stale without a cache source"},
+		// The other half of the same pairing, and the half that would be rendered rather
+		// than merely noticed: a cached answer is the fallback served when the live lookup
+		// could not be made, so `cache` with `stale:false` is "we checked, and this is
+		// current" written by a response that checked nothing.
+		{"a cache source marked fresh", `{"version":1,"subject_hash":"0123456789abcdef","access":"granted","plan_id":"pro","entitlement_source":"cache","entitlement_stale":false,"checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid, "came from a cache but was not marked stale"},
 		// A COMPLETED lookup with no time on it. The identity-only body that used to sit
 		// in this row — {"version":1,"access":"unverified"} — is now the canonical valid
 		// response, which is the defect this whole contract pass exists to fix.
