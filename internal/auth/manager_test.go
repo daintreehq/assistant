@@ -1019,6 +1019,13 @@ func TestAStaleLivenessConfirmationCannotVouchForALogout(t *testing.T) {
 	if m.State() != StateSignedOut {
 		t.Fatalf("state = %q — a late confirmation showed the user signed in with no credential", m.State())
 	}
+	// The state assertion above is no longer sufficient on its own: MarkIdentityLive
+	// writes no state at all now, so it would hold even with both guards deleted. What
+	// the call CAN still do wrongly is stamp a verification onto an identity that is
+	// gone, so that is what has to be checked.
+	if got := m.Status().LastVerifiedAt; got != nil {
+		t.Fatalf("a late confirmation stamped %s onto a signed-out machine", got)
+	}
 }
 
 // auth_token_expired on a token with no readable expiry would otherwise be re-presented

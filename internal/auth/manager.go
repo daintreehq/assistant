@@ -277,10 +277,14 @@ func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 		// The descriptor is written at login and removed at logout, so its absence here
 		// is definitive: there is no credential on this machine. A long-lived process
 		// whose own state still said `signed_in_active` because ANOTHER process signed
-		// out went on reporting a spendable session — and CanSpend() is what the
-		// supervisor's gate consults before an unattended turn, so the daemon would keep
-		// authorising paid work for an account the user believes they have signed out
-		// of. The token was already gone by then; only the state disagreed.
+		// out went on reporting a spendable session to every surface that renders one,
+		// and CanSpend() — the strictest reading of that state — kept answering true for
+		// an account the user believes they have signed out of. The token was already
+		// gone by then; only the state disagreed.
+		//
+		// (CanSpend has no production caller today; the supervisor's wake gate branches
+		// on StateRevoked/StateSignedOut directly. This comment used to name it as the
+		// gate, which sent a reader looking for a coupling that is not there.)
 		//
 		// NARROW, not every state SignedIn() covers. Three of those carry a diagnosis
 		// this branch has no business overwriting:

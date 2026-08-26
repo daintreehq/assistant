@@ -651,6 +651,10 @@ func TestAProtectedSuccessPreservesEveryUncertainVerdict(t *testing.T) {
 		StateTemporarilyUnavailable,
 		StateAccessRefused,
 		StateStorageUnavailable,
+		// StateRefreshing was promoted too. It resolves on its own — a completed
+		// refresh writes StateSignedInUnverified — so a success arriving mid-flight
+		// has no business guessing the outcome ahead of it.
+		StateRefreshing,
 	}
 	for _, before := range preserved {
 		d := newDeployment(t)
@@ -659,8 +663,16 @@ func TestAProtectedSuccessPreservesEveryUncertainVerdict(t *testing.T) {
 		if _, err := m.AccessToken(context.Background()); err != nil {
 			t.Fatalf("AccessToken: %v", err)
 		}
+		// The error is seeded alongside the state, because the two are retired together
+		// or not at all. MarkActive cleared lastErr, and it could: it also moved the
+		// state past whatever the error explained. Without this assertion, putting
+		// `m.lastErr = nil` back would pass every check below while leaving
+		// `temporarily_unavailable` and `access_refused` naming a problem and then
+		// refusing to say which.
+		seeded := &backend.Error{Code: backend.CodeAuthDependencyUnavailable, Type: "api_error", Message: "seeded"}
 		m.mu.Lock()
 		m.state = before
+		m.lastErr = seeded
 		m.mu.Unlock()
 
 		if _, err := c.Capabilities(context.Background()); err != nil {
@@ -676,6 +688,10 @@ func TestAProtectedSuccessPreservesEveryUncertainVerdict(t *testing.T) {
 		}
 		if got.LastVerifiedAt == nil {
 			t.Errorf("state %q: the success recorded no liveness", before)
+		}
+		if got.LastErrorCode != seeded.Code {
+			t.Errorf("state %q: last error code = %q, want %q — the success dropped the diagnosis its state still depends on",
+				before, got.LastErrorCode, seeded.Code)
 		}
 	}
 }
