@@ -36,6 +36,12 @@ func TestErrorIsRateLimited(t *testing.T) {
 // behind your key is". They are separated by CODE for exactly that reason, and this
 // pins the separation — a regression here sends a tester whose key the provider revoked
 // into a re-paste loop that cannot possibly succeed.
+//
+// Each provider code is therefore asserted under more than one status: the one it
+// carries today, none at all (mid-stream), and — for `provider_invalid_api_key`, which
+// is moving off 401 to a 5xx on the backend — a 5xx standing in for whichever one it
+// lands on. No case pins a number as the contract; they exist to prove the answer does
+// not depend on one.
 func TestErrorAuthSeparatesOurDoorFromTheProvider(t *testing.T) {
 	cases := []struct {
 		name            string
@@ -51,6 +57,10 @@ func TestErrorAuthSeparatesOurDoorFromTheProvider(t *testing.T) {
 		{"key not permitted", Error{HTTPStatus: 403, Code: CodeProviderKeyForbidden}, false, true, true},
 		// Mid-stream the status is absent entirely, so the code has to carry it alone.
 		{"provider rejected mid-stream", Error{Code: CodeProviderInvalidAPIKey, Stream: true}, false, true, true},
+		// The same rejection once the backend moves it off 401. Read on the status, a
+		// 5xx falls out of the auth family altogether and reads as a plain "model error".
+		{"provider rejected under the incoming 5xx", Error{HTTPStatus: 503, Code: CodeProviderInvalidAPIKey}, false, true, true},
+		{"key not permitted mid-stream", Error{Code: CodeProviderKeyForbidden, Stream: true}, false, true, true},
 		// The pre-split blob still reads as an upstream-auth problem, but must NOT claim
 		// to know which of the three it was.
 		{"legacy catch-all", Error{HTTPStatus: 502, Code: CodeUpstreamError}, false, true, false},

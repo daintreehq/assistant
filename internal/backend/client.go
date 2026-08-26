@@ -947,13 +947,20 @@ func (c *Client) Respond(ctx context.Context, req RespondRequest) (RespondRespon
 		req.Routing = c.routingPreference()
 	}
 	var out RespondResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/v1/daintree/respond", req, &out); err != nil {
+	spendAbandoned, err := c.doJSONTracked(ctx, http.MethodPost, "/v1/daintree/respond", req, &out)
+	if err != nil {
+		if spendAbandoned {
+			// Failed outright, but an attempt this call replaced may already have spent
+			// money nothing else will ever report — the same exit the streamed path
+			// takes for abandonedSpend.
+			c.reportCost(CostEvent{Op: RespondOp, Complete: false})
+		}
 		return RespondResponse{}, err
 	}
 	// The non-streaming path spends the same upstream credential exactly like the
 	// streamed one, so it reports through the same seam. Reusing RespondResult keeps the
 	// two from growing different accounting rules for the same request.
-	c.reportRespondCost(RespondResult{Usage: out.Usage, Cost: out.Cost}, false)
+	c.reportRespondCost(RespondResult{Usage: out.Usage, Cost: out.Cost}, spendAbandoned)
 	return out, nil
 }
 
@@ -971,7 +978,7 @@ func (c *Client) RunTask(ctx context.Context, req TaskRequest) (TaskResult, erro
 	}
 	start := time.Now()
 	var out TaskResult
-	err := c.doJSON(ctx, http.MethodPost, "/v1/daintree/tasks", req, &out)
+	spendAbandoned, err := c.doJSONTracked(ctx, http.MethodPost, "/v1/daintree/tasks", req, &out)
 	if c.onTask != nil {
 		// Guarded side-channel: a hook panic must never fail the task call itself.
 		func() {
@@ -993,16 +1000,21 @@ func (c *Client) RunTask(ctx context.Context, req TaskRequest) (TaskResult, erro
 		// rather than silently omitting it — but only when a generation can actually
 		// have run (see taskMayHaveBilled), so a 400 or a refused key does not caveat a
 		// total that is perfectly accurate.
-		if taskMayHaveBilled(err) {
+		// spendAbandoned is asked FIRST and separately: taskMayHaveBilled answers for
+		// the error in hand, which is the LAST attempt, while a replayed call can have
+		// billed on an attempt whose error no longer exists.
+		if spendAbandoned || taskMayHaveBilled(err) {
 			c.reportCost(CostEvent{Op: req.Task, Complete: false})
 		}
 		return TaskResult{}, err
 	}
 	// A task's usage.cost IS that task's total — the figure covers a repair pass too.
+	// It does NOT cover an earlier HTTP attempt this call replaced, so a retried task
+	// reports its figure as a floor rather than as the bill.
 	c.reportCost(CostEvent{
 		Op:           req.Task,
 		Amount:       out.Usage.Cost,
-		Complete:     true,
+		Complete:     !spendAbandoned,
 		CachedTokens: out.Usage.CachedTokens,
 		PromptTokens: out.Usage.PromptTokens,
 	})
@@ -1068,6 +1080,17 @@ func (c *Client) reportRespondCost(res RespondResult, abandonedSpend bool) {
 // the backend, it refused the request at its own door, or the provider refused before
 // generating. Everything else — a 5xx, a malformed output verdict, a client-side timeout
 // on an accepted request — is counted as unknown spend.
+//
+// Every condition that names a backend VERDICT is read off the stable code. The statuses
+// beside those codes in errors.go are orientation (a mid-stream envelope carries none at
+// all, and `provider_invalid_api_key` is moving off the 401 it has always worn), so a
+// rule that asked the number would answer differently for the same condition depending
+// only on how far the request got. What remains status-shaped is a contract bug (a 400 by
+// definition), a protocol mismatch, and the trailing unrecognised-body backstop.
+//
+// It answers for the error IN HAND, which on a retried call is the last attempt only.
+// Whether an earlier attempt billed is a different question, answered by the
+// spendAbandoned result of doJSONTracked and combined by the caller.
 func taskMayHaveBilled(err error) bool {
 	var be *Error
 	if !errors.As(err, &be) {
@@ -1086,13 +1109,44 @@ func taskMayHaveBilled(err error) bool {
 		// failure to permanently caveat the session total as a lower bound over spend
 		// that provably never happened.
 		return false
-	case be.IsAccountIdentity(), be.IsSubscription(), be.IsAccountDependency():
-		// The backend refused at its own door, before any provider call.
+	case be.IsAccountIdentity(), be.IsSubscription(), be.IsAccountDependency(),
+		be.Code == CodeInvalidAPIKey:
+		// The backend refused at its own door, before any provider call. `invalid_api_key`
+		// — a malformed bearer, the one door code with no constant in this package — is
+		// named here rather than left to the status arm below, which was the only thing
+		// catching it.
+		return false
+	case be.Code == CodeProviderInvalidAPIKey, be.Code == CodeProviderKeyForbidden,
+		be.Code == CodeProviderInsufficientCredit, be.Code == CodeUpstreamNoCompliantProvider:
+		// Refused before a single token was generated: a credential the provider does
+		// not recognise, one it will not let use this model, an account with nothing
+		// left to spend, or no endpoint to spend it at.
+		//
+		// The first two used to reach this answer ONLY through the status arm below —
+		// they were caught as "a 401" and "a 403" rather than as themselves — which made
+		// an honest total depend on a number that is not part of the contract.
+		// `provider_invalid_api_key` is moving off 401 on the backend, and the same
+		// envelope carries no status at all mid-stream; under either, the status arm
+		// misses and the fallthrough caveats a total over a call the provider refused.
+		//
+		// It is the attempt in hand that generated nothing. Whether the backend billed
+		// EARLIER work inside the same request — a completion followed by a repair pass
+		// that then hit one of these — is not visible from here; the contract's position
+		// is that a billed task failure surfaces as `task_output_invalid`, and this arm
+		// rests on it.
 		return false
 	case be.HTTPStatus == http.StatusUnauthorized, be.HTTPStatus == http.StatusForbidden:
-		return false
-	case be.Code == CodeProviderInsufficientCredit, be.Code == CodeUpstreamNoCompliantProvider:
-		// Refused before any generation: no credit to spend, or no endpoint to spend it at.
+		// Orientation only, and LAST: an auth-shaped refusal whose code this build does
+		// not recognise — an older or newer backend, or a proxy that reshaped the body —
+		// is still a refusal at somebody's door, before any generation.
+		//
+		// Every code above is decided before it, so no recognised condition depends on
+		// the number any more. What this arm cannot do is prove the negative: it is not
+		// restricted to unrecognised codes, so a code that DOES mean spend would be read
+		// as free if it ever arrived wearing a 401 or 403. Nothing in the current backend
+		// mappings pairs one that way — which is a fact about today's server, not a
+		// guarantee. The remedy if it ever fires wrongly is to give that code its own
+		// arm above, never to add a number here.
 		return false
 	}
 	return true
@@ -1282,18 +1336,36 @@ const jsonAttemptTimeout = 60 * time.Second
 // The request body is marshaled ONCE and replayed from the same bytes — a fresh
 // reader per attempt, since each is consumed.
 func (c *Client) doJSON(ctx context.Context, method, path string, body any, out any) error {
+	_, err := c.doJSONTracked(ctx, method, path, body, out)
+	return err
+}
+
+// doJSONTracked is doJSON plus the one fact only the retry loop knows: whether an attempt
+// it REPLACED may already have billed. Every endpoint that reports spend has to ask,
+// because the answer cannot be recovered afterwards — a failed attempt reports no cost of
+// its own, and the succeeding attempt's total covers only its own request (the backend
+// aggregates re-rolls WITHIN a request, never across separate HTTP attempts). So a
+// replayed call's reported figure is a floor, and the callers that report money say so.
+//
+// The plain doJSON exists for the endpoints that spend nothing — capabilities, health,
+// account status — where the answer is real but there is no total for it to qualify.
+func (c *Client) doJSONTracked(ctx context.Context, method, path string, body any, out any) (bool, error) {
 	// One scrub point for every JSON endpoint. readErrorResponse already scrubs the
 	// HTTP-error path (so the retry hook sees a clean error too); this additionally
 	// covers marshal/decode errors, whose text can echo the payload. See scrubError.
-	return c.scrubError(c.doJSONRetry(ctx, method, path, body, out))
+	spendAbandoned, err := c.doJSONRetry(ctx, method, path, body, out)
+	return spendAbandoned, c.scrubError(err)
 }
 
-func (c *Client) doJSONRetry(ctx context.Context, method, path string, body any, out any) error {
+// The bool result is the abandoned-spend answer doJSONTracked documents; it is returned
+// beside BOTH outcomes, because a call that eventually succeeds hides the same money as
+// one that eventually fails.
+func (c *Client) doJSONRetry(ctx context.Context, method, path string, body any, out any) (spendAbandoned bool, err error) {
 	var payload []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("backend: marshal %s: %w", path, err)
+			return false, fmt.Errorf("backend: marshal %s: %w", path, err)
 		}
 		payload = b
 	}
@@ -1312,10 +1384,12 @@ func (c *Client) doJSONRetry(ctx context.Context, method, path string, body any,
 
 	started := time.Now()
 	for attempt := 0; ; attempt++ {
-		err := c.doJSONOnce(ctx, method, path, payload, body != nil, out)
+		err = c.doJSONOnce(ctx, method, path, payload, body != nil, out)
 		if err == nil {
 			acct.succeeded()
-			return nil
+			// Success does not retire the history: an attempt this one replaced may
+			// still have billed, and only the caller knows what to qualify with it.
+			return spendAbandoned, nil
 		}
 		// Caller cancellation (or an exhausted caller-supplied deadline) is a clean
 		// stop, never a retry — but the answer that arrived before it is still an
@@ -1324,7 +1398,7 @@ func (c *Client) doJSONRetry(ctx context.Context, method, path string, body any,
 		// believing in a session the backend has already ended.
 		if ctx.Err() != nil {
 			acct.failed(ctx, err)
-			return err
+			return spendAbandoned, err
 		}
 		// The auth ladder, above the transport retry and deliberately separate from it.
 		// isRetriable refuses every identity code, so without this an expired token is a
@@ -1348,7 +1422,7 @@ func (c *Client) doJSONRetry(ctx context.Context, method, path string, body any,
 				// the refresh failed because the session is gone — send the request
 				// ANONYMOUSLY, which on an open backend succeeds as the wrong principal
 				// and reports a confirmed session that no longer exists.
-				return err
+				return spendAbandoned, err
 			}
 			// The outcome of the replay belongs to the NEW token, not the one that just
 			// failed.
@@ -1358,7 +1432,7 @@ func (c *Client) doJSONRetry(ctx context.Context, method, path string, body any,
 		be, ok := err.(*Error)
 		if !ok || !isRetriable(be) || attempt+1 >= c.retry.MaxAttempts || retriesDisabled(ctx) {
 			acct.failed(ctx, err)
-			return err
+			return spendAbandoned, err
 		}
 		delay := c.retry.backoff(attempt, be.RetryAfter)
 		// Attempts are not free here either: a slow-failing endpoint can spend most
@@ -1371,7 +1445,7 @@ func (c *Client) doJSONRetry(ctx context.Context, method, path string, body any,
 			// and they are the ones that must reach the state machine as "we could not
 			// check" so it preserves the credential instead of inferring a logout.
 			acct.failed(ctx, err)
-			return err
+			return spendAbandoned, err
 		}
 		if c.onRetry != nil {
 			c.onRetry(RetryInfo{
@@ -1384,7 +1458,15 @@ func (c *Client) doJSONRetry(ctx context.Context, method, path string, body any,
 		}
 		if !sleepCtx(ctx, delay) {
 			acct.failed(ctx, err)
-			return err
+			return spendAbandoned, err
+		}
+		// The attempt is now genuinely being REPLACED, so ask about it the same question
+		// the caller will ask about the final error: could it have billed? A retriable
+		// 503 or 504 is exactly the case where the backend may have paid for a generation
+		// and then failed to deliver it. Recorded here rather than at the retry decision
+		// because the two exits above return THIS error, which answers for itself.
+		if taskMayHaveBilled(err) {
+			spendAbandoned = true
 		}
 	}
 }

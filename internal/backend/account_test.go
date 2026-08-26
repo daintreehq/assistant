@@ -231,14 +231,24 @@ func TestAnUntyped401AsksForSignInRatherThanARefresh(t *testing.T) {
 // The provider account codes ride 401/402/403 too, and they are somebody else's
 // problem entirely. A refresh here would re-mint a Daintree credential to fix an
 // OpenRouter balance.
+//
+// Every status shape is swept rather than one being pinned: these codes arrive with no
+// status at all mid-stream, and `provider_invalid_api_key` is moving off 401 to a 5xx on
+// the backend. The remedy has to be none under all of them. A build that answered on the
+// number instead would be offering a sign-in TODAY for the deployment's own upstream
+// credential, under the 401 — and after the move it would reach "none" by accident, for a
+// reason that says nothing about the code, while every other classification of it stayed
+// wrong.
 func TestProviderAccountCodesAreNotAnAuthRemedy(t *testing.T) {
 	for _, code := range []string{CodeProviderInvalidAPIKey, CodeProviderInsufficientCredit, CodeProviderKeyForbidden} {
-		e := &Error{HTTPStatus: 401, Code: code}
-		if got := e.AuthRemedy(); got != RemedyNone {
-			t.Errorf("%s: remedy = %s, want none", code, got)
-		}
-		if e.IsAuth() {
-			t.Errorf("%s: IsAuth() = true, want false", code)
+		for _, status := range []int{0, 401, 402, 403, 503} {
+			e := &Error{HTTPStatus: status, Code: code, Stream: status == 0}
+			if got := e.AuthRemedy(); got != RemedyNone {
+				t.Errorf("%s at status %d: remedy = %s, want none", code, status, got)
+			}
+			if e.IsAuth() {
+				t.Errorf("%s at status %d: IsAuth() = true, want false", code, status)
+			}
 		}
 	}
 }

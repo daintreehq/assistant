@@ -17,8 +17,20 @@ type Envelope struct {
 
 // EnvelopeError is the inner error object.
 type EnvelopeError struct {
-	// OpenAI taxonomy, "_error"-suffixed:
-	// invalid_request_error|authentication_error|rate_limit_error|api_error
+	// The taxonomy family, "_error"-suffixed — invalid_request_error |
+	// authentication_error | rate_limit_error | api_error, plus billing_error for the
+	// subscription family. The list is OPEN, and an unrecognised family is decoded and
+	// carried rather than rejected. It is a machine identifier but still a
+	// backend-controlled string, so it is scrubbed on the way out like the rest — see
+	// scrubBackendError.
+	//
+	// No classifier here consults Type except IsRateLimited, which ORs in
+	// `rate_limit_error` and so does reach the retry layer through isRetriable. Every
+	// other decision — account, provider, billing, spend — reads Code, the stable half of
+	// the contract, plus the documented status fallbacks for a body this build does not
+	// recognise. That is what lets the backend add a family or move a code between them
+	// without a coordinated release: `billing_error` for the two subscription codes is
+	// exactly such a move, and it changes nothing here.
 	Type string `json:"type"`
 
 	Code    string `json:"code"`    // stable machine code, e.g. system_messages_not_allowed
@@ -52,7 +64,12 @@ type EnvelopeError struct {
 const (
 	// The DEPLOYMENT's upstream provider account. Deterministic — the backend
 	// operator's settings, the backend operator's fix.
-	CodeProviderInvalidAPIKey      = "provider_invalid_api_key"      // 401 upstream
+	//
+	// `provider_invalid_api_key` carries no status annotation on purpose. It has arrived
+	// as a 401 for as long as the code has existed and is moving to a 5xx; nothing in
+	// this package reads the number for it, so the move lands with nothing to change
+	// here. Annotating it again is how someone comes to classify on it again.
+	CodeProviderInvalidAPIKey      = "provider_invalid_api_key"
 	CodeProviderInsufficientCredit = "provider_insufficient_credits" // 402 upstream
 	CodeProviderKeyForbidden       = "provider_key_forbidden"        // 403 upstream
 
@@ -77,6 +94,14 @@ const (
 	// why it stays retryable on the stream path.
 	CodeUpstreamError = "upstream_error" // 502
 )
+
+// CodeInvalidAPIKey is the backend's own ingress rejection of a malformed bearer — the
+// one door code that belongs to neither taxonomy above nor the account codes in
+// account.go. It is named here because a decision path reads it (see taskMayHaveBilled,
+// which must know that no provider was ever reached). IsAuth deliberately still reaches
+// it through the 401 fallback instead: unlike the codes it excludes by name, this one IS
+// a 401 by nature — the header on THIS request is the thing that is wrong.
+const CodeInvalidAPIKey = "invalid_api_key"
 
 // Error is a backend failure surfaced to the agent loop. HTTPStatus is 0 for a
 // mid-stream SSE error (the 200 was already committed). RetryAfter is set from the
@@ -146,10 +171,12 @@ func (e *Error) Error() string {
 //
 // Two families are deliberately EXCLUDED even though they share 401/403.
 //
-// The provider account codes came first: `provider_invalid_api_key` is also a 401, but
-// the key the provider revoked is the one the BACKEND spends, so telling the person at
-// the terminal to "check you pasted it in full" sends them round a re-entry loop for a
-// credential they have never held.
+// The provider account codes came first, and they are why the check below asks the code
+// and not the status: `provider_invalid_api_key` arrives today with the same 401 a real
+// auth failure carries — and is moving off it, which changes nothing here — while
+// `provider_key_forbidden` shares the 403. Either way the key the provider rejected is
+// the one the BACKEND spends, so telling the person at the terminal to "check you pasted
+// it in full" sends them round a re-entry loop for a credential they have never held.
 //
 // The two 403s — `auth_client_not_allowed` and `auth_permission_denied` — are the
 // newer and sharper case. Each carries a perfectly valid, perfectly fresh token that

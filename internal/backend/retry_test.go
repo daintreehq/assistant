@@ -299,6 +299,11 @@ func TestIsRetriableClassification(t *testing.T) {
 		// stream), and a status-based rule silently reverses its answer between the two.
 		{"invalid provider key", &Error{HTTPStatus: 401, Code: CodeProviderInvalidAPIKey}, false},
 		{"invalid provider key mid-stream", &Error{Code: CodeProviderInvalidAPIKey, Stream: true}, false},
+		// The backend is moving this code off 401 to a 5xx. The status switch reads a
+		// 503 as a transient gateway failure, so if the code ever stopped being checked
+		// first, the move would silently start replaying a final rejection through the
+		// whole backoff budget.
+		{"invalid provider key under the incoming 5xx", &Error{HTTPStatus: http.StatusServiceUnavailable, Code: CodeProviderInvalidAPIKey}, false},
 		{"no credit", &Error{HTTPStatus: 402, Code: CodeProviderInsufficientCredit}, false},
 		{"no credit mid-stream", &Error{Code: CodeProviderInsufficientCredit, Stream: true}, false},
 		{"key forbidden", &Error{HTTPStatus: 403, Code: CodeProviderKeyForbidden}, false},

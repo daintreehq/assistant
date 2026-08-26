@@ -751,3 +751,175 @@ func TestTrailingJSONIsNotRetried(t *testing.T) {
 		t.Errorf("server was called %d times, want exactly 1 (trailing_json must not be retried)", n)
 	}
 }
+
+// taskMayHaveBilled decides whether a failed task call caveats the session cost total,
+// and the two directions are not symmetric: over-caveating turns an accurate total into a
+// lower bound, under-caveating hides a real charge from the person paying it. So the safe
+// answer is "true" for anything unclear — which is exactly why every "false" has to be
+// earned by a stable CODE rather than by a status.
+//
+// The two provider rejections are the case that was not earned. For as long as they were
+// caught only by their 401 and 403, the identical rejection carrying no status, or
+// carrying the 5xx `provider_invalid_api_key` is moving to, fell through to "may have
+// billed" — telling the user that a call the provider refused before generating a single
+// token might have cost them money.
+func TestTaskMayHaveBilledIsDecidedByCodeNotStatus(t *testing.T) {
+	// Every status shape one of these envelopes can arrive under: the one it carries
+	// today, a 5xx standing in for whichever one `provider_invalid_api_key` lands on
+	// (the contract says only "a 5xx"), and none at all — which is what a terminal SSE
+	// error carries, and what any transport that stops handing us a status would.
+	statuses := []int{
+		0,
+		http.StatusUnauthorized,
+		http.StatusPaymentRequired,
+		http.StatusForbidden,
+		http.StatusServiceUnavailable,
+	}
+	for _, code := range []string{
+		CodeProviderInvalidAPIKey,
+		CodeProviderKeyForbidden,
+		CodeProviderInsufficientCredit,
+		CodeUpstreamNoCompliantProvider,
+	} {
+		for _, status := range statuses {
+			err := &Error{HTTPStatus: status, Code: code}
+			if taskMayHaveBilled(err) {
+				t.Errorf("%s at status %d: taskMayHaveBilled() = true — caveats the total over a call the provider refused before generating anything", code, status)
+			}
+		}
+	}
+
+	// The other side of the ledger. None of these can be shown to be free, so each one
+	// must keep reporting unknown spend.
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"output verdict — the model already ran", &Error{HTTPStatus: http.StatusBadGateway, Code: "task_output_invalid"}},
+		{"provider outage — generation may have started", &Error{HTTPStatus: http.StatusServiceUnavailable, Code: CodeUpstreamUnavailable}},
+		{"upstream timeout", &Error{HTTPStatus: http.StatusGatewayTimeout, Code: CodeUpstreamTimeout}},
+		{"unexplained 500", &Error{HTTPStatus: http.StatusInternalServerError}},
+		{"not a backend error at all", context.DeadlineExceeded},
+	} {
+		if !taskMayHaveBilled(tc.err) {
+			t.Errorf("%s: taskMayHaveBilled() = false — silently drops spend we cannot rule out", tc.name)
+		}
+	}
+
+	// Refusals at our own door, none of which reach a provider. `invalid_api_key` is
+	// asserted with NO status precisely because it is now answered by code; the last two
+	// are the status backstop doing its remaining job — an auth-shaped refusal whose code
+	// this build does not recognise, which is deliberately still classified on the number.
+	for _, err := range []*Error{
+		{Code: "invalid_api_key"},
+		{HTTPStatus: http.StatusUnauthorized, Code: "invalid_api_key"},
+		{Code: "connect"},
+		{HTTPStatus: http.StatusBadRequest, Code: "system_messages_not_allowed"},
+		{HTTPStatus: http.StatusUnauthorized, Code: "some_future_auth_code"},
+		{HTTPStatus: http.StatusForbidden, Code: "some_future_auth_code"},
+	} {
+		if taskMayHaveBilled(err) {
+			t.Errorf("%+v: taskMayHaveBilled() = true — a refusal at somebody's door, before any generation", err)
+		}
+	}
+}
+
+// A retried task reports the whole CALL, not its last attempt. The first attempt here
+// fails with a transient 503 — the class that may well have billed a completion the
+// backend then failed to deliver — and the second fails with a provider refusal that
+// generated nothing. Classifying only the final error reads that as free, and the money
+// the first attempt may have spent is reported by nothing, anywhere: the backend
+// aggregates re-rolls WITHIN a request, never across separate HTTP attempts.
+func TestARetriedTaskKeepsTheEarlierAttemptsPossibleSpend(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		code := "provider_invalid_api_key"
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			code = "upstream_unavailable"
+		} else {
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+		_, _ = io.WriteString(w, `{"error":{"type":"api_error","code":"`+code+`","message":"x"}}`)
+	}))
+	defer srv.Close()
+
+	var events []CostEvent
+	c := NewClient(ClientConfig{
+		BaseURL: srv.URL,
+		Retry:   RetryPolicy{MaxAttempts: 2, BaseDelay: time.Millisecond},
+		OnCost:  func(ev CostEvent) { events = append(events, ev) },
+	})
+	if _, err := c.RunTask(context.Background(), TaskRequest{Task: "terminal_extract_json"}); err == nil {
+		t.Fatal("want an error")
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("attempts = %d, want 2 — the transient failure was not retried, so the test proves nothing", got)
+	}
+	if len(events) != 1 {
+		t.Fatalf("OnCost fired %d times, want 1 — spend from the replaced attempt is reported by nothing else", len(events))
+	}
+	if events[0].Complete || events[0].Amount != nil {
+		t.Errorf("cost event = %+v, want an incomplete event with no amount — the figure is unknown, not zero", events[0])
+	}
+}
+
+// The same history, on a call that then SUCCEEDS. This is the half that a marker on the
+// error object cannot carry: the succeeding attempt reports a real, exact-looking total,
+// and it covers only its own request. Reporting it as complete presents a number below
+// the real bill as if it were the bill.
+func TestARetriedTaskThatSucceedsReportsItsTotalAsAFloor(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":{"type":"api_error","code":"upstream_unavailable","message":"x"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":"task_1","object":"daintree.task.result","task":"terminal_extract_json","model":"m","output":{},"finish_reason":"stop","usage":{"total_tokens":5,"cost":0.25}}`)
+	}))
+	defer srv.Close()
+
+	var events []CostEvent
+	c := NewClient(ClientConfig{
+		BaseURL: srv.URL,
+		Retry:   RetryPolicy{MaxAttempts: 2, BaseDelay: time.Millisecond},
+		OnCost:  func(ev CostEvent) { events = append(events, ev) },
+	})
+	if _, err := c.RunTask(context.Background(), TaskRequest{Task: "terminal_extract_json"}); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("attempts = %d, want 2 — nothing was retried, so the test proves nothing", got)
+	}
+	if len(events) != 1 {
+		t.Fatalf("OnCost fired %d times, want 1", len(events))
+	}
+	if events[0].Amount == nil || *events[0].Amount != 0.25 {
+		t.Errorf("Amount = %v, want the succeeding attempt's own total", events[0].Amount)
+	}
+	if events[0].Complete {
+		t.Error("Complete = true — the reported total omits whatever the replaced attempt spent, so it is a floor")
+	}
+}
+
+// An unretried task is the common case and must NOT be caveated: a total with nothing
+// wrong with it is worth more than a total that is always hedged.
+func TestAnUnretriedTaskStillReportsACompleteTotal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"task_1","object":"daintree.task.result","task":"terminal_extract_json","model":"m","output":{},"finish_reason":"stop","usage":{"total_tokens":5,"cost":0.25}}`)
+	}))
+	defer srv.Close()
+
+	var events []CostEvent
+	c := NewClient(ClientConfig{BaseURL: srv.URL, OnCost: func(ev CostEvent) { events = append(events, ev) }})
+	if _, err := c.RunTask(context.Background(), TaskRequest{Task: "terminal_extract_json"}); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if len(events) != 1 || !events[0].Complete {
+		t.Fatalf("cost events = %+v, want exactly one complete event", events)
+	}
+}
