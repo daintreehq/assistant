@@ -636,7 +636,12 @@ func TestLoginEmitsAStatusEventOnEveryPlanOutcome(t *testing.T) {
 }
 
 // A backend URL carrying userinfo must not reach any status output, in either mode.
-// Configuration permits `https://user:secret@host`, and nothing upstream rejects it.
+//
+// Defence in depth: backend.NormalizeBaseURL now refuses userinfo at every endpoint
+// source, so a configured `https://user:secret@host` fails the launch instead of
+// arriving here. This constructs the Manager directly, bypassing that check, because
+// what is being pinned is the status rendering itself — the guarantee has to hold on
+// the value the Manager was handed, not only on the one path that vets it.
 func TestAStatusNeverCarriesCredentialsFromTheBackendURL(t *testing.T) {
 	mgr, err := auth.NewManager(auth.Options{
 		StateRoot:  t.TempDir(),

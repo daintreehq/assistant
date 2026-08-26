@@ -206,7 +206,6 @@ func (a *App) SetBackendURL(rawURL string) (string, error) {
 	a.Config.BackendURL = target
 	a.Auth = mgr
 	a.cfgMu.Unlock()
-	a.clearEndpointRejections()
 
 	// PERSIST. A switch that evaporated on restart is the thing this command exists to
 	// stop: the daily case is a developer on a local backend who dips into the deployed
@@ -220,6 +219,14 @@ func (a *App) SetBackendURL(rawURL string) (string, error) {
 	if err := config.SaveBackendURL(cfg.EndpointPath, target); err != nil {
 		return target, fmt.Errorf("switched for this session only — could not save the choice: %w", err)
 	}
+	// AFTER the save, never before it, and for the same reason the branch above clears
+	// only once its own save has returned. A startup rejection is a fact about the file
+	// on disk: if the write failed, that file is still the malformed one, it will be
+	// refused again on the next launch, and the listing must keep saying so. Clearing
+	// first meant a read-only state dir bought silence — `/backend` would then render
+	// the rejected preference as an ordinary "Remembered:" line, which is the one
+	// reading of it that leaves the user with nothing to repair.
+	a.clearEndpointRejections()
 
 	// The capability descriptor is pinned to the endpoint that answered it, so the
 	// cached one is discarded on read rather than needing to be cleared here — a gate

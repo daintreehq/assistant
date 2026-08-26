@@ -74,9 +74,11 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 		Queue:  contextQueueAdapter{app: a},
 		// Read through the Swappable every call so a replaced client is reflected
 		// immediately, rather than pinning whatever URL was current at wiring time.
-		// Sanitized like any other model-visible endpoint: DAINTREE_BACKEND_URL is taken
-		// as given, with no normalisation step to strip userinfo, so it could otherwise
-		// carry credentials straight into a tool result the model may quote back.
+		// Sanitized like any other model-visible endpoint — defence in depth. Every
+		// endpoint source now passes backend.NormalizeBaseURL at startup, which refuses
+		// userinfo outright, so a credential no longer reaches this far. It stays
+		// sanitized because the value lands in a tool result the model may quote back,
+		// and that is not a place to depend on a check made somewhere else.
 		BackendURL: func() string {
 			if a.Backend == nil {
 				return ""

@@ -1,6 +1,9 @@
 package app
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -435,5 +438,52 @@ func TestDescribeBackendChoicesExplainsARefusedPreference(t *testing.T) {
 	}
 	if repaired := a.DescribeBackendChoices(); strings.Contains(repaired, "refused at startup") {
 		t.Errorf("the stale rejection survived the repair:\n%s", repaired)
+	}
+}
+
+// A startup rejection describes the FILE on disk, so it may only be cleared once a new
+// file has actually replaced it. Persisting is best-effort — a read-only state dir
+// leaves the switch live for this session and the old preference untouched — and for as
+// long as the clear ran before the save, that failure bought silence: the malformed
+// preference stayed on disk, ready to be refused again on the next launch, while
+// `/backend` had stopped mentioning it and rendered it as an ordinary "Remembered:"
+// line. The user was left a repair job with nothing pointing at it.
+func TestSetBackendURLKeepsTheRejectionWhenTheChoiceCannotBeSaved(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+
+	a.cfgMu.Lock()
+	path := a.Config.EndpointPath
+	// Stand in for the startup refusal of a stored preference. The file itself stays
+	// readable and well-formed JSON — what LoadConfig refused was the URL inside it, so
+	// this listing must reach the rejection branch rather than the unreadable-file one.
+	a.Config.EndpointShapeRejected = errors.New("stored endpoint embeds a username or password")
+	a.cfgMu.Unlock()
+	if err := config.SaveBackendURL(path, "https://stored.example"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A read-only state dir is the real shape of this failure: the existing file still
+	// reads, but no new one can be written beside it.
+	dir := filepath.Dir(path)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if config.SaveBackendURL(path, backend.LocalBaseURL) == nil {
+		t.Skip("this filesystem let the write through, so there is no failed save to observe")
+	}
+
+	if _, err := a.SetBackendURL("local"); err == nil {
+		t.Fatal("SetBackendURL should report that the choice could not be saved")
+	}
+	if a.SnapshotConfig().BackendURL != backend.LocalBaseURL {
+		t.Error("the switch itself must still take effect for this session")
+	}
+	if a.SnapshotConfig().EndpointShapeRejected == nil {
+		t.Error("the startup rejection was cleared even though the bad preference is still on disk")
+	}
+	if !strings.Contains(a.DescribeBackendChoices(), "refused at startup") {
+		t.Error("`/backend` stopped naming the refused preference the user still has to repair")
 	}
 }

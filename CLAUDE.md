@@ -146,9 +146,11 @@ through `Stale()` and would render "we checked, and this is current" for a respo
 claimed nothing. It is the ONLY field whose wire presence is preserved: a `null` or `""`
 string decodes the same as an omission, so the `unverified` rules are enforced on the
 decoded value, not on literal absence. The decoder is deliberately NOT a mirror of the
-server's — it ignores unknown fields where the server forbids extras, and it does not
-re-check every cross-field rule the server already enforces (`source=cache` with
-`stale=false`, for one). It is the subset that decides what a user is told. Bounds are
+server's — it ignores unknown fields where the server forbids extras, and it re-checks
+only those cross-field rules whose violation would change what a user is TOLD. The
+source/freshness pairing is one of those, and is enforced in BOTH directions: a `polar`
+answer calling itself stale, and a `cache` answer calling itself fresh, are each a body
+making a false claim about how current someone's billing information is. Bounds are
 WIDER than the server's where the two count in different units: the backend bounds `email`
 in code points and this counts bytes, so a 320-byte cap would refuse a server-valid
 accented address. The canonical wire bodies live once, in

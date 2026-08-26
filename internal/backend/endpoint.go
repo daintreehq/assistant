@@ -300,7 +300,33 @@ func plaintextRemoteCheck(u *url.URL, allowInsecure bool) *PlaintextRemoteError 
 	if u.Scheme != "http" || allowInsecure || isLoopbackHost(u.Hostname()) {
 		return nil
 	}
-	return &PlaintextRemoteError{Host: u.Host}
+	return &PlaintextRemoteError{Host: hostWithoutZone(u)}
+}
+
+// hostWithoutZone renders the refused authority with any IPv6 ZONE ID removed.
+//
+// Naming the host is the useful half of the refusal, and a hostname is not a secret. A
+// zone id is different: it is the arbitrary text after `%` inside the brackets of an
+// IPv6 literal, it is not part of the address, and nothing constrains what it contains —
+// `http://[fe80::1%25user:pw@x]` parses, and u.Host comes back carrying that text
+// verbatim. NormalizeBaseURL rejects the shape before this is reached, but
+// ValidatePlaintextRemote is exported and parses on its own, so the redaction rule has
+// to hold here rather than at one of the two doors onto it.
+func hostWithoutZone(u *url.URL) string {
+	host := u.Host
+	if !strings.HasPrefix(host, "[") {
+		return host
+	}
+	close := strings.Index(host, "]")
+	if close < 0 {
+		return host
+	}
+	inner := host[1:close]
+	pct := strings.Index(inner, "%")
+	if pct < 0 {
+		return host
+	}
+	return "[" + inner[:pct] + "%<zone>]" + host[close+1:]
 }
 
 // IsLoopbackURL reports whether a base URL addresses THIS machine, whatever its

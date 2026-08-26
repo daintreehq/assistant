@@ -155,6 +155,22 @@ func TestNormalizeBaseURLNeverEchoesASecret(t *testing.T) {
 			t.Errorf("%s: the rejection echoed the secret back: %v", name, err)
 		}
 	}
+	// An IPv6 ZONE ID is the one part of an authority that is not a host name: arbitrary
+	// text after `%` inside the brackets, constrained by nothing, echoed by u.Host
+	// verbatim. NormalizeBaseURL refuses the shape earlier, but ValidatePlaintextRemote
+	// parses on its own, so the rule has to hold in the check they share.
+	zoned := "http://[fe80::1%25" + testSecret + "]"
+	if err := ValidatePlaintextRemote(zoned, false); err == nil {
+		t.Error("a plaintext remote IPv6 endpoint should still be refused")
+	} else if strings.Contains(err.Error(), testSecret) {
+		t.Errorf("the refusal echoed an IPv6 zone id back: %v", err)
+	}
+	if _, err := NormalizeBaseURL(zoned, false); err == nil {
+		t.Error("NormalizeBaseURL accepted a zoned IPv6 endpoint")
+	} else if strings.Contains(err.Error(), testSecret) {
+		t.Errorf("NormalizeBaseURL echoed an IPv6 zone id back: %v", err)
+	}
+
 	// ValidatePlaintextRemote is the other public door onto the same parser and had the
 	// same leak.
 	if err := ValidatePlaintextRemote("https://user:"+testSecret+"@[::1", false); err == nil {

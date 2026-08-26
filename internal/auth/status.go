@@ -118,11 +118,12 @@ func backendCodeOf(err error) string {
 //
 // It lives HERE, at the point Status is built, rather than at each surface that prints
 // one. The type's whole premise is that nothing in it is a credential, and the backend
-// URL is operator-supplied: nothing upstream rejects userinfo in an https:// endpoint, so
-// `DAINTREE_BACKEND_URL=https://user:secret@example.test` would otherwise put `secret`
-// into a struct that goes to stdout, to the NDJSON event stream, and into a support
-// bundle. Sanitizing at each caller was how `auth login --json` came to emit it while
-// `auth status --json` did not.
+// URL is operator-supplied. backend.NormalizeBaseURL now refuses userinfo at every
+// endpoint source, so `DAINTREE_BACKEND_URL=https://user:secret@example.test` fails the
+// launch rather than arriving here — but this struct goes to stdout, to the NDJSON event
+// stream, and into a support bundle, and a type that promises to hold no credential
+// should enforce that itself rather than inherit it. Sanitizing at each caller instead
+// was how `auth login --json` came to emit userinfo while `auth status --json` did not.
 func sanitizeURLForDisplay(raw string) string {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.User == nil {
