@@ -85,7 +85,8 @@ func StateForAccess(access string) State {
 // ApplyAccountStatus folds a decoded account response into local state.
 //
 // `gen` is the generation captured BEFORE the request, and the check is the same one
-// ApplyBackendVerdict and MarkActive perform, for the same reason: answers arrive late.
+// ApplyBackendVerdict and MarkIdentityLive perform, for the same reason: answers arrive
+// late.
 // A status read can outlive a logout, and applying it unconditionally would report a
 // signed-in account with a plan on a machine that has no credential at all.
 //
@@ -94,7 +95,12 @@ func StateForAccess(access string) State {
 // token mid-call does not make the answer stale. The generation is the whole guard.
 //
 // It only ever applies to a session that still exists (State.SignedIn), mirroring
-// MarkActive — a verdict can confirm or qualify a login, never resurrect one.
+// MarkIdentityLive — a verdict can confirm or qualify a login, never resurrect one.
+//
+// This is also the ONLY route to StateSignedInActive, and it must stay the only one.
+// That state means signed in AND ENTITLED, so nothing short of the backend saying
+// access=granted may produce it; a protected 2xx elsewhere proves the credential lives
+// and says nothing whatever about billing.
 //
 // It REPORTS whether it committed, and callers must believe that report rather than the
 // absence of an error. Every reason below to decline is a legitimate one — the identity

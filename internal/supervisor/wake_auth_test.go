@@ -45,7 +45,7 @@ func manifestServer(t *testing.T) *httptest.Server {
 // real login does: a stored credential and a descriptor, hydrated, then confirmed by a
 // backend request.
 //
-// MarkActive alone no longer suffices, and that is deliberate — a confirmation may only
+// MarkIdentityLive alone no longer suffices, and that is deliberate — a confirmation may only
 // CONFIRM a session that exists, never revive one that does not, or a success already in
 // flight when a logout landed would put the daemon back to work on a closed account.
 func activeSession(t *testing.T, r *Runtime) {
@@ -56,7 +56,7 @@ func activeSession(t *testing.T, r *Runtime) {
 	}
 	seedLogin(t, r, man)
 	r.auth.Hydrate(context.Background())
-	r.auth.MarkActive(r.auth.Generation())
+	r.auth.MarkIdentityLive(r.auth.Generation())
 	if got := r.auth.State(); !got.SignedIn() {
 		t.Fatalf("setup: state = %q, want a signed-in session", got)
 	}

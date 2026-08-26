@@ -61,7 +61,7 @@ func (f *fakeObserver) Generation() uint64 {
 	return f.gen
 }
 
-func (f *fakeObserver) MarkActive(gen uint64) {
+func (f *fakeObserver) MarkIdentityLive(gen uint64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.active = append(f.active, gen)
@@ -124,7 +124,7 @@ func TestAStreamedTurnRefreshesAndReplaysOnce(t *testing.T) {
 		t.Errorf("verdicts = %d, want 1 for the expired attempt", verdicts)
 	}
 	if active != 1 {
-		t.Errorf("MarkActive calls = %d, want 1 for the successful replay", active)
+		t.Errorf("MarkIdentityLive calls = %d, want 1 for the successful replay", active)
 	}
 }
 

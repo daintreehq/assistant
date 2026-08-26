@@ -73,6 +73,11 @@ type Status struct {
 	StorageTier StorageTier `json:"storageTier"`
 	// LastVerifiedAt is when the backend last confirmed this SESSION — any protected
 	// request succeeding counts, so it answers "is this login still good".
+	//
+	// It answers that and nothing else. It is not a plan check, and a fresh value here
+	// is not grounds for any surface to read the account as entitled: identity liveness
+	// and billing are separate answers from separate calls, which is why State is not
+	// derived from this field.
 	LastVerifiedAt *time.Time `json:"lastVerifiedAt,omitempty"`
 	// EntitlementCheckedAt is when the billing answer itself was established, as the
 	// BACKEND reported it.

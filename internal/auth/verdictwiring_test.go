@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/daintreehq/assistant/internal/backend"
 )
@@ -17,7 +18,7 @@ import (
 // verdictwiring_test.go drives a REAL backend.Client against a real Manager.
 //
 // The state machine already had its own tests and they all passed while the whole thing
-// was disconnected: nothing in production ever called ApplyBackendVerdict or MarkActive,
+// was disconnected: nothing in production ever called ApplyBackendVerdict or MarkIdentityLive,
 // so every transition was exercised by a test calling it directly and by nothing else.
 // Testing through the client is what makes these assertions mean anything — they fail if
 // the seam comes unplugged, which is the failure that actually happened.
@@ -106,6 +107,20 @@ func newDeployment(t *testing.T) *deployment {
 		next(w)
 	})
 
+	// The streamed turn route. A turn is the OTHER protected call a session makes all
+	// day, and it reaches the account seam by a completely different path (the SSE
+	// ladder in client.go, not doJSON) — so "a turn must not grant entitlement either"
+	// has to be asserted against a turn and not by analogy with capabilities.
+	mux.HandleFunc("/v1/daintree/respond", func(w http.ResponseWriter, r *http.Request) {
+		d.protectedCalls.Add(1)
+		select {
+		case d.bearers <- r.Header.Get("Authorization"):
+		default:
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(turnStream))
+	})
+
 	// The account status route, scripted independently of the protected route above so
 	// a test can drive the two in one run — which is the point of several of the
 	// account tests: what a status read does must not depend on what a turn just did.
@@ -181,6 +196,11 @@ func accountError(status int, code string) func(w http.ResponseWriter) {
 	}
 }
 
+// turnStream is the minimal successful turn: meta, one delta, done.
+const turnStream = "event: meta\ndata: {}\n\n" +
+	"event: delta\ndata: {\"content\":\"Done.\"}\n\n" +
+	"event: done\ndata: {\"finish_reason\":\"stop\"}\n\n"
+
 func okJSON(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{}`))
@@ -189,11 +209,36 @@ func okJSON(w http.ResponseWriter) {
 // signedIn returns a Manager holding a live session against d, plus its client.
 func signedIn(t *testing.T, d *deployment, store Store) (*Manager, *backend.Client, CredentialKey) {
 	t.Helper()
+	return signedInAt(t, d, store, nil)
+}
+
+// steppingClock returns a clock that advances a fixed second on every read.
+//
+// The liveness stamp is now the only thing a protected success writes, so several tests
+// turn on "did lastVerifiedAt move". Against the real clock that comparison is a
+// nanosecond race dressed up as an assertion; a clock that visibly steps makes "this
+// call recorded nothing" a fact rather than a coincidence.
+func steppingClock() func() time.Time {
+	var mu sync.Mutex
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	n := 0
+	return func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		n++
+		return t0.Add(time.Duration(n) * time.Second)
+	}
+}
+
+// signedInAt is signedIn with an explicit clock. A nil clock means the real one.
+func signedInAt(t *testing.T, d *deployment, store Store, now func() time.Time) (*Manager, *backend.Client, CredentialKey) {
+	t.Helper()
 	m, err := NewManager(Options{
 		StateRoot:  t.TempDir(),
 		BackendURL: d.srv.URL,
 		Store:      store,
 		Opener:     NoOpener{},
+		Now:        now,
 	})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -234,9 +279,13 @@ func TestTheManagerIsBothTheTokenSourceAndTheObserver(t *testing.T) {
 	var _ backend.AccountObserver = (*Manager)(nil)
 }
 
-// A protected 2xx is a verdict too, and the only one that can promote a session out of
-// "a credential exists but nothing has confirmed it".
-func TestAProtectedSuccessConfirmsTheSession(t *testing.T) {
+// A protected 2xx is a verdict too, and the only one that can say the CREDENTIAL is
+// still honoured. It says nothing about billing, and this pins both halves.
+//
+// Capabilities is the endpoint that matters here: it is protected, it answers 2xx to a
+// caller with no plan whatsoever, and it runs at boot. Reading it as an entitlement is
+// how every session came to report itself as granted on its first call.
+func TestAProtectedSuccessRecordsLivenessWithoutGrantingEntitlement(t *testing.T) {
 	d := newDeployment(t)
 	d.script(okJSON)
 	m, c, _ := signedIn(t, d, NewMemoryStore())
@@ -245,11 +294,41 @@ func TestAProtectedSuccessConfirmsTheSession(t *testing.T) {
 		t.Fatalf("Capabilities: %v", err)
 	}
 
-	if got := m.State(); got != StateSignedInActive {
-		t.Errorf("state = %q, want %q — a confirmed request is the only proof of a live session", got, StateSignedInActive)
+	got := m.Status()
+	if got.State != StateSignedInUnverified {
+		t.Errorf("state = %q, want %q — a 2xx that never consulted billing changed the plan verdict", got.State, StateSignedInUnverified)
+	}
+	if got.State.CanSpend() {
+		t.Error("an unchecked session was cleared to spend by a capabilities 200")
+	}
+	if got.LastVerifiedAt == nil {
+		t.Error("the success recorded no liveness at all — the credential half is the part this DOES prove")
 	}
 	if bearer := <-d.bearers; bearer == "" {
 		t.Error("the request went out with no Authorization header")
+	}
+}
+
+// The same rule on the streamed path. A turn is the call a session actually makes all
+// day, and it reaches the observer through the SSE ladder rather than doJSON — so it
+// would be perfectly possible to fix one path and leave the other granting.
+func TestATurnSuccessRecordsLivenessWithoutGrantingEntitlement(t *testing.T) {
+	d := newDeployment(t)
+	m, c, _ := signedIn(t, d, NewMemoryStore())
+
+	if _, err := c.RespondStream(context.Background(), backend.RespondRequest{}, backend.StreamCallbacks{}); err != nil {
+		t.Fatalf("RespondStream: %v", err)
+	}
+
+	got := m.Status()
+	if got.State != StateSignedInUnverified {
+		t.Errorf("state = %q, want %q — a completed turn is not an entitlement check", got.State, StateSignedInUnverified)
+	}
+	if got.State.CanSpend() {
+		t.Error("a turn cleared an unchecked session to spend")
+	}
+	if got.LastVerifiedAt == nil {
+		t.Error("a completed turn recorded no liveness")
 	}
 }
 
@@ -271,8 +350,12 @@ func TestAnAnonymousSuccessConfirmsNothing(t *testing.T) {
 		t.Fatalf("Capabilities: %v", err)
 	}
 
-	if m.State() == StateSignedInActive {
+	got := m.Status()
+	if got.State == StateSignedInActive {
 		t.Error("an anonymous request reported a confirmed account session")
+	}
+	if got.LastVerifiedAt != nil {
+		t.Error("an anonymous request stamped a verification time onto a session that does not exist")
 	}
 	if bearer := <-d.bearers; bearer != "" {
 		t.Errorf("an anonymous request carried %q", bearer)
@@ -298,8 +381,12 @@ func TestAnExpiredTokenIsRefreshedAndTheRequestReplayedOnce(t *testing.T) {
 	if first == second {
 		t.Error("the replay presented the SAME token the backend had just refused")
 	}
-	if got := m.State(); got != StateSignedInActive {
-		t.Errorf("state = %q, want %q after a successful replay", got, StateSignedInActive)
+	// The replay's own 2xx confirms the freshly refreshed credential — and confirms only
+	// that. A refresh proves the login works; the plan is still a question nobody asked.
+	if got := m.Status(); got.LastVerifiedAt == nil {
+		t.Error("the successful replay recorded no liveness for the new credential")
+	} else if got.State != StateSignedInUnverified {
+		t.Errorf("state = %q, want %q after a successful replay", got.State, StateSignedInUnverified)
 	}
 }
 
@@ -481,18 +568,19 @@ func TestAVerdictForAReplacedTokenIsIgnored(t *testing.T) {
 // in flight when that happened would otherwise land with a generation that still
 // matched and put a closed account back to work, which is precisely what the daemon's
 // spend gate is built on top of.
-func TestALateSuccessCannotResurrectASessionEndedElsewhere(t *testing.T) {
+func TestALateSuccessCannotVouchForASessionEndedElsewhere(t *testing.T) {
 	d := newDeployment(t)
 	d.script(okJSON)
 	store := NewMemoryStore()
-	m, c, _ := signedIn(t, d, store)
+	m, c, _ := signedInAt(t, d, store, steppingClock())
 
-	// Confirm it, so there is a live session for a late answer to revive.
+	// Confirm it, so there is a live session for a late answer to vouch for.
 	if _, err := c.Capabilities(context.Background()); err != nil {
 		t.Fatalf("Capabilities: %v", err)
 	}
-	if got := m.State(); got != StateSignedInActive {
-		t.Fatalf("setup: state = %q", got)
+	confirmed := m.Status().LastVerifiedAt
+	if confirmed == nil {
+		t.Fatal("setup: the protected success recorded no liveness")
 	}
 	inFlightGen := m.Generation()
 
@@ -506,29 +594,88 @@ func TestALateSuccessCannotResurrectASessionEndedElsewhere(t *testing.T) {
 	}
 
 	// The late 2xx for the request that was already in flight.
-	m.MarkActive(inFlightGen)
+	m.MarkIdentityLive(inFlightGen)
 
-	if got := m.State(); got == StateSignedInActive {
-		t.Error("a success in flight during a logout elsewhere re-confirmed the session")
+	// Nothing is recorded for it. The stamp is all this call can write now, so "was it
+	// dropped" is exactly "did the verification time move" — and the clock steps on
+	// every read, so an applied call could not possibly land on the same instant.
+	got := m.Status().LastVerifiedAt
+	if got == nil {
+		t.Fatal("the earlier confirmation was erased")
+	}
+	if !got.Equal(*confirmed) {
+		t.Errorf("verification time moved to %s from %s — a success in flight during a logout elsewhere vouched for the session", got, confirmed)
 	}
 }
 
-// A confirmation may only CONFIRM. Reviving a session from a state that says there is
-// none is how an unattended daemon resumes spending on a closed account.
-func TestMarkActiveOnlyPromotesAnExistingSession(t *testing.T) {
+// A confirmation may only CONFIRM. Vouching for a session from a state that says there
+// is none is how a status line comes to report a freshly verified account on a machine
+// holding no credential at all.
+func TestMarkIdentityLiveOnlyVouchesForAnExistingSession(t *testing.T) {
 	d := newDeployment(t)
 	m, _, _ := signedIn(t, d, NewMemoryStore())
 
 	for _, dead := range []State{StateSignedOut, StateRevoked, StateAccountsUnavailable} {
 		m.mu.Lock()
 		m.state = dead
+		m.lastVerifiedAt = nil
 		gen := m.generation
 		m.mu.Unlock()
 
-		m.MarkActive(gen)
+		m.MarkIdentityLive(gen)
 
 		if got := m.State(); got != dead {
-			t.Errorf("MarkActive revived %q into %q", dead, got)
+			t.Errorf("MarkIdentityLive revived %q into %q", dead, got)
+		}
+		m.mu.Lock()
+		stamped := m.lastVerifiedAt
+		m.mu.Unlock()
+		if stamped != nil {
+			t.Errorf("MarkIdentityLive stamped a verification onto %q", dead)
+		}
+	}
+}
+
+// The states a success must LEAVE ALONE, which is the whole of the fix.
+//
+// Each of these is a signed-in session carrying a specific, expensive truth: the plan
+// was refused, the plan was never looked up, the check itself could not be made, the
+// deployment rejects this credential. A protected 2xx knows none of that — it knows a
+// route answered — and every one of these used to be overwritten with "signed in and
+// entitled" by the first capabilities call of the session.
+func TestAProtectedSuccessPreservesEveryUncertainVerdict(t *testing.T) {
+	preserved := []State{
+		StateSignedInUnverified,
+		StateSubscriptionRequired,
+		StateSubscriptionInactive,
+		StateTemporarilyUnavailable,
+		StateAccessRefused,
+		StateStorageUnavailable,
+	}
+	for _, before := range preserved {
+		d := newDeployment(t)
+		d.script(okJSON)
+		m, c, _ := signedIn(t, d, NewMemoryStore())
+		if _, err := m.AccessToken(context.Background()); err != nil {
+			t.Fatalf("AccessToken: %v", err)
+		}
+		m.mu.Lock()
+		m.state = before
+		m.mu.Unlock()
+
+		if _, err := c.Capabilities(context.Background()); err != nil {
+			t.Fatalf("Capabilities: %v", err)
+		}
+
+		got := m.Status()
+		if got.State != before {
+			t.Errorf("state %q became %q after an unrelated 200", before, got.State)
+		}
+		if got.State.CanSpend() {
+			t.Errorf("state %q was cleared to spend by an unrelated 200", before)
+		}
+		if got.LastVerifiedAt == nil {
+			t.Errorf("state %q: the success recorded no liveness", before)
 		}
 	}
 }

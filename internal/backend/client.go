@@ -362,19 +362,22 @@ type accountAttempt struct {
 	obs   AccountObserver
 	gen   uint64
 	token string
-	// deferSuccess suppresses the automatic MarkActive on a 2xx, leaving the verdict to
-	// whoever decodes the body.
+	// deferSuccess suppresses the automatic MarkIdentityLive on a 2xx, leaving the
+	// verdict to whoever decodes the body.
 	//
 	// It exists for exactly one endpoint. /v1/daintree/account answers 200 for a caller
 	// with NO plan — that is the whole design, since it is a status read rather than
 	// paid work — so the transport's "a protected request succeeded, therefore this
-	// session is active" inference is precisely wrong there. Left in place it would
-	// promote the state to signed_in_active a moment before the decoded
-	// `subscription_required` demoted it again, and any reader in that window (the
-	// supervisor's spend gate is one) would see a session cleared to spend money it is
-	// not entitled to spend.
+	// session is confirmed" inference is at best redundant there and at worst wrong:
+	// the decoded body is about to say something more specific, including that the
+	// entitlement could not be established at all.
 	//
-	// A malformed body lands the same way and should: nothing is confirmed, the
+	// It is deliberately kept even though MarkIdentityLive no longer grants anything.
+	// The liveness stamp it writes is the same field ApplyAccountStatus writes, and
+	// letting the transport set it from a body the decoder is about to REJECT
+	// (account_contract_invalid) would record a verification that never happened.
+	//
+	// A malformed body therefore lands the way it should: nothing is confirmed, the
 	// credential is untouched, and the caller reports "could not verify".
 	deferSuccess bool
 }
@@ -407,9 +410,13 @@ func (c *Client) beginAccountAttempt(path, token string) accountAttempt {
 
 // succeeded reports a protected 2xx for the credential this attempt carried, unless the
 // endpoint's own body is the authoritative verdict (see deferSuccess).
+//
+// What it reports is IDENTITY liveness and never entitlement: this layer knows only
+// that the request came back 2xx, and most protected routes answer 2xx whatever billing
+// says. See AccountObserver.MarkIdentityLive.
 func (a accountAttempt) succeeded() {
 	if a.obs != nil && !a.deferSuccess {
-		a.obs.MarkActive(a.gen)
+		a.obs.MarkIdentityLive(a.gen)
 	}
 }
 

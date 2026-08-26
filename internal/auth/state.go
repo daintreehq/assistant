@@ -127,11 +127,15 @@ func (s State) NeedsPlan() bool {
 
 // CanSpend reports whether a paid request should be attempted at all.
 //
-// This is what the supervisor daemon consults before a wake turn. It is deliberately
-// strict: only a confirmed-active session qualifies, and an unverified one does not,
-// because an unattended process should not discover its login is dead by spending money
-// to find out. An interactive session takes the opposite view and simply tries — a
-// human is there to read the error.
+// It is deliberately strict: only a confirmed-entitled session qualifies, and an
+// unverified one does not, because an unattended process should not discover its login
+// is dead by spending money to find out. An interactive session takes the opposite view
+// and simply tries — a human is there to read the error.
+//
+// StateSignedInActive is reachable from ONE place: a decoded account-v1 body saying
+// access=granted (StateForAccess, accountsnapshot.go). It used to be reachable from a
+// second — any protected 2xx — and that is exactly how a session with no plan came to
+// be cleared to spend. Nothing that merely proves the credential works may set it.
 func (s State) CanSpend() bool { return s == StateSignedInActive }
 
 // Terminal reports a state no local retry will move: nothing this process can do
@@ -141,8 +145,17 @@ func (s State) CanSpend() bool { return s == StateSignedInActive }
 // the deployment" is an external event that moves several of these, and a caller that
 // reads Terminal as permanent will still be refusing work long after the cause is gone.
 // It has no production callers today; the first one should re-read this line.
+//
+// BOTH subscription states are here, and the omission of StateSubscriptionInactive was
+// a plain inconsistency rather than a distinction. NeedsPlan treats the two identically
+// and always has: each is a valid login that billing does not currently clear, and the
+// remedy for each is an action taken off this machine — a checkout for one, the billing
+// portal for the other. Retrying locally moves neither. Leaving inactive out meant the
+// first caller to gate on Terminal would have kept hammering exactly the account whose
+// answer is settled, while sparing the one next to it.
 func (s State) Terminal() bool {
-	return s == StateSignedOut || s == StateRevoked || s == StateSubscriptionRequired ||
+	return s == StateSignedOut || s == StateRevoked ||
+		s == StateSubscriptionRequired || s == StateSubscriptionInactive ||
 		s == StateAccountsUnavailable || s == StateAccessRefused
 }
 

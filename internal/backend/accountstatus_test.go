@@ -427,15 +427,19 @@ func TestAccountSurfacesBackendAccountErrors(t *testing.T) {
 				t.Errorf("verdicts = %d, want 1 — the account path swallowed a failure", verdicts)
 			}
 			if active, _ := obs.counts(); active != 0 {
-				t.Errorf("MarkActive calls = %d on a failed status read", active)
+				t.Errorf("MarkIdentityLive calls = %d on a failed status read", active)
 			}
 		})
 	}
 }
 
-// The endpoint's own 200 must NOT confirm the session — the decoded body is the verdict,
-// and a body saying subscription_required would otherwise be preceded by a MarkActive
-// that reports the account as cleared to spend.
+// The endpoint's own 200 must NOT confirm the session — the decoded body is the verdict.
+//
+// The suppression is still load-bearing now that MarkIdentityLive grants nothing. The
+// liveness stamp it writes is the same field ApplyAccountStatus writes, and this route
+// is the one whose 200 the decoder may still reject outright
+// (account_contract_invalid). Confirming from the transport would record a verification
+// for a body nothing could read.
 func TestAccountDoesNotMarkTheSessionActiveOnItsOwn200(t *testing.T) {
 	c, _, obs := accountServer(t, []string{"token-a"}, func(int) (int, string) {
 		return http.StatusOK, `{"version":1,"subject_hash":"0123456789abcdef","access":"subscription_required",` + checkedEntitlementFields + `"checked_at":"2026-08-25T12:00:00Z"}`
@@ -459,13 +463,13 @@ func TestAccountDoesNotMarkTheSessionActiveEvenWhenGranted(t *testing.T) {
 		t.Fatalf("Account: %v", err)
 	}
 	if active, _ := obs.counts(); active != 0 {
-		t.Errorf("MarkActive calls = %d, want 0", active)
+		t.Errorf("MarkIdentityLive calls = %d, want 0", active)
 	}
 }
 
 // Every OTHER protected endpoint keeps the automatic confirmation. The suppression above
 // is one endpoint's exception, not a hole in the observer.
-func TestOtherProtectedEndpointsStillMarkActive(t *testing.T) {
+func TestOtherProtectedEndpointsStillReportIdentityLiveness(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"protocol_version":3}`))
@@ -479,7 +483,7 @@ func TestOtherProtectedEndpointsStillMarkActive(t *testing.T) {
 		t.Fatalf("Capabilities: %v", err)
 	}
 	if active, _ := obs.counts(); active != 1 {
-		t.Errorf("MarkActive calls = %d, want 1", active)
+		t.Errorf("MarkIdentityLive calls = %d, want 1", active)
 	}
 }
 
@@ -518,10 +522,10 @@ func TestAccountRefreshesAndReplaysOnceOnAnExpiredToken(t *testing.T) {
 	if len(verdicts) != 1 || verdicts[0] != CodeAuthTokenExpired {
 		t.Errorf("verdicts = %v, want exactly [%s]", verdicts, CodeAuthTokenExpired)
 	}
-	// The success still does not confirm — the ladder does not smuggle a MarkActive in
+	// The success still does not confirm — the ladder does not smuggle a MarkIdentityLive in
 	// through the replay.
 	if active, _ := obs.counts(); active != 0 {
-		t.Errorf("MarkActive calls = %d after a replayed status read", active)
+		t.Errorf("MarkIdentityLive calls = %d after a replayed status read", active)
 	}
 }
 
@@ -592,7 +596,7 @@ func TestAccountStopsOnCancellationWithoutAVerdict(t *testing.T) {
 		t.Errorf("requests = %d, want 0 — the call went out after cancellation", n)
 	}
 	if active, _ := obs.counts(); active != 0 {
-		t.Errorf("MarkActive calls = %d on a cancelled read", active)
+		t.Errorf("MarkIdentityLive calls = %d on a cancelled read", active)
 	}
 }
 

@@ -52,6 +52,9 @@ type Manager struct {
 	// lastVerifiedAt is when a protected request last succeeded under this session. It
 	// is the one thing only the BACKEND can tell us: a stored credential proves a login
 	// happened, never that the deployment still honours it.
+	//
+	// It answers ONLY that question. It is not evidence of a plan, and the state machine
+	// must never read it as one — see MarkIdentityLive.
 	lastVerifiedAt *time.Time
 	// account is what the backend last said about this session — email, plan, billing
 	// verdict. MEMORY ONLY and generation-stamped; see accountsnapshot.go.
@@ -62,8 +65,9 @@ type Manager struct {
 	// It exists because backend verdicts arrive late. A request made with token A can
 	// return its answer after the user has logged out and signed back in with token B,
 	// and an unconditional "revoked" verdict would then delete B's perfectly good
-	// session — or an unconditional MarkActive would resurrect a signed-in state after a
-	// logout. Callers capture the generation when they start a request and hand it back
+	// session — or an unconditional MarkIdentityLive would vouch for a session that has
+	// been logged out. Callers capture the generation when they start a request and hand
+	// it back
 	// with the verdict, so a stale answer can be recognised and dropped.
 	generation uint64
 
@@ -1298,50 +1302,57 @@ func (m *Manager) backendOriginMatches(k CredentialKey) bool {
 		k.StateRoot == strings.TrimRight(strings.TrimSpace(m.stateRoot), "/")
 }
 
-// MarkActive records a confirmed, entitled session, if the confirmation is still current.
-func (m *Manager) MarkActive(gen uint64) {
+// MarkIdentityLive records that this deployment answered a protected request under the
+// current session — that the CREDENTIAL is still honoured, and nothing more.
+//
+// It changes no state, and that emptiness is the fix. This was MarkActive, and it
+// promoted any signed-in state to StateSignedInActive, which means signed in AND
+// ENTITLED and is the sole state CanSpend() is true for. But the only thing the caller
+// knows is that some protected route returned 2xx, and nearly every protected route
+// answers 2xx without ever consulting billing — /v1/daintree/capabilities does, and it
+// runs at boot. So the first call of every session manufactured an entitlement out of a
+// request that had never asked about one. That was most visible while entitlement
+// enforcement was off or merely observing: the backend served everything, and every
+// session therefore reported itself as granted.
+//
+// Entitlement now has exactly one source: a successfully decoded account-v1 body,
+// through ApplyAccountStatus in accountsnapshot.go. This records the OTHER half, the
+// half only the backend can supply — a stored credential proves a login happened, never
+// that this deployment still honours it — and it lands in lastVerifiedAt, which Status
+// renders as its own row beside, never instead of, the entitlement's own timestamp.
+//
+// The consequence is that a session which never performs an account read stays
+// signed_in_unverified for its whole life, because nothing at boot asks. That reads as a
+// regression and is not one: "signed in, plan not checked" is precisely what is known,
+// and the state that used to be shown there was a guess. The unattended daemon is
+// unaffected — its wake gate branches on StateRevoked/StateSignedOut, not on CanSpend.
+func (m *Manager) MarkIdentityLive(gen uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.generation != gen {
 		// A confirmation for a session that has since been logged out. Applying it would
-		// show the user as signed in with no credential behind it.
+		// stamp a verification time onto an identity that is gone, and Status would
+		// report the replacement session as freshly checked when it never was.
 		return
 	}
 	// The generation is not enough on its own, and this is the belt to its braces. Not
 	// every way a session ends advances it — a logout in ANOTHER process reaches this one
 	// as a revision change, and a hydrate that finds the credential gone simply rewrites
 	// the state. A success already in flight when that happened would otherwise land here
-	// with a generation that still matches and put the daemon back to work on an account
-	// the user has closed.
-	//
-	// A confirmation can only ever CONFIRM: it promotes a session that still exists, and
-	// never revives one that does not.
+	// with a generation that still matches and vouch for a session the user has closed.
 	if !m.state.SignedIn() {
 		return
 	}
-	// A success supersedes whatever last went wrong. Without this, status reports an
-	// active session beside the error code from a dependency outage that has since
-	// cleared — which reads as an account still in trouble.
-	m.lastErr = nil
+	// m.lastErr is deliberately NOT cleared, which MarkActive did.
+	//
+	// Clearing was coherent there only because the same call also moved the state past
+	// whatever the error explained. This one leaves the state alone, so clearing would
+	// split the pair: a status reading `temporarily_unavailable` or `access_refused`
+	// with no code beside it names a problem and then refuses to say which, and the
+	// advice every surface renders is chosen from that pair. The error and the state it
+	// produced are retired together, by the account read that supersedes both.
 	now := m.now()
 	m.lastVerifiedAt = &now
-	// A PLAN verdict is not overwritten, and this is the one thing MarkActive
-	// deliberately cannot do.
-	//
-	// It knows only that a protected request returned 2xx, and most protected endpoints
-	// answer 2xx regardless of entitlement — /v1/daintree/capabilities does, and it runs
-	// at boot. So promoting on any success would take a session that the account
-	// endpoint had just reported as subscription_required and mark it active and cleared
-	// to spend, on the strength of a call that never consulted billing.
-	//
-	// The cost of holding back is that a checkout completed elsewhere is not noticed by
-	// a turn succeeding; the user runs `auth status --refresh`, which is the documented
-	// remedy and the one call that actually asks. The cost of the other direction is
-	// spending against an account that has no plan, so this fails toward asking again.
-	if m.state.NeedsPlan() {
-		return
-	}
-	m.state = StateSignedInActive
 }
 
 // Ensure Manager satisfies the backend seams at compile time.

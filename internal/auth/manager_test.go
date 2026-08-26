@@ -1002,7 +1002,7 @@ func TestAStaleVerdictCannotDestroyACurrentSession(t *testing.T) {
 }
 
 // ...and a late confirmation must not resurrect a session that has been logged out.
-func TestAStaleMarkActiveCannotResurrectALogout(t *testing.T) {
+func TestAStaleLivenessConfirmationCannotVouchForALogout(t *testing.T) {
 	p := newIDP(t)
 	store := NewMemoryStore()
 	m := newManager(t, p, store)
@@ -1015,7 +1015,7 @@ func TestAStaleMarkActiveCannotResurrectALogout(t *testing.T) {
 		t.Fatalf("Logout: %v", err)
 	}
 
-	m.MarkActive(gen)
+	m.MarkIdentityLive(gen)
 	if m.State() != StateSignedOut {
 		t.Fatalf("state = %q — a late confirmation showed the user signed in with no credential", m.State())
 	}

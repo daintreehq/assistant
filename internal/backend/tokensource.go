@@ -64,12 +64,23 @@ type AccountObserver interface {
 	// after a logout or a re-login is recognised as describing a session that is gone.
 	Generation() uint64
 
-	// MarkActive records that a protected request SUCCEEDED under that generation.
+	// MarkIdentityLive records that a protected request SUCCEEDED under that
+	// generation — that the CREDENTIAL is still honoured by this deployment, and
+	// NOTHING MORE.
 	//
 	// Success is a verdict too, and the one nothing else can supply: a stored
 	// credential proves a login happened, never that the backend still honours it.
-	// Without this the only route out of "signed in, unverified" is a failure.
-	MarkActive(gen uint64)
+	// Without this the only route out of "we have a credential" is a failure.
+	//
+	// The name is load-bearing, and it is the second one this method has had. It was
+	// MarkActive, which read as "mark the account active" — and the implementation duly
+	// promoted a session to the local ENTITLED state on the strength of any 2xx. Almost
+	// every protected endpoint answers 2xx without consulting billing
+	// (/v1/daintree/capabilities does, and it runs at boot), so identity-was-accepted
+	// was silently minting billing-was-granted. Only a decoded account-v1 body saying
+	// access=granted may establish entitlement; an implementation that does anything
+	// more here than stamp a liveness time has reintroduced the bug.
+	MarkIdentityLive(gen uint64)
 
 	// ApplyBackendVerdict folds an account failure into local state: refresh, clear,
 	// preserve, or ignore as stale. usedToken is the credential the request actually

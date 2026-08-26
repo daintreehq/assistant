@@ -626,10 +626,17 @@ func TestAnUnrelatedSuccessCannotEraseAPlanVerdict(t *testing.T) {
 	}
 }
 
-// A success DOES still promote an ordinary unverified session — the guard above is
-// narrow, and widening it to every state would strand a perfectly good login at
-// "unverified" forever.
-func TestAnUnrelatedSuccessStillConfirmsAnUnverifiedSession(t *testing.T) {
+// An unverified session STAYS unverified, and that is the resting state of an ordinary
+// login rather than a symptom.
+//
+// This test asserted the opposite for as long as the promotion existed, on the reasoning
+// that never widening past unverified would strand a good login there forever. It does
+// strand it there — nothing performs an account read at boot — and that turns out to be
+// the honest answer: "signed in, plan not checked" is exactly what a process knows when
+// nothing has checked the plan. The alternative was inventing an entitlement from a
+// capabilities 200, which is a claim about someone's billing that no call in the session
+// had made. `/account` and `auth status --refresh` are what actually ask.
+func TestAnUnrelatedSuccessLeavesAnUnverifiedSessionUnverified(t *testing.T) {
 	d := newDeployment(t)
 	m, c, _ := signedIn(t, d, NewMemoryStore())
 	if _, err := m.AccessToken(context.Background()); err != nil {
@@ -643,8 +650,34 @@ func TestAnUnrelatedSuccessStillConfirmsAnUnverifiedSession(t *testing.T) {
 	if _, err := c.Capabilities(context.Background()); err != nil {
 		t.Fatalf("Capabilities: %v", err)
 	}
+	got := m.Status()
+	if got.State != StateSignedInUnverified {
+		t.Errorf("state = %q, want %q — an unrelated 200 invented a plan verdict", got.State, StateSignedInUnverified)
+	}
+	if got.State.CanSpend() {
+		t.Error("an unchecked session was cleared to spend")
+	}
+	// The success is still worth exactly one thing, and it is recorded.
+	if got.LastVerifiedAt == nil {
+		t.Error("a successful protected request recorded no liveness")
+	}
+
+	// ...and the genuine grant still lands. The point is to narrow WHAT may grant, not
+	// to make granting unreachable.
+	d.scriptAccount(accountBody(activeAccountBody))
+	gen := m.Generation()
+	st, err := c.Account(context.Background())
+	if err != nil {
+		t.Fatalf("Account: %v", err)
+	}
+	if !m.ApplyAccountStatus(gen, st) {
+		t.Fatal("a valid granted account response was not applied")
+	}
 	if got := m.State(); got != StateSignedInActive {
-		t.Errorf("state = %q, want %q — a confirmed session stayed unverified", got, StateSignedInActive)
+		t.Errorf("state = %q after access=granted, want %q", got, StateSignedInActive)
+	}
+	if !m.State().CanSpend() {
+		t.Error("a granted account cannot spend")
 	}
 }
 
