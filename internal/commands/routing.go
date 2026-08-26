@@ -12,9 +12,11 @@ import (
 // routing.go renders `/routing`: which OpenRouter endpoints may serve this session, and
 // how they are ranked.
 //
-// The caller owns the key and pays the bill, so two of these decisions are legitimately
-// theirs — how strict the privacy filter is, and whether speed or price wins. This panel
-// exists because a policy set in another terminal, possibly days ago, is otherwise
+// Two of these decisions are legitimately the caller's, for different reasons. The
+// privacy filter is theirs because it governs where their own source code may go.
+// Ranking is theirs because it trades the latency they sit through against the cost the
+// deployment bears upstream, and only they know which one this session is worth. This
+// panel exists because a policy set in another terminal, possibly days ago, is otherwise
 // invisible, and the privacy posture is part of the trust decision someone makes before
 // sending their source code anywhere.
 //

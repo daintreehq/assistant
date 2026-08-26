@@ -25,8 +25,10 @@ import (
 //
 // cfg.APIKey is empty on virtually every install, and the client is built the same way
 // either way: it simply omits the Authorization header, which is exactly what the
-// backend's open door expects. A key that IS present rides along and overrides the
-// backend's own upstream credential for the turn.
+// backend's open door expects. A key that IS present rides along as the CALLER's
+// bearer — it says who is asking, never what pays. The backend funds the turn from its
+// own upstream credential either way, so setting one changes which principal the
+// request is attributed to and nothing about the money.
 //
 // ledger, when non-nil, receives a CostEvent for every billed upstream call the built
 // client makes. It stays a parameter rather than being read off the App so an unbilled

@@ -95,9 +95,9 @@ type ClientConfig struct {
 	// It lives on the CLIENT rather than on the agent session because a session sees
 	// only turns. A day of orchestration also spends money on dozens of
 	// terminal.summarize / terminal.extract / watcher-classify tasks, fired from tools,
-	// watchers and compaction alike — real spend on the user's own key, outside any
-	// turn. One hook at the layer every call passes through is the only way to count
-	// all of it without every future caller remembering to.
+	// watchers and compaction alike — real spend on the backend's upstream credential,
+	// outside any turn. One hook at the layer every call passes through is the only way
+	// to count all of it without every future caller remembering to.
 	OnCost func(CostEvent)
 	// RoutingPreference, if set, is read for every request this client makes — turns AND
 	// utility tasks. It lives on the client for the same reason OnCost does: a task
@@ -111,7 +111,8 @@ type ClientConfig struct {
 //
 // One event is not one provider call: a single turn can bill the runbook selector, a
 // repair pass, a losing speculative generation and the main completion. Amount is the
-// request's total across all of them, which is the number the caller is charged.
+// request's total across all of them, which is what the backend's upstream credential
+// was charged for this one request.
 //
 // It is emitted even when Amount is nil — "this request happened and reported no cost"
 // is the fact that turns a session total into a LOWER BOUND, and an accumulator that
@@ -132,7 +133,8 @@ type CostEvent struct {
 	// about the main call, not the whole request, and consumers should say so. It rides
 	// here because it EXPLAINS the spend beside it: the backend's byte-stable prompt
 	// assembly exists to keep ~18k tokens of tool schemas cached, and a collapse in this
-	// ratio is the first symptom of a regression that costs the user money directly.
+	// ratio is the first symptom of a regression that spends real money on the backend's
+	// upstream credential.
 	CachedTokens int
 	PromptTokens int
 }
@@ -656,8 +658,9 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 	}
 
 	// Cost accounting spans the whole retried call, not one attempt, and it is the one
-	// piece of bookkeeping that must survive EVERY exit path — the caller is paying for
-	// this with their own key.
+	// piece of bookkeeping that must survive EVERY exit path — a retried turn is real
+	// money off the backend's upstream credential whether or not the caller ever sees a
+	// reply.
 	//
 	// abandonedSpend records that some earlier attempt reached the point of billing
 	// (it got a meta event, which means the runbook selector already ran and charged)
@@ -665,7 +668,7 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 	// `done` event, and the succeeding attempt's `cost.total` covers only ITS OWN
 	// request — the backend aggregates re-rolls within one request, never across
 	// separate HTTP attempts. So a replayed turn's reported total is a floor, and
-	// saying otherwise would present a number below the caller's real bill as exact.
+	// saying otherwise would present a number below the real bill as exact.
 	abandonedSpend := false
 	// finalize emits EXACTLY ONE cost event for this RespondStream call, whatever
 	// happens. Every return below routes through it.
@@ -940,9 +943,9 @@ func (c *Client) Respond(ctx context.Context, req RespondRequest) (RespondRespon
 	if err := c.doJSON(ctx, http.MethodPost, "/v1/daintree/respond", req, &out); err != nil {
 		return RespondResponse{}, err
 	}
-	// The non-streaming path spends the caller's money exactly like the streamed one,
-	// so it reports through the same seam. Reusing RespondResult keeps the two from
-	// growing different accounting rules for the same request.
+	// The non-streaming path spends the same upstream credential exactly like the
+	// streamed one, so it reports through the same seam. Reusing RespondResult keeps the
+	// two from growing different accounting rules for the same request.
 	c.reportRespondCost(RespondResult{Usage: out.Usage, Cost: out.Cost}, false)
 	return out, nil
 }
@@ -1046,7 +1049,8 @@ func (c *Client) reportRespondCost(res RespondResult, abandonedSpend bool) {
 }
 
 // taskMayHaveBilled reports whether a FAILED task call could already have charged the
-// caller — the difference between "nothing to account for" and "spend we cannot see".
+// backend's upstream credential — the difference between "nothing to account for" and
+// "spend we cannot see".
 //
 // It matters because the most common task failure is not a rejection: `task_output_invalid`
 // is raised only AFTER a billed completion, and often after a second billed repair pass.
@@ -1107,7 +1111,10 @@ func (c *Client) Capabilities(ctx context.Context) (Capabilities, error) {
 	return out, nil
 }
 
-// KeyVerification is the backend's verdict on the caller's key.
+// KeyVerification is the backend's verdict on the credential a request would ACTUALLY
+// spend — its own upstream key on every install, since the CLI ships none. It is not a
+// verdict on any bearer the caller supplied: that is an account token, and the backend
+// never sends it upstream.
 type KeyVerification struct {
 	// Valid is the provider's answer. False means a definite rejection — not
 	// "we couldn't check", which surfaces as an error from VerifyKey instead.
@@ -1126,8 +1133,9 @@ type KeyVerification struct {
 	// Reason is the stable machine-readable outcome — `ok`, `provider_rejected`,
 	// `credits_exhausted`. Branch on this, never on Detail, which is prose.
 	Reason string `json:"reason"`
-	// Label is the provider's own name for the key, when it exposes one — useful for
-	// confirming the RIGHT key was pasted, not just a working one.
+	// Label is the provider's own name for that credential, when it exposes one — useful
+	// for telling WHICH upstream key a deployment is spending, not merely that a working
+	// one is configured.
 	Label string `json:"label"`
 	// LimitRemaining is credit left on the key when the provider reports it. A pointer
 	// so "not reported" stays distinct from a genuine zero, which is worth warning about.
@@ -1160,8 +1168,9 @@ var verifyUnsupportedStatuses = map[int]bool{
 }
 
 // VerifyKey asks the backend whether the credential this request would spend actually
-// works upstream — the backend's own on every normal install, ours when DAINTREE_API_KEY
-// named one.
+// works upstream. That is the backend's OWN provider credential, on every install: a
+// bearer this request carries says who is calling and is never sent upstream, so setting
+// one does not change which credential is verified here.
 //
 // This is the ONLY meaningful check available. /health and /readyz answer for the
 // process, and /v1/daintree/capabilities answers 200 whether or not a turn could be
@@ -1184,8 +1193,8 @@ func (c *Client) VerifyKey(ctx context.Context) (KeyVerification, error) {
 	// Label and Reason are backend-controlled strings that ride a 200 response — the
 	// success path, which no error-scrubbing wrapper covers — and they land in the
 	// doctor credential row and the debug log. A no-op when no caller key is set, which
-	// is the normal case; when one IS set, a provider that echoes it into its rejection
-	// reason would otherwise persist it in the host's native scrollback, which the
+	// is the normal case; when one IS set, a backend or proxy that echoes it back into
+	// this response would otherwise persist it in the host's native scrollback, which the
 	// attached session never clears. One choke point here beats N display-site fixes.
 	//
 	// Reason is in the list even though it is contractually a short enum member: it is
@@ -1552,9 +1561,11 @@ func safeRequestID(v string) string {
 
 // scrubError removes the API key from any error on its way out of the client.
 //
-// The bearer token IS the caller's spendable credential, and an upstream we do not
-// control can echo the Authorization header into an error body — a 502 from the
-// provider, a proxy's error page, a terminal SSE `error` event. Those become
+// The bearer token is a live credential whichever form it takes — the account access
+// token a signed-in install sends, or the caller key the rare install sets — and while
+// it never travels to the provider, everything between here and the backend can echo the
+// Authorization header back into an error body: the backend itself, a custom endpoint, an
+// intercepting proxy's error page, a terminal SSE `error` event. Those become
 // Error.Message and flow straight to surfaces that persist them: the attached session renders on
 // the NORMAL screen buffer, so a leak stays in the host's native scrollback long after
 // the session, and the same text is appended to the 0600 debug log.

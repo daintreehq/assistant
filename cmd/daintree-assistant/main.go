@@ -389,11 +389,12 @@ func parseArgsInto(args []string) (parsedArgs, *flag.FlagSet, error) {
 		return parsed, fs, nil
 	}
 	// `auth <action> --json` is carved out here for the same reason `doctor --json` is,
-	// and for this command it is not optional. Daintree's account UI drives
-	// `auth status --json` and `auth login --json` as its ONLY way of reading account
-	// state, so if --json left "auth" as a prompt the desktop would silently start
-	// running the word "auth" as a conversation turn — spending money to produce prose
-	// where a machine-readable status was expected.
+	// and for this command it is not optional. Account state lives in the CLI, so a host
+	// embedding this binary reads it the way a script does — by driving
+	// `auth status --json` / `auth login --json` and parsing the events. If --json left
+	// "auth" as a prompt, that caller would silently start running the word "auth" as a
+	// conversation turn — spending a turn to produce prose where a machine-readable
+	// status was expected.
 	if len(positionals) >= 1 && positionals[0] == "auth" && !forcePrompt {
 		if *stdio {
 			return parsedArgs{}, nil, stdioRequiresHostError()

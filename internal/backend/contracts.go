@@ -6,9 +6,9 @@
 // executes local function tools, and ships structured startup/runtime/turn context.
 // The backend owns the system prompt, developer instructions, runbook
 // selection, model choice, prompt assembly, and the utility-model prompts — and it
-// reaches every model THROUGH OPENROUTER, using the caller's own key on a per-request
-// basis. Model names that appear in this repo are OpenRouter route ids, never direct
-// provider integrations. The wire contract here is Daintree-native (NOT
+// reaches every model THROUGH OPENROUTER, funded by an upstream credential the SERVER
+// holds. The CLI ships none, for the main loop or for utility tasks. Model names that
+// appear in this repo are OpenRouter route ids, never direct provider integrations. The wire contract here is Daintree-native (NOT
 // OpenAI-compatible) and strict: the request schema rejects system/developer messages
 // and unknown fields, so these structs deliberately emit only the fields the backend
 // accepts.
@@ -618,9 +618,10 @@ type Usage struct {
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
 	CachedTokens     int `json:"cached_tokens"`
-	// Cost is what this ONE call charged the caller, in USD — their own key funds every
-	// upstream call, so it is their money. A POINTER because nil means "the provider
-	// reported nothing", which is emphatically not "free": coercing it to 0 would
+	// Cost is what this ONE call charged the credential the BACKEND spends, in USD —
+	// the deployment's money, reported down so a session can show what it consumed. A
+	// POINTER because nil means "the provider reported nothing", which is emphatically
+	// not "free": coercing it to 0 would
 	// quietly under-report a running total. Never compute this client-side; the router
 	// knows which of ~24 endpoints served the call and what cache discount applied, and
 	// anything we derived from a token price would be a guess presented as a bill.
@@ -631,12 +632,13 @@ type Usage struct {
 	Cost *float64 `json:"cost"`
 }
 
-// TurnCost is what a whole /respond request charged the caller, in USD, across every
-// upstream call it made: the runbook selector, its repair pass, a losing speculative
-// generation, the main completion, and a re-rolled round the user never saw.
+// TurnCost is what a whole /respond request charged the backend's upstream credential,
+// in USD, across every upstream call it made: the runbook selector, its repair pass, a
+// losing speculative generation, the main completion, and a re-rolled round the user
+// never saw.
 //
 // Two rules a client must IMPLEMENT rather than infer, and both exist to stop a session
-// accumulator from quietly under-reporting someone's bill:
+// accumulator from quietly under-reporting what a session consumed:
 //
 //   - The whole block is ABSENT when nothing was reported. Absent means unknown, never
 //     free.
@@ -648,7 +650,8 @@ type Usage struct {
 //
 // The practical consequence is one rule: render a session total as a lower bound if ANY
 // turn in it was incomplete or reported no cost at all. These figures are for proportion
-// and trend; the OpenRouter dashboard is the authority on the actual bill.
+// and trend; the OpenRouter dashboard of whoever runs this backend — not the user's own,
+// which funds none of it — is the authority on the actual bill.
 type TurnCost struct {
 	Total    float64  `json:"total"`
 	Main     *float64 `json:"main"`
@@ -733,7 +736,7 @@ func (t *TurnTimings) Any() bool {
 // These numbers are telemetry. They arrive on the terminal `done` event, which the SSE
 // parser decodes strictly: one `json.Unmarshal` failure anywhere in that event aborts
 // the stream, and the turn — already generated, already streamed to the user, already
-// BILLED to their key — fails. Letting a diagnostic field have that power is
+// BILLED upstream — fails. Letting a diagnostic field have that power is
 // indefensible, and the failure is not hypothetical: every field is a `*int`, so the
 // backend dropping a single `round()` and reporting `5775.3` would kill every turn,
 // as would any future string-valued field. A phase we cannot parse is reported the same
@@ -1272,8 +1275,8 @@ type RespondCapsBlock struct {
 	SystemMessagesAccepted bool     `json:"system_messages_accepted"`
 	MaxActiveRunbooks      int      `json:"max_active_runbooks"`
 	MetadataTransport      string   `json:"metadata_transport"`
-	// CostReporting is present when this backend reports what each request charged the
-	// caller. Absent on an older deployment — which the CLI handles without needing to
+	// CostReporting is present when this backend reports what each request cost its
+	// upstream credential. Absent on an older deployment — which the CLI handles without needing to
 	// ask, since an unreported cost is already indistinguishable from a backend that
 	// reports none, and both are rendered as "unknown". Advertised here so `/doctor`
 	// can name the contract rather than leave a tester guessing why /cost is empty.

@@ -52,9 +52,12 @@ func backendReachable(url string) bool {
 //  1. -short mode — `go test -short` is the "fast, no-network" contract; honor it.
 //  2. backend reachability — if nothing answers /health on the dev endpoint, skip.
 //     This is what keeps the suite green offline / on CI / on a laptop with no backend.
-//  3. DAINTREE_API_KEY — the turn is funded by the caller's key; unset means opted out.
-//  4. -race — buildBinary(t) already skips: it spawns a separate, non-instrumented
+//  3. -race — buildBinary(t) already skips: it spawns a separate, non-instrumented
 //     process, so -race adds no coverage and only flakes under load.
+//
+// A funding key is deliberately NOT among them, and the note in the body says why: the
+// backend funds its own turns, so gating on one would skip the test on exactly the setup
+// it exists to exercise.
 //
 // ASSERTIONS are STRUCTURAL, never on exact text. Model output is nondeterministic, so we
 // prove the PIPE works — exit 0, pure JSONL, monotonic seq, a terminal success envelope,
@@ -68,7 +71,7 @@ func TestLiveBackendOneShot(t *testing.T) {
 	if !backendReachable(liveBackendURL) {
 		t.Skipf("live backend e2e requires a Daintree backend reachable at %s; none responded to /health", liveBackendURL)
 	}
-	// There is deliberately no third guard on a funding key. The backend holds its own
+	// There is deliberately no guard on a funding key here. The backend holds its own
 	// upstream credential now, so a reachable one should be able to fund this turn
 	// unaided; requiring DAINTREE_API_KEY would skip the test on exactly the setup it is
 	// meant to exercise. A local backend running WITHOUT a credential fails here rather
@@ -93,9 +96,10 @@ func TestLiveBackendOneShot(t *testing.T) {
 	// DAINTREE_BACKEND_URL is now set EXPLICITLY to the local backend: the default is
 	// the deployed endpoint, and this test must never be the thing that quietly calls
 	// production. DAINTREE_ASSISTANT_OFFLINE stays unset (offline would short-circuit
-	// the call). DAINTREE_API_KEY is inherited from the environment when present: the
-	// backend normally funds the turn from its own credential, but a local backend
-	// running without one still completes if the caller supplies a funding key.
+	// the call). DAINTREE_API_KEY is inherited from the environment when present so this
+	// run is attributed to the same caller the developer's shell already names — it is a
+	// caller bearer, never a funding key, and the local backend still pays for the turn
+	// out of its own upstream credential either way.
 	cmd.Env = append(os.Environ(),
 		"DAINTREE_BACKEND_URL="+liveBackendURL,
 		"DAINTREE_API_KEY="+liveKey,

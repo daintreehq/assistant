@@ -24,8 +24,9 @@ import (
 //
 //  1. STDOUT is the machine channel and stderr is the human one. Under --json, stdout
 //     carries newline-delimited versioned events and nothing else — no spinner, no
-//     prompt, no warning — because Daintree's account UI parses it line by line and a
-//     stray human sentence would break a login.
+//     prompt, no warning — because the caller driving this command, a host embedding
+//     the binary or a script, parses it line by line and a stray human sentence would
+//     break a login.
 //  2. No command prints a credential, ever. There is deliberately no flag, no verbose
 //     mode and no debug switch that reveals an access or refresh token. If support needs
 //     token diagnostics they get the issuer, the client id, a subject hash and an expiry
@@ -83,14 +84,15 @@ func AuthUsage() string {
 	}, "\n")
 }
 
-// authEventVersion versions the NDJSON event stream. Daintree validates every line
-// against a shared schema keyed on this.
+// authEventVersion versions the NDJSON event stream, and a consumer keys its schema on
+// it.
 //
 // It stays 1 through an additive change: new optional properties and new `state` values.
-// That is only safe if the shared schema treats both as open — `additionalProperties`
+// That is only safe if the consumer's schema treats both as open — `additionalProperties`
 // permitted, and `state` a string rather than a closed enum — because a strict v1 schema
-// would reject the whole line rather than degrade. The schema lives in the Daintree app,
-// so this side cannot check it; a state added here needs that confirmed there.
+// would reject the whole line rather than degrade. Those schemas live outside this repo,
+// so this side cannot check them; a state added here needs that confirmed wherever the
+// stream is parsed.
 const authEventVersion = 1
 
 // authEvent is one line of the --json stream.
@@ -285,13 +287,14 @@ func reportPlanAfterLogin(ctx context.Context, w authWriter, mgr *auth.Manager, 
 
 	st := mgr.Status().WithManifest(man)
 	// The same versioned event type `auth status` emits, carrying the same payload —
-	// deliberately NOT a new type, because the shared schema lives in the Daintree app
-	// and this side cannot check that a new one would be accepted.
+	// deliberately NOT a new type, because the schemas that validate this stream live
+	// outside this repo and this side cannot check that a new one would be accepted.
 	//
-	// Emitted on EVERY outcome, including the failures below. Daintree reads this stream
-	// as its only view of account state, and a failed plan check that produced nothing
-	// on stdout left it unable to tell "no plan", "could not check" and "no check was
-	// made" apart — the human sentences go to stderr under --json and it never sees them.
+	// Emitted on EVERY outcome, including the failures below. Under --json this stream is
+	// a machine consumer's whole view of the login, and a failed plan check that produced
+	// nothing on stdout left it unable to tell "no plan", "could not check" and "no check
+	// was made" apart — the human sentences go to stderr under --json and it never sees
+	// them.
 	//
 	// The failure rides the event's own `code`, not the status payload. It cannot ride
 	// the payload: Status.LastErrorCode reflects what was recorded AGAINST THE SESSION,
@@ -391,8 +394,9 @@ func runAuthStatus(ctx context.Context, w authWriter, mgr *auth.Manager, cfg con
 
 	if w.json {
 		// ONE LINE. json.MarshalIndent would emit a multi-line document, and the first
-		// line a caller read would be a bare "{" — Daintree parses this stream line by
-		// line, so an indented status is not merely ugly, it is unparseable. The status
+		// line a caller read would be a bare "{" — machine consumers parse this stream
+		// one event per line, so an indented status is not merely ugly, it is
+		// unparseable. The status
 		// rides inside a versioned event for the same reason every other line does.
 		w.event(authEvent{Type: "auth:status", Env: st.Environment, Extra: st})
 		return exit

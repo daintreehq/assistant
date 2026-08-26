@@ -12,7 +12,8 @@ import (
 )
 
 // status.go is the redacted account view every surface renders: the `auth status`
-// command, the `--json` event stream, and Daintree's settings panel.
+// command, the embedded `/account` card, and the `--json` event stream a host or a
+// script parses.
 //
 // The rule is absolute and it is why this type exists at all rather than callers
 // reaching into the Manager: NOTHING here is a credential. No access token, no refresh

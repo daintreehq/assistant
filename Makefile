@@ -1,5 +1,5 @@
 # Makefile for daintree-assistant (Go).
-# Single static binary; pure-Go SQLite (no CGO). Requires Go >= 1.25.8.
+# Single static binary; pure-Go SQLite (no CGO). Requires Go >= 1.25.13.
 
 BINARY    := daintree-assistant
 PKG       := ./cmd/daintree-assistant

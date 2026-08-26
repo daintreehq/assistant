@@ -17,8 +17,8 @@ import "github.com/daintreehq/assistant/internal/backend"
 //   - StateStorageUnavailable is signed-in-but-not-persisted: everything works until the
 //     process exits, and the user has to be told that.
 //
-// Every consumer — the CLI status command, the JSON event stream, Daintree's settings
-// panel — branches on this and nothing else.
+// Every consumer — the CLI status command, the embedded `/account` card, the JSON event
+// stream a host or a script parses — branches on this and nothing else.
 
 // State is the local account state.
 //

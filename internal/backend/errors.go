@@ -50,7 +50,8 @@ type EnvelopeError struct {
 // condition reaches this package with and without its status depending only on how far
 // the request got.
 const (
-	// The caller's provider account. Deterministic — their settings, their fix.
+	// The DEPLOYMENT's upstream provider account. Deterministic — the backend
+	// operator's settings, the backend operator's fix.
 	CodeProviderInvalidAPIKey      = "provider_invalid_api_key"      // 401 upstream
 	CodeProviderInsufficientCredit = "provider_insufficient_credits" // 402 upstream
 	CodeProviderKeyForbidden       = "provider_key_forbidden"        // 403 upstream
@@ -145,9 +146,10 @@ func (e *Error) Error() string {
 //
 // Two families are deliberately EXCLUDED even though they share 401/403.
 //
-// The provider account codes came first: `provider_invalid_api_key` is also a 401, and
-// telling someone whose key the provider revoked to "check you pasted it in full" sends
-// them round a re-entry loop that cannot work.
+// The provider account codes came first: `provider_invalid_api_key` is also a 401, but
+// the key the provider revoked is the one the BACKEND spends, so telling the person at
+// the terminal to "check you pasted it in full" sends them round a re-entry loop for a
+// credential they have never held.
 //
 // The two 403s — `auth_client_not_allowed` and `auth_permission_denied` — are the
 // newer and sharper case. Each carries a perfectly valid, perfectly fresh token that
@@ -183,9 +185,10 @@ func (e *Error) IsAuth() bool {
 	return e.HTTPStatus == 401 || e.HTTPStatus == 403
 }
 
-// providerAccountCodes are the three conditions that live on the CALLER's OpenRouter
-// account. Grouped because every consumer that asks "is this my account?" wants all
-// three, while the advice for each one differs — see IsUpstreamAuth.
+// providerAccountCodes are the three conditions that live on the OpenRouter account the
+// DEPLOYMENT funds turns from — never the user's, who holds no provider credential at
+// all. Grouped because every consumer that asks "is this the upstream account?" wants
+// all three, while the advice for each one differs — see IsUpstreamAuth.
 var providerAccountCodes = map[string]bool{
 	CodeProviderInvalidAPIKey:      true,
 	CodeProviderInsufficientCredit: true,
@@ -193,9 +196,11 @@ var providerAccountCodes = map[string]bool{
 }
 
 // IsUpstreamAuth reports a well-formed key that the UPSTREAM provider then rejected.
-// IsAuth means "fix your header"; this means "fix your account" — a revoked key, an
-// empty balance, or a key not permitted to use this model. Without the split, a funding
-// problem would read as a broken login.
+// IsAuth is about the credential this CLI presents — fix your header; this is about the
+// credential the backend spends upstream — a revoked key, an empty balance, or a key not
+// permitted to use this model, none of which anything on the user's machine can change.
+// Without the split, a funding problem on the deployment's account would read to the
+// person in front of the terminal as their own broken login.
 //
 // The legacy 502 `upstream_error` form is still recognised so a CLI pointed at an older
 // backend keeps its correct message rather than falling through to "Model error".
@@ -215,14 +220,20 @@ func (e *Error) IsProviderAccount() bool { return providerAccountCodes[e.Code] }
 // when the error is not one of the three, including for the legacy `upstream_error`
 // blob — which genuinely could not tell them apart, and must not be made to look as if
 // it could.
+//
+// Every clause names the DEPLOYMENT's credential and offers the reader no action of
+// their own. The account in question is the one whoever runs this backend pays for, so
+// telling a user to rotate a key or top up a balance sends them to change a value they
+// have never held — see upstreamFailureAdvice in internal/agent/session.go, which is
+// the copy a real turn renders.
 func (e *Error) ProviderAccountReason() string {
 	switch e.Code {
 	case CodeProviderInvalidAPIKey:
-		return "does not recognise this key — replace or rotate it"
+		return "does not recognise the credential this backend spends — it belongs to the deployment, so report it to whoever runs the backend"
 	case CodeProviderInsufficientCredit:
-		return "reports this account has no credit left — add credits at https://openrouter.ai/credits"
+		return "reports the account this backend spends from has no credit left — it is the deployment's account rather than yours"
 	case CodeProviderKeyForbidden:
-		return "will not let this key use this model — check its model permissions, spend limit and guardrails"
+		return "will not let the credential this backend spends use this model — its model permissions, spend limit or guardrails are blocking it"
 	}
 	return ""
 }
