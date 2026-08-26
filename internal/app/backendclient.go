@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"strings"
 
@@ -201,12 +202,14 @@ func (u unobservedTokenSource) Secrets() []string { return u.mgr.Secrets() }
 // NewAccountManager builds the account manager for a resolved config, or nil when there
 // is no account for this process to have.
 //
-// Two ways to get nil, and both mean "no account layer here" rather than a failure. A
-// deprecated caller key overrides account identity for every request, so building a
-// manager beside it would put two credentials in play with only one able to win. And a
-// manager that cannot be constructed means no auth directory — a broken state root, not
-// a reason to refuse to start; the client falls back to sending no credential, exactly
-// as it does for a signed-out user.
+// Two ways to get nil, and they are NOT the same thing — see AccountLayerFault, which is
+// how a surface tells them apart. A deprecated caller key overrides account identity for
+// every request, so building a manager beside it would put two credentials in play with
+// only one able to win: a deliberate choice, and nothing to report. A manager that cannot
+// be CONSTRUCTED is a broken state root — still not a reason to refuse to start (the
+// client falls back to sending no credential, exactly as it does for a signed-out user),
+// but a local fault the user has to be told about, because every account surface would
+// otherwise describe their machine's problem as a property of the deployment.
 func NewAccountManager(cfg config.AppConfig) *auth.Manager {
 	if strings.TrimSpace(cfg.APIKey) != "" {
 		return nil
@@ -219,6 +222,70 @@ func NewAccountManager(cfg config.AppConfig) *auth.Manager {
 		return nil
 	}
 	return mgr
+}
+
+// ErrAccountLayerUnbuilt is the fallback fault: this session has no account manager, the
+// config says one was wanted, and re-deriving the cause no longer reproduces it.
+//
+// It exists so the third branch is never SILENT. The generic "accounts are not available"
+// is a statement about the deployment, and saying it here would send someone reading it
+// to a backend that is working perfectly while the fault sits on their own disk.
+var ErrAccountLayerUnbuilt = errors.New("the account layer could not be built when this session started")
+
+// AccountLayerFault reports the local fault that left this session without an account
+// manager, or nil when there is no fault to report.
+//
+// nil covers the two healthy readings: a manager exists, or a caller key deliberately
+// replaced it. Non-nil means construction FAILED — an unwritable state root, a plain file
+// where the `auth` directory belongs, EACCES, ENOSPC — and every account surface should
+// say so instead of falling through to copy about the deployment.
+//
+// The fault is RE-DERIVED from the config rather than retained beside the manager, for
+// two reasons. Both construction sites — boot and a `/backend` switch, which rebuilds the
+// manager because a credential minted for one deployment must never be presented to
+// another — are covered by one function of the live (config, manager) pair, with no field
+// for the second site to forget to update. And re-deriving reports the CURRENT state of
+// the root, so a fault that has since been repaired stops being asserted; what it cannot
+// then explain is why this process still has no manager, which is what the sentinel
+// above is for.
+//
+// The pair is read under the same lock and in one capture, for the reason RefreshAccount
+// documents: `/backend` replaces the config and the manager together, and two separate
+// reads can straddle that write and hand this function a manager from one endpoint beside
+// the config of another.
+func (a *App) AccountLayerFault() error {
+	a.cfgMu.RLock()
+	cfg, mgr := a.Config, a.Auth
+	a.cfgMu.RUnlock()
+	if mgr != nil {
+		return nil
+	}
+	return accountLayerFault(cfg)
+}
+
+// accountLayerFault answers the same question from a config alone, for the paths that
+// have no App — the account read below, which is shared with the standalone `auth`
+// subcommands.
+//
+// It re-attempts the construction rather than probing the directory itself, so it stays
+// truthful to whatever auth.NewManager actually requires. That is safe to call from a
+// user-facing surface because construction performs no I/O beyond creating the auth
+// directory: discovery and credential reads are deferred precisely so building one on an
+// offline or signed-out machine cannot block.
+func accountLayerFault(cfg config.AppConfig) error {
+	if strings.TrimSpace(cfg.APIKey) != "" {
+		// Deliberate, not degraded. The caller key names the principal for every request
+		// in this process, and reporting a fault here would tell an operator who
+		// configured exactly this that something is broken.
+		return nil
+	}
+	if _, err := auth.NewManager(auth.Options{
+		StateRoot:  cfg.StateRoot,
+		BackendURL: cfg.BackendURL,
+	}); err != nil {
+		return err
+	}
+	return ErrAccountLayerUnbuilt
 }
 
 // accountTokenSource adapts a manager for the client, preserving the nil contract.

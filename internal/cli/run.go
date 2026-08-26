@@ -13,6 +13,7 @@ import (
 
 	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/app"
+	"github.com/daintreehq/assistant/internal/auth"
 	"github.com/daintreehq/assistant/internal/backend"
 	"github.com/daintreehq/assistant/internal/cli/jsonout"
 	"github.com/daintreehq/assistant/internal/cli/render"
@@ -1138,6 +1139,13 @@ func backendDoctorChecks(ctx context.Context, a *app.App) []DoctorCheck {
 // overrides account identity for the request, so an install with both a sign-in and a
 // key is one where the key silently wins — and the person reading a support bundle needs
 // to know that before anything else they see makes sense.
+//
+// It also fails on a state root the account layer could not be built under. That is not a
+// live check either — App.AccountLayerFault re-derives it from the config, filesystem
+// only — and it is the one condition this row used to report as OK. A session whose auth
+// directory cannot be created carries no credential, so on an enforcing deployment every
+// turn is refused; reporting "account sign-in" for it is doctor concluding no problem
+// about the exact fault it exists to find.
 func accountDoctorCheck(a *app.App) DoctorCheck {
 	c := DoctorCheck{ID: "auth.account", Label: "account"}
 	if a.Config.APIKeyDeprecated {
@@ -1148,6 +1156,18 @@ func accountDoctorCheck(a *app.App) DoctorCheck {
 		c.Detail = "a caller-supplied key (DAINTREE_API_KEY or --api-key-file) is overriding account sign-in"
 		c.Hint = "That override is deprecated. Remove it and use `daintree-assistant auth login`."
 		c.Data = map[string]any{"deprecatedApiKey": true}
+		return c
+	}
+	if fault := a.AccountLayerFault(); fault != nil {
+		c.Status = StatusFail
+		c.Detail = "sign-in is unavailable on this machine: " + fault.Error()
+		// The PATH belongs here and nowhere else. A doctor row is meant to be pasted into
+		// an issue and is already full of state-dir paths (see CheckStateDir), and this
+		// fault is unactionable without knowing which directory could not be created —
+		// where a turn's prose keeps to the fault itself.
+		c.Hint = "Sign-in needs a writable `auth` directory under " + a.Config.StateRoot +
+			". Fix its permissions, or set DAINTREE_ASSISTANT_STATE_DIR to a writable path."
+		c.Data = map[string]any{"stateRoot": a.Config.StateRoot, "code": auth.CodeOf(fault)}
 		return c
 	}
 	c.Status = StatusOK

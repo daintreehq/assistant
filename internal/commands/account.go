@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -258,16 +259,54 @@ func refreshNote(res app.AccountRefresh, after auth.Status) string {
 
 // noAccountManagerText explains a session with NO account layer at all.
 //
-// Two different causes land here and they need different sentences. A caller key names
+// Three different causes land here and they need different sentences. A caller key names
 // the principal for this process, which deliberately leaves App.Auth nil — telling that
 // operator "this backend does not use accounts" would be false and would send them
 // looking for a deployment problem that does not exist.
+//
+// The second is the one this used to hide: the manager could not be BUILT, because the
+// auth directory under the state root could not be created. That is a fault on this
+// machine and it has nothing to do with the deployment, so the generic sentence sent
+// people to check a backend that was answering fine. It is also the only one of the three
+// that is fixable, which is why it is the only one carrying a next action.
+//
+// The generic line is left for the third: an App with a manager the deployment simply has
+// no use for. It stays a statement about availability and never about a fault, because
+// every install today runs against a backend with no identity provider at all.
 func noAccountManagerText(a *app.App) string {
-	if a != nil && a.SnapshotConfig().APIKey != "" {
+	if a == nil {
+		return "Accounts are not available in this session."
+	}
+	if a.SnapshotConfig().APIKey != "" {
 		return "This session identifies itself with DAINTREE_API_KEY, so there is no\n" +
 			"account to sign in to or out of. Unset it to use a managed sign-in."
 	}
+	if fault := a.AccountLayerFault(); fault != nil {
+		msg := "Accounts are unavailable in this session: " + accountFaultMessage(fault) + ".\n" +
+			"That is a fault on this machine, not on the backend — turns still work, but\n" +
+			"signing in cannot. Run `daintree-assistant doctor` for the path it needs, fix\n" +
+			"it, then start a new session."
+		if hint := auth.HintOf(fault); hint != "" {
+			msg += "\n" + hint
+		}
+		return msg
+	}
 	return "Accounts are not available in this session."
+}
+
+// accountFaultMessage renders a construction fault WITHOUT the local error code.
+//
+// Every other card here goes through authMessage, code and all, because those codes name
+// something the user just did — a busy callback port, a declined consent. This one names
+// nothing of the sort: creating the auth directory is wrapped as `auth_exchange_failed`,
+// and no token exchange has happened or could have. Printing that code sends a reader
+// hunting a sign-in attempt that was never made.
+func accountFaultMessage(err error) string {
+	var ae *auth.Error
+	if errors.As(err, &ae) && ae != nil && ae.Message != "" {
+		return ae.Message
+	}
+	return authMessage(err)
 }
 
 // accountSummary is the shared body of /account and the tail of a successful /login.

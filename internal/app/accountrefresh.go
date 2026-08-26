@@ -174,8 +174,18 @@ type fetchedAccount struct {
 // endpoint still, without ever holding that lock across a network request.
 func fetchAccount(ctx context.Context, cfg config.AppConfig, mgr *auth.Manager, opts AccountRefreshOptions) fetchedAccount {
 	if mgr == nil {
-		// No account layer in this process at all — DAINTREE_API_KEY names the caller
-		// instead. There is no session to refresh and no endpoint to ask.
+		// No account layer in this process at all — and WHICH of the two reasons decides
+		// whether this is an outcome or a failure.
+		//
+		// A caller key names the principal instead, so there is no session to refresh and
+		// no endpoint to ask: Skipped, silently, exactly as a deployment with no identity
+		// provider is. But a manager that could not be BUILT is a broken state root, and
+		// reporting that as Skipped renders a local fault as "this deployment does not use
+		// accounts" — the reader is then told nothing is wrong on a machine where sign-in
+		// cannot work at all. Err is the outcome that reaches a human as a note.
+		if fault := accountLayerFault(cfg); fault != nil {
+			return fetchedAccount{Err: fault}
+		}
 		return fetchedAccount{Skipped: true}
 	}
 
