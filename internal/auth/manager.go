@@ -71,6 +71,33 @@ type Manager struct {
 	// with the verdict, so a stale answer can be recognised and dropped.
 	generation uint64
 
+	// sessionKey is the credential a login IN THIS PROCESS published, remembered for the
+	// lifetime of the process. hasSessionKey says whether it was ever set, because the
+	// zero CredentialKey is not distinguishable from an unset one.
+	//
+	// It exists because the on-disk descriptor is the ADDRESS of a credential, not the
+	// credential, and every path that reads it treats its absence as "no login on this
+	// machine". That inference is correct for a process that did not perform the login;
+	// it is nonsense for one that did. A process that just exchanged a code, stored a
+	// refresh token and told the user "Signed in." knows exactly which credential it
+	// holds, and must never conclude from a missing FILE that it holds none — which is
+	// what the memory tier does by construction (no credential service, and often no
+	// durable anything), and what a persistent tier does for the width of any window
+	// between the credential landing and the descriptor landing.
+	//
+	// Without it, the failure is silent and delayed: the in-memory access token keeps
+	// working, so the login looks fine until it expires, and then AccessToken's
+	// short-circuit answers "never signed in", returns an EMPTY bearer, and the backend's
+	// open door happily serves the turn as an anonymous principal. The user is told they
+	// are signed in the whole time.
+	//
+	// It is checked against backendOriginMatches everywhere it is consulted, for the same
+	// reason the descriptor is: one manager is built per endpoint, but nothing in the type
+	// forces that, and a key minted for one deployment must never name the credential for
+	// another.
+	sessionKey    CredentialKey
+	hasSessionKey bool
+
 	// storeOnce makes credential-store opening exactly-once.
 	storeOnce sync.Once
 	// refreshing is the in-process singleflight for refreshes, as a 1-buffered channel so
@@ -226,6 +253,49 @@ func (m *Manager) key(man *Manifest) CredentialKey {
 	return KeyFor(m.stateRoot, m.backendURL, man)
 }
 
+// rememberedKey returns the credential a login in this process published, if it belongs
+// to the endpoint this manager is configured for.
+//
+// The origin check is not defensive noise. The descriptor has the same problem and
+// resolveKey documents it: a key names a backend origin and a state root, and using one
+// minted for a different deployment would make `auth status` for B report A's session and
+// `auth logout` for B DELETE A's credential. A manager is rebuilt on every `/backend`
+// switch today, so this cannot currently fire — which is exactly why it is cheap to keep
+// and expensive to leave out the day that stops being true.
+func (m *Manager) rememberedKey() (CredentialKey, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.rememberedKeyLocked()
+}
+
+// rememberedKeyLocked is rememberedKey for callers already holding m.mu.
+func (m *Manager) rememberedKeyLocked() (CredentialKey, bool) {
+	if !m.hasSessionKey || !m.backendOriginMatches(m.sessionKey) {
+		return CredentialKey{}, false
+	}
+	return m.sessionKey, true
+}
+
+// forgetSessionKeyLocked drops the remembered credential. Every identity boundary that
+// removes the credential calls it: leaving the key behind would keep naming a session
+// that has been deleted, and the next resolve would hand a logged-out key to the store.
+func (m *Manager) forgetSessionKeyLocked() {
+	m.sessionKey, m.hasSessionKey = CredentialKey{}, false
+}
+
+// everSignedInHere answers "is there a credential on this machine we can name?".
+//
+// TWO sources, and the in-memory one comes first because it is the only one that can be
+// right about a login this process performed but could not durably address. The
+// descriptor answers for every OTHER process, which is what it is for.
+func (m *Manager) everSignedInHere() bool {
+	if _, ok := m.rememberedKey(); ok {
+		return true
+	}
+	_, ok := loadKeyRef(m.authDir)
+	return ok
+}
+
 // AccessToken implements backend.TokenSource.
 //
 // This is the hot path: every protected backend request calls it. It must be cheap when
@@ -272,7 +342,15 @@ func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 	// backend does not serve one), and abort the call. A user who has never signed in
 	// would find the assistant unable to reach a backend that was perfectly willing to
 	// serve them anonymously.
-	if _, everSignedIn := loadKeyRef(m.authDir); !everSignedIn {
+	//
+	// THE IN-MEMORY KEY IS CONSULTED FIRST, and it is what keeps this cheap answer from
+	// being a wrong one. "No descriptor" is only evidence about OTHER processes. In one
+	// that performed the login itself the descriptor's absence proves nothing — the
+	// memory tier has no durable anything by definition — and taking it as proof here is
+	// how a session that is genuinely signed in silently starts sending an empty bearer
+	// the moment its access token expires. The backend's open door accepts that, so the
+	// turn succeeds under the wrong principal and nothing anywhere reports a problem.
+	if !m.everSignedInHere() {
 		m.mu.Lock()
 		// A state that CLAIMS a session is corrected, not just an unknown one.
 		//
@@ -295,10 +373,12 @@ func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 		//     its descriptor yet. Overwriting it reports a sign-in as signed out while
 		//     the browser is still open.
 		//   StateStorageUnavailable — a memory-only credential, on a box with no
-		//     credential service. The descriptor write is best-effort and can fail for
-		//     the same reason the store did, so its absence there is a symptom of the
-		//     tier rather than evidence of a sign-out, and "signed out" would hide the
-		//     one fact the user needs: their session works and will not survive exit.
+		//     credential service. A missing descriptor there is a symptom of the tier
+		//     rather than evidence of a sign-out, and "signed out" would hide the one
+		//     fact the user needs: their session works and will not survive exit. A
+		//     login on that tier no longer reaches this branch at all — the remembered
+		//     key answers above — so what is left here is a manager that degraded to
+		//     memory without ever signing in, which is not a sign-out either.
 		//   StateAccessRefused — deliberately retained (see state.go), because a fresh
 		//     credential would be refused identically. Downgrading erases the refusal
 		//     and invites an endless re-login loop against a deployment that will not
@@ -500,6 +580,12 @@ func (m *Manager) refresh(ctx context.Context) (TokenSet, error) {
 			revoked := newError(CodeSessionRevoked, "the session is no longer valid").
 				withHint("Sign in again with `daintree-assistant auth login`.")
 			_ = forgetKeyRef(m.authDir)
+			// The in-memory key goes with the descriptor. The provider has rejected this
+			// grant outright; a remembered key would keep asserting a session that the
+			// issuer has already said is gone.
+			m.mu.Lock()
+			m.forgetSessionKeyLocked()
+			m.mu.Unlock()
 			if delErr := store.Delete(ctx, key); delErr != nil && !errors.Is(delErr, ErrNotFound) {
 				revoked = wrapError(CodeStorageUnavailable,
 					"the session is no longer valid, and the stored credential could not be removed", delErr).
@@ -776,8 +862,6 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 		restore()
 		return LoginResult{}, wrapError(CodeStorageUnavailable, "could not store the session", saveErr)
 	}
-	_ = saveKeyRef(m.authDir, key) // best effort: it only enables OFFLINE logout
-
 	// Persistence is derived from the TIER, not from whether Save returned an error. A
 	// MemoryStore saves successfully and still loses the session on exit, so trusting the
 	// error would report an ordinary signed-in state for a login that evaporates.
@@ -785,6 +869,46 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 	tier := m.tier
 	m.mu.Unlock()
 	persisted := tier == TierKeychain
+
+	// THE DESCRIPTOR AND THE CREDENTIAL ARE ONE PUBLICATION, not a write and a courtesy.
+	//
+	// This used to be `_ = saveKeyRef(...)` under a comment saying it "only enables
+	// OFFLINE logout", and that comment was the bug: the descriptor is also how every
+	// later process — and this one, after its access token expires — finds out a
+	// credential exists at all. AccessToken short-circuits on its absence, resolveKey
+	// falls back to a network round trip, and Hydrate reads it before deciding whether an
+	// outage is a sign-out. A login that stored a refresh token and then failed to record
+	// its address has produced a credential nobody can name: the in-memory access token
+	// keeps working for an hour, and then the session quietly becomes anonymous against a
+	// backend whose open door serves it.
+	//
+	// So on the persistent tier it FAILS the login, and rolls back exactly as the
+	// revision bump below does — under the lock that is still held, so no concurrent
+	// login can have replaced what is being deleted. `Persisted: true` then means what it
+	// says: a new process can resolve this credential. Reporting success and leaving an
+	// unaddressable keychain entry behind is the outcome this refuses.
+	//
+	// On the MEMORY tier it stays best effort, and that is not an inconsistency. There is
+	// nothing durable for the descriptor to address — the credential dies with the
+	// process — so a failed write costs nothing the tier has not already lost, and the
+	// remembered key below keeps this process's own session working for its lifetime.
+	// Failing there would refuse a login that is about to work perfectly well.
+	if err := saveKeyRef(m.authDir, key); err != nil && persisted {
+		// Best-effort cleanup, errors discarded on purpose: the failure being reported is
+		// the descriptor write, and replacing it with a cleanup error would name the
+		// wrong cause. The descriptor is removed only if it names THIS key — it is a
+		// single file for the whole state root, and a stale one for another endpoint is
+		// not ours to delete.
+		_ = m.ensureStore(ctx).Delete(ctx, key)
+		if recorded, ok := loadKeyRef(m.authDir); ok && recorded == key {
+			_ = forgetKeyRef(m.authDir)
+		}
+		lock.release()
+		restore()
+		return LoginResult{}, wrapError(CodeStorageUnavailable,
+			"the session was stored but its descriptor could not be recorded, so no later process could find it", err).
+			withHint("Check that " + m.authDir + " is writable, then sign in again.")
+	}
 
 	if err := m.revision.Bump(ctx); err != nil {
 		// ROLL THE CREDENTIAL BACK before reporting failure, under the lock that is
@@ -824,12 +948,19 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 	// Publishing first closes it: any clearer that acquires the lock after this point
 	// sees the bumped generation and the replaced token, fails its staleness check, and
 	// leaves the new credential alone. Nothing below can fail, so there is no path that
-	// publishes a session and then abandons it.
+	// publishes a session and then abandons it — which is a claim about the code above
+	// too, and the checked descriptor write is what makes it true: every step that CAN
+	// fail now happens before this point and rolls the credential back when it does.
 	registerSecrets(set)
 	m.mu.Lock()
 	m.access = set
 	m.lastErr = nil
 	m.generation++
+	// The credential this process now holds, remembered for its lifetime. See the field.
+	// Set here rather than beside the store write so it is published in the same critical
+	// section as the generation and the token — a key naming a session the manager has
+	// not adopted yet would be read by a concurrent resolve as current when it is not.
+	m.sessionKey, m.hasSessionKey = key, true
 	// A NEW identity has verified nothing yet. Inheriting the previous one's timestamp
 	// would let a login whose courtesy account read fails report itself as freshly
 	// checked on the strength of the session it replaced. See Logout.
@@ -894,6 +1025,7 @@ func (m *Manager) Logout(ctx context.Context) (revokedRemotely bool, err error) 
 		m.mu.Lock()
 		m.access = TokenSet{}
 		m.state = StateSignedOut
+		m.forgetSessionKeyLocked()
 		m.mu.Unlock()
 		return false, nil
 	}
@@ -912,6 +1044,11 @@ func (m *Manager) Logout(ctx context.Context) (revokedRemotely bool, err error) 
 	m.access = TokenSet{}
 	m.state = StateSignedOut
 	m.generation++ // a late verdict from a pre-logout request must not resurrect anything
+	// The remembered key names the credential that was just deleted. Kept, it would go on
+	// telling AccessToken "this process signed in" for a session the user has ended —
+	// which is the descriptor's own failure mode, reproduced in memory where no other
+	// process could correct it.
+	m.forgetSessionKeyLocked()
 	// CLEARED WITH THE SESSION, and every identity boundary does the same.
 	//
 	// lastVerifiedAt says "this deployment honoured THIS credential at this time". It is
@@ -992,7 +1129,7 @@ func (m *Manager) Hydrate(ctx context.Context) (resolved bool) {
 		// Signing someone out over a backend outage is the failure this branch exists to
 		// prevent.
 		unresolved := newError(CodeDiscoveryUnavailable, "could not determine which account this backend uses")
-		if _, everSignedIn := loadKeyRef(m.authDir); !everSignedIn {
+		if !m.everSignedInHere() {
 			// No descriptor means no login has EVER completed on this machine, so there
 			// is no session for an outage to have interrupted. recordUnavailable would
 			// promote Unknown to TemporarilyUnavailable here — a state whose SignedIn()
@@ -1241,6 +1378,8 @@ func (m *Manager) clearSessionIfCurrent(ctx context.Context, gen uint64, usedTok
 	m.generation++
 	// The revoked session's verification time goes with it. See Logout.
 	m.lastVerifiedAt = nil
+	// And so does the remembered key: the credential it names has just been deleted.
+	m.forgetSessionKeyLocked()
 }
 
 // currentKey resolves the credential key, preferring live discovery and falling back to
@@ -1280,6 +1419,19 @@ const (
 
 // resolveKey works out which credential this manager is responsible for.
 func (m *Manager) resolveKey(ctx context.Context) (CredentialKey, keyResolution) {
+	// A login performed by THIS process outranks both the file and the network, and it is
+	// the only source that can be right when neither of the others is. On the memory tier
+	// there may be no durable descriptor at all, and after a `logout` elsewhere removed
+	// the shared descriptor there is certainly none — yet this process still holds a
+	// credential in its own store, and Logout still has to be able to name it to delete
+	// it. Falling through to discovery would make that conditional on the network, which
+	// is precisely what the descriptor exists to avoid.
+	//
+	// It is already origin-checked (see rememberedKey), so it can never name a credential
+	// belonging to another endpoint.
+	if remembered, ok := m.rememberedKey(); ok {
+		return remembered, keyResolved
+	}
 	recorded, ok := loadKeyRef(m.authDir)
 	if ok {
 		// The descriptor is a SINGLE file per state root, so it can describe a credential
