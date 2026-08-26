@@ -777,6 +777,47 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 		}
 	}
 
+	// abandoned() is restore()'s counterpart for the two paths that ROLL THE CREDENTIAL
+	// BACK, and the difference between them is not cosmetic.
+	//
+	// restore() puts the pre-attempt state back, which is right for every failure that
+	// left the stored credential untouched — a cancelled browser, a timeout, a refused
+	// exchange. It is wrong the moment a rollback has run. Save has already overwritten
+	// whatever was there, and the rollback then deletes what Save wrote, so BOTH the new
+	// credential and the one it replaced are gone. Restoring `signed_in_unverified` over
+	// that publishes a session with nothing behind it: Status reports signed in, the
+	// cached access token from the previous login keeps being sent for the rest of its
+	// hour, and only when it expires does the refresh discover there is no credential to
+	// refresh from. That is the same delayed, silent slide into anonymous requests this
+	// whole path exists to close — reintroduced by the cleanup.
+	//
+	// So a rollback says signed out, and drops the cached token that would otherwise
+	// contradict it. One consistent story: the sign-in failed, you are signed out, try
+	// again.
+	//
+	// The generation guard is restore()'s, for restore()'s reason. If the generation has
+	// moved, a logout or a revocation has spoken about this session more recently than
+	// this attempt can, and forcing StateSignedOut over StateRevoked would replace "your
+	// session was revoked" — which is actionable — with a bare sign-out that is not.
+	abandoned := func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.generation != priorGen {
+			return
+		}
+		m.access = TokenSet{}
+		m.state = StateSignedOut
+		// The identity ended here, so everything scoped to it goes. The remembered key
+		// names the credential the rollback just deleted; left behind it would keep
+		// telling AccessToken this process holds a session. lastVerifiedAt is cleared at
+		// every generation bump for the same reason — it belongs to one identity.
+		m.forgetSessionKeyLocked()
+		m.lastVerifiedAt = nil
+		// A verdict already in flight for the dead session must not land and re-confirm
+		// it. Advancing the generation is what makes those stale.
+		m.generation++
+	}
+
 	if openBrowser {
 		if err := m.opener.Open(ctx, authURL); err != nil {
 			restore()
@@ -904,7 +945,7 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 			_ = forgetKeyRef(m.authDir)
 		}
 		lock.release()
-		restore()
+		abandoned()
 		return LoginResult{}, wrapError(CodeStorageUnavailable,
 			"the session was stored but its descriptor could not be recorded, so no later process could find it", err).
 			withHint("Check that " + m.authDir + " is writable, then sign in again.")
@@ -930,7 +971,7 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 			_ = forgetKeyRef(m.authDir)
 		}
 		lock.release()
-		restore()
+		abandoned()
 		return LoginResult{}, err
 	}
 
