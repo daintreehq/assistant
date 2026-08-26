@@ -38,11 +38,16 @@ func TestAccountDoctorCheckFailsOnAnUnbuildableAuthStateRoot(t *testing.T) {
 		BackendURL: "https://assistant.daintree.org",
 	}})
 
-	if c.Status != StatusFail {
-		t.Fatalf("status %q for a state root the account layer cannot be built under, want fail", c.Status)
+	// WARN, not FAIL: a fail makes Summary.Healthy false and the exit code non-zero,
+	// which has to mean the install cannot run — and it can, because sign-in is optional
+	// and every deployment today serves anonymous requests. The case where it genuinely
+	// cannot is a deployment that requires an account, and the backend-aware credential
+	// row already fails for that one.
+	if c.Status != StatusWarn {
+		t.Fatalf("status %q for a state root the account layer cannot be built under, want warn", c.Status)
 	}
 	if c.Hint == "" {
-		t.Error("a failing check with no hint is a support ticket by construction")
+		t.Error("a reported fault with no hint is a support ticket by construction")
 	}
 	// The PATH belongs in a doctor row: the fault is unactionable without knowing which
 	// directory could not be created, and this output already carries state-dir paths.
@@ -102,5 +107,24 @@ func TestAccountDoctorCheckKeepsTheCallerKeyWarning(t *testing.T) {
 	}
 	if c.Data["deprecatedApiKey"] != true {
 		t.Errorf("the deprecation flag went missing from the JSON form: %v", c.Data)
+	}
+}
+
+// The row must not be the thing that gates a working install. A broken auth directory on
+// an open deployment leaves every turn working, so the report stays healthy and doctor
+// still exits zero — the loud version of this belongs to the credential row, which can
+// actually see whether the backend refuses an anonymous request.
+func TestAccountLayerFaultDoesNotGateAnOtherwiseHealthyReport(t *testing.T) {
+	r := &DoctorReport{}
+	r.Add(accountDoctorCheck(&app.App{Config: config.AppConfig{
+		StateRoot:  brokenAuthStateRoot(t),
+		BackendURL: "https://assistant.daintree.org",
+	}}))
+	r.Finalize()
+	if !r.Summary.Healthy {
+		t.Fatal("a broken auth directory made the whole report unhealthy — doctor now exits non-zero on an install that runs every turn")
+	}
+	if r.Summary.Warn != 1 {
+		t.Fatalf("warn count %d, want the fault reported exactly once", r.Summary.Warn)
 	}
 }

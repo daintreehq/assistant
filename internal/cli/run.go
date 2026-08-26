@@ -1139,12 +1139,20 @@ func backendDoctorChecks(ctx context.Context, a *app.App) []DoctorCheck {
 // key is one where the key silently wins — and the person reading a support bundle needs
 // to know that before anything else they see makes sense.
 //
-// It also fails on a state root the account layer could not be built under. That is not a
+// It also warns on a state root the account layer could not be built under. That is not a
 // live check either — App.AccountLayerFault re-derives it from the config, filesystem
-// only — and it is the one condition this row used to report as OK. A session whose auth
-// directory cannot be created carries no credential, so on an enforcing deployment every
-// turn is refused; reporting "account sign-in" for it is doctor concluding no problem
-// about the exact fault it exists to find.
+// only — and it is the one condition this row used to report as plain OK, which is doctor
+// concluding no problem about a machine that cannot sign in at all.
+//
+// WARN rather than FAIL, and the line between them is drawn where this file draws it
+// everywhere else: a fail is what makes Summary.Healthy false and the exit code non-zero,
+// so it has to mean the install cannot run. This one does not. Sign-in is optional — every
+// deployment today answers `configured:false` and serves anonymous requests — so an install
+// with a broken auth directory still runs every turn. The case where it genuinely cannot,
+// a deployment that REQUIRES an account, is already a fail two rows down: the credential
+// probe is backend-aware and 401s at our own door (isBackendAuthError), where this row can
+// only see a directory. Failing here as well would gate a working install on a broken
+// optional feature, which is how a release gate becomes noise people learn to skip.
 func accountDoctorCheck(a *app.App) DoctorCheck {
 	c := DoctorCheck{ID: "auth.account", Label: "account"}
 	if a.Config.APIKeyDeprecated {
@@ -1158,7 +1166,7 @@ func accountDoctorCheck(a *app.App) DoctorCheck {
 		return c
 	}
 	if fault := a.AccountLayerFault(); fault != nil {
-		c.Status = StatusFail
+		c.Status = StatusWarn
 		c.Detail = "sign-in is unavailable on this machine: " + app.AccountFaultMessage(fault)
 		// The PATH belongs here and nowhere else. A doctor row is meant to be pasted into
 		// an issue and already prints state-dir paths, and this fault is unactionable

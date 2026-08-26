@@ -230,7 +230,45 @@ func NewAccountManager(cfg config.AppConfig) *auth.Manager {
 // It exists so the third branch is never SILENT. The generic "accounts are not available"
 // is a statement about the deployment, and saying it here would send someone reading it
 // to a backend that is working perfectly while the fault sits on their own disk.
-var ErrAccountLayerUnbuilt = errors.New("the account layer could not be built when this session started")
+//
+// The wording says "in this session" and deliberately not "at startup": boot is only one
+// of the two construction sites. A `/backend` switch rebuilds the manager mid-session,
+// and a root that was broken for that one attempt and repaired since lands here too.
+var ErrAccountLayerUnbuilt = errors.New("the account layer is not built in this session")
+
+// AccountLayerFaultError marks an error as a CONSTRUCTION fault rather than anything the
+// account itself did.
+//
+// The marker is a type because the underlying error is not distinguishable by its own
+// code: creating the auth directory is wrapped as `auth_exchange_failed`, which is also
+// what a genuinely failed token exchange carries. Without this, a surface rendering a
+// refresh error would have to guess from the wording, and the two need opposite copy —
+// one says retry the sign-in, the other says fix a directory.
+//
+// Error() delegates so nothing is added to the text, and Unwrap keeps errors.Is/As and
+// auth.CodeOf working straight through the marker.
+type AccountLayerFaultError struct{ Cause error }
+
+func (e *AccountLayerFaultError) Error() string {
+	if e == nil || e.Cause == nil {
+		return "the account layer is not built in this session"
+	}
+	return e.Cause.Error()
+}
+
+func (e *AccountLayerFaultError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+// IsAccountLayerFault reports whether err is a construction fault, however deeply it is
+// wrapped. Surfaces branch on this rather than on message text.
+func IsAccountLayerFault(err error) bool {
+	var f *AccountLayerFaultError
+	return errors.As(err, &f)
+}
 
 // AccountLayerFault reports the local fault that left this session without an account
 // manager, or nil when there is no fault to report.
@@ -283,9 +321,9 @@ func accountLayerFault(cfg config.AppConfig) error {
 		StateRoot:  cfg.StateRoot,
 		BackendURL: cfg.BackendURL,
 	}); err != nil {
-		return err
+		return &AccountLayerFaultError{Cause: err}
 	}
-	return ErrAccountLayerUnbuilt
+	return &AccountLayerFaultError{Cause: ErrAccountLayerUnbuilt}
 }
 
 // AccountFaultMessage renders a construction fault as a human sentence, WITHOUT the local

@@ -239,6 +239,17 @@ func refreshNote(res app.AccountRefresh, after auth.Status) string {
 		if auth.IsCancelled(res.Err) {
 			return ""
 		}
+		if app.IsAccountLayerFault(res.Err) {
+			// Not a failed CHECK. There was no account layer to check with, and rendering
+			// it through the line below would say "could not be re-checked just now
+			// (auth_exchange_failed: …)" — a transient-sounding sentence carrying a code
+			// for a token exchange nothing attempted. Reached only when `/backend`
+			// replaces the manager between a caller's own nil check and this read, which
+			// is narrow enough that the note stays one line and points at the surface
+			// that carries the path.
+			return "! Accounts are unavailable in this session: " + app.AccountFaultMessage(res.Err) + ".\n" +
+				"  That is a fault on this machine, not on the backend. Run `daintree-assistant doctor`."
+		}
 		// Never "you are not subscribed". A read that failed established nothing about
 		// the plan, and saying otherwise sends a paying customer to a checkout page.
 		note := "! The account could not be re-checked just now (" + authMessage(res.Err) + ")."
@@ -285,10 +296,14 @@ func noAccountManagerText(a *app.App) string {
 			"account to sign in to or out of. Unset it to use a managed sign-in."
 	}
 	if fault := a.AccountLayerFault(); fault != nil {
+		// Deliberately not "turns still work". They do on an open deployment, which is
+		// every install today, and they do NOT on one that requires an account — this
+		// session has no credential to present and never will. Promising the first would
+		// be read as "ignore this", which is exactly wrong on the second.
 		msg := "Accounts are unavailable in this session: " + app.AccountFaultMessage(fault) + ".\n" +
-			"That is a fault on this machine, not on the backend — turns still work, but\n" +
-			"signing in cannot. Run `daintree-assistant doctor` for the path it needs, fix\n" +
-			"it, then start a new session."
+			"That is a fault on this machine, not on the backend, and signing in cannot\n" +
+			"work until it is fixed. Run `daintree-assistant doctor` for the path it needs,\n" +
+			"fix it, then start a new session."
 		if hint := auth.HintOf(fault); hint != "" {
 			msg += "\n" + hint
 		}

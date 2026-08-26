@@ -1,12 +1,14 @@
 package commands
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/daintreehq/assistant/internal/app"
+	"github.com/daintreehq/assistant/internal/auth"
 	"github.com/daintreehq/assistant/internal/config"
 )
 
@@ -47,6 +49,12 @@ func TestNoAccountManagerTextNamesAnUnbuildableStateRoot(t *testing.T) {
 			t.Errorf("copy is missing %q:\n%s", want, got)
 		}
 	}
+	// It must not promise that turns keep working. They do on an open deployment and they
+	// do not on one that requires an account, and this session has no credential either
+	// way — a reassurance that is false half the time reads as "ignore this".
+	if strings.Contains(got, "turns still work") {
+		t.Errorf("the card promises working turns on a deployment that may require an account:\n%s", got)
+	}
 	// The local error CODE is deliberately not rendered: creating the directory is
 	// wrapped as `auth_exchange_failed`, and no token exchange was attempted.
 	if strings.Contains(got, "auth_exchange_failed") {
@@ -83,5 +91,31 @@ func TestNoAccountManagerTextKeepsTheCallerKeyBranch(t *testing.T) {
 func TestNoAccountManagerTextWithoutAnAppStaysGeneric(t *testing.T) {
 	if got := noAccountManagerText(nil); got != "Accounts are not available in this session." {
 		t.Fatalf("a nil App produced %q", got)
+	}
+}
+
+// A construction fault reaching the REFRESH path renders as a fault, not as a transient
+// re-check failure. It arrives here only through the narrow `/backend` race — the manager
+// is replaced between a command's own nil check and the read — and the generic branch
+// would dress it up as "could not be re-checked just now (auth_exchange_failed: …)", which
+// invites a retry that cannot succeed and names an exchange nothing attempted.
+func TestRefreshNoteRendersAConstructionFaultAsALocalFault(t *testing.T) {
+	fault := &app.AccountLayerFaultError{Cause: app.ErrAccountLayerUnbuilt}
+	got := refreshNote(app.AccountRefresh{Err: fault}, auth.Status{})
+	if strings.Contains(got, "could not be re-checked") {
+		t.Errorf("a construction fault rendered as a transient re-check failure:\n%s", got)
+	}
+	if !strings.Contains(got, "not on the backend") {
+		t.Errorf("the note does not place the fault on this machine:\n%s", got)
+	}
+}
+
+// An ordinary refresh failure keeps the transient wording — the point of the branch above
+// is that it is NARROW, and swallowing every error into "fix your machine" would misreport
+// a billing outage as a local fault.
+func TestRefreshNoteKeepsTheTransientWordingForAnOrdinaryFailure(t *testing.T) {
+	got := refreshNote(app.AccountRefresh{Err: errors.New("upstream timed out")}, auth.Status{})
+	if !strings.Contains(got, "could not be re-checked") {
+		t.Errorf("an ordinary read failure lost its transient wording:\n%s", got)
 	}
 }
