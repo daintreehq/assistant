@@ -600,3 +600,53 @@ func TestAnErrorThatCrossesAnEndpointSwitchIsAlsoDiscarded(t *testing.T) {
 		t.Errorf("the old endpoint's error was carried out under the new endpoint: %v", res.Err)
 	}
 }
+
+// The /account card for an account the deployment refuses: a remedy, a stable code, and
+// none of the backend's own prose.
+//
+// Three failures met on this one card. The state had no next-step branch, so the card said
+// "access refused" and stopped — leaving a reader with a valid sign-in and no action.
+// The note called a settled answer a failed check, inviting a retry that returns the
+// identical refusal. And it rendered the error through a helper that writes the server's
+// message verbatim, so whatever the backend chose to say — a vendor's name, an internal
+// email address — went straight into the conversation.
+func TestARefusedAccountCardCarriesARemedyAndNoBackendProse(t *testing.T) {
+	d := newLiveDeployment(t)
+	d.status = http.StatusForbidden
+	d.serve(`{"error":{"type":"authentication_error","code":"auth_permission_denied",` +
+		`"message":"not on the private-staging allowlist; email ops@vendor.example"}}`)
+	a := signedInApp(t, d)
+
+	out := accountText(context.Background(), a)
+
+	if !strings.Contains(out, "access refused") {
+		t.Errorf("the card does not name the state:\n%s", out)
+	}
+	if !strings.Contains(out, "approve") {
+		t.Errorf("the card offers no remedy — silence is what this branch used to do:\n%s", out)
+	}
+	if !strings.Contains(out, "auth_permission_denied") {
+		t.Errorf("the stable code is missing, so nothing on the card is searchable:\n%s", out)
+	}
+	if strings.Contains(out, "vendor.example") {
+		t.Errorf("backend-authored prose reached the conversation:\n%s", out)
+	}
+	if strings.Contains(out, "could not be re-checked") {
+		t.Errorf("a settled refusal was rendered as a transient failure:\n%s", out)
+	}
+	for _, banned := range []string{"Choose a plan", "Check billing", "Run /login to sign in."} {
+		if strings.Contains(out, banned) {
+			t.Errorf("the card answers a refusal with %q, which cannot fix it:\n%s", banned, out)
+		}
+	}
+	// The credential is kept: nothing about it is wrong, and a fresh one is refused
+	// identically.
+	if st := a.AuthManager().Status(); st.State != auth.StateAccessRefused || !st.State.SignedIn() {
+		t.Errorf("the session did not settle as a retained refusal: %+v", st.State)
+	}
+	// A settled 403 is asked exactly once — replaying it mints nothing and changes
+	// nothing.
+	if n := d.accountCalls.Load(); n != 1 {
+		t.Errorf("account requests = %d, want 1 — a settled refusal was retried", n)
+	}
+}

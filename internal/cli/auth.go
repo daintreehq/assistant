@@ -280,8 +280,9 @@ func runAuthLogin(ctx context.Context, w authWriter, mgr *auth.Manager, cfg conf
 func reportPlanAfterLogin(ctx context.Context, w authWriter, mgr *auth.Manager, cfg config.AppConfig, man *auth.Manifest) {
 	// THE shared account read, in courtesy mode — the same operation `/login` and
 	// `/account` perform, so the four surfaces cannot describe one credential
-	// differently. Courtesy selects the UNOBSERVING client: this check must not be able
-	// to revoke the session the token exchange just created. See app.RefreshAccountWith.
+	// differently. Courtesy selects the NON-DESTRUCTIVE client: no verdict this check
+	// hears may revoke the session the token exchange just created, and a settled refusal
+	// must still reach local state. See app.RefreshAccountWith.
 	res := app.RefreshAccountWith(ctx, cfg, mgr, app.AccountRefreshOptions{Courtesy: true})
 	err := res.Err
 
@@ -296,11 +297,13 @@ func reportPlanAfterLogin(ctx context.Context, w authWriter, mgr *auth.Manager, 
 	// was made" apart — the human sentences go to stderr under --json and it never sees
 	// them.
 	//
-	// The failure rides the event's own `code`, not the status payload. It cannot ride
-	// the payload: Status.LastErrorCode reflects what was recorded AGAINST THE SESSION,
-	// and this check is deliberately non-mutating (see
-	// NewUnobservingAccountBackendClient), so nothing was recorded and nothing should be.
-	// Putting it on the envelope says what happened without pretending the session
+	// The failure rides the event's own `code` REGARDLESS of what the session recorded,
+	// and that is why it cannot simply be read off the payload. Status.LastErrorCode
+	// reflects what was recorded AGAINST THE SESSION, and this check records only the
+	// settled account verdicts (app.courtesySettleCodes) — every credential verdict and
+	// every outage passes through it leaving local state exactly as the login left it. A
+	// consumer reading only the payload would therefore see nothing at all for most
+	// failures. The envelope says what happened either way, without pretending the session
 	// carries a fault it does not.
 	w.event(authEvent{Type: "auth:status", Env: st.Environment, Code: backendCodeOf(err), Extra: st})
 
@@ -484,13 +487,25 @@ func backendCodeOf(err error) string {
 	return ""
 }
 
-// backendMessage renders a backend error for a human, preferring the stable code over
-// prose the backend authored. The message is still shown — it is the part that says
-// which dependency — but a caller reading the line gets the code first.
+// backendMessage renders a backend error for a human WITHOUT the prose the backend
+// authored.
+//
+// The code is preferred because it is ours: closed, documented, and the term worth
+// searching for. `*backend.Error.Error()` writes the server's Message verbatim, and that
+// text reaches this terminal, the --json stream and every transcript pasted into an issue,
+// so the fallback for an envelope carrying a message and NO code — which the decoder
+// accepts — is the HTTP status rather than the message. A non-backend error keeps its own
+// text: it was raised on this machine and its wording is the only description there is.
 func backendMessage(err error) string {
 	var be *backend.Error
-	if errors.As(err, &be) && be.Code != "" {
-		return be.Code
+	if errors.As(err, &be) && be != nil {
+		if be.Code != "" {
+			return be.Code
+		}
+		if be.HTTPStatus != 0 {
+			return fmt.Sprintf("http %d", be.HTTPStatus)
+		}
+		return "no code"
 	}
 	return err.Error()
 }

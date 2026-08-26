@@ -733,3 +733,49 @@ func ptrManifest(t *testing.T, m *Manager) *Manifest {
 	}
 	return man
 }
+
+// A REFUSAL IS RECOVERABLE, on the same credential, with no new login.
+//
+// This is the property that makes retention worth anything. Keeping a credential the
+// deployment has refused is only defensible if it can be used the moment the refusal is
+// lifted — otherwise clearing it would be simpler and this state would be decoration.
+//
+// It also pins a subtlety one file away: ApplyAccountStatus applies only to a session that
+// is State.SignedIn, and StateAccessRefused is deliberately inside that set. Excluding it
+// reads as tidying ("the session cannot do anything, so it is not really signed in") and
+// would silently make an admitted account unable to notice it had been admitted.
+func TestARefusedSessionIsAdmittedByALaterAnswerWithoutANewLogin(t *testing.T) {
+	d := newDeployment(t)
+	d.script(accountError(403, backend.CodeAuthPermissionDenied))
+	store := NewMemoryStore()
+	m, c, key := signedIn(t, d, store)
+
+	if _, err := c.Capabilities(context.Background()); err == nil {
+		t.Fatal("a refused credential reported success")
+	}
+	if got := m.State(); got != StateAccessRefused {
+		t.Fatalf("state = %q, want %q — the premise of this test is gone", got, StateAccessRefused)
+	}
+	gen := m.Generation()
+
+	// An operator approves the account. Nothing happens on this machine: the same
+	// manager, the same stored credential, and the next answer simply says yes.
+	if !m.ApplyAccountStatus(gen, statusFor(t, backend.AccessGranted, backend.PlanStandard, backend.EntitlementSourcePolar)) {
+		t.Fatal("a refused session declined the admission that followed it")
+	}
+
+	if got := m.State(); got != StateSignedInActive {
+		t.Errorf("state = %q, want %q — an admitted account could not pick up its own entitlement", got, StateSignedInActive)
+	}
+	if got := m.Generation(); got != gen {
+		t.Errorf("generation = %d, want %d — the identity moved, which is what a second sign-in would do", got, gen)
+	}
+	if _, err := store.Load(context.Background(), key); err != nil {
+		t.Errorf("the credential did not survive the round trip: %v", err)
+	}
+	// The refusal's own code is retired with the state it explained. Leaving it behind
+	// would put `auth_permission_denied` beside a working, entitled session.
+	if got := m.Status().LastErrorCode; got != "" {
+		t.Errorf("last error code = %q after admission, want it retired", got)
+	}
+}

@@ -76,16 +76,29 @@ func (r AccountRefresh) Applied() bool {
 
 // AccountRefreshOptions tunes one read.
 type AccountRefreshOptions struct {
-	// Courtesy selects the UNOBSERVING client, for the plan report that follows a
+	// Courtesy selects the NON-DESTRUCTIVE client, for the plan report that follows a
 	// successful sign-in.
 	//
-	// The choice is load-bearing rather than stylistic. The observing client acts on what
+	// The choice is load-bearing rather than stylistic, and the first line it draws is
+	// DESTRUCTION rather than observation. The fully observing client acts on everything
 	// it hears, and `auth_session_revoked` reaches RemedyClear, which DELETES the refresh
 	// token — moments after a login persisted it. A backend mid-deploy, a proxy rewriting
 	// a body or a misconfigured deployment all produce that code as easily as a real
 	// revocation does. A post-login entitlement check is a courtesy: it exists to name
 	// the plan, and it has no business revoking a session minted seconds ago by a token
 	// exchange the provider itself completed.
+	//
+	// It is NOT a blind read, and used to be. A settled refusal — a private deployment
+	// answering 403 for a valid identity it has not approved — writes two fields of the
+	// state machine and destroys nothing, so withholding it bought no safety and cost the
+	// truth: the login printed the refusal and the state stayed `signed_in_unverified`,
+	// leaving `/account` and a turn's prose contradicting the sentence the user had just
+	// read.
+	//
+	// Non-destructive is necessary and not sufficient — the 402s clear that bar too and are
+	// still withheld, because no surface renders a settled billing state beside the error
+	// the same read returns. See app.courtesySettleCodes, which carries the reason for each
+	// exclusion.
 	//
 	// Everything else — an explicit `auth status --refresh` or `/account` — leaves this
 	// false. The user asked, so a revocation SHOULD clear the credential, an expired
@@ -255,7 +268,7 @@ func fetchAccount(ctx context.Context, cfg config.AppConfig, mgr *auth.Manager, 
 
 	client := NewAccountBackendClient(cfg, mgr)
 	if opts.Courtesy {
-		client = NewUnobservingAccountBackendClient(cfg, mgr)
+		client = NewCourtesyAccountBackendClient(cfg, mgr)
 	}
 	st, err := client.Account(ctx)
 	if err != nil {

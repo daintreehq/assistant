@@ -172,51 +172,156 @@ func NewAccountBackendClient(cfg config.AppConfig, mgr *auth.Manager) *backend.C
 	return backend.NewClient(accountClientConfig(cfg, accountTokenSource(mgr)))
 }
 
-// NewUnobservingAccountBackendClient builds the account client for the check that runs
-// straight after a successful `auth login`.
+// NewCourtesyAccountBackendClient builds the account client for the check that runs
+// straight after a successful `auth login` or `/login`.
 //
-// It deliberately does NOT observe, and that is the whole reason it exists. The observing
-// client acts on what it hears, and `auth_session_revoked` reaches RemedyClear, which
-// DELETES the refresh token — moments after a login persisted it. The user would be told
-// "Signed in.", the command would exit 0, and the credential would be gone. A backend
-// mid-deploy, a proxy rewriting a body, or a misconfigured deployment all produce that
-// code as easily as a real revocation does. (An untyped 401 is less severe — it maps to
-// RemedySignIn and deletes nothing — but it would still report the fresh session as
-// signed out.)
+// It observes SOME of what it hears and structurally cannot observe the rest, which is a
+// narrowing of what used to be a client that observed nothing at all. Both halves matter:
 //
-// A post-login entitlement check is a courtesy: it exists to name the plan, and it has no
-// business revoking a session that was minted seconds ago by a token exchange the
-// provider itself completed. So it reads, reports, and changes nothing. The plan answer
-// still lands, through ApplyAccountStatus, which cannot delete anything.
-func NewUnobservingAccountBackendClient(cfg config.AppConfig, mgr *auth.Manager) *backend.Client {
+//   - The half that must never come back. The fully observing client acts on everything,
+//     and `auth_session_revoked` reaches RemedyClear, which DELETES the refresh token —
+//     moments after a login persisted it. The user would be told "Signed in.", the command
+//     would exit 0, and the credential would be gone. A backend mid-deploy, a proxy
+//     rewriting a body, or a misconfigured deployment all produce that code as easily as a
+//     real revocation does. (An untyped 401 is less severe — it maps to RemedySignIn and
+//     deletes nothing — but it would still report the fresh session as signed out.)
+//   - The half that was missing. Observing NOTHING meant a settled refusal — a staging
+//     allowlist answering 403 `auth_permission_denied` for a valid identity — was PRINTED
+//     by the login and then forgotten: the state stayed `signed_in_unverified`, so
+//     `/account` and a turn's prose disagreed with the sentence the user had just read.
+//
+// DESTRUCTION is the bar a verdict must clear to be forwarded at all — the reason the
+// courtesy read was held at arm's length is that a verdict could delete a credential, and
+// one that only writes two fields of a state machine cannot. It is not the only bar: a
+// verdict also has to be one the surfaces can RENDER coherently beside the sentence the
+// login prints, which is why the two non-destructive 402s are excluded too. See
+// courtesySettleCodes, where each exclusion carries its own reason.
+//
+// One honest limit on the destruction claim: obtaining the credential in the first place
+// is still the manager's own business, and a refresh whose grant the provider rejects ends
+// the session wherever it happens. That is true of every caller of AccessToken and was true
+// of this path before it observed anything at all. What this type guarantees is narrower
+// and is the guarantee that was missing: nothing the BACKEND SAYS ABOUT THIS REQUEST can
+// destroy anything.
+func NewCourtesyAccountBackendClient(cfg config.AppConfig, mgr *auth.Manager) *backend.Client {
 	if mgr == nil {
 		return backend.NewClient(accountClientConfig(cfg, nil))
 	}
-	return backend.NewClient(accountClientConfig(cfg, unobservedTokenSource{mgr: mgr}))
+	return backend.NewClient(accountClientConfig(cfg, courtesyAccountTokenSource{mgr: mgr}))
 }
 
-// unobservedTokenSource presents the manager's credential without letting the outcome
-// mutate it.
+// courtesySettleCodes is the CLOSED set of account codes a courtesy read may fold into
+// local state: the two 403s, and nothing else.
 //
-// It implements TokenSource and TokenScrubber and NOTHING else. Omitting AccountObserver
-// is the mechanism: the client type-asserts for it, so an absent implementation makes
-// every observation an inert no-op rather than something that has to be remembered at
-// each call site. Scrubbing is kept, because masking a bearer a backend echoes back is
-// never the wrong thing to do.
-type unobservedTokenSource struct{ mgr *auth.Manager }
+// They are the answer a private deployment gives a valid identity it has not approved,
+// and they are SETTLED — repeating the login produces the identical refusal, so there is
+// nothing for a courtesy read to protect by staying quiet. Locally they write `lastErr`
+// and a state and touch no credential at all.
+//
+// Everything else is deliberately absent, and the two near misses are worth naming:
+//
+//   - `auth_session_revoked` — the destructive one this whole type exists to withhold.
+//     It reaches RemedyClear, which deletes the refresh token.
+//   - `auth_required`, `auth_token_invalid`, `auth_token_expired` — credential verdicts.
+//     They drop the access token or report the session as signed out, which is exactly
+//     what a courtesy check must not do to a session minted seconds ago.
+//   - the three 503s — an outage is not an answer. Recording `temporarily_unavailable`
+//     from a courtesy blip would leave a perfectly good fresh sign-in looking degraded,
+//     with a `lastErr` beside it that nothing retires until a later read succeeds.
+//   - THE TWO 402s, which were in this set and were taken out. They are equally
+//     non-destructive and equally settled, and the case for them was symmetry: a 200 body
+//     saying `access=subscription_required` already settles that state on this very read,
+//     so a 402 saying the same thing in an error envelope makes the local answer depend on
+//     which shape the backend chose. What defeats it is that a 402 ALSO returns an error,
+//     and the surfaces render the two halves separately: the card would read "signed in —
+//     no plan" and then, two lines down, "the account could not be re-checked just now".
+//     Settling a state nothing is prepared to render coherently buys a contradiction, not
+//     a truth. The symmetry is worth having once those surfaces have a settled-billing
+//     branch to put it in; until then the plan is named by the sentence the login prints,
+//     which is what a courtesy check is for.
+var courtesySettleCodes = map[string]bool{
+	backend.CodeAuthPermissionDenied: true,
+	backend.CodeAuthClientNotAllowed: true,
+}
 
-// AccessToken delegates: obtaining a credential, including refreshing an expired one, is
-// a normal read and not a verdict.
-func (u unobservedTokenSource) AccessToken(ctx context.Context) (string, error) {
-	return u.mgr.AccessToken(ctx)
+// courtesyAccountTokenSource presents the manager's credential and lets only the
+// non-destructive half of a verdict reach it.
+//
+// It implements TokenSource, TokenScrubber and AccountObserver — the last one is what
+// changed, and the filter below is the whole of the safety argument. The client
+// type-asserts for AccountObserver, so before this existed the guarantee was structural
+// in the crudest possible way: the interface was absent, and every observation was inert.
+// That guarantee is now carried by a filter, so it is written as two gates that must BOTH
+// pass, neither of them trusted alone:
+//
+//	the CODE must be in courtesySettleCodes — a closed set with a stated reason per entry;
+//	and the REMEDY must be RemedyReconfigure — an ALLOWLIST, checked at the moment of use.
+//
+// The second gate is positive rather than "not RemedyClear", and the difference is the
+// whole point of having it. A negative gate only blocks the one remedy somebody thought
+// of: if an allowlisted code were reclassified upstream as RemedyRefresh, it would sail
+// through and the manager would drop the access token. RemedyReconfigure is the only
+// remedy whose entire local effect is a state write, so naming it is the same sentence as
+// "nothing this observer forwards can destroy anything", enforced rather than asserted.
+//
+// What it does NOT do — and cannot, from here — is make a reclassification harmless
+// everywhere. The client reads the remedy independently: wantsRefreshReplay would see the
+// new RemedyRefresh, call renewedCredential, and a refresh whose grant is rejected deletes
+// the session, with this gate never consulted. Changing what a code MEANS is a change that
+// has to be made deliberately at both ends; this gate makes sure the observer is not the
+// end that gives way silently.
+type courtesyAccountTokenSource struct{ mgr *auth.Manager }
+
+// AccessToken delegates. Obtaining a credential is not a verdict about this request, and
+// this type has no business substituting its own answer for the manager's.
+//
+// It is NOT free of consequences, and the comment used to imply it was: a refresh runs
+// here, and a refresh whose grant the provider rejects ends the session. That is the
+// manager's rule for every caller and there is nothing to filter — the alternative is a
+// courtesy read that presents a token it knows to be expired.
+func (c courtesyAccountTokenSource) AccessToken(ctx context.Context) (string, error) {
+	return c.mgr.AccessToken(ctx)
 }
 
 // Invalidate is deliberately inert. Discarding the token a login has just minted, because
 // one courtesy request came back unhappy, is the failure this whole type prevents.
-func (u unobservedTokenSource) Invalidate(string) {}
+func (c courtesyAccountTokenSource) Invalidate(string) {}
 
 // Secrets reports the credentials worth masking in echoed error text.
-func (u unobservedTokenSource) Secrets() []string { return u.mgr.Secrets() }
+func (c courtesyAccountTokenSource) Secrets() []string { return c.mgr.Secrets() }
+
+// Generation delegates, because the staleness guard is only meaningful against the
+// manager's own counter — an observer that reported a number of its own would let a
+// verdict for a replaced session land on its replacement.
+func (c courtesyAccountTokenSource) Generation() uint64 { return c.mgr.Generation() }
+
+// MarkIdentityLive delegates. It stamps a liveness time and changes no state, so it is
+// non-destructive by construction — and the account endpoint suppresses it anyway
+// (accountAttempt.deferSuccess), since the decoded body is the verdict there.
+func (c courtesyAccountTokenSource) MarkIdentityLive(gen uint64) { c.mgr.MarkIdentityLive(gen) }
+
+// ApplyBackendVerdict forwards only the settled, non-destructive account verdicts.
+//
+// The default is to drop. A code this build does not classify, an error that is not a
+// backend error at all, and every credential verdict alike leave local state exactly as
+// the login left it — which is the behaviour this path had for all codes before, and is
+// still the right one for everything outside the allowlist.
+func (c courtesyAccountTokenSource) ApplyBackendVerdict(ctx context.Context, gen uint64, usedToken string, err error) {
+	var be *backend.Error
+	if !errors.As(err, &be) || be == nil {
+		return
+	}
+	if !courtesySettleCodes[be.Code] {
+		return
+	}
+	// The second gate, positive on purpose: only the remedy whose whole local effect is a
+	// state write may pass. A code reclassified upstream stops here rather than reaching a
+	// branch of the state machine this path has never been allowed to reach.
+	if be.AuthRemedy() != backend.RemedyReconfigure {
+		return
+	}
+	c.mgr.ApplyBackendVerdict(ctx, gen, usedToken, err)
+}
 
 // NewAccountManager builds the account manager for a resolved config, or nil when there
 // is no account for this process to have.

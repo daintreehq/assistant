@@ -2,11 +2,13 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/daintreehq/assistant/internal/app"
 	"github.com/daintreehq/assistant/internal/auth"
+	"github.com/daintreehq/assistant/internal/backend"
 	"github.com/daintreehq/assistant/internal/mcp"
 )
 
@@ -100,15 +102,6 @@ func loginText(ctx context.Context, a *app.App, progress func(stage string)) str
 		}
 	}
 
-	// A COURTESY plan check, exactly as `auth login` performs one — and through the
-	// UNOBSERVING client for exactly the same reason: this read exists to name the plan,
-	// and a spurious `auth_session_revoked` from a backend mid-deploy would otherwise
-	// reach RemedyClear and delete the refresh token the sign-in persisted seconds
-	// earlier. The user would read "Signed in." with the credential already gone.
-	//
-	// Best-effort throughout. The login has succeeded and been persisted by the time this
-	// runs, so nothing here may undo it: a billing outage means the plan is unknown, not
-	// that the sign-in was bad.
 	// THE ENDPOINT MAY HAVE MOVED while the browser was open. `/backend` runs inline on
 	// the command loop and is not excluded by the slow-command gate, so an ordinary
 	// switch is free to complete during a sign-in that is parked on a callback for up to
@@ -126,7 +119,10 @@ func loginText(ctx context.Context, a *app.App, progress func(stage string)) str
 	}
 
 	// A COURTESY plan check, exactly as `auth login` performs one, and through the
-	// UNOBSERVING client for the same reason — see AccountRefreshOptions.Courtesy.
+	// NON-DESTRUCTIVE client for the same reason — see AccountRefreshOptions.Courtesy. It
+	// cannot delete the credential this sign-in just persisted, and it CAN settle a
+	// verdict that only writes state, so a deployment that refuses this account says so on
+	// the card below rather than being printed once and forgotten.
 	//
 	// Best-effort throughout. The login has succeeded and been persisted by the time this
 	// runs, so nothing here may undo it: a billing outage means the plan is unknown, not
@@ -256,9 +252,28 @@ func refreshNote(res app.AccountRefresh, after auth.Status) string {
 			return "! Accounts are unavailable in this session: " + app.AccountFaultMessage(res.Err) + ".\n" +
 				"  That is a fault on this machine, not on the backend. Run `daintree-assistant doctor`."
 		}
+		if isSettledRefusal(res.Err) {
+			// NOT a failed check. The backend answered, and its answer was no: this
+			// deployment will not act on a credential that is valid and current. Running
+			// it through the transient line below would say "could not be re-checked just
+			// now", which invites a retry that returns the identical refusal — and the
+			// card above has already said what to do about it, so this states the fact
+			// and stops.
+			//
+			// WHAT was refused comes from the code, not from the remedy the two 403s
+			// share. One says this account is not approved and the other says this
+			// application's sign-in is not accepted, and telling somebody the wrong one
+			// sends them to ask for the wrong thing.
+			refused := "this account"
+			if accountFailureCode(res.Err) == backend.CodeAuthClientNotAllowed {
+				refused = "this application's sign-in"
+			}
+			return "! This deployment refused " + refused + " (" + accountFailureCode(res.Err) + ").\n" +
+				"  Your sign-in is intact; nothing was checked because nothing was allowed to be."
+		}
 		// Never "you are not subscribed". A read that failed established nothing about
 		// the plan, and saying otherwise sends a paying customer to a checkout page.
-		note := "! The account could not be re-checked just now (" + authMessage(res.Err) + ")."
+		note := "! The account could not be re-checked just now (" + accountFailureCode(res.Err) + ")."
 		if after.State.SignedIn() {
 			note += "\n  Your sign-in is unaffected; the state above is what was last known."
 		}
@@ -472,6 +487,30 @@ func accountNextStep(st auth.Status) string {
 		return "This account's plan is not granting access right now."
 	case auth.StateTemporarilyUnavailable:
 		return "The session is still stored — try again, or run /doctor."
+	case auth.StateAccessRefused:
+		// The state with no line at all, which is worse than a wrong one: the card said
+		// "access refused" and then stopped, and a reader with a valid sign-in and no
+		// next action reaches for the two things that cannot help — signing in again,
+		// which returns the identical refusal, and a checkout, which buys a plan for an
+		// account the deployment has not admitted.
+		//
+		// The remedy is a person with access to the deployment changing something there.
+		// That is not a command, so these name the action rather than pretending there is
+		// one to run.
+		//
+		// The two 403s share a REMEDY and land in the same state, and their advice must
+		// still differ — which is why the backend keeps them as two codes. An unapproved
+		// ACCOUNT can be fixed by approving that account, and (rarely) by using a
+		// different one. An unaccepted CLIENT is about this application's OAuth
+		// registration: no account the reader could sign in as makes any difference, so
+		// offering that would send them round a browser flow for nothing.
+		if st.LastErrorCode == backend.CodeAuthClientNotAllowed {
+			return "This deployment does not accept this application's sign-in. Ask whoever runs\n" +
+				"it to allow this client — no account you sign in with changes the answer."
+		}
+		return "This deployment has not approved this account. Ask whoever runs it to grant\n" +
+			"this account access — signing in again returns the same answer. If you meant to\n" +
+			"use a different account, /logout then /login."
 	default:
 		return ""
 	}
@@ -479,9 +518,63 @@ func accountNextStep(st auth.Status) string {
 
 // authMessage strips the package prefix the auth errors carry, so a card does not read
 // "auth: auth: ...". Mirrors the CLI's own helper.
+//
+// It is for LOCAL errors only — a sign-in that could not open a browser, a sign-out whose
+// key would not resolve. Anything that came back from the backend goes through
+// accountFailureCode instead; see the boundary documented there.
 func authMessage(err error) string {
 	if err == nil {
 		return ""
 	}
 	return strings.TrimPrefix(err.Error(), "auth: ")
+}
+
+// accountFailureCode renders a failed account read for a card, preferring the STABLE code
+// over prose the backend authored.
+//
+// The boundary this exists to hold: `*backend.Error.Error()` writes `Message` verbatim,
+// and `Message` is written by the server. It can name an upstream provider, quote a
+// billing vendor's copy, or carry whatever a proxy in between decided to substitute — and
+// this card renders straight into the conversation, the host's NDJSON stream and every
+// transcript pasted into an issue. The code is ours, it is closed, it is documented, and
+// it is the term worth searching for; the prose is none of those things.
+//
+// Errors that never came from a backend keep their own text: a keychain that would not
+// unlock or a lock that would not be taken are local faults, and their message is the only
+// thing that says which. The CLI's backendMessage draws the same line for the same reason
+// — this is that helper, on the side of the tree that had gone without one.
+func accountFailureCode(err error) string {
+	var be *backend.Error
+	if errors.As(err, &be) && be != nil {
+		if be.Code != "" {
+			return be.Code
+		}
+		// A backend envelope with a message and NO code — the decoder accepts one, and
+		// falling through to the text below would hand the whole leak back, since
+		// Error() renders Message verbatim. The status is a fact about the exchange
+		// rather than anything the server wrote, so it stands in.
+		if be.HTTPStatus != 0 {
+			return fmt.Sprintf("http %d", be.HTTPStatus)
+		}
+		return "no code"
+	}
+	return authMessage(err)
+}
+
+// isSettledRefusal reports a backend answer that will not change until somebody changes
+// the deployment — the two 403s, where a valid, current credential is refused outright.
+//
+// It reads the typed REMEDY rather than listing codes, so a third refusal added upstream
+// is recognised as settled here without an edit. The distinction it carries is between
+// "we could not check" and "we checked, and no": only the first is worth retrying, and
+// only the second is worth telling somebody to go and ask an operator about.
+//
+// Recognised is not the same as RENDERED. The advice below this — here and in
+// accountNextStep — branches on the CODE, and both default to the account wording, so a
+// third reconfigure code would be described as an unapproved account until somebody adds
+// its sentence (and its entry in app.courtesySettleCodes). That fails safely rather than
+// truthfully, which is the right way round for a code this build has never seen.
+func isSettledRefusal(err error) bool {
+	var be *backend.Error
+	return errors.As(err, &be) && be != nil && be.AuthRemedy() == backend.RemedyReconfigure
 }

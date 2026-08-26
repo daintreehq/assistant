@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,6 +38,28 @@ type accountDeployment struct {
 	accountCalls  atomic.Int64
 	tokenCalls    atomic.Int64
 	configPresent bool
+	// authCodeGrants counts CODE exchanges specifically, which is the one request only a
+	// completed OAuth flow makes. tokenCalls counts refreshes too, so it cannot answer
+	// "did the user have to sign in again?" — the refresh a normal session performs would
+	// look identical to a second sign-in.
+	authCodeGrants atomic.Int64
+	// browserOpens counts the times a sign-in asked for a browser, which is the other
+	// half of the same question seen from this side of the flow.
+	browserOpens atomic.Int64
+	// bearers records the Authorization header of every account request, so a test can
+	// assert WHICH credential was presented. Without it a test proving "the account was
+	// admitted" proves nothing about the credential: this fake serves the account route
+	// regardless of the header, so an anonymous request would be granted too.
+	mu      sync.Mutex
+	bearers []string
+	// The last credentials this IdP minted, and the form values of the last token
+	// request. A fake that accepts anything cannot, by itself, tell "the stored
+	// credential was used" from "no credential was used" — recording what was SENT and
+	// what was HANDED BACK is what lets a test assert the difference.
+	lastAccess    string
+	lastRefresh   string
+	lastGrantType string
+	lastSentToken string
 	// reply answers the account route. Nil serves a granted standard plan.
 	reply func(w http.ResponseWriter)
 }
@@ -71,13 +95,26 @@ func newAccountDeployment(t *testing.T, configured bool) *accountDeployment {
 	mux.HandleFunc("/auth/v1/oauth/token", func(w http.ResponseWriter, r *http.Request) {
 		n := d.tokenCalls.Add(1)
 		_ = r.ParseForm()
+		if r.Form.Get("grant_type") == "authorization_code" {
+			d.authCodeGrants.Add(1)
+		}
+		access := fmt.Sprintf("access-%d", n)
+		refresh := fmt.Sprintf("refresh-%d", n)
+		d.mu.Lock()
+		d.lastGrantType = r.Form.Get("grant_type")
+		d.lastSentToken = r.Form.Get("refresh_token")
+		d.lastAccess, d.lastRefresh = access, refresh
+		d.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(fmt.Sprintf(
-			`{"access_token":"access-%d","refresh_token":"refresh-%d","token_type":"bearer","expires_in":3600}`, n, n)))
+			`{"access_token":%q,"refresh_token":%q,"token_type":"bearer","expires_in":3600}`, access, refresh)))
 	})
 
-	mux.HandleFunc(backend.AccountStatusPath, func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(backend.AccountStatusPath, func(w http.ResponseWriter, r *http.Request) {
 		d.accountCalls.Add(1)
+		d.mu.Lock()
+		d.bearers = append(d.bearers, r.Header.Get("Authorization"))
+		d.mu.Unlock()
 		if d.reply != nil {
 			d.reply(w)
 			return
@@ -92,6 +129,59 @@ func newAccountDeployment(t *testing.T, configured bool) *accountDeployment {
 	d.srv = httptest.NewServer(mux)
 	t.Cleanup(d.srv.Close)
 	return d
+}
+
+// browser completes the loopback callback, standing in for the person and the browser.
+//
+// The authorization endpoint is never fetched: the provider's consent screen is not part
+// of what this side implements, and the only thing the flow needs back from it is a code
+// on the redirect. Each open is counted, because "did a second sign-in happen?" is an
+// assertion below rather than an assumption.
+func (d *accountDeployment) browser(ctx context.Context, authURL string) error {
+	d.browserOpens.Add(1)
+	u, err := url.Parse(authURL)
+	if err != nil {
+		return err
+	}
+	state := u.Query().Get("state")
+	go func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			req, rErr := http.NewRequestWithContext(ctx, http.MethodGet,
+				auth.RedirectURI()+"?code=test-auth-code&state="+url.QueryEscape(state), nil)
+			if rErr != nil {
+				return
+			}
+			resp, cErr := http.DefaultClient.Do(req)
+			if cErr == nil {
+				_ = resp.Body.Close()
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	return nil
+}
+
+// presentedBearers returns the Authorization header of every account request so far.
+func (d *accountDeployment) presentedBearers() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.bearers...)
+}
+
+// minted returns the credentials handed out by the most recent token request.
+func (d *accountDeployment) minted() (access, refresh string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.lastAccess, d.lastRefresh
+}
+
+// lastGrant returns the grant type and refresh token of the most recent token request.
+func (d *accountDeployment) lastGrant() (grantType, sentRefreshToken string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.lastGrantType, d.lastSentToken
 }
 
 // signedInAgainst returns a Manager holding a live session against d, plus a matching
@@ -670,4 +760,264 @@ func TestAStatusNeverCarriesCredentialsFromTheBackendURL(t *testing.T) {
 	if strings.Contains(human.String(), "hunter2") {
 		t.Fatalf("the human block carried the password:\n%s", human.String())
 	}
+}
+
+// A refusal PRINTED is not a refusal RECORDED, and for a long time this surface did only
+// the first.
+//
+// The courtesy read after a sign-in ran through a client that observed nothing at all, so
+// a deployment answering 403 for a valid identity it has not approved had its answer read
+// out to the user and then dropped on the floor: the state machine stayed
+// `signed_in_unverified`, and `/account`, `auth status` and a turn's prose all went on
+// contradicting the sentence the user had just been shown.
+func TestThePostLoginPlanCheckSettlesARefusalRatherThanOnlyPrintingIt(t *testing.T) {
+	d := newAccountDeployment(t, true)
+	d.reply = func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"type":"authentication_error","code":"auth_permission_denied",` +
+			`"message":"this account is not approved for private staging"}}`))
+	}
+	mgr, cfg := signedInAgainst(t, d)
+	if !mgr.Hydrate(context.Background()) {
+		t.Fatal("the seeded session did not hydrate")
+	}
+
+	got, _ := runLoginCheck(t, mgr, cfg, false)
+
+	if st := mgr.State(); st != auth.StateAccessRefused {
+		t.Errorf("state = %q, want %q — the refusal was printed and forgotten", st, auth.StateAccessRefused)
+	}
+	// Settling must not cost the credential. Nothing about it is wrong, and a fresh one
+	// would be refused identically.
+	if !mgr.State().SignedIn() {
+		t.Error("a refusal ended the session it followed")
+	}
+	if !mgr.Hydrate(context.Background()) {
+		t.Error("a refusal deleted the credential the sign-in had just stored")
+	}
+	// The login itself succeeded and must read that way.
+	if !strings.Contains(got, "Signed in") {
+		t.Errorf("the sign-in was reported as something other than successful:\n%s", got)
+	}
+	for _, banned := range []string{"Choose a plan", "/subscribe", "auth login"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("a refusal was answered with %q, which cannot fix it:\n%s", banned, got)
+		}
+	}
+	// The backend's own prose is not the CLI's copy. This message names an environment
+	// and could name a vendor; the stable code is the part worth printing.
+	if strings.Contains(got, "private staging") {
+		t.Errorf("backend-authored prose reached the login output:\n%s", got)
+	}
+}
+
+// THE recovery this whole state exists to make possible: an account refused by a
+// deployment's allowlist is admitted later, on the SAME credential, with no second trip
+// through the browser.
+//
+// This is the one sequence that proves the retention rule is worth anything. Keeping a
+// refused credential is only defensible if it can still be used the moment the refusal is
+// lifted; if the user has to sign in again anyway, then clearing it would have been
+// simpler and the state machine's careful preservation would be decoration. Everything
+// asserted here is about that: the state settles, the credential survives it, and the
+// admission arrives without an authorization-code exchange or a browser.
+func TestARefusedAccountIsAdmittedLaterWithoutASecondSignIn(t *testing.T) {
+	d := newAccountDeployment(t, true)
+	// The allowlist, as this side sees it. An atomic rather than a re-assigned handler:
+	// the flip happens between requests, and a plain field written from the test while a
+	// server goroutine has read it is a data race whether or not it ever fires.
+	var refused atomic.Bool
+	refused.Store(true)
+	d.reply = func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		if refused.Load() {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"type":"authentication_error","code":"auth_permission_denied",` +
+				`"message":"this account is not approved for private staging"}}`))
+			return
+		}
+		_, _ = w.Write(accountfixture.Body(accountfixture.GrantedStandard))
+	}
+
+	root := t.TempDir()
+	// The store is held rather than inlined: the last phase builds a SECOND manager over
+	// the same credential, which is what a restart looks like from here.
+	store := auth.NewMemoryStore()
+	mgr, err := auth.NewManager(auth.Options{
+		StateRoot: root, BackendURL: d.srv.URL,
+		Store: store, Opener: openerFn(d.browser),
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	cfg := config.AppConfig{StateRoot: root, BackendURL: d.srv.URL}
+
+	// The identity BEFORE anything happens. Captured so the witnesses below are not
+	// vacuous: "the generation did not move" proves nothing unless a sign-in is known to
+	// move it, and a regression in which login stopped bumping either counter would
+	// otherwise leave those assertions green for the wrong reason.
+	genBefore := mgr.Generation()
+	revisionBefore := auth.NewRevision(mgr.AuthDirPath()).Current()
+
+	// 1. A REAL sign-in, not a seeded credential. The claim being made is about what a
+	// user does and does not have to repeat, so the thing that must not repeat has to
+	// actually happen once first.
+	if err := loginWithPortRetry(t, mgr); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if n := d.authCodeGrants.Load(); n != 1 {
+		t.Fatalf("authorization-code exchanges after the sign-in = %d, want 1", n)
+	}
+	// The credential the login ended up holding. The cold start at the end has to present
+	// exactly this one, and a fake that accepts anything cannot say so unless the test
+	// knows what "this one" is.
+	loginAccess, loginRefresh := d.minted()
+	gen := mgr.Generation()
+	revision := auth.NewRevision(mgr.AuthDirPath()).Current()
+	if gen == genBefore {
+		t.Fatal("the sign-in did not move the local generation, so comparing it below proves nothing")
+	}
+	if revision == revisionBefore {
+		t.Fatal("the sign-in did not move the shared revision, so comparing it below proves nothing")
+	}
+
+	// 2. The courtesy plan check the login performs, refused by the allowlist.
+	if _, _ = runLoginCheck(t, mgr, cfg, false); mgr.State() != auth.StateAccessRefused {
+		t.Fatalf("state = %q after a refusal, want %q", mgr.State(), auth.StateAccessRefused)
+	}
+
+	// 3. Everything that would make a second sign-in NECESSARY is intact.
+	if !mgr.Hydrate(context.Background()) {
+		t.Fatal("the refusal deleted the stored credential")
+	}
+	if got := mgr.Generation(); got != gen {
+		t.Errorf("generation = %d after a refusal, want %d — the identity moved", got, gen)
+	}
+	if got := auth.NewRevision(mgr.AuthDirPath()).Current(); got != revision {
+		t.Errorf("revision = %v after a refusal, want %v — another process was told the session ended", got, revision)
+	}
+	if st := mgr.Status(); !st.Authenticated {
+		t.Error("a refused session stopped reporting a credential")
+	}
+
+	// 4. The deployment's answer changes. Nothing happens on this machine at all — an
+	// operator approves the account somewhere else.
+	refused.Store(false)
+
+	// 5. An ordinary observation, with the credential the login stored and no other.
+	out, exit := runStatus(t, mgr, cfg, true)
+	if exit != 0 {
+		t.Errorf("exit = %d, want 0", exit)
+	}
+	if st := mgr.State(); st != auth.StateSignedInActive {
+		t.Errorf("state = %q after admission, want %q", st, auth.StateSignedInActive)
+	}
+	if !strings.Contains(out, "standard") {
+		t.Errorf("the admitted account's plan is missing:\n%s", out)
+	}
+	if strings.Contains(out, "refuse") {
+		t.Errorf("the status still reports the lifted refusal:\n%s", out)
+	}
+
+	// 6. NO SECOND OAUTH FLOW. Three independent witnesses, because any one of them alone
+	// is satisfiable by a test that merely never got as far as needing one: no browser was
+	// opened, no authorization code was exchanged, and the local identity never moved —
+	// which it does on every login, including one that reuses the same account.
+	if n := d.browserOpens.Load(); n != 1 {
+		t.Errorf("browser opens = %d, want 1 — the recovery went back through a sign-in", n)
+	}
+	if n := d.authCodeGrants.Load(); n != 1 {
+		t.Errorf("authorization-code exchanges = %d, want 1 — a second OAuth flow ran", n)
+	}
+	if got := mgr.Generation(); got != gen {
+		t.Errorf("generation = %d after admission, want %d — the identity was replaced rather than admitted", got, gen)
+	}
+	if got := auth.NewRevision(mgr.AuthDirPath()).Current(); got != revision {
+		t.Errorf("revision = %v after admission, want %v", got, revision)
+	}
+
+	// 7. THE CREDENTIAL, not merely a granted answer. This fake serves the account route
+	// whatever the header says, so an admission proves nothing about what was presented —
+	// a status read that had lost the credential and gone out anonymous would look
+	// identical from the assertions above.
+	bearers := d.presentedBearers()
+	if len(bearers) != 2 {
+		t.Fatalf("account requests = %d, want 2 (the refusal and the admission)", len(bearers))
+	}
+	if bearers[0] != "Bearer "+loginAccess {
+		t.Fatalf("the refused read presented %q, not the credential the login minted", redactBearer(bearers[0]))
+	}
+	if bearers[1] != bearers[0] {
+		t.Errorf("the admission presented a different credential (%q) from the refusal (%q) — the point is that it is the same one",
+			redactBearer(bearers[1]), redactBearer(bearers[0]))
+	}
+
+	// 8. And once more from a cold start. The phases above all ran on an access token
+	// still in memory from the login; a staging approval realistically lands the next
+	// day, on a process that has only the stored refresh credential. A fresh manager over
+	// the same store and state root is what that looks like — it must reach the same
+	// admission through a REFRESH, and still without an authorization code.
+	tokensBefore := d.tokenCalls.Load()
+	restarted, err := auth.NewManager(auth.Options{
+		StateRoot: root, BackendURL: d.srv.URL,
+		// An opener that fails the test if it is ever called: a restart that reaches for
+		// a browser is precisely the outcome this whole state exists to avoid.
+		Store: store, Opener: openerFn(func(context.Context, string) error {
+			t.Error("a restarted session opened a browser instead of using the stored credential")
+			return nil
+		}),
+	})
+	if err != nil {
+		t.Fatalf("NewManager (restart): %v", err)
+	}
+
+	out, exit = runStatus(t, restarted, cfg, true)
+	if exit != 0 {
+		t.Errorf("exit = %d on the restarted session, want 0", exit)
+	}
+	if st := restarted.State(); st != auth.StateSignedInActive {
+		t.Errorf("restarted state = %q, want %q", st, auth.StateSignedInActive)
+	}
+	if !strings.Contains(out, "standard") {
+		t.Errorf("the restarted session did not pick up the plan:\n%s", out)
+	}
+	if got := d.tokenCalls.Load(); got <= tokensBefore {
+		t.Fatal("the restarted session made no token request, so it proved nothing about the stored credential")
+	}
+	// WHICH grant, and with WHAT. "A token request happened" is satisfied by anything;
+	// this is the assertion that the stored refresh credential from the original login is
+	// the thing that bought the new session.
+	grant, sent := d.lastGrant()
+	if grant != "refresh_token" {
+		t.Errorf("the restarted session used grant_type %q, want refresh_token", grant)
+	}
+	if sent != loginRefresh {
+		t.Errorf("the restarted session sent %q, want the refresh credential the login stored", redactBearer(sent))
+	}
+	// And the renewed access token actually went out on the account request — the fake
+	// serves that route regardless of the header, so an anonymous third read would look
+	// identical to a recovered one.
+	coldAccess, _ := d.minted()
+	if all := d.presentedBearers(); len(all) != 3 {
+		t.Errorf("account requests = %d after the restart, want 3", len(all))
+	} else if all[2] != "Bearer "+coldAccess {
+		t.Errorf("the restarted read presented %q, not the credential its refresh had just minted", redactBearer(all[2]))
+	}
+	if n := d.authCodeGrants.Load(); n != 1 {
+		t.Errorf("authorization-code exchanges = %d after a restart, want 1 — the stored credential was not enough", n)
+	}
+	if n := d.browserOpens.Load(); n != 1 {
+		t.Errorf("browser opens = %d after a restart, want 1", n)
+	}
+}
+
+// redactBearer keeps a failure message from printing a credential. The values here are
+// the fake IdP's own, but a test that prints bearers is a habit, and this file already
+// asserts that nothing else does.
+func redactBearer(v string) string {
+	if len(v) <= 10 {
+		return "…"
+	}
+	return v[:10] + "…"
 }
