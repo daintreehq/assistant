@@ -94,8 +94,10 @@ only correct answer is the one discovery returns at runtime.
 **Desktop authentication is CLI-owned.** This binary runs the OAuth flow, owns the
 credential store, and answers every account question — including inside the embedded
 Assistant, where `/login`, `/logout` and `/account` run on the same `*auth.Manager` the
-`auth` subcommands do, and `/login` and `/account` share the one account read
-(`/logout` performs none). Daintree's native Settings owns NEITHER the account NOR the backend URL:
+`auth` subcommands are built from, and `/login` and `/account` share the one account-read
+IMPLEMENTATION (`/logout` performs none). Same authority, not one live object and not one
+request: the embedded commands share the App's manager, each standalone `auth` invocation
+constructs its own for that process, and every read is its own `GET /v1/daintree/account`. Daintree's native Settings owns NEITHER the account NOR the backend URL:
 there is no host-side sign-in to keep in sync, and the endpoint comes from
 `--backend-url` / `DAINTREE_BACKEND_URL` / the stored `/backend` preference / the default,
 in that order. A host that grew its own copy of either would be a second source of truth
@@ -184,8 +186,9 @@ contract come to be green against documents that do not match.
 `App.RefreshAccount` for a session, `RefreshAccountWith` for the standalone `auth`
 subcommands, which run in a process with no App at all. `auth status --refresh` and
 `/account` read as the user asking — OBSERVING, so a revocation clears the credential;
-the checks after `auth login` and `/login` are a COURTESY and run unobserving, because a
-plan report has no business revoking a session minted seconds ago. A plain `auth status`
+the checks after `auth login` and `/login` are a COURTESY and run through a NARROWED
+observer, because a plan report has no business revoking a session minted seconds ago —
+but it equally has no business printing a settled refusal and then forgetting it. A plain `auth status`
 never asks. The App path fetches outside `cfgMu` and commits under it, so an answer for an
 endpoint a `/backend` switch has left is never applied — and `ApplyAccountStatus` REPORTS
 whether it committed, because it declines silently whenever the identity moved and "no
@@ -219,10 +222,30 @@ Three rules in that layer are load-bearing and easy to undo:
 - The account endpoint's own 200 must not stamp liveness either
   (`accountAttempt.deferSuccess`). The transport would otherwise record a verification
   from a body the decoder is about to REJECT as `account_contract_invalid`.
-- The post-login plan check runs through a NON-observing client
-  (`app.NewUnobservingAccountBackendClient`). The observing one acts on what it hears,
-  and a revoked verdict reaches `RemedyClear`, which would delete the refresh token
-  seconds after login persisted it.
+- The post-login plan check runs through a NARROWED observer
+  (`app.NewCourtesyAccountBackendClient`), which used to observe nothing at all. The
+  fully observing client acts on everything it hears, and a revoked verdict reaches
+  `RemedyClear`, which would delete the refresh token seconds after login persisted it.
+  But observing NOTHING meant a settled refusal — a staging allowlist answering 403
+  `auth_permission_denied` to a valid identity — was PRINTED by the login and then
+  forgotten, leaving `/account` and a turn's prose contradicting the sentence the user
+  had just read. Two gates must BOTH pass for a verdict to be folded in: the CODE must be
+  in `courtesySettleCodes` (a closed set — the two 403s, each exclusion carrying its own
+  reason) AND the remedy must be `RemedyReconfigure`, checked as an ALLOWLIST at the
+  moment of use so a code reclassified later cannot sail through. DESTRUCTION is the bar:
+  a verdict that only writes `lastErr` and a state cannot delete a credential. The two
+  402s are non-destructive too and are still excluded — a 402 also returns an error, and
+  no surface has a settled-billing branch, so folding it in produces a card reading
+  "signed in — no plan" above "could not be re-checked just now". The narrow guarantee is
+  that nothing the BACKEND SAYS ABOUT THIS REQUEST can destroy anything; obtaining the
+  credential is still the manager's own business, and a rejected refresh grant ends the
+  session wherever it happens. State the guarantee as "nothing this OBSERVER forwards can
+  destroy anything" and not as a claim about the whole request: the client evaluates
+  `wantsRefreshReplay` independently of the observer, so an expiry landing mid-courtesy-read
+  can still enter `Manager.AccessToken`, and a grant the provider rejects there deletes the
+  credential and bumps the revision. Both gates also rest on what `RemedyReconfigure` MEANS
+  today; if that branch ever becomes destructive they both still pass. This is a strong
+  regression check, not a type-level impossibility.
 - **`Login` publishes its new identity BEFORE releasing the credential lock, and a
   clearer consults the SHARED REVISION after taking it.** Both halves guard the same
   failure — a late revocation deleting the credential a login has just stored, while the

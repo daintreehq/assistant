@@ -61,8 +61,9 @@ daintree-assistant doctor     # read it top to bottom; you want no FAIL lines
 pays for the model calls, so nothing you supply funds a turn.
 
 Signing in is the other question, and it belongs to the CLI: `daintree-assistant auth
-login` opens your browser, and the refresh token that comes back is exchanged and kept in
-your system keychain. Whether you *have* to is the BACKEND's answer, never a guess from a
+login` opens your browser, and the authorization code that comes back is exchanged for a
+token set whose refresh token is kept in your system keychain — the access token stays in
+memory, and neither is ever written to a file, an environment variable or a command line. Whether you *have* to is the BACKEND's answer, never a guess from a
 hostname or from how this was built — `daintree-assistant auth status` asks the endpoint
 and reports what it said: `accounts  required` means sign in, `accounts  not offered by
 this backend` means there is nothing to do. The default endpoint,

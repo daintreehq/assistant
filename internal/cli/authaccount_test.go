@@ -393,8 +393,15 @@ func TestARefusedClientDoesNotOfferAnotherLogin(t *testing.T) {
 	if exit != 0 {
 		t.Errorf("exit = %d, want 0", exit)
 	}
-	if !strings.Contains(got, "refuses these credentials") {
+	if !strings.Contains(got, "access refused by this deployment") {
 		t.Errorf("did not name the refusal:\n%s", got)
+	}
+	// The label deliberately says ACCESS and not credentials — both codes reaching this
+	// state leave the credential valid — so the code-specific half is what has to name
+	// the actual problem. For this one it is the APPLICATION's sign-in, and the reply
+	// must say so, because no account the reader could use changes the answer.
+	if !strings.Contains(got, "this application's sign-in") {
+		t.Errorf("did not distinguish a refused client from a refused account:\n%s", got)
 	}
 	if strings.Contains(got, "Run `daintree-assistant auth login`") {
 		t.Errorf("offered a login that would be refused identically:\n%s", got)

@@ -604,7 +604,8 @@ Four properties a consumer has to respect:
   outage tells someone their sign-in is unnecessary. Absent is a third answer; treat it
   as unknown rather than as no.
 - **The account fields are only populated after a live check.** They come from
-  `--refresh`, which makes the one request to `/v1/daintree/account`. A plain read is
+  `--refresh`, and from the courtesy check a successful `auth login` runs — both make the
+  one request to `/v1/daintree/account`. A plain read is
   offline-capable and reports what the process already knows, so a fresh process shows
   `state: signed_in_unverified` and no plan until something asks. Nothing about the plan
   is persisted — deliberately, since a plan on disk is a plan that can be wrong.
@@ -633,10 +634,17 @@ could not be built, bad arguments or configuration) and carry no status line.
 `auth login --json` emits a multi-line event stream — `auth:starting`, then
 `auth:browser_opened` or `auth:manual_url_required`, `auth:waiting`, `auth:authenticated`
 — and closes a successful sign-in with the same `auth:status` line, on every plan outcome
-including a failed check. When the check failed, the event's top-level `code` names the
-reason; the status payload itself carries no `lastErrorCode` for it, because the
-post-login check is deliberately non-mutating and does not record anything against the
-session. Cancellation, a deployment with no accounts, and a genuine sign-in failure end on
+including a failed check.
+
+When the check failed, the event's top-level `code` names the reason where the envelope
+carried one — a backend error with no code has none to name, and the field is omitted
+rather than invented. Whether the status PAYLOAD also carries a `lastErrorCode` depends on
+which failure it was, and the split is the courtesy observer's: the two settled 403s
+(`auth_permission_denied`, `auth_client_not_allowed`) are folded into local state, so the
+payload reports `access_refused` and the code beside it. Every other failure leaves the
+session exactly as the login minted it — `signed_in_unverified`, no code — because a plan
+report has no business recording an outage, or a revocation, against a session seconds
+old. Cancellation, a deployment with no accounts, and a genuine sign-in failure end on
 `auth:cancelled`, `auth:not_offered` and `auth:error` respectively, with no status line.
 
 ### Isolation

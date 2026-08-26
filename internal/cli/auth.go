@@ -347,7 +347,21 @@ func reportPlanCheckFailure(w authWriter, err error) {
 		// The credential is fine and this deployment will not act on it. Offering a
 		// second login here opens a loop that mints another credential wrong in exactly
 		// the same way.
-		w.human("Signed in, but this backend does not accept this client's credentials.")
+		//
+		// The two 403s share that remedy and still need different sentences, which is why
+		// the backend keeps them as two codes — and why collapsing them here was wrong.
+		// `auth_permission_denied` means the ACCOUNT was recognised and not admitted, so
+		// telling its holder the deployment "does not accept this client's credentials"
+		// sends them to check a registration that is fine. `auth_client_not_allowed` is
+		// the one that really is about this application's OAuth registration, where no
+		// account the reader could sign in as changes the answer.
+		if be.Code == backend.CodeAuthClientNotAllowed {
+			w.human("Signed in, but this deployment does not accept this application's sign-in.")
+			w.human("Ask whoever runs it to allow this client — no account changes the answer.")
+			break
+		}
+		w.human("Signed in, but this deployment has not approved this account.")
+		w.human("Ask whoever runs it to grant this account access — signing in again returns the same answer.")
 		w.human("Signing in again produces the same result; this needs a change at the backend.")
 	case be.IsAccountDependency():
 		w.human("Signed in. The plan could not be checked — the billing service is unavailable.")
@@ -625,6 +639,17 @@ func renderAuthStatus(w authWriter, st auth.Status, cfg config.AppConfig) {
 		w.human("")
 		w.human("Your sign-in is intact and this deployment will not act on it.")
 		w.human("Signing in again produces the same result; this needs a change at the backend.")
+		// Which change, and by whom, differs between the two codes that reach this state —
+		// see reportPlanCheckFailure above, where the same distinction is drawn for the
+		// same reason. The state alone cannot carry it, so the label stays neutral and
+		// the specifics live here.
+		if st.LastErrorCode == backend.CodeAuthClientNotAllowed {
+			w.human("It is this application's sign-in that is not accepted, so no account you")
+			w.human("sign in with changes the answer.")
+		} else if st.LastErrorCode == backend.CodeAuthPermissionDenied {
+			w.human("This account needs approving by whoever runs the deployment. If you meant")
+			w.human("to use a different one, `daintree-assistant auth logout` then log in again.")
+		}
 	}
 }
 
@@ -669,7 +694,12 @@ func authStateLabel(s auth.State) string {
 	case auth.StateAccountsUnavailable:
 		return "this backend has no accounts"
 	case auth.StateAccessRefused:
-		return "signed in — this backend refuses these credentials"
+		// Deliberately says ACCESS and not credentials. Both codes that reach this state
+		// leave the credential valid; `auth_permission_denied` in particular means the
+		// account was recognised and not admitted, so a label naming the credential sends
+		// its holder to check the one thing that is definitely fine. The remedy lines in
+		// renderAuthStatus carry which of the two it was.
+		return "signed in — access refused by this deployment"
 	case auth.StateAuthorizing:
 		return "waiting for the browser"
 	case auth.StateRefreshing:

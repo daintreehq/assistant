@@ -83,19 +83,27 @@ The third is about the plan. Nothing about it is stored on your machine, deliber
 plan on disk is a plan that can go stale, so a fresh process starts knowing only that a
 credential exists. Plain `auth status` stays fast and works offline; **`auth status
 --refresh` is the mode that asks the backend**, and it is what to run after buying or
-changing a plan. (Inside a running session, `/account` asks the same question.) It reports four things that look alike and are not:
+changing a plan. (Inside a running session, `/account` asks the same question.) It reports
+five things that look alike and are not:
 
 ```
   state        signed in
   state        signed in — no plan yet
   state        signed in — plan inactive
   state        signed in — could not check just now
+  state        signed in — access refused by this deployment
 ```
 
 The first three describe your account; the fourth describes the backend, and is never a
 statement that you are unsubscribed. A lapsed plan needs the billing portal rather than a
 second checkout — the command says which case you are in, and prints the relevant link
 when the deployment publishes one (both the account and subscribe URLs are optional).
+
+The fifth is none of those, and buying something will not clear it: your sign-in is valid
+and the deployment has declined to act on it — either because this account has not been
+approved for it, or because it does not accept this application's sign-in at all. The
+command says which. Both need a person with access to the deployment to change something
+there, so signing in again returns the identical answer.
 
 No model-provider credential is stored on your machine, and nothing reaches a model
 provider from it directly. Signed in, the CLI sends your account token as a bearer to the

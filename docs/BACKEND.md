@@ -46,7 +46,7 @@ backend, and the default for a fresh install) and `backend.LocalBaseURL` =
 staged behind identity on its own axis. Nothing on this side may encode where that walk has
 reached — not in a constant, not in a doc, not in a hostname test.
 
-**Whether a request carries a credential is the deployment's answer.** The backend holds
+**Whether a request carries a credential is decided LOCALLY, per request.** The backend holds
 its own upstream credential and funds every turn from it, so a request needs to carry no
 key in order to have one to spend: `auth.authenticate` returns an anonymous principal for a
 request with no `Authorization` header, and that stays a first-class path — it is what a
@@ -55,9 +55,17 @@ prompts for a provider key, never writes one to disk, and never gates startup on
 
 The CLI owns ACCOUNTS (`internal/auth`, and `daintree-assistant auth …`), and when a
 deployment configures an identity provider it sends the account's access token as the
-bearer on protected paths. Discovery decides: `GET /v1/daintree/auth/config` answers with
-`configured` and `required`, and a deployment with neither returns just those two flags —
-no issuer, no client id — which the CLI reads as "no accounts here", not as a fault. The
+bearer on protected paths.
+
+Two separate questions, and conflating them invents a preflight this code does not perform.
+Discovery answers what the DEPLOYMENT offers — `GET /v1/daintree/auth/config` returns
+`configured` and `required`, and a deployment with neither returns just those two flags (no
+issuer, no client id), which the CLI reads as "no accounts here" rather than as a fault.
+What rides on a given request is answered without asking it: a cached access token is
+returned before discovery is consulted, a machine with no local session yields an empty
+bearer and consults nothing, the deprecated static override becomes a bearer independently,
+and public paths never consult a token source at all. An ordinary never-signed-in run makes
+no discovery call before a turn; it sends anonymously and the backend's answer decides. The
 protected/public split matters here: `/healthz`, `/readyz`, `/version` and the discovery
 endpoint itself never wait on a credential, because they are exactly what someone probes
 when their login is broken.
@@ -86,8 +94,13 @@ reads this contract.
 **One read serves every surface** (`internal/app/accountrefresh.go`). `auth status
 --refresh` and `/account` read as the user asking, through the OBSERVING client, so a
 revocation clears the credential. The checks after `auth login` and `/login` are a
-COURTESY and run unobserving — a plan report must not be able to revoke a session the
-token exchange completed seconds earlier. A plain `auth status` makes no account request
+COURTESY and run through a NARROWED observer — a plan report must not be able to revoke a
+session the token exchange completed seconds earlier, but it equally must not print a
+settled refusal and then forget it. Two gates must both pass for a verdict to be folded
+into local state: the code must be one of the two 403s (`auth_permission_denied`,
+`auth_client_not_allowed`) and the remedy must be `RemedyReconfigure`. Those write
+`lastErr` and a state and touch no credential; everything else — the revoking codes, the
+credential verdicts, the 503s, and the two 402s — is still dropped. A plain `auth status` makes no account request
 at all.
 
 **The backend's account verdicts change local state.** The codes in `account.go` are not
