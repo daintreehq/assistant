@@ -242,6 +242,24 @@ func (m *Manager) Manifest(ctx context.Context) (*Manifest, error) {
 	return man, nil
 }
 
+// CachedLinks returns the validated account and subscribe URLs already known for this
+// deployment, or the zero StatusLinks when discovery has never succeeded against it.
+//
+// It performs NO I/O and starts NO discovery, which is what makes it safe to call while
+// composing a failure message. Rendering a link must never itself become a reason to make
+// a network request: a turn that has just failed is the worst moment to add a round trip,
+// and the one-discovery-per-account-operation budget must not be spent by an error
+// string. A caller handed the zero value says whatever it can say without a link.
+//
+// The links come through Status.WithManifest — the same projection `auth status` and
+// `/account` render — so they are the manifest's validated, origin-pinned values. They
+// are never assembled from the backend hostname, and never read out of an error body.
+// See Discoverer.CachedLinks for why the answer is links rather than the manifest, and
+// for the staleness this deliberately accepts.
+func (m *Manager) CachedLinks() StatusLinks {
+	return m.discoverer.CachedLinks()
+}
+
 // Availability reports what this deployment says about accounts. Answerable when
 // Manifest is not — see the type — which is the whole reason it is its own call.
 func (m *Manager) Availability(ctx context.Context) Availability {

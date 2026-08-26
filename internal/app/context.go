@@ -114,6 +114,34 @@ func (a *App) resumedWatchersForFooter() []string {
 	return a.ownership.ResumedWatcherTitles
 }
 
+// accountLinksForAdvice returns the validated account/subscribe URLs for the endpoint
+// this App is pointed at, for SessionDeps.AccountLinks. Zero links when there is no
+// account manager (a caller key, or a layer that could not be built) or when discovery
+// has not yet succeeded here — both of which the advice renders as "no link", never as a
+// guess assembled from the hostname.
+//
+// This is the conversion boundary Codex-reviewed layering asks for: auth.StatusLinks is
+// the provider's type and agent.AccountLinks is the loop's own narrow seam, so the turn
+// engine never imports the package that owns issuers and credentials.
+//
+// The manager is read under cfgMu because `/backend` replaces the config and the manager
+// together and an unlocked read can straddle that write. Unlike AccountLayerFault this
+// does NOT need the matched (config, manager) pair — only the manager is used — so the
+// lock is released before the memory-only cache read rather than held across it. A switch
+// landing immediately after the read can still make the answer describe the endpoint just
+// left; in practice a switch refuses while a turn is in flight, which is the only time
+// this is called.
+func (a *App) accountLinksForAdvice() agent.AccountLinks {
+	a.cfgMu.RLock()
+	mgr := a.Auth
+	a.cfgMu.RUnlock()
+	if mgr == nil {
+		return agent.AccountLinks{}
+	}
+	links := mgr.CachedLinks()
+	return agent.AccountLinks{Account: links.Account, Subscribe: links.Subscribe}
+}
+
 // mcpServerContexts lists the MCP servers this process is wired to, each with its
 // endpoint, so the model can answer "which Daintree are you actually talking to?"
 // without guessing (ses_8cb40b4e). The primary status is passed in so PromptContext

@@ -812,7 +812,12 @@ func Create(opts CreateOptions) (*App, error) {
 		// One-time resumed-watchers note. Worktree data now travels through the typed
 		// request.runtime.worktree field; activeWorktreeForFooter remains available to
 		// workflow intelligence but is no longer a Session dependency.
-		ResumedWatchers:   a.resumedWatchersForFooter,
+		ResumedWatchers: a.resumedWatchersForFooter,
+		// Validated account/subscribe links for account-failure advice. A provider func
+		// so a `/backend` switch cannot leave a turn naming the previous deployment's
+		// plan page, and so that composing the message costs no discovery: the seam
+		// reads an already-validated manifest out of memory.
+		AccountLinks:      a.accountLinksForAdvice,
 		ArtifactPersister: store,
 		WorkflowRunLister: store,
 		// Durable mirror + seed for the opaque backend state token, so a session

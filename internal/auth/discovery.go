@@ -879,6 +879,12 @@ func (d *Discoverer) Availability(ctx context.Context) Availability {
 // mutating result.Scopes[0] silently rewrites what every later caller receives — and
 // races any concurrent reader, which is the kind of bug that surfaces weeks later as an
 // inexplicable scope rejection.
+//
+// Configured is a *bool for the reason its own field documents — an absent flag and a
+// false one are different answers — and it is a pointer, so the same argument applies to
+// it exactly. Copying it shallowly leaves a caller able to flip the CACHED manifest's
+// "this deployment has accounts" answer through the copy it was handed, after validation
+// has already passed on it, and a later 304 then reuses that object without revalidating.
 func (m *Manifest) clone() *Manifest {
 	if m == nil {
 		return nil
@@ -886,6 +892,10 @@ func (m *Manifest) clone() *Manifest {
 	out := *m
 	if m.Scopes != nil {
 		out.Scopes = append([]string(nil), m.Scopes...)
+	}
+	if m.Configured != nil {
+		configured := *m.Configured
+		out.Configured = &configured
 	}
 	return &out
 }
@@ -956,6 +966,45 @@ func (d *Discoverer) fetch(ctx context.Context, etag string) (*Manifest, string,
 		}
 	}
 	return &m, strings.TrimSpace(resp.Header.Get("ETag")), false, nil
+}
+
+// CachedLinks returns the account and subscribe URLs from the last manifest that PASSED
+// validation for the endpoint this Discoverer is pointed at, or the zero value when there
+// is none. It performs no I/O and starts no fetch.
+//
+// It answers with LINKS rather than the manifest for the same reason it is allowed to
+// ignore manifestCacheTTL: the two decisions are one decision. Manifest applies that TTL
+// because a cached copy that has stopped being servable must not still be the
+// AUTHORITATIVE answer — the issuer, token endpoint and client id a login is about to be
+// conducted against, where being behind a rotation is a real hazard. This accessor is
+// deliberately not able to answer that question. It hands back the two browser
+// destinations and nothing else, so no caller can reach a stale issuer through it, and
+// widening it later means confronting that argument rather than inheriting an exemption.
+//
+// The staleness really is unbounded, and the honest reason it is acceptable is narrow: a
+// failed or unconfigured revalidation leaves the previous cached copy in place, so a link
+// can outlive the deployment that served it for the life of the process. A subscribe URL
+// is origin-pinned by Validate and is only ever RENDERED beside an account failure, so the
+// worst case is offering a plan page that has moved — against rendering no link at all on
+// the configured happy path, which leaves the reader nothing to act on. manifestCacheTTL
+// is sixty seconds and a session is not, so binding the two would make that the ordinary
+// case rather than the exception.
+//
+// Endpoint safety does NOT come from Invalidate, which nothing on the switch path calls.
+// It comes from baseURL being immutable for the life of a Discoverer: a `/backend` switch
+// builds a whole new Manager, and with it a new Discoverer and a new cache, so a given
+// cache can only ever hold a manifest fetched from its own endpoint. Invalidate remains
+// correct here — it nils the cache — but it is a second line, not the first.
+func (d *Discoverer) CachedLinks() StatusLinks {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.cached == nil {
+		return StatusLinks{}
+	}
+	// Through the same projection every other surface renders, so a caller reading Links
+	// off a full Status and one reading them here can never disagree about what a
+	// validated manifest's links are.
+	return Status{}.WithManifest(d.cached).Links
 }
 
 // Invalidate drops the cached manifest, forcing the next call to re-fetch. Used when a

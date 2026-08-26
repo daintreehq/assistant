@@ -15,6 +15,22 @@ import (
 // satisfied by the real provider (e.g. *backend.Client, *tools.Registry,
 // *storage.Store) and trivially by a fake in tests.
 
+// AccountLinks are the browser destinations account-failure advice may offer. Declared
+// here rather than reusing auth.StatusLinks because this file's whole rule is that the
+// loop depends on narrow consumer-defined seams and not on the concrete provider
+// packages — and because an account failure needs exactly two strings, not a route into
+// the package that owns issuers and credentials. The app seam converts.
+//
+// Both fields are empty when discovery has not succeeded against this deployment. That is
+// the documented degradation: advice names the slash command and offers no link, rather
+// than assembling a URL from the backend hostname or lifting one out of an error body.
+type AccountLinks struct {
+	// Account is the account/billing page, for a plan that exists but is not active.
+	Account string
+	// Subscribe is the create-an-account-or-choose-a-plan page.
+	Subscribe string
+}
+
 // ToolRunner is the tool-registry seam (satisfied by an adapter over
 // *tools.Registry). It projects tools to OpenAI specs, resolves wire→internal
 // names, and dispatches a call for this turn (carrying the per-turn
@@ -225,6 +241,19 @@ type SessionDeps struct {
 	// paths where the note is moot, even though the slice is known at construction.
 	// Optional; nil ⇒ the note never appears (the default in tests).
 	ResumedWatchers func() []string
+	// AccountLinks returns the validated account and subscribe URLs for the deployment
+	// this session is pointed at, for the advice an account failure renders.
+	//
+	// A provider func rather than a value for two reasons. The answer is pinned to an
+	// endpoint and `/backend` can replace one mid-session, so reading it per use is what
+	// stops advice naming the previous deployment's plan page. And it must be cheap
+	// enough to call while building an error string: the seam behind it reads an
+	// already-validated manifest out of memory and never fetches, so composing a message
+	// can never cost a discovery.
+	//
+	// Optional; nil ⇒ advice degrades to naming the slash command with no link, which is
+	// exactly the documented behaviour when discovery is unavailable.
+	AccountLinks func() AccountLinks
 	// ArtifactPersister mirrors overflow tool-result payloads to durable storage so
 	// artifact.read survives cache eviction/restart (optional; nil ⇒ in-memory only).
 	ArtifactPersister ArtifactPersister

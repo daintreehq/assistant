@@ -1,6 +1,9 @@
 package backend
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // tokensource.go replaces the client's frozen `apiKey string` with a value that can
 // change under it.
@@ -130,6 +133,42 @@ func (s StaticTokenSource) Secrets() []string {
 	}
 	return []string{s.Token}
 }
+
+// UnavailableTokenSource fails every request rather than letting one go out without a
+// credential.
+//
+// It is what the account layer installs when it could not be CONSTRUCTED — an unwritable
+// state root, a plain file where the `auth` directory belongs, EACCES, ENOSPC. Until that
+// wiring lands this type has no production caller; the alternative it is there to replace
+// is NoTokenSource, under which the client omits the Authorization header and the turn
+// goes out as an anonymous principal. Against a
+// deployment whose door is open that SUCCEEDS, and this machine's local fault is quietly
+// billed to whoever the open door resolves to; against one that enforces accounts it
+// comes back as a generic server rejection naming the deployment, for a problem that is
+// entirely on this disk. Both readings are wrong, and neither is visible.
+//
+// The abort itself is free: Client.credential already refuses to continue when its source
+// errors, and raises CodeCredentialUnavailable rather than CodeAuthRequired precisely
+// because no request was sent. Public paths — discovery, health, version — never consult a
+// token source at all, so `doctor` and `/backend` keep working and can explain the fault
+// instead of dead-ending on it.
+//
+// Err is the local diagnosis to carry, so every surface reports the same one. A zero value
+// still fails closed; it just cannot say why.
+type UnavailableTokenSource struct{ Err error }
+
+// AccessToken always fails, which is the whole point: no request is sent without a
+// credential, and the failure names a local fault rather than the backend.
+func (u UnavailableTokenSource) AccessToken(context.Context) (string, error) {
+	if u.Err == nil {
+		return "", errors.New("the account layer is unavailable")
+	}
+	return "", u.Err
+}
+
+// Invalidate is a no-op: there is nothing behind this source to re-derive a credential
+// from, and a fault that has since been repaired is picked up by rebuilding the layer.
+func (UnavailableTokenSource) Invalidate(string) {}
 
 // NoTokenSource sends no credential. It is the zero-configuration default and what the
 // public probes use, so an unconfigured client behaves exactly as it did before this
