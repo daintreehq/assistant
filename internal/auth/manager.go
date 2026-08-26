@@ -283,6 +283,19 @@ func (m *Manager) forgetSessionKeyLocked() {
 	m.sessionKey, m.hasSessionKey = CredentialKey{}, false
 }
 
+// forgetSessionKeyIfLocked drops the remembered credential only when it is the one the
+// caller is talking about.
+//
+// The conditional form is for the paths that act on a key they RESOLVED rather than one
+// they own — a refresh, a hydrate. Those can be looking at a different credential than the
+// one this process published if the manifest moved underneath them, and clearing
+// unconditionally would let a lookup for one credential retire the memory of another.
+func (m *Manager) forgetSessionKeyIfLocked(key CredentialKey) {
+	if m.hasSessionKey && m.sessionKey == key {
+		m.forgetSessionKeyLocked()
+	}
+}
+
 // everSignedInHere answers "is there a credential on this machine we can name?".
 //
 // TWO sources, and the in-memory one comes first because it is the only one that can be
@@ -321,6 +334,24 @@ func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 		m.generation++
 		// The verification time belongs to the identity that earned it. See Logout.
 		m.lastVerifiedAt = nil
+		// AND THE REMEMBERED KEY, which is the one thing here that is not obviously
+		// scoped to an identity and is.
+		//
+		// It exists so a process that performed a login never has to consult a FILE to
+		// know it holds a credential. That reasoning holds right up to the moment
+		// something else changes the identity, and then it inverts: a logout in another
+		// process bumps the marker EVEN WHEN ITS DELETE FAILED, precisely so every other
+		// process stops spending — and a manager that kept its key would sail past the
+		// short-circuit, re-read the credential the delete could not remove, refresh it,
+		// and resume the session the user asked to end. Keeping it would make this
+		// manager the one process on the machine that ignores the signal.
+		//
+		// Dropping it costs nothing that matters. If the other process signed OUT, the
+		// descriptor went with it and the short-circuit answers correctly. If it signed
+		// IN, the descriptor names the new credential and this one adopts it. Either way
+		// the authority for "is there a credential here" is now somebody else's, which is
+		// exactly what a bump means.
+		m.forgetSessionKeyLocked()
 		m.mu.Unlock()
 		m.revision.MarkObserved(marker)
 	}
@@ -543,7 +574,18 @@ func (m *Manager) refresh(ctx context.Context) (TokenSet, error) {
 	stored, err := store.Load(ctx, key)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			m.setState(StateSignedOut)
+			// AUTHORITATIVE ABSENCE, so the remembered key goes too.
+			//
+			// This is the one read that can settle the question the key defers: the store
+			// itself, under the credential lock, says there is nothing there. Keeping the
+			// key past that answer does not preserve a session — there is none — it just
+			// makes every later request skip the cheap short-circuit and pay a lock, a
+			// store read and a periodic discovery to be told the same thing again, with a
+			// locked keychain along the way turning a settled sign-out into an error.
+			m.mu.Lock()
+			m.state = StateSignedOut
+			m.forgetSessionKeyIfLocked(key)
+			m.mu.Unlock()
 			return TokenSet{}, newError(CodeNotSignedIn, "not signed in").
 				withHint("Run `daintree-assistant auth login`.")
 		}
@@ -882,6 +924,22 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 		return LoginResult{}, err
 	}
 
+	// THE SESSION THIS LOGIN IS ABOUT TO REPLACE, read under the lock that will hold until
+	// the new one is published.
+	//
+	// It exists so a failed login can be undone rather than merely cleaned up. Save
+	// REPLACES the entry (see store.go), so every rollback below used to reduce to a
+	// delete — which turns "your sign-in did not complete" into "your sign-in did not
+	// complete and your previous session is gone", on the single most common path this
+	// runs on: a re-login. The old refresh token has not been spent by anything, so
+	// putting it back is both possible and correct.
+	//
+	// A read failure is not a login failure. It only means the rollback falls back to the
+	// delete it used to be — and if the store cannot be read here, the Save below is about
+	// to fail on the same store anyway and the rollback never runs.
+	prior, priorErr := store.Load(ctx, key)
+	hadPrior := priorErr == nil && prior.Valid()
+
 	session := StoredSession{
 		Version:      storedSessionVersion,
 		RefreshToken: set.RefreshToken,
@@ -935,17 +993,13 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 	// remembered key below keeps this process's own session working for its lifetime.
 	// Failing there would refuse a login that is about to work perfectly well.
 	if err := saveKeyRef(m.authDir, key); err != nil && persisted {
-		// Best-effort cleanup, errors discarded on purpose: the failure being reported is
-		// the descriptor write, and replacing it with a cleanup error would name the
-		// wrong cause. The descriptor is removed only if it names THIS key — it is a
-		// single file for the whole state root, and a stale one for another endpoint is
-		// not ours to delete.
-		_ = m.ensureStore(ctx).Delete(ctx, key)
-		if recorded, ok := loadKeyRef(m.authDir); ok && recorded == key {
-			_ = forgetKeyRef(m.authDir)
+		if m.rollbackLogin(ctx, store, key, prior, hadPrior) {
+			lock.release()
+			restore()
+		} else {
+			lock.release()
+			abandoned()
 		}
-		lock.release()
-		abandoned()
 		return LoginResult{}, wrapError(CodeStorageUnavailable,
 			"the session was stored but its descriptor could not be recorded, so no later process could find it", err).
 			withHint("Check that " + m.authDir + " is writable, then sign in again.")
@@ -955,23 +1009,22 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 		// ROLL THE CREDENTIAL BACK before reporting failure, under the lock that is
 		// still held.
 		//
-		// Save has already overwritten whatever was stored, so by this point the
-		// PREVIOUS session's refresh token is gone whatever happens next — there is no
-		// outcome that preserves it. What is still in this function's gift is whether
-		// "login failed" is true. Leaving the new credential behind makes it false in the
-		// worst way: a fresh process loads a session this one has just told the user it
-		// could not create, and on a re-login as a different account the two disagree
-		// about who is signed in. Deleting leaves one consistent story — signed out, the
-		// sign-in failed, try again.
+		// Save has already overwritten whatever was stored, so leaving the new credential
+		// behind makes "login failed" false in the worst way: a fresh process loads a
+		// session this one has just told the user it could not create, and on a re-login
+		// as a different account the two disagree about who is signed in. rollbackLogin
+		// leaves one consistent story instead — the previous session if there was one,
+		// signed out if there was not.
 		//
 		// Best-effort, and its error is discarded on purpose: the failure being reported
 		// is the bump, and replacing it with a cleanup error would name the wrong cause.
-		_ = m.ensureStore(ctx).Delete(ctx, key)
-		if recorded, ok := loadKeyRef(m.authDir); ok && recorded == key {
-			_ = forgetKeyRef(m.authDir)
+		if m.rollbackLogin(ctx, store, key, prior, hadPrior) {
+			lock.release()
+			restore()
+		} else {
+			lock.release()
+			abandoned()
 		}
-		lock.release()
-		abandoned()
 		return LoginResult{}, err
 	}
 
@@ -1037,6 +1090,45 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 	// lock would block it until the 30-second acquisition timeout.
 	report("authenticated", "")
 	return LoginResult{Manifest: man, Tier: tier, Persisted: persisted}, nil
+}
+
+// rollbackLogin undoes a login's credential write, under the credential lock the caller
+// still holds. It reports whether the session this login replaced is back in place.
+//
+// PUTTING THE PREVIOUS SESSION BACK, not merely deleting the new one — and that
+// distinction is the difference between a failed sign-in and a destroyed one.
+//
+// Save REPLACES the entry, so by the time a publication step fails the previous refresh
+// token has already been overwritten. Deleting was all this used to do, which made every
+// failed RE-LOGIN — much the commonest way this path is reached, since the user already
+// had a session — end with no credential at all: the sign-in failed AND the working
+// session it was refreshing went with it, for a fault that had nothing to do with either
+// credential. Nothing ever presented the old refresh token, so it is not spent, and
+// writing it back is both possible and correct.
+//
+// Every error is discarded on purpose. The caller is reporting the publication failure,
+// and replacing it with a cleanup error would name the wrong cause; what the caller needs
+// from here is only which state to leave behind, which is what the return value says.
+//
+// The descriptor is touched ONLY when nothing was restored, and only when it names THIS
+// key. If the previous session is back, the descriptor already addresses it correctly. It
+// is a single file for the whole state root, so a stale one for another endpoint is never
+// ours to delete.
+func (m *Manager) rollbackLogin(ctx context.Context, store Store, key CredentialKey, prior StoredSession, hadPrior bool) (restored bool) {
+	if hadPrior {
+		if err := store.Save(ctx, key, prior); err == nil {
+			return true
+		}
+		// The restore failed, so the entry now holds the new login's token under a login
+		// that is reporting failure. Deleting is the lesser wrong: an unaddressable
+		// credential nobody can name outlives every logout, while an absent one just
+		// means signing in again.
+	}
+	_ = store.Delete(ctx, key)
+	if recorded, ok := loadKeyRef(m.authDir); ok && recorded == key {
+		_ = forgetKeyRef(m.authDir)
+	}
+	return false
 }
 
 // Logout ends the local session.
@@ -1202,7 +1294,13 @@ func (m *Manager) Hydrate(ctx context.Context) (resolved bool) {
 			}
 		})
 	case errors.Is(err, ErrNotFound):
-		applyIfCurrent(func() { m.state = StateSignedOut })
+		// The store's own answer, so the remembered key is retired with the state. See
+		// the same case in refresh: an authoritative absence is what the key was deferring
+		// to, and holding it past that only buys a repeat of this lookup.
+		applyIfCurrent(func() {
+			m.state = StateSignedOut
+			m.forgetSessionKeyIfLocked(key)
+		})
 	case errors.Is(err, ErrStoreLocked), errors.Is(err, ErrStoreUnavailable):
 		// "We could not read it" is not "there is nothing there". Guarded like every
 		// other write here: a slow hydrate must not overwrite a login that completed

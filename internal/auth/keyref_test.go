@@ -102,6 +102,17 @@ func blockDescriptorWrite(t *testing.T, dir string) {
 	t.Cleanup(func() { _ = os.RemoveAll(path) })
 }
 
+// keyFor derives the credential key this manager's endpoint uses, for tests that need to
+// name it before any login has recorded a descriptor.
+func keyFor(t *testing.T, m *Manager, p *idp) CredentialKey {
+	t.Helper()
+	man, err := m.Manifest(context.Background())
+	if err != nil {
+		t.Fatalf("Manifest: %v", err)
+	}
+	return m.key(man)
+}
+
 // signIn drives a real end-to-end login, failing the test on anything but success.
 func signIn(t *testing.T, m *Manager) LoginResult {
 	t.Helper()
@@ -133,18 +144,11 @@ func TestALoginWhoseDescriptorCannotBePublishedFailsAndRollsBack(t *testing.T) {
 	root := t.TempDir()
 	m := managerAt(t, p, store, root, nil)
 
-	// A first, ordinary login, to name the key the second attempt will store under and to
-	// establish that this rig CAN sign in — so the failure below is the descriptor and
-	// not the harness.
-	first := signIn(t, m)
-	if !first.Persisted {
-		t.Fatalf("Persisted = false on the keychain tier")
-	}
-	key, ok := loadKeyRef(m.AuthDirPath())
-	if !ok {
-		t.Fatal("an ordinary login recorded no descriptor")
-	}
-
+	// A FIRST login, so there is no earlier session for the rollback to put back and the
+	// credential it stored is simply removed. The re-login case — where a previous session
+	// exists and must survive — is its own test below, because the two rollbacks end
+	// somewhere deliberately different.
+	key := keyFor(t, m, p)
 	blockDescriptorWrite(t, m.AuthDirPath())
 
 	res, err := loginWithPortRetry(t, m, nil)
@@ -169,6 +173,55 @@ func TestALoginWhoseDescriptorCannotBePublishedFailsAndRollsBack(t *testing.T) {
 	}
 }
 
+// A failed RE-login must not take the session it was replacing down with it.
+//
+// This is the commonest way the rollback is reached, because a user who signs in again
+// already had a session. Save has overwritten the previous refresh token by the time the
+// descriptor write fails, so a rollback that only DELETED left the machine with no
+// credential at all: the sign-in failed, and the working session it was refreshing went
+// with it, over a fault that had nothing to do with either credential. Nothing ever
+// presented the old token, so putting it back is both possible and correct.
+func TestAFailedReLoginKeepsTheSessionItWasReplacing(t *testing.T) {
+	p := newIDP(t)
+	store := newPersistentStore()
+	root := t.TempDir()
+	m := managerAt(t, p, store, root, nil)
+
+	first := signIn(t, m)
+	if !first.Persisted {
+		t.Fatalf("Persisted = false on the keychain tier")
+	}
+	key, ok := loadKeyRef(m.AuthDirPath())
+	if !ok {
+		t.Fatal("an ordinary login recorded no descriptor")
+	}
+	before, err := store.Load(context.Background(), key)
+	if err != nil {
+		t.Fatalf("Load after the first login: %v", err)
+	}
+
+	blockDescriptorWrite(t, m.AuthDirPath())
+	if _, err := loginWithPortRetry(t, m, nil); err == nil {
+		t.Fatal("the re-login reported success despite an unpublishable descriptor")
+	}
+
+	after, err := store.Load(context.Background(), key)
+	if err != nil {
+		t.Fatalf("the previous session was destroyed by a failed re-login: %v — the sign-in "+
+			"failed, and the session the user already had went with it", err)
+	}
+	if after.RefreshToken != before.RefreshToken {
+		t.Errorf("the stored credential is neither the previous session nor absent")
+	}
+	// And the process still reports the session it actually holds.
+	if !m.State().SignedIn() {
+		t.Errorf("state = %q — the previous session is back in the store and usable", m.State())
+	}
+	if tok, tErr := m.AccessToken(context.Background()); tErr != nil || tok == "" {
+		t.Errorf("the restored session could not be spent: tok=%q err=%v", tok, tErr)
+	}
+}
+
 // The rollback's own failure must not be mistaken for success, and must not replace the
 // cause with the cleanup's error.
 //
@@ -183,7 +236,8 @@ func TestADescriptorRollbackWhoseDeleteFailsStillFailsTheLogin(t *testing.T) {
 	root := t.TempDir()
 	m := managerAt(t, p, store, root, nil)
 
-	signIn(t, m)
+	// A first login, so the rollback has nothing to restore and must fall through to the
+	// delete that fails.
 	blockDescriptorWrite(t, m.AuthDirPath())
 
 	_, err := loginWithPortRetry(t, m, nil)
@@ -423,6 +477,91 @@ func TestARevocationForgetsTheKeyRememberedByThisProcess(t *testing.T) {
 	}
 	if _, ok := m.rememberedKey(); ok {
 		t.Error("the remembered key outlived the revocation that deleted the credential it names")
+	}
+}
+
+// A logout in ANOTHER process must reach this one even when its delete failed.
+//
+// The revision bump is the signal, and Logout emits it whether or not the credential could
+// actually be removed — precisely so every other process stops spending when it could not.
+// A manager that kept the key it remembered would be the one process on the machine that
+// ignored it: past the short-circuit, straight back to the credential the delete could not
+// remove, refreshed, and carrying on with the session the user asked to end.
+func TestABumpElsewhereRetiresTheKeyRememberedHere(t *testing.T) {
+	p := newIDP(t)
+	// A store that refuses deletion, so the credential SURVIVES the other process's
+	// logout. Without that, this process would settle to signed out through the store's
+	// own answer and the test would prove nothing about the marker.
+	store := &deleteFailingStore{persistentStore: newPersistentStore(), err: errors.New("keychain is on fire")}
+	root := t.TempDir()
+
+	me := managerAt(t, p, store, root, nil)
+	signIn(t, me)
+	if _, ok := me.rememberedKey(); !ok {
+		t.Fatal("a completed login remembered no key")
+	}
+
+	// The other process signs the machine out. Its delete fails; its bump does not.
+	other, err := NewManager(Options{StateRoot: root, BackendURL: p.srv.URL, Store: store, Opener: NoOpener{}})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, lErr := other.Logout(context.Background()); lErr == nil {
+		t.Fatal("the rig's delete was supposed to fail, so this test is not testing what it claims")
+	}
+
+	tok, err := me.AccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("AccessToken after a logout elsewhere: %v", err)
+	}
+	if tok != "" {
+		t.Fatal("this process kept spending after a logout elsewhere — a remembered key must " +
+			"not survive an identity change it did not make")
+	}
+	if _, ok := me.rememberedKey(); ok {
+		t.Error("the remembered key outlived the bump that announced the identity had changed")
+	}
+}
+
+// The store's own "there is nothing here" is the answer the remembered key was deferring
+// to, so it retires there.
+//
+// Holding it past an authoritative absence preserves no session — there is none. It only
+// makes every later request skip the cheap short-circuit and pay a lock, a store read and
+// a periodic discovery to be told the same thing again.
+func TestAnAuthoritativeAbsenceRetiresTheRememberedKey(t *testing.T) {
+	p := newIDP(t)
+	store := newPersistentStore()
+	root := t.TempDir()
+	m := managerAt(t, p, store, root, nil)
+
+	signIn(t, m)
+	key, ok := m.rememberedKey()
+	if !ok {
+		t.Fatal("a completed login remembered no key")
+	}
+	// The credential goes, with no bump and no descriptor left behind — a state dir
+	// cleared out from under a running process.
+	if err := store.Delete(context.Background(), key); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if err := forgetKeyRef(m.AuthDirPath()); err != nil {
+		t.Fatalf("forgetKeyRef: %v", err)
+	}
+	m.Invalidate(currentToken(m))
+
+	tok, err := m.AccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("AccessToken: %v", err)
+	}
+	if tok != "" {
+		t.Fatalf("token = %q for a credential that is not there", tok)
+	}
+	if _, ok := m.rememberedKey(); ok {
+		t.Error("the remembered key outlived the store's own answer that the credential is gone")
+	}
+	if m.State() != StateSignedOut {
+		t.Errorf("state = %q, want %q", m.State(), StateSignedOut)
 	}
 }
 
