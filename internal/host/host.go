@@ -60,11 +60,22 @@ type Host struct {
 	// turnCancel, wakeCancel, turnGen, pendingWake, wakeRetried, wakeSweepDone,
 	// summarizedTerminals, and the turnWG.Add gate. The command loop must stay
 	// non-blocking, so it only ever takes this short lock.
-	turnMu              sync.Mutex
-	busy                bool
-	closing             bool // latched by teardown; no new prompt/wake worker may start
-	turnCancel          context.CancelFunc
-	wakeCancel          context.CancelFunc // aborts the in-flight WAKE turn (shutdown paths only)
+	turnMu     sync.Mutex
+	busy       bool
+	closing    bool // latched by teardown; no new prompt/wake worker may start
+	turnCancel context.CancelFunc
+	wakeCancel context.CancelFunc // aborts the in-flight WAKE turn (shutdown paths only)
+	// cmdCancel aborts the in-flight SLOW command (see handleSlashCommandAsync), and
+	// cmdBusy is what keeps there being only one.
+	//
+	// A slow command is the only work here that waits on a person rather than on a
+	// model: `/login` blocks until a browser round trip completes or its five-minute
+	// callback window expires. Without a cancel, shutdown reaches its bounded join with
+	// that wait still running and tears the App down underneath it; without the busy
+	// flag, two of them overlap and settle in whichever order the network decides —
+	// a `/logout` sent after a `/login` can finish first and leave the session signed in.
+	cmdCancel           context.CancelFunc
+	cmdBusy             bool
 	turnGen             uint64
 	pendingWake         []domain.QueueEvent
 	wakeRetried         bool

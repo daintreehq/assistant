@@ -29,6 +29,19 @@ import (
 func strPtr(s string) *string { return &s }
 func boolPtr(b bool) *bool    { return &b }
 
+// deadBackend is a loopback port nothing listens on.
+//
+// Pinned into every test app because `Offline` does NOT reach the account layer: it
+// governs the model backend, while the auth manager reads the resolved endpoint and,
+// left unset, resolves to the DEPLOYED default. `TestUIEveryRegistryCommandHandled`
+// walks the whole registry, so once /login joined it that test was one reachable
+// deployment away from running a real sign-in — opening a browser on a developer's
+// machine, mid-suite, and then waiting five minutes for a callback nobody would send.
+//
+// A refused connection is the fast, deterministic, offline answer, and it is the same
+// answer on a laptop with no network as on one with.
+const deadBackend = "http://127.0.0.1:1"
+
 // newOfflineApp builds an offline App writing to a temp dir (cleaned by t).
 func newOfflineApp(t *testing.T) *app.App {
 	t.Helper()
@@ -39,6 +52,7 @@ func newOfflineApp(t *testing.T) *app.App {
 			StateDir:    strPtr(dir),
 			ProjectPath: strPtr(dir),
 			Tier:        strPtr("operator"),
+			BackendURL:  strPtr(deadBackend),
 		},
 		// Inject a scripted backend so backend-backed commands (/compact via
 		// RunCheckpoint + RunMemoryDistill) resolve deterministically and OFFLINE —

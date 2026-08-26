@@ -16,6 +16,17 @@ type CommandMeta struct {
 	Syntax string
 	// Help is the one-line description.
 	Help string
+	// Slow marks a command that can take longer than a person will sit still for, and
+	// whose waiting is spent on something other than this process — a browser the user
+	// has to go and act in, a backend round trip.
+	//
+	// It exists for the EMBEDDED host, which runs commands inline on its command loop.
+	// That is fine for a command that reads a table and returns; it is not fine for one
+	// that waits five minutes on an OAuth callback, because for those five minutes the
+	// loop services no interrupt, no approval and no shutdown, and posts nothing — the
+	// panel simply freezes. A slow command is dispatched to a worker instead. The line
+	// REPL ignores this: it has one user, one terminal, and nothing else to service.
+	Slow bool
 }
 
 // COMMAND_REGISTRY is the ordered, canonical command table. Aliases (? ⇐ help;
@@ -36,6 +47,9 @@ var COMMAND_REGISTRY = []CommandMeta{
 	{Name: "models", Syntax: "/models", Palette: "backend-owned model routing", Help: "show backend-owned model routing"},
 	{Name: "cost", Syntax: "/cost", Palette: "what this session has spent", Help: "upstream cost this session ran up, as the backend reported it"},
 	{Name: "backend", Syntax: "/backend [target]", Palette: "which backend answers", Help: "switch backend (remembered); no arg lists, 'default' forgets"},
+	{Name: "login", Syntax: "/login", Palette: "sign in to your account", Help: "sign in through your browser", Slow: true},
+	{Name: "logout", Syntax: "/logout", Palette: "sign out on this machine", Help: "sign out on this machine", Slow: true},
+	{Name: "account", Syntax: "/account", Palette: "who you are signed in as", Help: "account state, plan, and which backend it belongs to", Slow: true},
 	{Name: "routing", Syntax: "/routing", Palette: "which endpoints serve you", Help: "endpoint routing: privacy filter and ranking"},
 	{Name: "permissions", Syntax: "/permissions [tier]", Palette: "supervisor | operator | system", Help: "show or set tier (supervisor|operator|system)"},
 	{Name: "approvals", Syntax: "/approvals [clear]", Palette: "attached session tool approvals", Help: "attached session session approvals; clear resets them"},
@@ -151,6 +165,12 @@ func canonical(cmd string) string {
 	switch cmd {
 	case "?":
 		return "help"
+	case "signin", "sign-in":
+		return "login"
+	case "signout", "sign-out":
+		return "logout"
+	case "whoami":
+		return "account"
 	case "exit", "q":
 		return "quit"
 	default:
@@ -191,4 +211,23 @@ func padRight(s string, width int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", width-n)
+}
+
+// IsSlowCommand reports whether a slash line names a command marked Slow — see
+// CommandMeta.Slow for what that means and who is expected to care.
+//
+// Aliases resolve first, so `/signin` answers the same as `/login`; an unknown command
+// is not slow, because the answer it produces is immediate.
+func IsSlowCommand(line string) bool {
+	cmd, _, _ := parseCommand(strings.TrimSpace(line))
+	if cmd == "" {
+		return false
+	}
+	name := canonical(cmd)
+	for _, c := range COMMAND_REGISTRY {
+		if c.Name == name {
+			return c.Slow
+		}
+	}
+	return false
 }

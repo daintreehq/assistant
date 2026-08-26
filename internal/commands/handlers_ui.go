@@ -101,6 +101,12 @@ func HandleUICommandWithProgress(ctx context.Context, line string, a *app.App, p
 		return UICommandResult{Handled: true, Title: "Models", Text: modelsText(a)}
 	case "cost":
 		return UICommandResult{Handled: true, Title: "Cost", Text: costText(a)}
+	case "login":
+		return UICommandResult{Handled: true, Title: "Sign in", Text: loginText(ctx, a, progress)}
+	case "logout":
+		return UICommandResult{Handled: true, Title: "Sign out", Text: logoutText(ctx, a)}
+	case "account":
+		return UICommandResult{Handled: true, Title: "Account", Text: accountText(ctx, a)}
 	case "backend":
 		return UICommandResult{Handled: true, Title: "Backend", Text: backendText(a, arg)}
 	case "routing":
@@ -558,7 +564,8 @@ func noArgUsage(name string, rest []string) string {
 	}
 	switch name {
 	case "status", "timers", "watchers", "grants", "launches", "models",
-		"compact", "clear", "doctor", "reconnect", "help", "quit":
+		"compact", "clear", "doctor", "reconnect", "help", "quit",
+		"login", "logout", "account":
 		return "Usage: /" + name
 	default:
 		return ""

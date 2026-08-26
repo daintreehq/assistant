@@ -262,3 +262,27 @@ func (e *BindingMismatchError) Error() string {
 			"about which session this is, so neither can be trusted to act on it",
 		e.Field, e.Declared, e.Actual)
 }
+
+// CommandProgressRunner is an App whose commands can report progress while they run.
+//
+// OPTIONAL, and separate from App on purpose: every existing implementation — including
+// the conformance fakes — satisfies App without it, and a command that returns promptly
+// has nothing to report. The host type-asserts for it and falls back to RunCommand.
+//
+// It exists for the commands marked Slow in the registry. `/login` opens a browser and
+// then waits up to five minutes for a loopback callback; without a progress channel the
+// surface shows nothing at all for the entire part of that which requires the user to go
+// and do something in another window.
+type CommandProgressRunner interface {
+	// RunCommandWithProgress is RunCommand plus a stage reporter. progress is called
+	// with short human-readable lines and may be called from the calling goroutine only.
+	RunCommandWithProgress(ctx context.Context, line string, progress func(stage string)) CommandOutcome
+
+	// IsSlowCommand reports whether a slash line names a command that may block for
+	// longer than the command loop can afford to stop for.
+	//
+	// Answered by the App rather than read from the registry directly, because the
+	// registry lives in a package that imports this one — asking through the interface
+	// is what keeps that arrow pointing one way.
+	IsSlowCommand(line string) bool
+}

@@ -48,7 +48,13 @@ func (h *Host) handleCommand(cmd HostCommand) {
 		// the bridge guards its own state, so call directly (no blocking).
 		h.bridge.ResolveApproval(cmd.ApprovalID, ConfirmationDecision(cmd.Decision))
 	case CmdCommand:
-		h.handleSlashCommand(cmd.CommandLine)
+		// A command the App reports as slow goes to a worker; everything else runs
+		// inline, as it always has. See handleSlashCommandAsync.
+		if runner, ok := h.app.(CommandProgressRunner); ok && runner.IsSlowCommand(cmd.CommandLine) {
+			h.handleSlashCommandAsync(cmd.CommandLine)
+		} else {
+			h.handleSlashCommand(cmd.CommandLine)
+		}
 	case CmdOperations:
 		h.postOperations()
 	case CmdInterjectRetract:
@@ -234,6 +240,13 @@ func (h *Host) reclaimStrandedInjections() string {
 // wake fold into it via InjectPrompt instead. Shutdown/hibernate/parent-exit DO
 // cancel wakes — see teardown/cancelWake.
 func (h *Host) handleInterrupt() {
+	// A slow command first, and unconditionally. `/login` is the only work here a user
+	// can be left staring at with no other way out — the browser tab is theirs to
+	// abandon, and Stop is where they will reach for that. Cancelled alongside a turn
+	// rather than instead of one: the two are independent, so a login running beside a
+	// turn must not survive a Stop aimed at either.
+	h.cancelCommand()
+
 	h.turnMu.Lock()
 	cancel := h.turnCancel
 	h.turnMu.Unlock()
@@ -286,6 +299,21 @@ func (h *Host) cancelTurn() {
 func (h *Host) cancelWake() {
 	h.turnMu.Lock()
 	cancel := h.wakeCancel
+	h.turnMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// cancelCommand aborts an in-flight SLOW command (see handleSlashCommandAsync).
+//
+// The loopback listener a `/login` is parked on selects on its context, so cancelling
+// here closes the socket and unwinds the wait immediately. Without it, shutdown reaches
+// its bounded join with that wait still running, times out, and tears the App down
+// underneath a command still holding it.
+func (h *Host) cancelCommand() {
+	h.turnMu.Lock()
+	cancel := h.cmdCancel
 	h.turnMu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -467,6 +495,11 @@ func (h *Host) teardown(reason HostShutdownReason, resumeSessionID string) {
 		// already call cancelTurn before teardown; both are idempotent.)
 		h.cancelTurn()
 		h.cancelWake()
+		// And an in-flight slow command. It is the one worker that can be parked on a
+		// human rather than a model — a sign-in waits five minutes for a browser — so
+		// leaving it out meant every shutdown during one burned the whole join timeout
+		// and then closed the App under it.
+		h.cancelCommand()
 		// Reject every outstanding approval so a parked dispatch unblocks (declined).
 		if h.bridge != nil {
 			h.bridge.SettlePendingApprovals(DecisionRejected)
@@ -619,7 +652,34 @@ func flushExit(code int) {
 // command costs nothing and cannot be answered with prose about itself. A `/quit` is
 // honoured by winding the session down exactly as a shutdown command would.
 func (h *Host) handleSlashCommand(line string) {
-	out := h.app.RunCommand(h.runCtx, line)
+	out := h.runAndPostCommand(line)
+	if out.Quit {
+		h.cancelTurn()
+		h.teardown(ShutdownExit, "")
+	}
+}
+
+// runAndPostCommand runs a slash line, posts its result, and re-reports MCP status.
+//
+// Split from handleSlashCommand so it is callable from a worker: teardown joins the
+// worker group, so a goroutine inside that group must never be the one to call it.
+func (h *Host) runAndPostCommand(line string) CommandOutcome {
+	return h.runAndPostCommandCtx(h.runCtx, line)
+}
+
+// runAndPostCommandCtx is runAndPostCommand against a caller-supplied context, so a slow
+// command can be cancelled without cancelling the whole run.
+func (h *Host) runAndPostCommandCtx(ctx context.Context, line string) CommandOutcome {
+	var out CommandOutcome
+	if runner, ok := h.app.(CommandProgressRunner); ok {
+		// Progress arrives as ordinary info notices — the same channel a degraded MCP or
+		// a repeating tool failure uses. A command that reports nothing posts nothing.
+		out = runner.RunCommandWithProgress(ctx, line, func(stage string) {
+			h.post(EvNotice{Level: "info", Message: stage})
+		})
+	} else {
+		out = h.app.RunCommand(ctx, line)
+	}
 	h.post(EvCommandResult{
 		Command:             line,
 		Text:                out.Text,
@@ -630,10 +690,74 @@ func (h *Host) handleSlashCommand(line string) {
 	// A command may have reconnected (or lost) the control plane — /reconnect exists
 	// precisely to change this — so re-report rather than leaving a stale status.
 	h.postMcpStatus()
-	if out.Quit {
-		h.cancelTurn()
-		h.teardown(ShutdownExit, "")
+	return out
+}
+
+// handleSlashCommandAsync runs a SLOW slash line on a worker goroutine.
+//
+// The command loop is single-threaded, and everything it does not service while blocked
+// is a thing the user cannot do: interrupt a turn, answer an approval, hibernate, quit.
+// That is a fair trade for a command that reads a table and returns. It is not a fair
+// trade for `/login`, which opens a browser and then waits up to five minutes for a
+// loopback callback — for those five minutes the panel would accept no input, show no
+// progress, and be indistinguishable from a hung engine.
+//
+// Registered in the same worker group as a turn, under the same `closing` check, so
+// teardown's bounded join covers an abandoned sign-in rather than racing it.
+func (h *Host) handleSlashCommandAsync(line string) {
+	// Its own context, not h.runCtx: teardown and interrupt both need a handle on this
+	// specific wait, and h.runCtx is only cancelled once the process is already going.
+	ctx, cancel := context.WithCancel(h.runCtx)
+
+	h.turnMu.Lock()
+	if h.closing {
+		h.turnMu.Unlock()
+		cancel()
+		h.report("not-ready", "Host is shutting down.")
+		return
 	}
+	if h.cmdBusy {
+		h.turnMu.Unlock()
+		cancel()
+		// REJECTED, not queued. These commands change the account, and running a
+		// second while the first is still deciding means the two settle in whichever
+		// order the network returns rather than the order they were typed — a /logout
+		// sent after a /login can land first and leave the session signed in. Saying so
+		// is also the honest answer: the first one is waiting on the user, and they are
+		// the only one who can finish it.
+		h.report("command-busy",
+			"Another account command is still running. Finish it in your browser, or interrupt it, before starting another.")
+		return
+	}
+	h.cmdBusy = true
+	h.cmdCancel = cancel
+	h.turnWG.Add(1)
+	h.turnMu.Unlock()
+
+	go func() {
+		defer h.turnWG.Done()
+		defer func() {
+			h.turnMu.Lock()
+			h.cmdBusy = false
+			h.cmdCancel = nil
+			h.turnMu.Unlock()
+			cancel()
+			// A panic in a command worker is fatal-for-command, not fatal-for-host —
+			// the same rule a turn worker follows.
+			if r := recover(); r != nil {
+				h.report("command-failed", fmt.Sprintf("command panicked: %v\n%s", r, debug.Stack()))
+			}
+		}()
+		out := h.runAndPostCommandCtx(ctx, line)
+		if out.Quit {
+			// Unreachable by construction: no command is both Slow and quitting, and
+			// tearing down from inside the worker group would deadlock on its own join.
+			// Reported rather than silently dropped, because the day that stops being
+			// true the symptom would otherwise be a /quit that did nothing.
+			h.report("command-failed",
+				"a slow command asked to quit; that is not supported from a command worker")
+		}
+	}()
 }
 
 // postCost emits the session's cumulative spend. Best-effort: a missing ledger reports

@@ -15,7 +15,8 @@ import (
 func TestRegistryExactOrderedSet(t *testing.T) {
 	want := []string{
 		"status", "inbox", "tools", "timers", "watchers", "grants", "workflows", "workflow", "launches",
-		"audit", "explain", "models", "cost", "backend", "routing", "permissions", "approvals", "memory", "compact",
+		"audit", "explain", "models", "cost", "backend", "login", "logout", "account",
+		"routing", "permissions", "approvals", "memory", "compact",
 		"clear", "doctor", "reconnect", "help", "quit",
 	}
 	if len(COMMAND_REGISTRY) != len(want) {
