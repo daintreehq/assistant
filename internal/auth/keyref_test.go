@@ -69,32 +69,37 @@ func managerAt(t *testing.T, p *idp, store Store, root string, now func() time.T
 	return m
 }
 
-// sealAuthDir makes the auth directory unwritable, which is what actually breaks
-// saveKeyRef: writeAtomic creates a temp file in that directory and renames over the
-// descriptor, and both need the directory's write bit.
+// blockDescriptorWrite makes saveKeyRef — and ONLY saveKeyRef — fail, by putting a
+// directory where the descriptor file belongs. writeAtomic finishes with
+// rename(tmp, credential.json), and renaming a regular file over an existing directory
+// is refused by the kernel.
 //
-// This is the honest mechanism rather than a seam — it fails the same syscall a real
-// read-only state root would. It is skipped rather than faked where it cannot work: root
-// ignores the mode bits entirely, so on a container that runs tests as uid 0 the write
-// would succeed and the test would pass without exercising anything. Probing beats
-// guessing at the environment.
-func sealAuthDir(t *testing.T, dir string) {
+// The obvious mechanism, chmod 0500 on the auth directory, is WRONG here and quietly so.
+// The revision marker lives in that same directory and is written by the same
+// temp-and-rename, so an unwritable directory fails the revision bump as well — and the
+// bump's rollback predates this change. A test built that way fails the login either way
+// and would pass just as green against the best-effort descriptor write it is supposed to
+// be catching. Verified: with the checked write reverted, this version fails and the
+// chmod version does not.
+//
+// Nothing is faked. saveKeyRef takes a real error from a real syscall on the real path,
+// which is what a read-only state root or a full disk would also produce; only the blast
+// radius is narrowed to the one write under test.
+func blockDescriptorWrite(t *testing.T, dir string) {
 	t.Helper()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
+	path := keyRefPath(dir)
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatalf("clear descriptor: %v", err)
 	}
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Skipf("cannot make %s read-only on this filesystem: %v", dir, err)
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatalf("block descriptor path: %v", err)
 	}
-	// Restore before TempDir's own cleanup, which cannot remove files from a 0500 dir.
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-
-	probe := filepath.Join(dir, "writability-probe")
-	if f, err := os.Create(probe); err == nil {
-		_ = f.Close()
-		_ = os.Remove(probe)
-		t.Skip("the auth directory is still writable at mode 0500 (running as root?), so a descriptor write cannot be made to fail")
+	// Confirm the block actually blocks, rather than trusting the platform. A silent
+	// no-op here would make every assertion below meaningless.
+	if err := saveKeyRef(dir, CredentialKey{Issuer: "probe", ClientID: "probe"}); err == nil {
+		t.Skip("a descriptor write succeeded over a directory on this filesystem, so it cannot be made to fail")
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(path) })
 }
 
 // signIn drives a real end-to-end login, failing the test on anything but success.
@@ -128,10 +133,9 @@ func TestALoginWhoseDescriptorCannotBePublishedFailsAndRollsBack(t *testing.T) {
 	root := t.TempDir()
 	m := managerAt(t, p, store, root, nil)
 
-	// A first, ordinary login. It creates the credential lock file, so the SECOND
-	// attempt fails on the descriptor write rather than earlier on the lock — flock
-	// needs to open an existing file, which a 0500 directory still permits, while
-	// CreateTemp and Rename do not.
+	// A first, ordinary login, to name the key the second attempt will store under and to
+	// establish that this rig CAN sign in — so the failure below is the descriptor and
+	// not the harness.
 	first := signIn(t, m)
 	if !first.Persisted {
 		t.Fatalf("Persisted = false on the keychain tier")
@@ -141,7 +145,7 @@ func TestALoginWhoseDescriptorCannotBePublishedFailsAndRollsBack(t *testing.T) {
 		t.Fatal("an ordinary login recorded no descriptor")
 	}
 
-	sealAuthDir(t, m.AuthDirPath())
+	blockDescriptorWrite(t, m.AuthDirPath())
 
 	res, err := loginWithPortRetry(t, m, nil)
 	if err == nil {
@@ -180,7 +184,7 @@ func TestADescriptorRollbackWhoseDeleteFailsStillFailsTheLogin(t *testing.T) {
 	m := managerAt(t, p, store, root, nil)
 
 	signIn(t, m)
-	sealAuthDir(t, m.AuthDirPath())
+	blockDescriptorWrite(t, m.AuthDirPath())
 
 	_, err := loginWithPortRetry(t, m, nil)
 	if err == nil {
@@ -237,26 +241,9 @@ func TestARolledBackLoginLeavesNothingForASecondProcess(t *testing.T) {
 	root := t.TempDir()
 
 	first := managerAt(t, p, store, root, nil)
-	signIn(t, first)
-	if _, err := first.Logout(context.Background()); err != nil {
-		t.Fatalf("Logout: %v", err)
-	}
-	// Logout removed the descriptor; recreate the lock file the sealed directory will not
-	// let Login create, so the next attempt fails on the descriptor as intended.
-	man, err := first.Manifest(context.Background())
-	if err != nil {
-		t.Fatalf("Manifest: %v", err)
-	}
-	lockFile := lockPath(first.AuthDirPath(), first.key(man))
-	if f, cErr := os.OpenFile(lockFile, os.O_CREATE|os.O_RDWR, 0o600); cErr != nil {
-		t.Fatalf("pre-create lock file: %v", cErr)
-	} else {
-		_ = f.Close()
-	}
-
-	sealAuthDir(t, first.AuthDirPath())
+	blockDescriptorWrite(t, first.AuthDirPath())
 	if _, err := loginWithPortRetry(t, first, nil); err == nil {
-		t.Fatal("the login reported success with an unwritable auth directory")
+		t.Fatal("the login reported success though its descriptor could not be written")
 	}
 
 	second := managerAt(t, p, store, root, nil)
@@ -289,20 +276,10 @@ func TestADescriptorFailureOnTheMemoryTierStillSignsIn(t *testing.T) {
 	root := t.TempDir()
 	m := managerAt(t, p, store, root, nil)
 
-	// Seal before the first login. The memory tier never reaches the credential lock's
-	// failure path here because AuthDir already exists and flock creates its file
-	// lazily — but if it did, the skip in sealAuthDir keeps this honest rather than green.
-	authDir := filepath.Join(root, authDirName)
-	sealAuthDir(t, authDir)
+	blockDescriptorWrite(t, filepath.Join(root, authDirName))
 
 	res, err := loginWithPortRetry(t, m, nil)
 	if err != nil {
-		if CodeOf(err) == CodeExchangeFailed {
-			// The credential lock could not be created in the sealed directory. That is a
-			// different failure from the one under test, and pretending otherwise would
-			// hide a regression.
-			t.Skipf("the credential lock could not be taken in a sealed directory: %v", err)
-		}
 		t.Fatalf("a memory-tier login was refused over a descriptor it does not need: %v", err)
 	}
 	if res.Persisted {
@@ -316,7 +293,7 @@ func TestADescriptorFailureOnTheMemoryTierStillSignsIn(t *testing.T) {
 		t.Errorf("state = %q, want %q so status can say this-process-only", got, StateStorageUnavailable)
 	}
 	if descriptorExists(m.AuthDirPath()) {
-		t.Error("a descriptor was written into a directory that refuses writes")
+		t.Error("a descriptor was read back from a path the write could not reach")
 	}
 }
 
