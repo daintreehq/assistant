@@ -85,6 +85,15 @@ func accountOK(t *testing.T, body string) (*Client, *accountRecorder) {
 	return c, rec
 }
 
+// checkedEntitlementFields is the source/freshness pair every CHECKED verdict must
+// carry — the backend types both as non-optional and refuses a website answer missing
+// either, so a body without them is not a response a healthy deployment produces.
+//
+// Spelled once because it appears in a dozen bodies whose subject is something else
+// entirely; a row testing the plan-id rule should not be readable as also making a claim
+// about entitlement sources.
+const checkedEntitlementFields = `"entitlement_source":"polar","entitlement_stale":false,`
+
 const grantedBody = `{"version":1,"email":"person@example.com","subject_hash":"0123456789abcdef",` +
 	`"access":"granted","plan_id":"standard","subscription_status":"active",` +
 	`"entitlement_source":"polar","entitlement_stale":false,"checked_at":"2026-08-25T12:00:00Z"}`
@@ -102,19 +111,25 @@ func TestAccountDecodesEveryAccessVerdict(t *testing.T) {
 		{"granted", grantedBody, AccessGranted, PlanStandard, "0123456789abcdef", "2026-08-25T12:00:00Z"},
 		{
 			"subscription required",
-			`{"version":1,"access":"subscription_required","subscription_status":"none","checked_at":"2026-08-25T12:00:00+02:00"}`,
-			AccessSubscriptionRequired, "", "", "2026-08-25T10:00:00Z",
+			`{"version":1,"subject_hash":"0123456789abcdef","access":"subscription_required",` +
+				`"subscription_status":"none",` + checkedEntitlementFields + `"checked_at":"2026-08-25T12:00:00+02:00"}`,
+			AccessSubscriptionRequired, "", "0123456789abcdef", "2026-08-25T10:00:00Z",
 		},
 		{
 			"subscription inactive",
-			`{"version":1,"access":"subscription_inactive","plan_id":"pro","subscription_status":"past_due",` +
-				`"entitlement_source":"polar","checked_at":"2026-08-25T12:00:00Z"}`,
-			AccessSubscriptionInactive, PlanPro, "", "2026-08-25T12:00:00Z",
+			`{"version":1,"subject_hash":"0123456789abcdef","access":"subscription_inactive",` +
+				`"plan_id":"pro","subscription_status":"past_due",` +
+				`"entitlement_source":"polar","entitlement_stale":false,"checked_at":"2026-08-25T12:00:00Z"}`,
+			AccessSubscriptionInactive, PlanPro, "0123456789abcdef", "2026-08-25T12:00:00Z",
 		},
 		{
+			// NO checked_at, and that is the contract rather than an omission in the
+			// fixture: `unverified` means no entitlement lookup happened, so there is no
+			// instant at which anything was established. The expected instant below is
+			// the zero time for the same reason.
 			"unverified",
-			`{"version":1,"access":"unverified","checked_at":"2026-08-25T12:00:00Z"}`,
-			AccessUnverified, "", "", "2026-08-25T12:00:00Z",
+			`{"version":1,"subject_hash":"0123456789abcdef","access":"unverified"}`,
+			AccessUnverified, "", "0123456789abcdef", "0001-01-01T00:00:00Z",
 		},
 	}
 	for _, tc := range cases {
@@ -149,7 +164,7 @@ func TestAccountDecodesEveryAccessVerdict(t *testing.T) {
 // A backend must be able to add optional metadata without an older CLI refusing the
 // whole answer — otherwise every future field is a breaking change.
 func TestAccountIgnoresUnknownFieldsAndAbsentOptionals(t *testing.T) {
-	const body = `{"version":1,"access":"unverified","checked_at":"2026-08-25T12:00:00Z",` +
+	const body = `{"version":1,"subject_hash":"0123456789abcdef","access":"unverified",` +
 		`"future_field":{"nested":[1,2,3]},"plan_id":null,"email":null}`
 	c, _ := accountOK(t, body)
 	got, err := c.Account(context.Background())
@@ -169,32 +184,57 @@ func TestAccountIgnoresUnknownFieldsAndAbsentOptionals(t *testing.T) {
 // the tempting-verdict row below is exactly the body that would make that mistake
 // expensive, since it carries a fully-formed `granted` under a version we cannot read.
 func TestAccountRejectsMalformedBodiesAsProtocolErrors(t *testing.T) {
-	cases := []struct{ name, body, code string }{
-		{"unknown version", `{"version":2,"access":"granted","plan_id":"pro","entitlement_source":"polar","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid},
-		{"missing version", `{"access":"granted","plan_id":"pro","entitlement_source":"polar","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid},
-		{"unknown access", `{"version":1,"access":"maybe","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid},
-		{"absent access", `{"version":1,"checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid},
-		{"granted with no plan", `{"version":1,"access":"granted","entitlement_source":"polar","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid},
-		{"granted with no entitlement source", `{"version":1,"access":"granted","plan_id":"pro","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid},
-		{"unknown plan", `{"version":1,"access":"granted","plan_id":"platinum","entitlement_source":"polar","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid},
-		{"unknown entitlement source", `{"version":1,"access":"unverified","entitlement_source":"guesswork","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid},
-		{"stale without a cache source", `{"version":1,"access":"granted","plan_id":"pro","entitlement_source":"polar","entitlement_stale":true,"checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid},
-		{"missing checked_at", `{"version":1,"access":"unverified"}`, CodeAccountContractInvalid},
-		{"naive checked_at", `{"version":1,"access":"unverified","checked_at":"2026-08-25T12:00:00"}`, CodeAccountContractInvalid},
-		{"uppercase subject hash", `{"version":1,"access":"unverified","subject_hash":"0123456789ABCDEF","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid},
-		{"short subject hash", `{"version":1,"access":"unverified","subject_hash":"0123456789abcde","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid},
-		{"long subject hash", `{"version":1,"access":"unverified","subject_hash":"0123456789abcdef0","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid},
-		{"non-hex subject hash", `{"version":1,"access":"unverified","subject_hash":"zzzzzzzzzzzzzzzz","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid},
-		{"oversized email", `{"version":1,"access":"unverified","email":"` + strings.Repeat("a", 400) + `","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid},
-		{"oversized subscription status", `{"version":1,"access":"unverified","subscription_status":"` + strings.Repeat("a", 400) + `","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid},
+	// Every row carries the REASON it is expected to fail on, not merely the code.
+	//
+	// Without it this table degrades silently the moment a new rule is added ahead of an
+	// old one: a body written to violate the plan-id rule starts failing on the missing
+	// subject hash instead, the row goes on passing, and the rule it was written for is
+	// no longer tested by anything. Each body below therefore violates exactly ONE rule
+	// and names it.
+	//
+	// The reason is matched as a substring of the message, which is our own prose about
+	// which rule failed — never the offending value.
+	cases := []struct{ name, body, code, reason string }{
+		{"unknown version", `{"version":2,"subject_hash":"0123456789abcdef","access":"granted","plan_id":"pro","entitlement_source":"polar","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid, "unsupported contract version"},
+		{"missing version", `{"subject_hash":"0123456789abcdef","access":"granted","plan_id":"pro","entitlement_source":"polar","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid, "unsupported contract version"},
+		{"unknown access", `{"version":1,"subject_hash":"0123456789abcdef","access":"maybe"}`, CodeAccountContractInvalid, "unrecognised access verdict"},
+		{"absent access", `{"version":1,"subject_hash":"0123456789abcdef"}`, CodeAccountContractInvalid, "unrecognised access verdict"},
+		{"granted with no plan", `{"version":1,"subject_hash":"0123456789abcdef","access":"granted","entitlement_source":"polar","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid, "granted with no plan"},
+		{"checked verdict with no entitlement source", `{"version":1,"subject_hash":"0123456789abcdef","access":"granted","plan_id":"pro","entitlement_stale":false,"checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid, "named no entitlement source"},
+		{"checked verdict that will not say whether it is stale", `{"version":1,"subject_hash":"0123456789abcdef","access":"granted","plan_id":"pro","entitlement_source":"polar","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid, "whether its answer was stale"},
+		{"unknown plan", `{"version":1,"subject_hash":"0123456789abcdef","access":"granted","plan_id":"platinum","entitlement_source":"polar","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid, "unrecognised plan id"},
+		{"unknown entitlement source", `{"version":1,"subject_hash":"0123456789abcdef","access":"granted","plan_id":"pro","entitlement_source":"guesswork","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid, "unrecognised entitlement source"},
+		{"stale without a cache source", `{"version":1,"subject_hash":"0123456789abcdef","access":"granted","plan_id":"pro","entitlement_source":"polar","entitlement_stale":true,"checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid, "stale without a cache source"},
+		// A COMPLETED lookup with no time on it. The identity-only body that used to sit
+		// in this row — {"version":1,"access":"unverified"} — is now the canonical valid
+		// response, which is the defect this whole contract pass exists to fix.
+		{"checked verdict missing checked_at", `{"version":1,"subject_hash":"0123456789abcdef","access":"subscription_required","entitlement_source":"polar","entitlement_stale":false}`, CodeAccountContractInvalid, "checked_at is missing"},
+		{"naive checked_at", `{"version":1,"subject_hash":"0123456789abcdef","access":"subscription_inactive","entitlement_source":"polar","entitlement_stale":false,"checked_at":"2026-08-25T12:00:00"}`, CodeAccountContractInvalid, "RFC 3339"},
+		// Year one parses, and IS Go's zero time — a completed lookup that would silently
+		// lose its own timestamp on the way to the screen.
+		{"year-one checked_at", `{"version":1,"subject_hash":"0123456789abcdef","access":"subscription_inactive","entitlement_source":"polar","entitlement_stale":false,"checked_at":"0001-01-01T00:00:00Z"}`, CodeAccountContractInvalid, "zero time"},
+		{"absent subject hash", `{"version":1,"access":"unverified"}`, CodeAccountContractInvalid, "subject hash"},
+		{"uppercase subject hash", `{"version":1,"access":"unverified","subject_hash":"0123456789ABCDEF"}`, CodeAccountContractInvalid, "subject hash"},
+		{"short subject hash", `{"version":1,"access":"unverified","subject_hash":"0123456789abcde"}`, CodeAccountContractInvalid, "subject hash"},
+		{"long subject hash", `{"version":1,"access":"unverified","subject_hash":"0123456789abcdef0"}`, CodeAccountContractInvalid, "subject hash"},
+		{"non-hex subject hash", `{"version":1,"access":"unverified","subject_hash":"zzzzzzzzzzzzzzzz"}`, CodeAccountContractInvalid, "subject hash"},
+		{"oversized email", `{"version":1,"subject_hash":"0123456789abcdef","access":"unverified","email":"` + strings.Repeat("a", maxAccountEmailBytes+1) + `"}`, CodeAccountContractInvalid, "email is too long"},
+		{"oversized subscription status", `{"version":1,"subject_hash":"0123456789abcdef","access":"subscription_inactive","subscription_status":"` + strings.Repeat("a", 400) + `",` + checkedEntitlementFields + `"checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid, "subscription status is too long"},
+		// An identity-only response cannot carry a lookup's results. The stale-false row
+		// is the one a plain `bool` could not catch: absent and false would decode the
+		// same, so "we checked, and the answer is current" would pass as "we did not ask".
+		{"unverified carrying a plan", `{"version":1,"subject_hash":"0123456789abcdef","access":"unverified","plan_id":"pro"}`, CodeAccountContractInvalid, "unverified but a plan"},
+		{"unverified carrying a check time", `{"version":1,"subject_hash":"0123456789abcdef","access":"unverified","checked_at":"2026-08-25T12:00:00Z"}`, CodeAccountContractInvalid, "unverified but a check time"},
+		{"unverified carrying stale:false", `{"version":1,"subject_hash":"0123456789abcdef","access":"unverified","entitlement_stale":false}`, CodeAccountContractInvalid, "unverified but entitlement staleness"},
 		// The decode failures carry the transport's own code, not ours. They are in the
 		// same table because the SAFETY property is identical: neither may read as an
-		// account verdict, and neither may hand back a usable status.
-		{"wrong type for version", `{"version":"1","access":"unverified","checked_at":"2026-08-25T12:00:00Z"}`, "decode"},
-		{"wrong type for stale flag", `{"version":1,"access":"unverified","entitlement_stale":"yes","checked_at":"2026-08-25T12:00:00Z"}`, "decode"},
-		{"empty body", ``, "decode"},
-		{"not JSON at all", `<html><body>gateway error</body></html>`, "decode"},
-		{"a JSON array", `[{"version":1,"access":"granted"}]`, "decode"},
+		// account verdict, and neither may hand back a usable status. Their reason is left
+		// empty — the message is the JSON decoder's, not ours to pin.
+		{"wrong type for version", `{"version":"1","subject_hash":"0123456789abcdef","access":"unverified"}`, "decode", ""},
+		{"wrong type for stale flag", `{"version":1,"subject_hash":"0123456789abcdef","access":"unverified","entitlement_stale":"yes"}`, "decode", ""},
+		{"empty body", ``, "decode", ""},
+		{"not JSON at all", `<html><body>gateway error</body></html>`, "decode", ""},
+		{"a JSON array", `[{"version":1,"access":"granted"}]`, "decode", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -209,6 +249,11 @@ func TestAccountRejectsMalformedBodiesAsProtocolErrors(t *testing.T) {
 			}
 			if be.Code != tc.code {
 				t.Errorf("code = %q, want %q (%v)", be.Code, tc.code, err)
+			}
+			// The row failed for ITS OWN reason, not an unrelated rule that happens to
+			// run earlier. See the table comment.
+			if tc.reason != "" && !strings.Contains(be.Message, tc.reason) {
+				t.Errorf("rejected for the wrong reason:\n got %q\nwant it to mention %q", be.Message, tc.reason)
 			}
 			// The safety property. None of these may read as a statement about the
 			// account, or the credential layer will act on a backend bug.
@@ -239,7 +284,7 @@ func TestAccountRejectsMalformedBodiesAsProtocolErrors(t *testing.T) {
 func TestAccountContractFailuresNameTheRuleWithoutQuotingTheValue(t *testing.T) {
 	const secret = "super-secret-bearer-value"
 	c, _, _ := accountServer(t, []string{secret}, func(int) (int, string) {
-		return http.StatusOK, `{"version":1,"access":"unverified","email":"` + strings.Repeat(secret, 40) + `","checked_at":"2026-08-25T12:00:00Z"}`
+		return http.StatusOK, `{"version":1,"subject_hash":"0123456789abcdef","access":"unverified","email":"` + strings.Repeat(secret, 80) + `"}`
 	})
 	_, err := c.Account(context.Background())
 	var be *Error
@@ -263,14 +308,17 @@ func TestAccountNeverReturnsAnEchoedCredential(t *testing.T) {
 	fields := []string{"email", "subject_hash", "access", "plan_id", "subscription_status", "entitlement_source", "checked_at"}
 	for _, field := range fields {
 		t.Run(field, func(t *testing.T) {
+			// Every body is otherwise VALID, so the echoed field is the only thing on
+			// trial. A body that also violated some unrelated rule would be refused for
+			// that instead, and the row would prove nothing about the field it names.
 			body := map[string]string{
-				"email":               `{"version":1,"access":"unverified","email":%q,"checked_at":"2026-08-25T12:00:00Z"}`,
-				"subject_hash":        `{"version":1,"access":"unverified","subject_hash":%q,"checked_at":"2026-08-25T12:00:00Z"}`,
-				"access":              `{"version":1,"access":%q,"checked_at":"2026-08-25T12:00:00Z"}`,
-				"plan_id":             `{"version":1,"access":"subscription_inactive","plan_id":%q,"checked_at":"2026-08-25T12:00:00Z"}`,
-				"subscription_status": `{"version":1,"access":"unverified","subscription_status":%q,"checked_at":"2026-08-25T12:00:00Z"}`,
-				"entitlement_source":  `{"version":1,"access":"unverified","entitlement_source":%q,"checked_at":"2026-08-25T12:00:00Z"}`,
-				"checked_at":          `{"version":1,"access":"unverified","checked_at":%q}`,
+				"email":               `{"version":1,"subject_hash":"0123456789abcdef","access":"unverified","email":%q}`,
+				"subject_hash":        `{"version":1,"access":"unverified","subject_hash":%q}`,
+				"access":              `{"version":1,"subject_hash":"0123456789abcdef","access":%q}`,
+				"plan_id":             `{"version":1,"subject_hash":"0123456789abcdef","access":"subscription_inactive","plan_id":%q,` + checkedEntitlementFields + `"checked_at":"2026-08-25T12:00:00Z"}`,
+				"subscription_status": `{"version":1,"subject_hash":"0123456789abcdef","access":"subscription_inactive","subscription_status":%q,` + checkedEntitlementFields + `"checked_at":"2026-08-25T12:00:00Z"}`,
+				"entitlement_source":  `{"version":1,"subject_hash":"0123456789abcdef","access":"subscription_inactive","entitlement_source":%q,"entitlement_stale":false,"checked_at":"2026-08-25T12:00:00Z"}`,
+				"checked_at":          `{"version":1,"subject_hash":"0123456789abcdef","access":"subscription_inactive",` + checkedEntitlementFields + `"checked_at":%q}`,
 			}[field]
 
 			c, _, _ := accountServer(t, []string{secret}, func(int) (int, string) {
@@ -294,8 +342,12 @@ func TestAccountNeverReturnsAnEchoedCredential(t *testing.T) {
 func TestAccountScrubsTheFreeTextDisplayFields(t *testing.T) {
 	const secret = "sk-live-abcdef0123456789"
 	c, _, _ := accountServer(t, []string{secret}, func(int) (int, string) {
-		return http.StatusOK, `{"version":1,"access":"unverified","email":"` + secret +
-			`","subscription_status":"` + secret + `","checked_at":"2026-08-25T12:00:00Z"}`
+		// A CHECKED verdict, because those are the only responses that carry a
+		// subscription_status at all: an identity-only body reports no entitlement
+		// fields, so it could not exercise the second half of the scrub.
+		return http.StatusOK, `{"version":1,"subject_hash":"0123456789abcdef",` +
+			`"access":"subscription_inactive","email":"` + secret +
+			`","subscription_status":"` + secret + `",` + checkedEntitlementFields + `"checked_at":"2026-08-25T12:00:00Z"}`
 	})
 	got, err := c.Account(context.Background())
 	if err != nil {
@@ -381,7 +433,7 @@ func TestAccountSurfacesBackendAccountErrors(t *testing.T) {
 // that reports the account as cleared to spend.
 func TestAccountDoesNotMarkTheSessionActiveOnItsOwn200(t *testing.T) {
 	c, _, obs := accountServer(t, []string{"token-a"}, func(int) (int, string) {
-		return http.StatusOK, `{"version":1,"access":"subscription_required","checked_at":"2026-08-25T12:00:00Z"}`
+		return http.StatusOK, `{"version":1,"subject_hash":"0123456789abcdef","access":"subscription_required",` + checkedEntitlementFields + `"checked_at":"2026-08-25T12:00:00Z"}`
 	})
 	if _, err := c.Account(context.Background()); err != nil {
 		t.Fatalf("Account: %v", err)

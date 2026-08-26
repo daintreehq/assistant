@@ -77,11 +77,33 @@ const CodeAccountContractInvalid = "account_contract_invalid"
 // compromised or misconfigured backend from putting an arbitrary blob into a status
 // line, a support bundle and a JSON event stream.
 const (
-	maxAccountEmailBytes = 320 // RFC 5321 maximum path length
+	// The server bounds `email` at 320 CHARACTERS (Pydantic max_length, which counts
+	// code points); this counts BYTES. They are the same number only for ASCII, so the
+	// byte ceiling is set at the widest a 320-code-point string can be — four bytes per
+	// code point — rather than at 320. At 320 bytes a perfectly server-valid address of
+	// 320 accented characters would be refused here, and refused as a CONTRACT failure,
+	// which is the reading that turns somebody's own email address into "we could not
+	// verify your account".
+	//
+	// The bound is still worth having: it stops a compromised or misconfigured backend
+	// putting an arbitrary blob into a status line, a support bundle and a JSON event
+	// stream. It is an abuse ceiling measured in the unit this language counts in, not
+	// a restatement of the server's rule.
+	maxAccountEmailBytes = 320 * 4
 	// The billing provider's own word for the subscription's condition. Deliberately
 	// LOOSE: the contract does not enumerate these values, so a bound tight enough to
 	// be a format check would turn a wordier provider status into a protocol failure —
 	// and this field is prose nothing branches on. It is an abuse cap, not a rule.
+	//
+	// It is deliberately WIDER than the backend's own cap on the same field, which is
+	// 64 and — unlike its email rule — is measured in BYTES there too
+	// (len(status.encode("utf-8")) in the entitlement client), so the two units agree
+	// and no server-valid value can exceed 64 here. The asymmetry is the safe direction
+	// and the only safe direction: a reader that accepts more than the writer can emit
+	// never refuses a legitimate response, whereas one that matched exactly would turn
+	// any future widening on the server into "could not verify your plan" for everybody
+	// on an older build. Tightening this to 64 buys nothing — a value between 65 and 256
+	// cannot arrive — and costs that.
 	maxAccountSubscriptionStatusBytes = 256
 	maxAccountPlanBytes               = 64
 )
@@ -124,8 +146,17 @@ type AccountStatus struct {
 	// EntitlementStale reports that the answer came from an aged cache rather than a
 	// live lookup. It is shown to the user because "we believe you are subscribed, as
 	// of some minutes ago" is a materially different claim from a fresh one.
-	EntitlementStale bool `json:"entitlement_stale"`
-	// CheckedAt is when the entitlement answer was established, as sent.
+	//
+	// A POINTER, because absent and false are different statements and the contract
+	// distinguishes them: the backend omits this field entirely when no entitlement
+	// lookup happened, and sends it as a real boolean when one did. A bare `false`
+	// would decode identically from both, which would make the `unverified` rule below
+	// unenforceable — "we checked, and the answer is fresh" is precisely the claim an
+	// identity-only response must not be able to make by accident. Read it through
+	// Stale(); nothing outside this file should dereference it.
+	EntitlementStale *bool `json:"entitlement_stale"`
+	// CheckedAt is when the entitlement answer was established, as sent. Absent for
+	// `unverified`, where nothing was checked — see validate.
 	CheckedAt string `json:"checked_at"`
 
 	// CheckedAtTime is CheckedAt parsed, filled in by validate. It has no JSON tag
@@ -137,6 +168,15 @@ type AccountStatus struct {
 
 // Granted reports the one verdict that permits paid work.
 func (a AccountStatus) Granted() bool { return a.Access == AccessGranted }
+
+// Stale reports whether the entitlement answer came from an aged cache.
+//
+// An ABSENT field reads as false, which is the only sound reading: a response that did
+// not mention staleness has not claimed any, and validate has already established that
+// absence is legitimate only where no lookup happened. Every caller outside this file
+// goes through here rather than the pointer, so "not stale" and "never asked" cannot
+// end up rendered differently by two readers that both meant the same thing.
+func (a AccountStatus) Stale() bool { return a.EntitlementStale != nil && *a.EntitlementStale }
 
 // accountContractError builds the local protocol error for a body that does not satisfy
 // the contract.
@@ -158,6 +198,13 @@ func accountContractError(reason string) *Error {
 // The distinction decides what happens to the user's login: a contract failure leaves
 // the credential in place and the status merely unverified, whereas letting a malformed
 // body fall through as "no plan" would send a paying customer to a checkout page.
+//
+// The shape is a fork, because version 1 describes TWO documents rather than one with
+// optional parts. An `unverified` response reports that identity is established and
+// entitlement was never looked up; the other three report the result of a lookup that
+// did happen. Fields that are required in one are forbidden in the other, and folding
+// them into a single pass of "optional unless" rules is how this file previously came
+// to demand `checked_at` from a response that had nothing to timestamp.
 func (a *AccountStatus) validate() error {
 	if a.Version != AccountStatusVersion {
 		return accountContractError("unsupported contract version")
@@ -180,7 +227,15 @@ func (a *AccountStatus) validate() error {
 		return accountContractError("plan id is too long")
 	}
 
-	if a.SubjectHash != "" && !subjectHashPattern.MatchString(a.SubjectHash) {
+	// REQUIRED, on every verdict, not merely well-formed when it happens to be there.
+	//
+	// This is a PROTECTED endpoint: reaching it at all means a bearer was accepted, so
+	// there is always a subject to hash and no legitimate response can omit it. Treating
+	// an empty one as acceptable made the field's absence indistinguishable from an
+	// anonymous principal the route cannot produce — and the support id is the one thing
+	// on this contract whose entire job is to correlate a user's report with a server
+	// log, which it cannot do when it is quietly blank.
+	if !subjectHashPattern.MatchString(a.SubjectHash) {
 		return accountContractError("subject hash is not 16 lowercase hex characters")
 	}
 
@@ -189,34 +244,89 @@ func (a *AccountStatus) validate() error {
 	default:
 		return accountContractError("unrecognised plan id")
 	}
+	switch a.EntitlementSource {
+	case "", EntitlementSourcePolar, EntitlementSourceCache:
+	default:
+		return accountContractError("unrecognised entitlement source")
+	}
+
+	if a.Access == AccessUnverified {
+		return a.validateIdentityOnly()
+	}
+	return a.validateChecked()
+}
+
+// validateIdentityOnly enforces the rule that gives `unverified` its meaning: a verdict
+// that reports NO LOOKUP cannot carry a lookup's results.
+//
+// Every field it forbids is one a reader would otherwise render as a finding. A
+// `plan_id` beside `unverified` is a plan nobody confirmed; a `checked_at` is a time at
+// which nothing was checked; an `entitlement_stale: false` is the sentence "we asked,
+// and the answer is current" written by a response that asked nothing. The backend
+// enforces the same rule on the way out, and it is repeated here because this side is
+// what decides whether somebody is told to go and buy a subscription.
+//
+// CheckedAtTime is left at its zero value on this path, and callers already read that
+// as "no entitlement time to show" (auth/status.go guards on IsZero) rather than as a
+// timestamp at the epoch.
+func (a *AccountStatus) validateIdentityOnly() error {
+	switch {
+	case a.PlanID != "":
+		return accountContractError("access is unverified but a plan was reported")
+	case a.SubscriptionStatus != "":
+		return accountContractError("access is unverified but a subscription status was reported")
+	case a.EntitlementSource != "":
+		return accountContractError("access is unverified but an entitlement source was reported")
+	case a.EntitlementStale != nil:
+		return accountContractError("access is unverified but entitlement staleness was reported")
+	case strings.TrimSpace(a.CheckedAt) != "":
+		return accountContractError("access is unverified but a check time was reported")
+	}
+	return nil
+}
+
+// validateChecked enforces the rules for the three verdicts an entitlement lookup
+// produced, and fills in CheckedAtTime.
+func (a *AccountStatus) validateChecked() error {
 	// A grant with no plan behind it is the contradiction that matters most: it is the
 	// combination that would let a backend bug hand out paid access, and it is cheap to
 	// refuse here.
 	if a.Access == AccessGranted && a.PlanID == "" {
 		return accountContractError("access is granted with no plan")
 	}
-
-	switch a.EntitlementSource {
-	case "", EntitlementSourcePolar, EntitlementSourceCache:
-	default:
-		return accountContractError("unrecognised entitlement source")
+	// SOURCE AND FRESHNESS ARE REQUIRED ON ALL THREE, not only on `granted`.
+	//
+	// The backend's own entitlement value object types both as non-optional and refuses
+	// a website answer that omits either, so a checked verdict that arrives without them
+	// did not come from a healthy deployment. Accepting it anyway is not leniency: with
+	// `entitlement_stale` absent, Stale() answers false, and the response is rendered as
+	// "we checked, and this is current" — the exact claim the pointer above exists to
+	// stop a body making by accident. A missing source is the same shape of problem one
+	// step down: paid access, or a refusal of it, that cannot say which authority
+	// decided.
+	//
+	// This is stricter than an earlier reading of the contract, which let the two
+	// subscription verdicts omit their source on the theory that a deployment might know
+	// the answer without naming its authority. No deployment does — the field is
+	// mandatory on the way out — and the cost of the lenient reading is a fabricated
+	// freshness claim, which is worse than the "could not verify" it was avoiding.
+	if a.EntitlementSource == "" {
+		return accountContractError("a checked verdict named no entitlement source")
 	}
-	// A GRANT with no source is the contradiction worth refusing: paid access was
-	// authorised and the response cannot say which authority said so. The other three
-	// verdicts may legitimately omit it — `unverified` because nothing was asked, and
-	// the two subscription verdicts because a deployment can know the answer without
-	// naming its authority, and rejecting those would replace a correct "you need a
-	// plan" with "could not verify" over a field nothing branches on.
-	if a.Access == AccessGranted && a.EntitlementSource == "" {
-		return accountContractError("access is granted with no entitlement source")
+	if a.EntitlementStale == nil {
+		return accountContractError("a checked verdict did not say whether its answer was stale")
 	}
 	// Stale describes an aged CACHE. A live answer that calls itself stale is either a
 	// bug or a mislabelled cache, and neither should be shown to a user as a fact about
-	// their billing.
-	if a.EntitlementStale && a.EntitlementSource != EntitlementSourceCache {
+	// their billing. The backend enforces the same pairing on the way out.
+	if a.Stale() && a.EntitlementSource != EntitlementSourceCache {
 		return accountContractError("entitlement marked stale without a cache source")
 	}
 
+	// REQUIRED here, and only here. A lookup happened, so it happened at a time, and
+	// that time is what separates "you are subscribed" from "you were subscribed when
+	// we last managed to ask" — the single fact a user needs to judge how much to trust
+	// the line above it.
 	if strings.TrimSpace(a.CheckedAt) == "" {
 		return accountContractError("checked_at is missing")
 	}
@@ -226,6 +336,16 @@ func (a *AccountStatus) validate() error {
 		// point: an instant with no offset is an instant this process would have to
 		// guess at, and a guessed "last verified" time is worse than none.
 		return accountContractError("checked_at is not an RFC 3339 timestamp with an offset")
+	}
+	// Year one parses cleanly and IS Go's zero time, which every consumer reads as "no
+	// entitlement check happened" (auth/status.go guards on IsZero before rendering a
+	// checked-at row). Left through, it would be a completed lookup that silently loses
+	// its timestamp — the response says one thing and the screen shows another. The Unix
+	// epoch is deliberately NOT rejected: it is an absurd clock reading, but it is a
+	// distinguishable one, and rendering "plan checked 1 Jan 1970" tells the truth about
+	// a broken backend where dropping the row would hide it.
+	if t.IsZero() {
+		return accountContractError("checked_at is the zero time, which cannot be told apart from no check at all")
 	}
 	a.CheckedAtTime = t
 	return nil

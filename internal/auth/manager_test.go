@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/backend/accountfixture"
 )
 
 // --- test rig -----------------------------------------------------------------------
@@ -612,7 +613,7 @@ func TestStatusPerformsNoIO(t *testing.T) {
 }
 
 func TestSubjectHashIsStableAndOneWay(t *testing.T) {
-	const sub = "8f14e45f-ea8b-4c1d-9b2a-0000feedface"
+	const sub = accountfixture.Subject
 	h := SubjectHash(sub)
 	if h == "" || len(h) != 16 {
 		t.Fatalf("hash = %q, want 16 hex characters", h)
@@ -625,6 +626,38 @@ func TestSubjectHashIsStableAndOneWay(t *testing.T) {
 	}
 	if SubjectHash("") != "" {
 		t.Fatal("an empty subject produced a hash")
+	}
+}
+
+// The CROSS-PROJECT test vector, as a LITERAL.
+//
+// Three codebases derive this id independently — this CLI, the assistant backend, and the
+// website — and they agree only if all three run the same algorithm over the same domain
+// separator: sha256("daintree-assistant-subject:" + subject), first 8 bytes, lowercase
+// hex. Nothing enforces that at runtime, and nothing would notice it breaking: the hash is
+// never compared across services in production, it is pasted into a support ticket by a
+// human and looked up in someone else's logs. A silent divergence surfaces months later as
+// "we cannot find any record of this user".
+//
+// So the expectation is written out rather than computed. A test that called SubjectHash
+// to produce its own expected value would be a second copy of the implementation, and the
+// one failure mode that matters here is exactly the one where both copies drift together.
+func TestTheSubjectHashMatchesTheCanonicalVector(t *testing.T) {
+	// The literal. Do not replace this with a call to SubjectHash — see above.
+	const want = "b4c864ea44cbb4a1"
+	if got := SubjectHash(accountfixture.Subject); got != want {
+		t.Fatalf("SubjectHash(%q) = %q, want %q\n"+
+			"The support correlation id no longer matches the value the backend and the "+
+			"website pin. Either the algorithm changed here, or it changed there; whichever "+
+			"it is, support correlation across the three services is broken until they agree.",
+			accountfixture.Subject, got, want)
+	}
+	// The shared fixtures carry the same literal, so a body decoded in any package
+	// correlates with a hash derived in this one.
+	if accountfixture.SubjectHash != want {
+		t.Fatalf("the shared fixtures carry subject_hash %q, want %q — a decoded response "+
+			"and a locally derived hash would no longer describe the same person",
+			accountfixture.SubjectHash, want)
 	}
 }
 

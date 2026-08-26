@@ -133,7 +133,7 @@ func (m *Manager) ApplyAccountStatus(gen uint64, st backend.AccountStatus) {
 		subjectHash:       st.SubjectHash,
 		planID:            st.PlanID,
 		entitlementSource: st.EntitlementSource,
-		entitlementStale:  st.EntitlementStale,
+		entitlementStale:  st.Stale(),
 		access:            st.Access,
 		checkedAt:         st.CheckedAtTime,
 	}

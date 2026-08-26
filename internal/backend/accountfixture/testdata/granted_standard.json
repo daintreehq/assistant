@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "email": "operator@example.com",
+  "subject_hash": "b4c864ea44cbb4a1",
+  "access": "granted",
+  "plan_id": "standard",
+  "subscription_status": "active",
+  "entitlement_source": "polar",
+  "entitlement_stale": false,
+  "checked_at": "2026-08-25T09:14:00Z"
+}

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "subject_hash": "b4c864ea44cbb4a1",
+  "access": "subscription_inactive",
+  "plan_id": "standard",
+  "subscription_status": "past_due",
+  "entitlement_source": "polar",
+  "entitlement_stale": false,
+  "checked_at": "2026-08-25T09:14:00Z"
+}

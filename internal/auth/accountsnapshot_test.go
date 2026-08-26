@@ -25,6 +25,13 @@ const activeAccountBody = `{"version":1,"email":"person@example.com","subject_ha
 // statusFor builds an AccountStatus the way the client would hand one over.
 func statusFor(t *testing.T, access, plan, source string) backend.AccountStatus {
 	t.Helper()
+	// CONTRACT-VALID, not merely field-complete. ApplyAccountStatus takes an
+	// already-decoded value and does not re-validate, so a helper is free to build a
+	// response no backend could send — and then every test resting on it is exercising a
+	// shape that will never arrive. The freshness pointer is the one that matters: a
+	// checked verdict must SAY whether its answer is stale, and a nil here would model
+	// the body the decoder now refuses.
+	fresh := false
 	st := backend.AccountStatus{
 		Version:            backend.AccountStatusVersion,
 		Email:              "person@example.com",
@@ -33,6 +40,7 @@ func statusFor(t *testing.T, access, plan, source string) backend.AccountStatus 
 		PlanID:             plan,
 		SubscriptionStatus: "active",
 		EntitlementSource:  source,
+		EntitlementStale:   &fresh,
 		CheckedAt:          "2026-08-25T12:00:00Z",
 	}
 	parsed, err := time.Parse(time.RFC3339, st.CheckedAt)
@@ -40,6 +48,18 @@ func statusFor(t *testing.T, access, plan, source string) backend.AccountStatus 
 		t.Fatal(err)
 	}
 	st.CheckedAtTime = parsed
+	return st
+}
+
+// markStale flags a decoded status as served from an aged cache.
+//
+// A helper rather than an inline address-of, because EntitlementStale is a POINTER on the
+// wire type: the contract distinguishes "we checked and it is fresh" from "we never
+// asked", and only a pointer can carry that difference. Saying it once here keeps every
+// call site reading as the intent — stale — rather than as pointer mechanics.
+func markStale(st backend.AccountStatus) backend.AccountStatus {
+	stale := true
+	st.EntitlementStale = &stale
 	return st
 }
 
@@ -119,7 +139,7 @@ func TestAnUnrecognisedAccessVerdictIsUnverifiedNotRefused(t *testing.T) {
 func TestAStaleEntitlementIsReportedAsStale(t *testing.T) {
 	m := signedInManager(t)
 	st := statusFor(t, backend.AccessGranted, backend.PlanPro, backend.EntitlementSourceCache)
-	st.EntitlementStale = true
+	st = markStale(st)
 	m.ApplyAccountStatus(m.Generation(), st)
 
 	got := m.Status()
@@ -306,7 +326,7 @@ func TestASnapshotIsRetainedThroughADependencyOutage(t *testing.T) {
 func TestForgetAccountStatusKeepsTheCredential(t *testing.T) {
 	m := signedInManager(t)
 	stale := statusFor(t, backend.AccessGranted, backend.PlanPro, backend.EntitlementSourceCache)
-	stale.EntitlementStale = true
+	stale = markStale(stale)
 	m.ApplyAccountStatus(m.Generation(), stale)
 	m.ForgetAccountStatus()
 
@@ -329,7 +349,7 @@ func TestAccountFieldsAreDroppedWhenTheDeploymentHasNoAccounts(t *testing.T) {
 	// `entitlementStale: false` would let a WithAvailability that forgot that one field
 	// pass unnoticed.
 	stale := statusFor(t, backend.AccessGranted, backend.PlanPro, backend.EntitlementSourceCache)
-	stale.EntitlementStale = true
+	stale = markStale(stale)
 	m.ApplyAccountStatus(m.Generation(), stale)
 	if before := m.Status(); before.Email == "" || before.Plan == "" || before.SubjectHash == "" ||
 		before.EntitlementSource == "" || !before.EntitlementStale || before.EntitlementCheckedAt == nil {
@@ -422,8 +442,10 @@ func TestAPlanlessAccountReadNeverReportsAnActiveSession(t *testing.T) {
 	d := newDeployment(t)
 	m, c, _ := signedIn(t, d, NewMemoryStore())
 	d.scriptAccount(accountBody(
-		`{"version":1,"email":"person@example.com","access":"subscription_required",` +
-			`"subscription_status":"none","checked_at":"2026-08-25T12:00:00Z"}`))
+		`{"version":1,"email":"person@example.com","subject_hash":"0123456789abcdef",` +
+			`"access":"subscription_required","subscription_status":"none",` +
+			`"entitlement_source":"polar","entitlement_stale":false,` +
+			`"checked_at":"2026-08-25T12:00:00Z"}`))
 
 	gen := m.Generation()
 	st, err := c.Account(context.Background())
@@ -564,8 +586,10 @@ func TestAnUnrelatedSuccessCannotEraseAPlanVerdict(t *testing.T) {
 	d := newDeployment(t)
 	m, c, _ := signedIn(t, d, NewMemoryStore())
 	d.scriptAccount(accountBody(
-		`{"version":1,"email":"person@example.com","access":"subscription_required",` +
-			`"subscription_status":"none","checked_at":"2026-08-25T12:00:00Z"}`))
+		`{"version":1,"email":"person@example.com","subject_hash":"0123456789abcdef",` +
+			`"access":"subscription_required","subscription_status":"none",` +
+			`"entitlement_source":"polar","entitlement_stale":false,` +
+			`"checked_at":"2026-08-25T12:00:00Z"}`))
 
 	gen := m.Generation()
 	st, err := c.Account(context.Background())

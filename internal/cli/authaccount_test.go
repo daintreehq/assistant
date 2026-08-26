@@ -84,7 +84,7 @@ func newAccountDeployment(t *testing.T, configured bool) *accountDeployment {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"version":1,"email":"person@example.com","subject_hash":"0123456789abcdef",` +
 			`"access":"granted","plan_id":"standard","subscription_status":"active",` +
-			`"entitlement_source":"polar","checked_at":"2026-08-25T12:00:00Z"}`))
+			`"entitlement_source":"polar","entitlement_stale":false,"checked_at":"2026-08-25T12:00:00Z"}`))
 	})
 
 	d.srv = httptest.NewServer(mux)
@@ -197,23 +197,27 @@ func TestRefreshRendersEachPlanOutcomeWithItsOwnRemedy(t *testing.T) {
 	}{
 		{
 			name: "no plan sends the user to choose one",
-			body: `{"version":1,"email":"a@b.test","access":"subscription_required",` +
-				`"subscription_status":"none","checked_at":"2026-08-25T12:00:00Z"}`,
+			body: `{"version":1,"email":"a@b.test","subject_hash":"0123456789abcdef",` +
+				`"access":"subscription_required","subscription_status":"none",` +
+				`"entitlement_source":"polar","entitlement_stale":false,` +
+				`"checked_at":"2026-08-25T12:00:00Z"}`,
 			wantHuman: []string{"no plan yet", "Choose a plan", "subscribe"},
 			// Not a sign-in problem, and not a billing-portal problem.
 			bannedHuman: []string{"auth login", "Check billing"},
 		},
 		{
 			name: "a lapsed plan sends the user to billing, never a second checkout",
-			body: `{"version":1,"email":"a@b.test","access":"subscription_inactive","plan_id":"pro",` +
-				`"subscription_status":"past_due","entitlement_source":"polar","checked_at":"2026-08-25T12:00:00Z"}`,
+			body: `{"version":1,"email":"a@b.test","subject_hash":"0123456789abcdef",` +
+				`"access":"subscription_inactive","plan_id":"pro",` +
+				`"subscription_status":"past_due","entitlement_source":"polar",` +
+				`"entitlement_stale":false,"checked_at":"2026-08-25T12:00:00Z"}`,
 			wantHuman: []string{"plan inactive", "billing", "/account"},
 			// The single most expensive wrong line available here.
 			bannedHuman: []string{"Choose a plan", "/subscribe", "auth login"},
 		},
 		{
 			name:        "an unverified rollout says so rather than inventing a verdict",
-			body:        `{"version":1,"email":"a@b.test","access":"unverified","checked_at":"2026-08-25T12:00:00Z"}`,
+			body:        `{"version":1,"email":"a@b.test","subject_hash":"0123456789abcdef","access":"unverified"}`,
 			wantHuman:   []string{"not verified this session", "--refresh"},
 			bannedHuman: []string{"auth login", "Choose a plan"},
 		},
@@ -529,19 +533,19 @@ func TestLoginReportsEachPlanOutcomeWithoutFailing(t *testing.T) {
 	}{
 		{
 			"no plan offers the subscribe link",
-			`{"version":1,"access":"subscription_required","checked_at":"2026-08-25T12:00:00Z"}`,
+			`{"version":1,"subject_hash":"0123456789abcdef","access":"subscription_required","entitlement_source":"polar","entitlement_stale":false,"checked_at":"2026-08-25T12:00:00Z"}`,
 			[]string{"does not have a plan", "/subscribe"},
 			[]string{"/account", "failed"},
 		},
 		{
 			"a lapsed plan offers billing, never a checkout",
-			`{"version":1,"access":"subscription_inactive","plan_id":"pro","entitlement_source":"polar","checked_at":"2026-08-25T12:00:00Z"}`,
+			`{"version":1,"subject_hash":"0123456789abcdef","access":"subscription_inactive","plan_id":"pro","entitlement_source":"polar","entitlement_stale":false,"checked_at":"2026-08-25T12:00:00Z"}`,
 			[]string{"not currently active", "Manage billing", "/account"},
 			[]string{"/subscribe", "failed"},
 		},
 		{
 			"an unverified rollout says the plan was not reported",
-			`{"version":1,"access":"unverified","checked_at":"2026-08-25T12:00:00Z"}`,
+			`{"version":1,"subject_hash":"0123456789abcdef","access":"unverified"}`,
 			[]string{"did not report a plan"},
 			[]string{"failed", "/subscribe"},
 		},
