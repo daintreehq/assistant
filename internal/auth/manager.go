@@ -630,6 +630,21 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 	if openBrowser {
 		if err := m.opener.Open(ctx, authURL); err != nil {
 			restore()
+			// The REMEDY is attached here, not only inside SystemOpener, because the
+			// remedy is a property of this operation rather than of any one launcher: a
+			// browser that will not open leaves exactly one way to sign in on this
+			// machine, whichever Opener failed to open it. Attaching it only in the
+			// system launcher meant an alternative one — a test double, an embedding
+			// host's own — produced a failure with no way out of it, and the surfaces
+			// that render HintOf simply showed nothing.
+			//
+			// An error that already carries a hint keeps its own: the platform cases in
+			// SystemOpener are more specific than this, and overwriting them would trade
+			// a precise remedy for a generic one.
+			if HintOf(err) == "" {
+				return LoginResult{}, wrapError(CodeBrowserFailed, "could not open a browser", err).
+					withHint(noOpenHint)
+			}
 			return LoginResult{}, err
 		}
 		// The SAFE account origin, never the authorization URL.

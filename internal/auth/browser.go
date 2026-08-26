@@ -33,6 +33,21 @@ func (f openerFunc) Open(ctx context.Context, url string) error { return f(ctx, 
 // would hang a login whose listener is already up and perfectly able to succeed.
 const browserLaunchTimeout = 15 * time.Second
 
+// noOpenHint is the remedy for every browser-launch failure: the WHOLE command, in a
+// terminal.
+//
+// It used to read "Re-run with --no-open", which is unambiguous only where the reader is
+// already looking at a shell prompt they typed a command into. Sign-in is now also a
+// slash command inside an embedding host, and there "re-run with a flag" names neither a
+// command nor a place to type it — the host's composer does not take flags, and the
+// binary the flag belongs to is not the thing the reader is looking at. Spelling the
+// whole invocation costs a few characters and is correct on both surfaces.
+//
+// The authorization URL is deliberately absent. --no-open prints it on the terminal path,
+// to a human-controlled stream; a hint travels into host events, logs and support
+// bundles, and a sign-in URL carries the state and challenge that make it worth stealing.
+const noOpenHint = "Run `daintree-assistant auth login --no-open` in a terminal."
+
 // SystemOpener returns the platform browser launcher.
 //
 // Deliberately a small exec rather than a dependency. The whole surface is one command
@@ -44,7 +59,7 @@ func SystemOpener() Opener {
 		if name == "" {
 			return newError(CodeInteractiveRequired,
 				"no way to open a browser on this platform").
-				withHint("Re-run with --no-open and complete sign-in in a browser on this machine.")
+				withHint(noOpenHint)
 		}
 		ctx, cancel := context.WithTimeout(ctx, browserLaunchTimeout)
 		defer cancel()
@@ -54,7 +69,7 @@ func SystemOpener() Opener {
 		cmd.Stdout, cmd.Stderr, cmd.Stdin = nil, nil, nil
 		if err := cmd.Run(); err != nil {
 			return wrapError(CodeBrowserFailed, "could not open a browser", err).
-				withHint("Re-run with --no-open to print the sign-in URL instead.")
+				withHint(noOpenHint)
 		}
 		return nil
 	})

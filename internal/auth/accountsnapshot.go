@@ -95,7 +95,14 @@ func StateForAccess(access string) State {
 //
 // It only ever applies to a session that still exists (State.SignedIn), mirroring
 // MarkActive — a verdict can confirm or qualify a login, never resurrect one.
-func (m *Manager) ApplyAccountStatus(gen uint64, st backend.AccountStatus) {
+//
+// It REPORTS whether it committed, and callers must believe that report rather than the
+// absence of an error. Every reason below to decline is a legitimate one — the identity
+// moved, the session ended, the body was not a verdict — and none of them is a failure of
+// the request. A caller that read "no error" as "this landed" would tell somebody their
+// plan had been refreshed by a call that deliberately changed nothing, which is the exact
+// misreading the generation guard exists to make impossible.
+func (m *Manager) ApplyAccountStatus(gen uint64, st backend.AccountStatus) (applied bool) {
 	// An answer that is not one of the four recognised verdicts is not an answer, and
 	// this returns WITHOUT MUTATING rather than mapping it to something harmless.
 	//
@@ -110,7 +117,7 @@ func (m *Manager) ApplyAccountStatus(gen uint64, st backend.AccountStatus) {
 	case backend.AccessGranted, backend.AccessSubscriptionRequired,
 		backend.AccessSubscriptionInactive, backend.AccessUnverified:
 	default:
-		return
+		return false
 	}
 	// Read the shared marker BEFORE taking m.mu: it is a file read, and the manager's
 	// mutex is deliberately never held across one.
@@ -119,10 +126,10 @@ func (m *Manager) ApplyAccountStatus(gen uint64, st backend.AccountStatus) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.generation != gen {
-		return
+		return false
 	}
 	if !m.state.SignedIn() {
-		return
+		return false
 	}
 	now := m.now()
 	m.account = accountSnapshot{
@@ -147,6 +154,7 @@ func (m *Manager) ApplyAccountStatus(gen uint64, st backend.AccountStatus) {
 	// just been confirmed still carries the error code from the outage that preceded it.
 	m.lastErr = nil
 	m.lastVerifiedAt = &now
+	return true
 }
 
 // accountSnapshotLocked returns the snapshot if it still describes the current identity.

@@ -276,13 +276,12 @@ func runAuthLogin(ctx context.Context, w authWriter, mgr *auth.Manager, cfg conf
 // this runs, so nothing here may undo it: a billing outage means the plan is unknown,
 // not that the sign-in was bad.
 func reportPlanAfterLogin(ctx context.Context, w authWriter, mgr *auth.Manager, cfg config.AppConfig, man *auth.Manifest) {
-	gen := mgr.Generation()
-	// The UNOBSERVING client. A courtesy entitlement check must not be able to revoke
-	// the session the token exchange just created — see NewUnobservingAccountBackendClient.
-	acct, err := app.NewUnobservingAccountBackendClient(cfg, mgr).Account(ctx)
-	if err == nil {
-		mgr.ApplyAccountStatus(gen, acct)
-	}
+	// THE shared account read, in courtesy mode — the same operation `/login` and
+	// `/account` perform, so the four surfaces cannot describe one credential
+	// differently. Courtesy selects the UNOBSERVING client: this check must not be able
+	// to revoke the session the token exchange just created. See app.RefreshAccountWith.
+	res := app.RefreshAccountWith(ctx, cfg, mgr, app.AccountRefreshOptions{Courtesy: true})
+	err := res.Err
 
 	st := mgr.Status().WithManifest(man)
 	// The same versioned event type `auth status` emits, carrying the same payload —
@@ -418,32 +417,48 @@ func refreshAccount(ctx context.Context, w authWriter, mgr *auth.Manager, cfg co
 	// A KNOWN "no accounts here" ends it. There is no credential to renew and no account
 	// endpoint to ask, and touching the credential store would report a keychain problem
 	// on a deployment where the answer is simply "nothing to do".
+	//
+	// The shared operation checks this too, and cheaply — availability is cached. It is
+	// repeated here because THIS caller has already paid for the answer above and uses it
+	// for its own branching, and because a `return` here is the difference between a
+	// silent skip and one that would have to be told apart from a success downstream.
 	if avail.Known && !avail.Configured {
 		return
 	}
 
-	// The token first: the account read is protected, and a credential that cannot be
-	// produced is a different failure from one the backend rejected. Cancellation is
-	// silent — the user stopped it.
-	if _, err := mgr.AccessToken(ctx); err != nil {
-		if !auth.IsCancelled(err) {
-			w.human("Could not verify the session: %s", authMessage(err))
-		}
+	// THE shared account read, in authoritative mode — the same operation `/account`
+	// performs. Observing, because the user asked: a revocation clears the credential, an
+	// expired token refreshes, an outage is recorded. See app.RefreshAccountWith.
+	//
+	// It deliberately does NOT call ApplyBackendVerdict on the error. The manager IS the
+	// client's AccountObserver, so the client has already folded the verdict into local
+	// state before the error reached here; applying it a second time would run the
+	// destructive branch twice against a generation the first one moved.
+	// The availability answer is HANDED OVER rather than looked up again. It is cached
+	// when it is known — and deliberately not cached when it is UNKNOWN, which is the
+	// outage this command is most often run during. A second discovery attempt there can
+	// add ten seconds to a status read whose whole value is answering quickly while
+	// things are broken.
+	res := app.RefreshAccountWith(ctx, cfg, mgr, app.AccountRefreshOptions{Availability: avail})
+	if res.Err == nil || auth.IsCancelled(res.Err) {
+		// Cancellation is silent — the user stopped it.
 		return
 	}
-
-	// Sample the generation BEFORE the request. A status read can outlive a logout in
-	// another process, and the answer must be recognisable as describing a session that
-	// has since ended.
-	gen := mgr.Generation()
-	acct, err := app.NewAccountBackendClient(cfg, mgr).Account(ctx)
-	if err != nil {
-		if !auth.IsCancelled(err) {
-			w.human("Could not check the plan: %s", backendMessage(err))
-		}
+	// A credential that cannot be PRODUCED is a different failure from one the backend
+	// rejected: the first is a keychain, a lock or an expired grant, the second is a
+	// statement about the account. Sending someone to check a billing service over a
+	// locked keychain wastes the only useful thing the error said.
+	//
+	// The test is the CODE, not merely "did this come from the backend package". The
+	// client wraps its own token-source failures as *backend.Error too
+	// (CodeCredentialUnavailable, raised before any request is sent), so an errors.As on
+	// the type alone would route half the credential failures into the billing branch.
+	var be *backend.Error
+	if errors.As(res.Err, &be) && be.Code != backend.CodeCredentialUnavailable {
+		w.human("Could not check the plan: %s", backendMessage(res.Err))
 		return
 	}
-	mgr.ApplyAccountStatus(gen, acct)
+	w.human("Could not verify the session: %s", authMessage(res.Err))
 }
 
 // backendCodeOf returns the stable account code an error carries, or "".
