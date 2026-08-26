@@ -380,7 +380,19 @@ func TestASignInFailureCarriesItsRemedy(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = a.Shutdown() })
 
-	out := loginText(context.Background(), a, func(string) {})
+	// The sign-in binds the FIXED callback port before the browser is opened, and
+	// `go test ./...` runs packages concurrently — so a sibling package driving its own
+	// real login can hold it. Retried, because a port collision is not the failure this
+	// test is about.
+	var out string
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		out = loginText(context.Background(), a, func(string) {})
+		if !strings.Contains(out, "already in use") || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 
 	if !strings.Contains(out, "daintree-assistant auth login --no-open") {
 		t.Errorf("the failure names no runnable remedy:\n%s", out)

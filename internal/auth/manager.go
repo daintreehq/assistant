@@ -268,7 +268,39 @@ func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 	// serve them anonymously.
 	if _, everSignedIn := loadKeyRef(m.authDir); !everSignedIn {
 		m.mu.Lock()
-		if m.state == StateUnknown {
+		// A state that CLAIMS a session is corrected, not just an unknown one.
+		//
+		// The descriptor is written at login and removed at logout, so its absence here
+		// is definitive: there is no credential on this machine. A long-lived process
+		// whose own state still said `signed_in_active` because ANOTHER process signed
+		// out went on reporting a spendable session — and CanSpend() is what the
+		// supervisor's gate consults before an unattended turn, so the daemon would keep
+		// authorising paid work for an account the user believes they have signed out
+		// of. The token was already gone by then; only the state disagreed.
+		//
+		// NARROW, not every state SignedIn() covers. Three of those carry a diagnosis
+		// this branch has no business overwriting:
+		//
+		//   StateAuthorizing — a login running in THIS process, which has not written
+		//     its descriptor yet. Overwriting it reports a sign-in as signed out while
+		//     the browser is still open.
+		//   StateStorageUnavailable — a memory-only credential, on a box with no
+		//     credential service. The descriptor write is best-effort and can fail for
+		//     the same reason the store did, so its absence there is a symptom of the
+		//     tier rather than evidence of a sign-out, and "signed out" would hide the
+		//     one fact the user needs: their session works and will not survive exit.
+		//   StateAccessRefused — deliberately retained (see state.go), because a fresh
+		//     credential would be refused identically. Downgrading erases the refusal
+		//     and invites an endless re-login loop against a deployment that will not
+		//     accept this client.
+		//
+		// What IS corrected is every state asserting an ordinary working session. Those
+		// are contradicted by the evidence: no descriptor means no credential on this
+		// machine, and this process has no usable token either — the early return above
+		// already handled the case where it does.
+		switch m.state {
+		case StateUnknown, StateSignedInUnverified, StateSignedInActive,
+			StateSubscriptionRequired, StateSubscriptionInactive, StateTemporarilyUnavailable:
 			m.state = StateSignedOut
 		}
 		m.mu.Unlock()
@@ -557,6 +589,11 @@ type LoginProgress func(event, detail string)
 // report.
 type ManualURLSink func(url string)
 
+// loginAfterCredentialUnlock runs immediately after a successful login releases the
+// credential lock. Tests only; see the call site for what it is for and why the invariant
+// it exposes cannot be reached any other way.
+var loginAfterCredentialUnlock func()
+
 // Login performs the whole interactive flow: discovery, PKCE, browser, callback,
 // exchange, persist.
 //
@@ -615,16 +652,33 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 	// every other process — the status and the behaviour would simply disagree.
 	m.mu.Lock()
 	priorState, hadCredential := m.state, m.access.AccessToken != ""
+	priorGen := m.generation
 	m.state = StateAuthorizing
 	m.mu.Unlock()
 	restore := func() {
 		m.mu.Lock()
+		defer m.mu.Unlock()
+		// ONLY IF THE SESSION IT DESCRIBES IS STILL THERE.
+		//
+		// Login serializes against other logins and nothing else: a `Logout`, a revoked
+		// verdict or a failed refresh can all land while this attempt sits in the
+		// browser for up to five minutes, and every one of them ends the prior session
+		// and advances the generation. Writing the snapshot back unconditionally then
+		// RESURRECTS it — `signed_in_active` restored over a session that was
+		// deliberately ended, with no token behind it, and CanSpend() answering true for
+		// a credential that no longer exists.
+		//
+		// The generation is the test because it is what every one of those paths moves.
+		// If it has changed, whatever ended the session is a newer statement about it
+		// than this snapshot, and a cancelled sign-in has no business overruling it.
+		if m.generation != priorGen {
+			return
+		}
 		if hadCredential || priorState.SignedIn() {
 			m.state = priorState
 		} else {
 			m.state = StateSignedOut
 		}
-		m.mu.Unlock()
 	}
 
 	if openBrowser {
@@ -723,12 +777,44 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 	persisted := tier == TierKeychain
 
 	if err := m.revision.Bump(ctx); err != nil {
+		// ROLL THE CREDENTIAL BACK before reporting failure, under the lock that is
+		// still held.
+		//
+		// Save has already overwritten whatever was stored, so by this point the
+		// PREVIOUS session's refresh token is gone whatever happens next — there is no
+		// outcome that preserves it. What is still in this function's gift is whether
+		// "login failed" is true. Leaving the new credential behind makes it false in the
+		// worst way: a fresh process loads a session this one has just told the user it
+		// could not create, and on a re-login as a different account the two disagree
+		// about who is signed in. Deleting leaves one consistent story — signed out, the
+		// sign-in failed, try again.
+		//
+		// Best-effort, and its error is discarded on purpose: the failure being reported
+		// is the bump, and replacing it with a cleanup error would name the wrong cause.
+		_ = m.ensureStore(ctx).Delete(ctx, key)
+		if recorded, ok := loadKeyRef(m.authDir); ok && recorded == key {
+			_ = forgetKeyRef(m.authDir)
+		}
 		lock.release()
 		restore()
 		return LoginResult{}, err
 	}
-	lock.release()
 
+	// PUBLISHED BEFORE THE LOCK IS RELEASED, and that ordering is the whole point.
+	//
+	// clearSessionIfCurrent — the path a revoked verdict takes — acquires this same
+	// credential lock and only THEN rechecks whether the identity it was told about is
+	// still current. Releasing here first opened a window between "the new refresh token
+	// is stored" and "the new generation is visible", and a revocation for the OLD
+	// session that had been blocking on the lock would wake inside it, see the old
+	// generation and the old access token, conclude it was current, and delete the
+	// credential this login had just persisted. The user would be told "Signed in.",
+	// `Persisted` would be true, and the keychain entry would be gone.
+	//
+	// Publishing first closes it: any clearer that acquires the lock after this point
+	// sees the bumped generation and the replaced token, fails its staleness check, and
+	// leaves the new credential alone. Nothing below can fail, so there is no path that
+	// publishes a session and then abandons it.
 	registerSecrets(set)
 	m.mu.Lock()
 	m.access = set
@@ -740,6 +826,24 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 		m.state = StateStorageUnavailable
 	}
 	m.mu.Unlock()
+
+	lock.release()
+	// A SEAM, for the one invariant above that is otherwise unobservable.
+	//
+	// The ordering this function depends on is a few nanoseconds wide: a clearer blocked
+	// on the credential lock has to wake, acquire it, and reach its staleness check
+	// before the login publishes. A stress test cannot reliably land in that window —
+	// tried, and it does not — so the alternative to this hook is an invariant defended
+	// only by a comment, in a function whose failure mode is deleting a credential
+	// seconds after telling somebody they signed in.
+	//
+	// Placed immediately AFTER the release, which is exactly where a competing clearer
+	// gets its turn. A test drives one from here and asserts it declines; under the
+	// wrong ordering the identity would not yet be published and it would delete.
+	// nil in every build that is not a test, and one nil check is the whole cost.
+	if hook := loginAfterCredentialUnlock; hook != nil {
+		hook()
+	}
 
 	// Reported AFTER the credential lock is released. A progress callback is
 	// caller-supplied and may re-enter — a UI that reacts to "authenticated" by asking
@@ -1061,6 +1165,30 @@ func (m *Manager) clearSessionIfCurrent(ctx context.Context, gen uint64, usedTok
 	if ok {
 		lock, lErr := acquireCredentialLock(ctx, m.authDir, key)
 		if lErr == nil {
+			// THE SHARED MARKER, checked here and not only in staleLocked.
+			//
+			// staleLocked compares this process's own generation and token, and that is
+			// blind to the case this lock exists for. Another PROCESS can complete a
+			// whole login while this clearer is blocked: it writes its credential, bumps
+			// the marker and releases. This manager's generation has not moved — nothing
+			// local happened — so the local check says "still current" and the delete
+			// destroys a credential belonging to a session that started after the
+			// verdict being acted on.
+			//
+			// Unlike the local window, this one is not nanoseconds: it lasts until this
+			// manager next calls AccessToken and adopts the new marker, which may be a
+			// whole idle turn away.
+			//
+			// Declining on ANY unobserved bump is deliberately blunt. It can skip a
+			// genuine revocation — but only defers it, because the same unobserved marker
+			// makes the next AccessToken clear the cached credential and advance the
+			// generation anyway. Deleting the wrong credential has no equivalent
+			// recovery: the refresh token is gone and the user is signed out with
+			// nothing to explain it.
+			if m.revision.Changed() {
+				lock.release()
+				return
+			}
 			m.mu.Lock()
 			stale := m.staleLocked(gen, usedToken)
 			m.mu.Unlock()
