@@ -296,17 +296,27 @@ func (m *Manager) forgetSessionKeyIfLocked(key CredentialKey) {
 	}
 }
 
-// everSignedInHere answers "is there a credential on this machine we can name?".
+// localSessionEvidence answers "is there a credential on this machine we can name?" —
+// in the three forms that question actually has.
 //
 // TWO sources, and the in-memory one comes first because it is the only one that can be
 // right about a login this process performed but could not durably address. The
-// descriptor answers for every OTHER process, which is what it is for.
-func (m *Manager) everSignedInHere() bool {
+// descriptor answers for every OTHER process, which is what it is for — and it can also
+// decline to answer, which is why the return type is not a bool. A caller that cannot
+// tell absence from an unreadable file will eventually treat a permissions fault as a
+// sign-out.
+func (m *Manager) localSessionEvidence() keyRefState {
 	if _, ok := m.rememberedKey(); ok {
-		return true
+		return keyRefPresent
 	}
-	_, ok := loadKeyRef(m.authDir)
-	return ok
+	_, st := readKeyRef(m.authDir)
+	return st
+}
+
+// everSignedInHere is localSessionEvidence for the callers that genuinely have nothing
+// better to do with an unreadable descriptor than treat it as no evidence.
+func (m *Manager) everSignedInHere() bool {
+	return m.localSessionEvidence() == keyRefPresent
 }
 
 // AccessToken implements backend.TokenSource.
@@ -323,7 +333,13 @@ func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 	// Reading it twice — compare, then adopt whatever Current() says now — would let a
 	// bump that landed between the two reads be adopted without ever being acted on, so
 	// the logout it represented would never be noticed.
-	if marker := m.revision.Current(); marker != m.revision.Observed() {
+	// AND ONLY A MARKER THIS PROCESS COULD ACTUALLY READ.
+	//
+	// An unreadable marker is a fault, not a bump. Acting on one drops the access token
+	// and the remembered key, and the descriptor in that same unreadable directory then
+	// reads as "no login here" — so an EACCES on one directory used to end with an
+	// anonymous request the open backend happily served. See Revision.CurrentReadable.
+	if marker, ok := m.revision.CurrentReadable(); ok && marker != m.revision.Observed() {
 		m.mu.Lock()
 		m.rememberSupersededLocked(m.access.AccessToken)
 		m.access = TokenSet{} // whatever we cached predates an identity change
@@ -381,7 +397,20 @@ func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 	// how a session that is genuinely signed in silently starts sending an empty bearer
 	// the moment its access token expires. The backend's open door accepts that, so the
 	// turn succeeds under the wrong principal and nothing anywhere reports a problem.
-	if !m.everSignedInHere() {
+	switch m.localSessionEvidence() {
+	case keyRefUnreadable:
+		// A DESCRIPTOR IS THERE AND THIS PROCESS CANNOT READ IT.
+		//
+		// Loudly, because the alternative is the bug this whole path exists to close.
+		// Falling through to the branch below would rewrite the state to signed-out and
+		// return an empty bearer, and the backend's open door accepts that — so a
+		// permissions accident on the state root would quietly re-bill every turn to the
+		// anonymous principal while the user went on believing they were signed in.
+		// "I cannot tell" must never resolve to "you are not signed in".
+		return "", newError(CodeStorageUnavailable,
+			"the credential descriptor could not be read, so this session cannot be identified").
+			withHint("Check the permissions on the assistant's auth state directory; `daintree-assistant doctor` names it.")
+	case keyRefAbsent:
 		m.mu.Lock()
 		// A state that CLAIMS a session is corrected, not just an unknown one.
 		//
@@ -609,7 +638,22 @@ func (m *Manager) refresh(ctx context.Context) (TokenSet, error) {
 		// leave the credential exactly where it is.
 		if CodeOf(err) == CodeGrantRejected {
 			m.mu.Lock()
+			m.rememberSupersededLocked(m.access.AccessToken)
 			m.access = TokenSet{}
+			// THE GENERATION ADVANCES, because this ends the session and every other
+			// ending advances it.
+			//
+			// Login's own comment already asserted that a failed refresh "ends the prior
+			// session and advances the generation" — and it did not, which made the
+			// assertion load-bearing and false. Two things depend on it. A browser login
+			// that was in flight when this landed restores its prior snapshot only if the
+			// generation has not moved, so a cancelled sign-in would resurrect the very
+			// session the issuer had just rejected; and the login rollback's abandoned()
+			// path would overwrite StateRevoked with StateSignedOut, replacing "your
+			// session ended, sign in again" with "you were never signed in". Late
+			// verdicts for the dead session also stayed generation-current.
+			m.generation++
+			m.lastVerifiedAt = nil
 			m.mu.Unlock()
 			// Cleanup failures are REPORTED, not swallowed. A failed delete leaves a dead
 			// credential that the next launch will try and fail on; a failed bump leaves
@@ -934,11 +978,26 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 	// runs on: a re-login. The old refresh token has not been spent by anything, so
 	// putting it back is both possible and correct.
 	//
-	// A read failure is not a login failure. It only means the rollback falls back to the
-	// delete it used to be — and if the store cannot be read here, the Save below is about
-	// to fail on the same store anyway and the rollback never runs.
+	// A read failure is not a login failure. It means the rollback falls back to the
+	// delete it used to be, and that is a deliberate choice rather than a proof: nothing
+	// in the Store contract says a failed Load implies a failed Save, so a transient read
+	// error followed by a successful write and a failed publication really can delete a
+	// prior session instead of restoring it. Delete is still the lesser wrong there — an
+	// unaddressable credential nobody can name outlives every logout, while an absent one
+	// just means signing in again — but it is a trade, not a guarantee.
 	prior, priorErr := store.Load(ctx, key)
 	hadPrior := priorErr == nil && prior.Valid()
+
+	// The DESCRIPTOR is snapshotted for the same reason the credential is, and it is a
+	// different reason from the credential's.
+	//
+	// There is one credential.json for the whole state root, so it names whichever
+	// endpoint signed in last. A login to B overwrites A's — and if this login then
+	// fails, restoring B's credential is not enough: without putting A's descriptor back,
+	// A's keychain entry survives with nothing on the machine able to name it, which is
+	// precisely the unaddressable-credential outcome this rollback exists to prevent.
+	priorRef, priorRefState := readKeyRef(m.authDir)
+	hadPriorRef := priorRefState == keyRefPresent
 
 	session := StoredSession{
 		Version:      storedSessionVersion,
@@ -993,7 +1052,7 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 	// remembered key below keeps this process's own session working for its lifetime.
 	// Failing there would refuse a login that is about to work perfectly well.
 	if err := saveKeyRef(m.authDir, key); err != nil && persisted {
-		if m.rollbackLogin(ctx, store, key, prior, hadPrior) {
+		if m.rollbackLogin(ctx, store, key, prior, hadPrior, priorRef, hadPriorRef) {
 			lock.release()
 			restore()
 		} else {
@@ -1002,7 +1061,7 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 		}
 		return LoginResult{}, wrapError(CodeStorageUnavailable,
 			"the session was stored but its descriptor could not be recorded, so no later process could find it", err).
-			withHint("Check that " + m.authDir + " is writable, then sign in again.")
+			withHint("Check that the assistant's auth state directory is writable, then sign in again; `daintree-assistant doctor` names it.")
 	}
 
 	if err := m.revision.Bump(ctx); err != nil {
@@ -1018,7 +1077,7 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 		//
 		// Best-effort, and its error is discarded on purpose: the failure being reported
 		// is the bump, and replacing it with a cleanup error would name the wrong cause.
-		if m.rollbackLogin(ctx, store, key, prior, hadPrior) {
+		if m.rollbackLogin(ctx, store, key, prior, hadPrior, priorRef, hadPriorRef) {
 			lock.release()
 			restore()
 		} else {
@@ -1114,9 +1173,32 @@ func (m *Manager) Login(ctx context.Context, openBrowser bool, progress LoginPro
 // key. If the previous session is back, the descriptor already addresses it correctly. It
 // is a single file for the whole state root, so a stale one for another endpoint is never
 // ours to delete.
-func (m *Manager) rollbackLogin(ctx context.Context, store Store, key CredentialKey, prior StoredSession, hadPrior bool) (restored bool) {
+func (m *Manager) rollbackLogin(ctx context.Context, store Store, key CredentialKey, prior StoredSession, hadPrior bool, priorRef CredentialKey, hadPriorRef bool) (restored bool) {
+	// The descriptor goes back FIRST, and it goes back whatever happens to the credential.
+	//
+	// It is one file for the whole state root, so this login may have overwritten a
+	// descriptor naming a DIFFERENT endpoint's credential — one this rollback is not
+	// touching and must not orphan. Putting it back is unconditional for that reason:
+	// the failure being unwound is this login's, and the other endpoint's session was
+	// never part of it.
+	if hadPriorRef && priorRef != key {
+		_ = saveKeyRef(m.authDir, priorRef)
+		if hadPrior {
+			if err := store.Save(ctx, key, prior); err == nil {
+				return true
+			}
+		}
+		_ = store.Delete(ctx, key)
+		return false
+	}
+
 	if hadPrior {
 		if err := store.Save(ctx, key, prior); err == nil {
+			// The descriptor already names this key, so the restored session is
+			// addressable and there is nothing further to put back.
+			if hadPriorRef {
+				_ = saveKeyRef(m.authDir, priorRef)
+			}
 			return true
 		}
 		// The restore failed, so the entry now holds the new login's token under a login
@@ -1294,12 +1376,25 @@ func (m *Manager) Hydrate(ctx context.Context) (resolved bool) {
 			}
 		})
 	case errors.Is(err, ErrNotFound):
-		// The store's own answer, so the remembered key is retired with the state. See
-		// the same case in refresh: an authoritative absence is what the key was deferring
-		// to, and holding it past that only buys a repeat of this lookup.
+		// The store's own answer, so the whole session is retired with the state — not
+		// just the parts that are cheap to drop.
+		//
+		// The remembered key goes because an authoritative absence is exactly what it was
+		// deferring to. The ACCESS TOKEN has to go with it, and forgetting that was a
+		// real hole: AccessToken returns a cached, unexpired token before it consults
+		// either key source, so this arm could declare the session gone and the very next
+		// request would still present its bearer. `/account` reproduced it — report
+		// signed out, then send the old credential to ask about the account it had just
+		// said did not exist. The generation advances for the same reason every other
+		// ending does, so a verdict already in flight cannot land as current, and the
+		// verification time goes because it belonged to the session that just ended.
 		applyIfCurrent(func() {
+			m.rememberSupersededLocked(m.access.AccessToken)
+			m.access = TokenSet{}
 			m.state = StateSignedOut
 			m.forgetSessionKeyIfLocked(key)
+			m.lastVerifiedAt = nil
+			m.generation++
 		})
 	case errors.Is(err, ErrStoreLocked), errors.Is(err, ErrStoreUnavailable):
 		// "We could not read it" is not "there is nothing there". Guarded like every
@@ -1313,9 +1408,17 @@ func (m *Manager) Hydrate(ctx context.Context) (resolved bool) {
 		})
 		return false
 	case errors.Is(err, ErrStoreCorrupt):
+		// Same ending, same clean-up. A corrupt entry cannot be refreshed, so the state
+		// is signed-out; leaving the cached bearer and the remembered key behind would
+		// keep this process spending on a credential it has just declared unusable.
 		applyIfCurrent(func() {
 			m.lastErr = err
+			m.rememberSupersededLocked(m.access.AccessToken)
+			m.access = TokenSet{}
 			m.state = StateSignedOut
+			m.forgetSessionKeyIfLocked(key)
+			m.lastVerifiedAt = nil
+			m.generation++
 		})
 	}
 	return true

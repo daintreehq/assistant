@@ -2,7 +2,9 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -39,30 +41,62 @@ func saveKeyRef(dir string, key CredentialKey) error {
 	return writeAtomic(keyRefPath(dir), append(body, '\n'))
 }
 
-// loadKeyRef reads the last recorded credential key.
+// keyRefState is what this machine can say about a recorded login, and the third case
+// is the one that matters.
 //
-// A missing or unreadable descriptor returns ok=false rather than an error: it is a
-// convenience for the offline path, and a caller that cannot read it should fall back to
-// discovery rather than fail. The only situation where its absence is fatal is an
-// offline logout with no prior login on this machine — which is a no-op anyway.
-func loadKeyRef(dir string) (CredentialKey, bool) {
+// "There is no descriptor" and "there is a descriptor and I cannot read it" are opposite
+// facts, and every caller here used to receive them as the same ok=false. The first is a
+// definitive local "no login". The second is a FAULT, and treating it as the first is
+// how an unreadable auth directory turns a signed-in session into an anonymous request
+// that the backend's open door accepts — see AccessToken.
+type keyRefState int
+
+const (
+	// keyRefAbsent: no descriptor. Definitive: this machine has no recorded login.
+	keyRefAbsent keyRefState = iota
+	// keyRefPresent: a descriptor was read.
+	keyRefPresent
+	// keyRefUnreadable: a descriptor exists and could not be read or parsed. Says
+	// nothing either way about whether a login exists.
+	keyRefUnreadable
+)
+
+// readKeyRef reads the last recorded credential key and reports which of the three
+// answers this machine can actually give.
+func readKeyRef(dir string) (CredentialKey, keyRefState) {
 	f, err := os.Open(keyRefPath(dir))
 	if err != nil {
-		return CredentialKey{}, false
+		if errors.Is(err, fs.ErrNotExist) {
+			return CredentialKey{}, keyRefAbsent
+		}
+		return CredentialKey{}, keyRefUnreadable
 	}
 	defer f.Close()
 	raw, err := io.ReadAll(io.LimitReader(f, maxKeyRefBytes))
 	if err != nil {
-		return CredentialKey{}, false
+		return CredentialKey{}, keyRefUnreadable
 	}
 	var k CredentialKey
 	if err := json.Unmarshal(raw, &k); err != nil {
-		return CredentialKey{}, false
+		return CredentialKey{}, keyRefUnreadable
 	}
 	if k.Issuer == "" || k.ClientID == "" {
-		return CredentialKey{}, false
+		// Present, parseable, and naming nothing. Corrupt rather than absent: a login
+		// wrote this file, so concluding "never signed in" from it would be a guess.
+		return CredentialKey{}, keyRefUnreadable
 	}
-	return k, true
+	return k, keyRefPresent
+}
+
+// loadKeyRef reads the last recorded credential key.
+//
+// It collapses readKeyRef's three answers to two, for the callers whose only question is
+// "can I name a credential right now" — the offline logout path and the rollback's
+// does-this-descriptor-name-my-key check. A caller deciding whether a login EXISTS must
+// use readKeyRef instead.
+func loadKeyRef(dir string) (CredentialKey, bool) {
+	k, st := readKeyRef(dir)
+	return k, st == keyRefPresent
 }
 
 // forgetKeyRef removes the descriptor. Absence is success.

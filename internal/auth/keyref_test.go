@@ -306,8 +306,19 @@ func TestARolledBackLoginLeavesNothingForASecondProcess(t *testing.T) {
 		t.Errorf("a second process reports %q after a login that FAILED — "+
 			"the credential was not rolled back", second.State())
 	}
+	// NO BEARER is the whole assertion; the error beside it may legitimately be either
+	// of two things, because this rig leaves the machine in a state a second process
+	// cannot fully read.
+	//
+	// blockDescriptorWrite occupies credential.json's path with a DIRECTORY, so the
+	// descriptor is not absent — it is unreadable. AccessToken now says so rather than
+	// concluding "never signed in", which is the point of that distinction: an
+	// unreadable descriptor must never resolve to an anonymous request. CodeNotSignedIn
+	// is the answer once the path is genuinely clear. Either way nothing is issued.
 	tok, err := second.AccessToken(context.Background())
-	if err != nil && CodeOf(err) != CodeNotSignedIn {
+	switch {
+	case err == nil, CodeOf(err) == CodeNotSignedIn, CodeOf(err) == CodeStorageUnavailable:
+	default:
 		t.Fatalf("second process AccessToken: %v", err)
 	}
 	if tok != "" {
@@ -663,5 +674,100 @@ func TestTheDescriptorCarriesNoSecret(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Errorf("descriptor mode = %o, want 600", perm)
+	}
+}
+
+// --- an unreadable auth directory is a fault, never a sign-out --------------------------
+
+// The descriptor's absence is a definitive local "no login". Its UNREADABILITY is not,
+// and collapsing the two is how a permissions accident silently re-bills every turn.
+//
+// A fresh process cannot fall back on the remembered key — it never performed the login —
+// so it has only the files, and both of them are in the directory that has gone bad. The
+// old code read the unreadable descriptor as "never signed in", rewrote the state to
+// signed out, and returned an empty bearer with a NIL error. The backend's open door
+// accepts that, so the turn succeeded as the anonymous principal and nothing anywhere
+// reported a problem. Failing loudly is the only safe answer to "I cannot tell".
+func TestAnUnreadableDescriptorFailsRatherThanGoingAnonymous(t *testing.T) {
+	p := newIDP(t)
+	store := newPersistentStore()
+	root := t.TempDir()
+
+	first := managerAt(t, p, store, root, nil)
+	if _, err := loginWithPortRetry(t, first, nil); err != nil {
+		t.Fatalf("setup login: %v", err)
+	}
+
+	// A second process, on the same state root, with the descriptor now unreadable.
+	second := managerAt(t, p, store, root, nil)
+	blockDescriptorWrite(t, second.AuthDirPath())
+
+	tok, err := second.AccessToken(context.Background())
+	if tok != "" {
+		t.Fatalf("a bearer was issued from an unreadable state root: %q", tok)
+	}
+	if err == nil {
+		t.Fatal("an unreadable descriptor produced an empty bearer and NO error — " +
+			"the request would have gone out anonymously under the wrong principal")
+	}
+	if got := CodeOf(err); got != CodeStorageUnavailable {
+		t.Errorf("code = %q, want %q — the fault must name storage, not a sign-out", got, CodeStorageUnavailable)
+	}
+}
+
+// An unreadable REVISION marker is the same fault by another route.
+//
+// Current() folded every read failure into the zero Marker, which compares unequal to any
+// real observation — so a process that had observed a bump saw an unreadable directory as
+// somebody else ending the identity. It dropped the access token AND the remembered key,
+// and the unreadable descriptor beside it then answered "no login here". The session this
+// process had performed itself evaporated into an anonymous request.
+func TestAnUnreadableRevisionMarkerIsNotAnIdentityChange(t *testing.T) {
+	p := newIDP(t)
+	store := newPersistentStore()
+	root := t.TempDir()
+
+	m := managerAt(t, p, store, root, nil)
+	if _, err := loginWithPortRetry(t, m, nil); err != nil {
+		t.Fatalf("setup login: %v", err)
+	}
+	if !m.State().SignedIn() {
+		t.Fatalf("setup: state = %q", m.State())
+	}
+
+	// Make the marker unreadable the way a permissions fault would: replace it with a
+	// directory, so it EXISTS and cannot be read.
+	marker := m.Revision().Path()
+	if err := os.RemoveAll(marker); err != nil {
+		t.Fatalf("clear marker: %v", err)
+	}
+	if err := os.MkdirAll(marker, 0o700); err != nil {
+		t.Fatalf("block marker: %v", err)
+	}
+	if _, ok := m.Revision().CurrentReadable(); ok {
+		t.Skip("the marker could still be read over a directory on this filesystem")
+	}
+
+	// THE GENERATION IS THE ASSERTION, because it is what an identity change moves and
+	// what an unreadable file must not.
+	//
+	// Watching only the bearer would pass either way here: the descriptor is still
+	// readable in this test, so even the old code found its way back to the credential
+	// after wrongly discarding the session. What it could not hide is the bump — and the
+	// bump is the damage, since it retires the remembered key and makes every request
+	// already in flight stale, on the strength of a file it merely failed to open.
+	before := m.Generation()
+	tok, err := m.AccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("AccessToken: %v", err)
+	}
+	if tok == "" {
+		t.Fatal("an unreadable marker emptied the bearer — the turn would have gone out anonymously")
+	}
+	if got := m.Generation(); got != before {
+		t.Errorf("generation moved %d -> %d — an unreadable coordination file was read as somebody else ending the session", before, got)
+	}
+	if !m.State().SignedIn() {
+		t.Errorf("state = %q after an unreadable marker, want the session intact", m.State())
 	}
 }

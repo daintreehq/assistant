@@ -110,24 +110,48 @@ func (r *Revision) Path() string { return r.path }
 // login exists. A zero marker still compares UNEQUAL to any real observation, so a
 // process that had observed something correctly sees a change.
 func (r *Revision) Current() Marker {
+	m, _ := r.CurrentReadable()
+	return m
+}
+
+// CurrentReadable reads the shared marker and says whether the answer is TRUSTWORTHY.
+//
+// The two are different questions and collapsing them was a real bug. Current cannot
+// distinguish "no marker file, because nothing has ever bumped one" — a perfectly
+// ordinary fresh install — from "a marker file is there and this process cannot read
+// it". Both produced the zero Marker, and the zero Marker compares unequal to any real
+// observation, so a process that had observed a bump saw an unreadable directory as
+// somebody else changing the identity. AccessToken acts on that: it drops the access
+// token AND the remembered credential key, after which an unreadable descriptor in the
+// same unreadable directory leaves it concluding there is no login here at all — and it
+// proceeds anonymously against a backend whose door is open. An EACCES on one directory
+// silently changed who the turn was billed to.
+//
+// ok is false ONLY for a file that exists and cannot be read or parsed. Absence is a
+// legitimate answer and returns (zero, true).
+func (r *Revision) CurrentReadable() (Marker, bool) {
 	f, err := os.Open(r.path)
 	if err != nil {
-		return Marker{}
+		// Absence is an answer; anything else is a fault this process must not act on.
+		if errors.Is(err, fs.ErrNotExist) {
+			return Marker{}, true
+		}
+		return Marker{}, false
 	}
 	defer f.Close()
 	raw, err := io.ReadAll(io.LimitReader(f, maxRevisionFileBytes))
 	if err != nil {
-		return Marker{}
+		return Marker{}, false
 	}
 	nonce, countStr, ok := strings.Cut(strings.TrimSpace(string(raw)), " ")
 	if !ok {
-		return Marker{}
+		return Marker{}, false
 	}
 	n, err := strconv.ParseUint(strings.TrimSpace(countStr), 10, 64)
 	if err != nil || strings.TrimSpace(nonce) == "" {
-		return Marker{}
+		return Marker{}, false
 	}
-	return Marker{Nonce: nonce, Counter: n}
+	return Marker{Nonce: nonce, Counter: n}, true
 }
 
 // Observed returns the marker this process last adopted.
