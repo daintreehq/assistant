@@ -83,8 +83,25 @@ unreadable stored preference), surfaced via `cfg.EndpointInsecureRejected`. See
 independent check on the interactive `/backend <url>` path (no escape hatch there).
 
 **Accounts exist, and whether one is REQUIRED is the deployment's answer, not this
-build's** — the deployed backend's configuration answers no today (`AUTH_MODE` defaults
-to `open` and the deployment sets no Supabase values). `internal/auth` is the CLI's account authority: OAuth Authorization Code +
+build's** — and nothing here may infer it from a hostname, a compiled-in default or a
+build tag. The default endpoint `https://assistant.daintree.org` is a SECURED STAGING
+deployment (`ENVIRONMENT=staging`, browser account/payment links on `staging.daintree.org`)
+whose identity posture walks `AUTH_MODE` `open` → `observe` → `enforce` by config-only
+revision, with entitlement staged behind it on its own axis. So any sentence in this repo
+asserting what that endpoint asks for *today* is wrong by the next revision of it; the
+only correct answer is the one discovery returns at runtime.
+
+**Desktop authentication is CLI-owned.** This binary runs the OAuth flow, owns the
+credential store, and answers every account question — including inside the embedded
+Assistant, where `/login`, `/logout` and `/account` run on the same `*auth.Manager` the
+`auth` subcommands do, and `/login` and `/account` share the one account read
+(`/logout` performs none). Daintree's native Settings owns NEITHER the account NOR the backend URL:
+there is no host-side sign-in to keep in sync, and the endpoint comes from
+`--backend-url` / `DAINTREE_BACKEND_URL` / the stored `/backend` preference / the default,
+in that order. A host that grew its own copy of either would be a second source of truth
+for a credential this process is the only holder of.
+
+`internal/auth` is the CLI's account authority: OAuth Authorization Code +
 PKCE against Supabase, the refresh token in the OS credential store and nowhere else, the
 access token in process memory and nowhere else, refresh under a cross-process lock, and
 one typed state machine every surface renders (`auth login` / `status` / `logout` /
@@ -96,8 +113,10 @@ The deployment decides whether any of it applies. A backend answers
 a deployment with no identity provider returns exactly four fields — `version`,
 `environment`, `configured`, `required` — and no issuer, client id, endpoints or links: a
 CORRECT response that fails manifest validation by design. Requests then go out with no
-`Authorization` header at all and the backend serves them, which is what every install
-does today. `auth.Availability` carries that answer through to status, and it is the one
+`Authorization` header at all and the backend serves them — the shape a local backend, the
+e2e fakes, and any deployment whose rollout has not reached `enforce` still present, and
+the reason an anonymous request must stay a first-class path rather than a legacy one.
+`auth.Availability` carries that answer through to status, and it is the one
 thing that must never be rendered as a session or as an outage: see
 `Status.WithAvailability`, where a known `configured:false` overrides the credential
 state, because the credential store knows nothing about the deployment.
@@ -216,6 +235,27 @@ Three rules in that layer are load-bearing and easy to undo:
   `loginAfterCredentialUnlock` seam — the windows are too narrow for a stress test to
   reach, which was verified rather than assumed.
 
+**A state root the account layer cannot be built under FAILS CLOSED, and `doctor` says so.**
+An unwritable state root, a plain file where the `auth` directory belongs, EACCES, ENOSPC —
+`app.credentialSource` installs an `UnavailableTokenSource` for all of them, so every WORK
+route aborts before the request leaves the process (`CodeCredentialUnavailable`, raised by
+`Client.credential`; public paths — health, version, auth discovery — never consult a source
+at all). It used to fall through to `NoTokenSource`, which sent the turn as an anonymous
+principal: against an open door that SUCCEEDS, and this machine's local fault is silently
+attributed to whoever the open door resolves to. `doctor`'s `account` row is a **FAIL** for
+it, not a warn — the install runs no turn at all, and a warn would let `doctor` exit zero on
+a machine where nothing works. It carries the stable `accountLayerFault: true` marker and
+names the state root in the hint; branch on the flag, never on the error's code, which reads
+`auth_exchange_failed` for an exchange nothing attempted.
+
+The DELIBERATE caller key is the one exception, and both surfaces honour it in the same
+order: `accountLayerFault` is silent when `cfg.APIKey` came from `DAINTREE_API_KEY` or
+`--api-key-file`, so `credentialSource` returns nil UNCHANGED (letting `NewClient`'s own
+`APIKey` fallback take it — any typed source would win the TokenSource-beats-APIKey
+preference and silently disable the key the operator exported), and `accountDoctorCheck`
+reports that WARN before it ever asks about the state root. An install with an explicit
+bearer still runs; it just runs as a different principal, which is what the warning says.
+
 **What is still missing:** the host protocol still emits a generic `turn-error` for
 account failures rather than a typed account event. Account STATE now reaches an attached
 session through the `/account` card rather than a typed event, which is a command result
@@ -245,7 +285,8 @@ Two further seams are load-bearing and must stay:
   changes the credential for the same endpoint, one level below.
 
 `POST /v1/daintree/auth/verify` answers for whichever key the request WOULD spend — the
-backend's own, on every install — so it is the one probe that can say "this deployment
+backend's own upstream credential on every install, because the CLI ships no provider key
+and signing in does not give it one — so it is the one probe that can say "this deployment
 can actually run a turn" before a turn is spent finding out. `doctor` is its only caller
 (`upstream credential` row), and it branches on the stable `reason`, never on the prose
 `detail`. The CLI must never probe a provider itself. That row always attributes the

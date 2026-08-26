@@ -57,15 +57,17 @@ go install github.com/daintreehq/assistant/cmd/daintree-assistant@latest
 daintree-assistant doctor     # read it top to bottom; you want no FAIL lines
 ```
 
-**There is no API key to paste, and today there is nothing to sign in to either.** The
-backend holds the upstream credential and Daintree pays for the model calls, so the binary
-works as soon as it is on your `PATH`.
+**There is no API key to paste.** The backend holds the upstream credential and Daintree
+pays for the model calls, so nothing you supply funds a turn.
 
-The binary does have accounts — on a deployment that offers them, `daintree-assistant
-auth login` opens a browser and stores a token in your system keychain — but whether one
-is needed is the BACKEND's answer, and the deployed one does not ask. `daintree-assistant
-auth status` says which of those you are looking at: `accounts  not offered by this
-backend` means there is nothing to do.
+Signing in is the other question, and it belongs to the CLI: `daintree-assistant auth
+login` opens your browser, and the refresh token that comes back is exchanged and kept in
+your system keychain. Whether you *have* to is the BACKEND's answer, never a guess from a
+hostname or from how this was built — `daintree-assistant auth status` asks the endpoint
+and reports what it said: `accounts  required` means sign in, `accounts  not offered by
+this backend` means there is nothing to do. The default endpoint,
+`https://assistant.daintree.org`, is a secured staging deployment whose posture moves by
+configuration, so ask `auth status` rather than this page.
 
 `auth status` reports what this process already knows and never asks about the account,
 which is what you want when the thing you are debugging is the network. **`auth status

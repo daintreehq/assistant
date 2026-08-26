@@ -38,30 +38,46 @@ copy — it cannot remove one that is already there, which is what `doctor` find
 
 ---
 
-## 2. There is nothing to sign in to — for now
+## 2. There is no key to paste, and signing in is the CLI's job
 
-No key, no login, no account. The Daintree Assistant backend holds its own upstream
-credential and **Daintree pays for the model calls** — including the background ones
-(watcher checks, async completions, summarize/extract/classify) that happen while you are
-not looking.
+**Daintree pays for the model calls** — including the background ones (watcher checks,
+async completions, summarize/extract/classify) that happen while you are not looking. The
+backend holds its own upstream credential, so nothing you supply funds a turn and there is
+no key to paste anywhere.
 
-The binary *can* sign in — on a deployment that offers accounts, `daintree-assistant
-auth login` opens a browser and keeps a token in your system keychain — but whether it
-needs to is the backend's decision, not this build's, and the one you are pointed at does
-not ask. `auth status` tells you which:
+Your ACCOUNT is a separate thing, and this binary owns it end to end. `daintree-assistant
+auth login` opens your browser; you sign in there, the browser hands an authorization code
+back to the CLI on a fixed loopback address (`http://127.0.0.1:42813/oauth/callback` — it
+has to be that exact one, so allow it if something local is filtering ports), and the CLI
+exchanges it for a session it keeps in your system keychain. Inside a running Assistant the
+same thing is `/login`. Daintree's native Settings has nothing to do with it: it holds
+neither your account nor the backend URL, so there is no second place to check when sign-in
+looks wrong.
+
+**Whether you have to sign in is the backend's decision, not this build's** — and never a
+guess from the endpoint's address. `auth status` is the command that asks it:
 
 ```
-  accounts     not offered by this backend
-  state        this backend has no accounts
+  accounts     required                    → the deployment says sign in
+  accounts     supported, not required     → the deployment says it is optional
+  accounts     not offered by this backend → nothing to do
+  accounts     could not ask this backend  → no trusted answer came back; not the same as "no"
 ```
 
-If it ever says `accounts  required`, that is when you sign in. Three notes for when you do.
+The endpoint you get by default, `https://assistant.daintree.org`, is a secured staging
+deployment that is being tightened while the beta runs, so run `auth status` rather than
+trusting a sentence in a document — including this one. If you have never signed in on this
+machine, the assistant does not check first: it just runs, and a deployment that requires an
+account is what tells you so.
+
+Three notes for when you do sign in.
 
 The refresh token lives in the macOS Keychain or the Linux Secret Service and nowhere
-else, so on a box with neither there is no persistence at all and the login is gone when
-the command exits (`auth status` says `credentials  this process only`). And `auth logout`
-signs out THIS machine only — there is no remote sign-out — while `auth disconnect` prints
-the account page, which is where access can be revoked for every device.
+else — never in a file, an environment variable or a command line. On a box with neither
+there is no persistence at all and the login is gone when the command exits (`auth status`
+says `credentials  this process only`). And `auth logout` signs out THIS machine only —
+there is no remote sign-out — while `auth disconnect` prints the account page, which is
+where access can be revoked for every device.
 
 The third is about the plan. Nothing about it is stored on your machine, deliberately: a
 plan on disk is a plan that can go stale, so a fresh process starts knowing only that a
@@ -82,12 +98,14 @@ second checkout — the command says which case you are in, and prints the relev
 when the deployment publishes one (both the account and subscribe URLs are optional).
 
 No model-provider credential is stored on your machine, and nothing reaches a model
-provider from it directly. On the deployment you are pointed at today the CLI sends no
-`Authorization` header at all; on one that has accounts it sends your account token as a
-bearer to the DAINTREE BACKEND — a statement about who is calling, never forwarded to a
-model provider. The backend does the rest. The CLI does store project-scoped
-conversation and operational state locally (`state.db` under `~/.daintree/assistant-cli/`)
-so sessions, memories, supervision, audit, and recovery can work — see
+provider from it directly. Signed in, the CLI sends your account token as a bearer to the
+DAINTREE BACKEND — a statement about who is calling, never forwarded to a model provider.
+Signed out, or against a deployment with no accounts, it sends no `Authorization` header at
+all. Either way the backend does the rest, out of its own upstream credential, and no
+credential of yours goes anywhere near a model provider. The CLI does
+store project-scoped conversation and operational state locally (`state.db` under
+`~/.daintree/assistant-cli/`) so sessions, memories, supervision, audit, and recovery can
+work — see
 [`PRIVACY_AND_DATA.md`](PRIVACY_AND_DATA.md) for exactly what and for how long.
 
 ---

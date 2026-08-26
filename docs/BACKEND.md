@@ -40,14 +40,20 @@ Two constants: `backend.DefaultBaseURL` = `https://assistant.daintree.org` (the 
 backend, and the default for a fresh install) and `backend.LocalBaseURL` =
 `http://127.0.0.1:8473` (a backend you run yourself).
 
+`assistant.daintree.org` is a **staging** deployment being secured in place
+(`ENVIRONMENT=staging`, browser account and payment links on `staging.daintree.org`): its
+`AUTH_MODE` walks `open` → `observe` → `enforce` by config-only revision, with entitlement
+staged behind identity on its own axis. Nothing on this side may encode where that walk has
+reached — not in a constant, not in a doc, not in a hostname test.
+
 **Whether a request carries a credential is the deployment's answer.** The backend holds
 its own upstream credential and funds every turn from it, so a request needs to carry no
-key in order to have one to spend: `auth.authenticate` returns an anonymous principal for
-a request with no `Authorization` header, and that is what the CLI sends on every install
-today. It never prompts for a provider key, never writes one to disk, and never gates
-startup on one.
+key in order to have one to spend: `auth.authenticate` returns an anonymous principal for a
+request with no `Authorization` header, and that stays a first-class path — it is what a
+local backend, the e2e fakes, and any deployment short of `enforce` serve. The CLI never
+prompts for a provider key, never writes one to disk, and never gates startup on one.
 
-The CLI does have ACCOUNTS (`internal/auth`, and `daintree-assistant auth …`), and when a
+The CLI owns ACCOUNTS (`internal/auth`, and `daintree-assistant auth …`), and when a
 deployment configures an identity provider it sends the account's access token as the
 bearer on protected paths. Discovery decides: `GET /v1/daintree/auth/config` answers with
 `configured` and `required`, and a deployment with neither returns just those two flags —
@@ -123,6 +129,21 @@ by code, so both the classification and the no-retry decision hold at any status
 the `HTTPStatus == 0` a mid-stream SSE error carries. That is what lets the two repos move
 this one independently instead of in a flag day.
 
+The COST path used to be the exception, and is not any more. `taskMayHaveBilled` decides
+whether a failed call may already have spent money, and it now answers by CODE first.
+`billedVerdictCodes` — the codes meaning a generation demonstrably ran,
+`task_output_invalid` today — is checked above every status-shaped arm; the provider-refusal
+codes (`provider_invalid_api_key`, `provider_key_forbidden`,
+`provider_insufficient_credits`, `upstream_no_compliant_provider`) get arms of their own
+rather than being caught as "a 401" and "a 403"; and `auth_credential_unavailable` is
+decided by code too, since it carries no HTTP status at all and a status arm would miss it
+entirely (it is raised before dispatch, so nothing left the machine and nothing can have
+billed). The remaining 401/403 arm is orientation for a code this build does not recognise,
+and it is LAST on purpose. Ordering is the argument: over-caveating an accurate total is
+cosmetic, while reporting a real charge as free is a number the user cannot recover — so a
+code that names spend must never be overridable by a status. If a status-shaped arm ever
+misclassifies a real code, give that code its own arm above; never add a number below.
+
 `IsAuth()` deliberately excludes the provider codes: telling someone whose credential the
 provider revoked to "check you pasted it in full" sends them round a re-entry loop that
 cannot work. See the upstream taxonomy below.
@@ -136,10 +157,11 @@ POST /v1/daintree/auth/verify
 ```
 
 It asks the provider directly (a model listing — no tokens spent) about the key this
-request would spend, which is the BACKEND's own on every install — a caller bearer is an
-account token and never reaches the provider. `valid:false` comes back as **200**, not 401: "this key is
-invalid" is a successful answer to the question, and a 401 would tell the client to retry
-the same header. A provider we cannot reach propagates as 502 `upstream_error`, because
+request would spend, which is the BACKEND's own upstream credential on every install: the
+CLI ships no provider key, and neither an account sign-in nor a caller bearer gives it one
+— both are account tokens, and neither reaches the provider. `valid:false` comes back as
+**200**, not 401: "this key is invalid" is a successful answer to the question, and a 401
+would tell the client to retry the same header. A provider we cannot reach propagates as 502 `upstream_error`, because
 then we do not know — and "could not check" must never be reported as "invalid".
 
 `valid` and `usable` answer different questions — "does the provider recognise this
@@ -378,7 +400,7 @@ client-side would be a guess presented as a bill.
 |---|---|---|
 | `/respond` body, and the terminal SSE `done` event | `cost: {total, main, selector, complete}` | the whole request, across every upstream call it made |
 | `/respond` `usage.cost` | float | the MAIN completion only |
-| `/tasks` `usage.cost` | float | that task's total (a repair pass is included) |
+| `/tasks` `usage.cost` | float | that task's total for the attempt that answered (a repair pass is included; an HTTP attempt this one replaced is not) |
 | `/v1/daintree/capabilities` | `respond.cost_reporting` | the contract, advertised so a client can degrade |
 
 Two rules the CLI **implements** rather than infers, because getting either wrong
@@ -396,14 +418,28 @@ Collapsed to one client rule: **a session total is a lower bound if any request 
 incomplete or carried no cost block at all.**
 
 Two gaps `complete` does not currently close, both of which the CLI handles on its own
-side. A **retried** respond call bills once per attempt, but each attempt's `cost.total`
-covers only its own request — the backend aggregates re-rolls *within* a request, never
-across HTTP attempts — so the client forces `Complete=false` when an earlier attempt got
-as far as `meta` (i.e. the selector already ran) and then failed. And a **failed** call
-still bills: `task_output_invalid` is raised only after a billed completion, often after
-a second billed repair, so a failed task reports unknown spend unless the failure is one
-where no generation can have run (a refused socket, a 400, an unfunded or unroutable
-request).
+side. A **retried** call can have billed on more than one HTTP attempt, and each attempt's
+`usage.cost` covers only its own request — the backend aggregates re-rolls *within* a
+request, never across HTTP attempts. For `/respond` the client forces `Complete=false` when
+an earlier attempt got as far as `meta` (i.e. the selector already ran) and then failed. For
+`/tasks` the same rule is enforced in the transport: before replaying a transient failure,
+`doJSONRetry` asks `taskMayHaveBilled` whether the attempt it is about to REPLACE could have
+billed and remembers the answer as `spendAbandoned`; `RunTask` then reports the task's
+figure with `Complete: !spendAbandoned`. So a task that succeeded after a billed-looking
+retry reports a **floor**, not the bill — and the flag has to be carried on the SUCCESS
+path, because a call that eventually succeeds hides exactly the same money as one that
+eventually fails. (The one-shot credential-refresh replay is not asked: it only ever
+replaces an identity error, which is refused at the door and provably free.) The two
+questions are also asked separately and in order: `spendAbandoned` answers for replaced
+attempts, `taskMayHaveBilled(err)` only for the error in hand, which is the last one.
+
+And a **failed** call may still have billed: `task_output_invalid` is raised only after a
+billed completion, often after a second billed repair, so a failed task reports unknown
+spend unless the failure proves no generation can have run — a refused socket, a contract
+error, an account verdict at the backend's own door, an unfunded or unroutable request, or a
+credential this process could not produce at all. Note that the proof is the CODE, never the
+status: `task_output_invalid` wearing a 400 is still billed, which is exactly why
+`billedVerdictCodes` is consulted first.
 
 One gap remains on the backend side and is tracked as
 [assistant-backend#31](https://github.com/daintreehq/assistant-backend/issues/31): a

@@ -155,10 +155,14 @@ object the gate reads. Two managers meant the gate deciding from a state nothing
 
 What it refuses is a session that ENDED, which is not the same as one that never began:
 
-- **Never signed in** — every install today — keeps working. The backend's open door
-  serves anonymous requests, and the manager reaches `signed_out` on its own the first
-  time anything asks it for a credential. Blocking on that state alone stopped unattended
-  work everywhere after a single request.
+- **Never signed in** keeps working. Against a deployment whose door is open — a local
+  backend, or a deployed one whose rollout has not reached `enforce` — anonymous requests
+  are served, and the manager reaches `signed_out` on its own the first time anything asks
+  it for a credential. Blocking on that state alone stopped unattended work everywhere
+  after a single request. Against a deployment that DOES require an account, the same
+  never-signed-in daemon is refused by the backend rather than by this gate, which is the
+  right layer for it: the gate exists to stop spending after a session ENDS, not to
+  second-guess what the deployment will accept.
 - **A session the daemon OBSERVED as live, then sees end**, stops it. A logout in
   another process bumps the shared revision, `refreshAuthPosture` notices on the next
   check, and `Runtime.authSawSession` is what remembers there was a session to lose. The

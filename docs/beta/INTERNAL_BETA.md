@@ -59,9 +59,9 @@ either.
 
 ## What it costs you
 
-**Nothing.** There is no key to supply, and the backend you are pointed at does not ask
-for an account: it holds the upstream credential and Daintree pays for every model call —
-turns you type, and also:
+**Nothing for the model calls.** There is no provider key to supply and no upstream bill
+reaches you: the backend holds the upstream credential and Daintree pays for every model
+call — turns you type, and also:
 
 - watcher checks (a small model classifying terminal output, on a cadence)
 - async supervision waking the assistant when work completes
@@ -72,6 +72,20 @@ as money, and it explains activity you did not ask for. `doctor`'s `upstream cre
 row reports whether the backend's own account can actually fund a turn, and treats "valid
 but no credit" as a FAILURE — that state fails every turn, so it should not read as
 healthy. If you see it, it is ours to fix, not yours.
+
+Paying nothing does not mean signing in to nothing. Those are separate questions: the first
+is about the upstream credential, which is always ours, and the second is about your
+Daintree ACCOUNT, which says who is calling. Whether a run needs one is the deployment's
+answer, never a guess from the endpoint's address, and `daintree-assistant auth status` is
+the command that asks — so it is the authority here, not this page. The default endpoint,
+`https://assistant.daintree.org`, is a secured staging deployment whose posture is being
+tightened during the beta; expect `auth status` to start saying `accounts  required` at some
+point, and one `auth login` per state root when it does.
+
+Sign-in belongs to the CLI. `daintree-assistant auth login` opens a browser and puts the
+refresh token in your OS keychain; inside the Assistant panel the same three things are
+`/login`, `/logout` and `/account`. Daintree's native Settings owns neither your account nor
+the backend URL, so it is not where to look when something about sign-in is wrong.
 
 ---
 

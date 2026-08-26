@@ -78,15 +78,18 @@ window.
 | Artifacts (oversized results, archived transcripts) | `state.db` | 90 days / 1,000 rows — deliberately the same window as the conversation, so a transcript stub can never outlive the payload it points at |
 | Attention inbox | `state.db` | Until resolved (7 days once terminal) |
 
-**The account subsystem never writes a token to `state.db`.** No provider credential
-exists on your machine at all, and a request from the CLI carries no `Authorization`
-header on the deployment you are pointed at.
+**The account subsystem never writes a token to `state.db`.** No provider credential exists
+on your machine at all. A request from the CLI carries your account token as its
+`Authorization` header when you are signed in, and no header at all when you are not — that
+bearer says who is calling and is never forwarded to a model provider. (The one other thing
+that can put a header there is the deprecated `DAINTREE_API_KEY` / `--api-key-file`
+override, which no normal install sets and which is likewise an account token, never a
+provider one.)
 
-If you ever sign in to a deployment that has accounts, the refresh token is the only
-account secret that persists, and it goes to the **macOS Keychain or the Linux Secret
-Service** — never to `state.db`, never to the project directory, never into an environment
-variable or a command line. The access token is never persisted at all; it lives in
-process memory and is gone when the process exits. What the state root does hold is
+When you sign in, the refresh token is the only account secret that persists, and it goes to
+the **macOS Keychain or the Linux Secret Service** — never to `state.db`, never to the
+project directory, never into an environment variable or a command line. The access token
+is never persisted at all; it lives in process memory and is gone when the process exits. What the state root does hold is
 `auth/credential.json`, a non-secret descriptor naming WHICH credential this machine has,
 plus a revision marker and lock files. Where no OS credential store is reachable, nothing
 persists and the session dies with the process — `auth status` says `credentials  this

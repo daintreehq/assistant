@@ -539,14 +539,22 @@ selection rather than replacing it, so the turn still loads whatever else it nee
 
 Four rules worth knowing before you script against them:
 
-- **You need no key.** The backend holds its own upstream credential and funds every
-  model call from it, so a headless run works with nothing but a prompt. `--api-key-file`
-  and `DAINTREE_API_KEY` do NOT change that: they supply a bearer that says who is
-  CALLING, which a deployment with accounts configured will verify and one without will
-  ignore entirely. Neither pays for anything. If a deployment does require an account,
-  sign in interactively once (`daintree-assistant auth login`) and headless runs on that
-  machine pick the session up from the keychain — there is no headless login flow,
-  because the authorization code arrives through a browser. See
+- **You supply no key that pays.** The backend holds its own upstream credential and funds
+  every model call from it. `--api-key-file` and `DAINTREE_API_KEY` do NOT change that:
+  they supply a bearer that says who is CALLING, which a deployment with accounts
+  configured will verify and one without will ignore entirely. Neither pays for anything.
+  What a run may still need is an ACCOUNT, and that is the deployment's answer, never
+  inferred from the endpoint's hostname and never compiled in. Note WHEN it is asked: a run
+  with no local credential does not preflight discovery at all — it sends the request
+  without a managed bearer and an enforcing backend's rejection is what decides. Ask
+  deliberately if you need to know first; `auth status` is the command that reads
+  `GET /v1/daintree/auth/config`. **There is no headless login flow, and there is no refresh
+  token to pass:** the flow needs a browser (the authorization code comes back to the fixed
+  loopback callback `http://127.0.0.1:42813/oauth/callback` and is exchanged by the CLI),
+  and the refresh token lives in the OS credential store and is never read from an
+  environment variable or argv. So a headless run REUSES a session: sign in interactively
+  once on that machine (`daintree-assistant auth login`, under the same state root — see
+  [Isolation](#isolation)) and later runs pick it up from the keychain. See
   [`auth status --json`](#auth-status---json) for reading account state from a script.
 - **The key never rides argv.** `ps` is world-readable, so `--api-key-file` takes a
   path. The file is read with a bounded read (a FIFO would otherwise defeat
@@ -635,11 +643,17 @@ session. Cancellation, a deployment with no accounts, and a genuine sign-in fail
 
 A harness should never touch the developer's real state. `--state-dir` relocates the
 database, the artifacts and the owner lease, so an isolated run shares nothing with a
-attached session the developer has open. Nothing else needs supplying against a backend
-that asks for no account — which is every deployment today. Note that `--state-dir` is
-also the account boundary: a login lives under the state ROOT, so an isolated run does
-NOT inherit the developer's session, and against a deployment that required one it would
-have to sign in under that directory itself.
+attached session the developer has open. Against a backend that asks for no account,
+nothing else needs supplying.
+
+Note that `--state-dir` is also the account boundary, and that makes isolation and sign-in
+pull against each other: a login lives under the state ROOT, so an isolated run does NOT
+inherit the developer's session, and against a deployment that requires one it would have
+to sign in under that directory itself — interactively, with a browser, since there is no
+headless login. Point a harness that needs an account at the state root the login used, or
+give that directory its own one-time sign-in; there is no way to inject a refresh token or
+a ready-made session. (`DAINTREE_API_KEY` / `--api-key-file` are a different thing entirely
+— a static caller bearer, not a CLI session, and deprecated.)
 
 ```bash
 daintree-assistant \
