@@ -52,7 +52,11 @@ func backendClientConfig(cfg config.AppConfig, ledger *costledger.Ledger, tokenS
 		// cannot both be right about who is calling and the client prefers TokenSource
 		// over APIKey. Silently overriding an explicit key would be the more surprising
 		// of the two — see the doctor warning, which tells the user the key is winning.
-		TokenSource: tokenSource,
+		//
+		// A nil source is NOT the same as "send nothing": credentialSource decides which
+		// of the two nil readings this is, and fails the client closed when the account
+		// layer could not be built at all.
+		TokenSource: credentialSource(cfg, tokenSource),
 		ClientInfo: backend.ClientInfo{
 			Name:     "daintree-cli",
 			Platform: runtime.GOOS,
@@ -118,7 +122,22 @@ func backendClientConfig(cfg config.AppConfig, ledger *costledger.Ledger, tokenS
 // Listing what a backend can load is a question about the BACKEND, and it has to be
 // answerable while another assistant owns the project.
 func NewProbeBackendClient(cfg config.AppConfig) *backend.Client {
-	return backend.NewClient(backendClientConfig(cfg, nil, nil))
+	// ANONYMOUS ON PURPOSE, said out loud rather than by passing nil. credentialSource
+	// reads a nil source as "no account layer was handed over", which on a machine with
+	// no caller key is a construction fault and fails the request closed. The catalog read
+	// is protected but not account-BOUND: it describes the deployment, not the user, so it
+	// stays answerable on a broken state root — which is precisely when someone runs a
+	// probe.
+	//
+	// The caller key is the one thing that must still reach it, and it reaches it by this
+	// staying nil: NewClient prefers TokenSource over APIKey, so naming NoTokenSource here
+	// unconditionally would silently drop the key the operator exported. nil with a key set
+	// is the caller-key branch of credentialSource, which returns it unchanged.
+	tokens := backend.TokenSource(backend.NoTokenSource{})
+	if strings.TrimSpace(cfg.APIKey) != "" {
+		tokens = nil
+	}
+	return backend.NewClient(backendClientConfig(cfg, nil, tokens))
 }
 
 // accountClientConfig builds the shared shape of both account clients below.
@@ -206,10 +225,12 @@ func (u unobservedTokenSource) Secrets() []string { return u.mgr.Secrets() }
 // how a surface tells them apart. A deprecated caller key overrides account identity for
 // every request, so building a manager beside it would put two credentials in play with
 // only one able to win: a deliberate choice, and nothing to report. A manager that cannot
-// be CONSTRUCTED is a broken state root — still not a reason to refuse to start (the
-// client falls back to sending no credential, exactly as it does for a signed-out user),
-// but a local fault the user has to be told about, because every account surface would
-// otherwise describe their machine's problem as a property of the deployment.
+// be CONSTRUCTED is a broken state root — still not a reason to refuse to START, because
+// the surfaces that diagnose it (doctor's account row, `/account`, `/backend`) read local
+// configuration and are exactly what someone runs next, but the session's WORK routes fail
+// closed from that point on (see credentialSource). It is a local fault the user has to be
+// told about, because every account surface would otherwise describe their machine's
+// problem as a property of the deployment.
 func NewAccountManager(cfg config.AppConfig) *auth.Manager {
 	if strings.TrimSpace(cfg.APIKey) != "" {
 		return nil
@@ -362,4 +383,75 @@ func accountTokenSource(mgr *auth.Manager) backend.TokenSource {
 		return nil
 	}
 	return mgr
+}
+
+// credentialSource decides what a client actually presents, and is the one place a
+// session with NO account layer stops being an ANONYMOUS one.
+//
+// A nil tokenSource means no account manager was handed over, and NewAccountManager
+// returns nil for exactly two reasons — which is why this re-asks accountLayerFault
+// rather than assuming either:
+//
+//   - A deliberate DAINTREE_API_KEY. accountLayerFault is silent for it, and nil is
+//     returned UNCHANGED so NewClient's own APIKey fallback takes it. Returning any
+//     typed source here would win the client's TokenSource-beats-APIKey preference and
+//     silently disable the key the operator exported — see accountTokenSource, where the
+//     same trap is documented for the same reason.
+//   - A construction fault: an unwritable state root, a plain file where the `auth`
+//     directory belongs, EACCES, ENOSPC. This used to fall through to NoTokenSource, so
+//     the client omitted the Authorization header and the turn went out as an anonymous
+//     principal. Against a deployment whose door is open that SUCCEEDS, and this
+//     machine's local fault is quietly attributed to whoever the open door resolves to;
+//     against one that enforces accounts it comes back as a generic server rejection
+//     naming the deployment, for a problem that is entirely on this disk. Neither
+//     reading is visible, and neither is true.
+//
+// A HEALTHY manager with no credential is not this case at all: it is a real token
+// source that returns "" with a nil error, so an account-optional deployment keeps
+// running signed out exactly as it does today.
+//
+// The abort itself is already built: Client.credential refuses to send when its source
+// errors, and raises CodeCredentialUnavailable rather than CodeAuthRequired precisely
+// because nothing left the process. Public paths (health, version, auth discovery) never
+// consult a source at all, and the surfaces that NAME this fault — doctor's account row,
+// `/account`, `/backend` — read local configuration, so the diagnosis stays reachable.
+// A protected diagnostic does not: doctor's upstream-credential row calls VerifyKey through
+// the session client, so on this fault it reports the local credential failure instead of
+// the deployment's verdict. That is honest — no request could be made — but it is a row
+// that changes shape here, and the account row above it is the one carrying the remedy.
+func credentialSource(cfg config.AppConfig, tokenSource backend.TokenSource) backend.TokenSource {
+	if tokenSource != nil {
+		return tokenSource
+	}
+	fault := accountLayerFault(cfg)
+	if fault == nil {
+		return nil
+	}
+	return backend.UnavailableTokenSource{Err: &accountCredentialFault{fault: fault}}
+}
+
+// accountCredentialFault carries a construction fault to the request path as the SAME
+// sentence every other account surface prints.
+//
+// Two properties, both load-bearing. Error() renders through AccountFaultMessage, so the
+// local auth code (`auth_exchange_failed`, which names a token exchange no code path
+// attempted) and the wrapped os.MkdirAll cause (which embeds the state-root path) are
+// both dropped before the text can reach a turn's prose — the boundary AccountFaultMessage
+// documents. And Unwrap keeps the typed fault reachable, so IsAccountLayerFault still
+// recognises it after the backend client has wrapped it in its own envelope, and a surface
+// branching on the class does not have to read message text.
+type accountCredentialFault struct{ fault error }
+
+func (e *accountCredentialFault) Error() string {
+	if e == nil {
+		return ""
+	}
+	return AccountFaultMessage(e.fault)
+}
+
+func (e *accountCredentialFault) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.fault
 }

@@ -177,14 +177,6 @@ func (a *App) SetBackendURL(rawURL string) (string, error) {
 		a.clearEndpointRejections()
 		return target, nil
 	}
-	// BEFORE the swap. If a turn is running we must change nothing at all — a swap that
-	// happened and then reported failure would be the worst of both.
-	if a.Session != nil {
-		if err := a.Session.DropBackendState(); err != nil {
-			return "", err
-		}
-	}
-
 	// Rebuild through the SAME config builder Create uses, so the replacement inherits
 	// every hook — the debug-log tracing especially, whose absence would only show up
 	// much later as a session log with a hole in it from the moment of the switch.
@@ -200,6 +192,42 @@ func (a *App) SetBackendURL(rawURL string) (string, error) {
 	// Replaced on the App as well as handed to the client, so the two cannot diverge:
 	// every account question after a switch is about the endpoint now in use.
 	mgr := NewAccountManager(cfg)
+	// …and if it could not be built, NOTHING is committed.
+	//
+	// nil has two readings here, and only one of them is a fault: a deliberate caller key
+	// replaces account identity for every request, which is a configuration this command
+	// has no business refusing. accountLayerFault is the same discriminator every other
+	// account surface asks, so /login, /account, doctor and this all name one problem.
+	//
+	// Committing anyway is what the old code did, and it installed `a.Auth = nil` beside a
+	// client for the NEW endpoint that would have sent every turn with no credential at
+	// all — and then PERSISTED that endpoint, so the next launch started there too. A
+	// broken state root is not a reason to lose the working endpoint you were already on.
+	//
+	// This runs before DropBackendState on purpose: that call is the first thing in this
+	// function that MUTATES the session, and a refusal that has already discarded the
+	// server's signed runbook-selection state has not, in fact, changed nothing.
+	if mgr == nil {
+		if fault := accountLayerFault(cfg); fault != nil {
+			// Wrapped, not formatted flat. ResetBackendURL runs its own cleanup after this
+			// returns and deletes the stored preference for every error it does not
+			// RECOGNIZE — so an unrecognizable refusal here reports "nothing changed"
+			// while having forgotten the endpoint the user was on, which the next launch
+			// then moves. Same trap ErrBackendPinned is a sentinel for. The wrapper is the
+			// one whose Error() drops the state-root path, so the %w keeps the type
+			// without putting the path back.
+			return "", fmt.Errorf("the account layer could not be built, so this session stays where it is: %w", &accountCredentialFault{fault: fault})
+		}
+	}
+
+	// BEFORE the swap. If a turn is running we must change nothing at all — a swap that
+	// happened and then reported failure would be the worst of both.
+	if a.Session != nil {
+		if err := a.Session.DropBackendState(); err != nil {
+			return "", err
+		}
+	}
+
 	sw.Swap(backend.NewClient(backendClientConfig(cfg, a.CostLedger, accountTokenSource(mgr))))
 
 	a.cfgMu.Lock()
@@ -326,7 +354,12 @@ func (a *App) ResetBackendURL() (string, error) {
 	// case and for a stronger reason: the pin is a security boundary (see
 	// SetBackendURL), and "forget the preference" is a switch route like any other, so
 	// clearing the file here would let the refusal be worked around by asking to reset.
-	if errors.Is(err, agent.ErrTurnInProgress) || errors.Is(err, ErrBackendPinned) {
+	//
+	// An account-layer fault is the third member of that set, and the newest: SetBackendURL
+	// refuses before it commits anything, so there is likewise nothing to clean up — and
+	// deleting the preference here would take the working endpoint away from a user whose
+	// only actual problem is a directory on their own disk.
+	if errors.Is(err, agent.ErrTurnInProgress) || errors.Is(err, ErrBackendPinned) || IsAccountLayerFault(err) {
 		return "", err
 	}
 	a.switchMu.Lock()

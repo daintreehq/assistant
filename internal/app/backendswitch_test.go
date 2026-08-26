@@ -487,3 +487,139 @@ func TestSetBackendURLKeepsTheRejectionWhenTheChoiceCannotBeSaved(t *testing.T) 
 		t.Error("`/backend` stopped naming the refused preference the user still has to repair")
 	}
 }
+
+// newOfflineAppRootedAt is newOfflineApp with the state root chosen by the caller, so a
+// test can break the account layer BEFORE boot — which is the real shape of this fault. It
+// is not a mid-session corruption; it is a machine that was already broken when the
+// session started, and the switch is just the next thing the user tries.
+func newOfflineAppRootedAt(t *testing.T, root, apiKey string) *App {
+	t.Helper()
+	a, err := Create(CreateOptions{
+		Overrides: config.ConfigOverrides{
+			Offline:              boolPtr(true),
+			StateDir:             &root,
+			ProjectPath:          &root,
+			Tier:                 strPtr("operator"),
+			APIKey:               &apiKey,
+			WorkflowIntelligence: boolPtr(false),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Shutdown() })
+	return a
+}
+
+// A switch that cannot build an account layer for the target must change NOTHING.
+//
+// The old code committed unconditionally: it swapped the live client, wrote
+// a.Config.BackendURL, set a.Auth = nil, and then PERSISTED the new endpoint — so a broken
+// state root cost the user the working endpoint they were already on, on this launch and
+// every launch after it, while every turn went out with no credential at all.
+func TestSetBackendURLAbortsWhenTheAccountLayerCannotBeBuilt(t *testing.T) {
+	root := brokenStateRoot(t)
+	a := newOfflineAppRootedAt(t, root, "")
+
+	beforeLive := a.Backend.BaseURL()
+	beforeCfg := a.SnapshotConfig().BackendURL
+	// Seeded so the durable half has something to LOSE. Asserting "nothing was stored" on
+	// a session that never stored anything passes for a version of this that deletes.
+	endpointPath := a.SnapshotConfig().EndpointPath
+	if err := config.SaveBackendURL(endpointPath, backend.LocalBaseURL); err != nil {
+		t.Fatalf("seed the stored preference: %v", err)
+	}
+
+	target, err := a.SetBackendURL("https://switched.example")
+	if err == nil {
+		t.Fatalf("the switch succeeded with an unbuildable account layer (target %q)", target)
+	}
+
+	if got := a.Backend.BaseURL(); got != beforeLive {
+		t.Errorf("the live client moved to %q (was %q)", got, beforeLive)
+	}
+	if got := a.SnapshotConfig().BackendURL; got != beforeCfg {
+		t.Errorf("the config moved to %q (was %q)", got, beforeCfg)
+	}
+	if a.Auth != nil {
+		t.Error("a manager appeared out of a refused switch")
+	}
+	// The preference is the durable half, and the one a failed switch must not touch:
+	// persisting a target that never took effect moves the NEXT launch as well.
+	if stored, _ := config.LoadBackendURL(endpointPath); stored != backend.LocalBaseURL {
+		t.Errorf("a refused switch left the stored preference as %q, want it untouched at %q", stored, backend.LocalBaseURL)
+	}
+
+	// The refusal has to be the account layer's diagnosis, not a generic one — otherwise
+	// the user reads a `/backend` problem and goes looking at endpoints.
+	sentence := AccountFaultMessage(a.AccountLayerFault())
+	if sentence == "" {
+		t.Fatal("the App reports no fault to explain the refusal")
+	}
+	if !strings.Contains(err.Error(), sentence) {
+		t.Errorf("refusal %q does not carry the shared diagnosis %q", err.Error(), sentence)
+	}
+	// `/backend` is rendered in the conversation, so the same path boundary applies here
+	// as to a turn's prose: the state root belongs in doctor's hint and nowhere else.
+	if strings.Contains(err.Error(), root) {
+		t.Errorf("the state-root path reached the refusal: %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "auth_exchange_failed") {
+		t.Errorf("the raw auth code reached the refusal: %q", err.Error())
+	}
+}
+
+// …and the discrimination must not misfire. A caller key means no manager is WANTED, so
+// nil is the correct outcome and the switch proceeds — even on a state root that would
+// fault, because no auth directory is needed when no managed sign-in is in play.
+func TestSetBackendURLStillSwitchesUnderACallerKey(t *testing.T) {
+	a := newOfflineAppRootedAt(t, brokenStateRoot(t), "fake-caller-key-for-tests")
+
+	target, err := a.SetBackendURL("https://switched.example")
+	if err != nil {
+		t.Fatalf("a caller-key session was refused a switch: %v", err)
+	}
+	if target != "https://switched.example" {
+		t.Fatalf("returned target = %q", target)
+	}
+	if got := a.Backend.BaseURL(); got != "https://switched.example" {
+		t.Errorf("the live client did not move: %q", got)
+	}
+	if got := a.SnapshotConfig().BackendURL; got != "https://switched.example" {
+		t.Errorf("the config did not move: %q", got)
+	}
+}
+
+// The refusal has to be RECOGNIZABLE, not just correct.
+//
+// ResetBackendURL deletes the stored preference for every error it does not know, on the
+// grounds that SetBackendURL wrote the default on its way through — so a refusal it cannot
+// classify reports "nothing changed" while having forgotten the endpoint the user was on,
+// which the next launch then silently moves them off. ErrTurnInProgress and
+// ErrBackendPinned are sentinels for exactly this reason; an account-layer fault is the
+// third member of the set.
+func TestResetBackendURLKeepsTheStoredChoiceWhenTheAccountLayerCannotBeBuilt(t *testing.T) {
+	root := brokenStateRoot(t)
+	// Seeded BEFORE boot, so the session comes up ON the remembered endpoint. Seeding
+	// afterwards would leave the session on the default, and `default` is then the
+	// same-target early return — a path that never reaches the account layer at all, so
+	// the test would pass while proving nothing.
+	endpointPath := config.EndpointPath(root)
+	if err := config.SaveBackendURL(endpointPath, backend.LocalBaseURL); err != nil {
+		t.Fatalf("seed the stored preference: %v", err)
+	}
+	a := newOfflineAppRootedAt(t, root, "")
+	if got := a.SnapshotConfig().BackendURL; got != backend.LocalBaseURL {
+		t.Fatalf("the session did not boot on the remembered endpoint: %q", got)
+	}
+
+	if _, err := a.ResetBackendURL(); err == nil {
+		t.Fatal("the reset succeeded with an unbuildable account layer")
+	} else if !IsAccountLayerFault(err) {
+		t.Errorf("the refusal is not recognisable as a construction fault: %v", err)
+	}
+
+	if stored, _ := config.LoadBackendURL(endpointPath); stored != backend.LocalBaseURL {
+		t.Errorf("a refused reset left the stored preference as %q, want it untouched at %q", stored, backend.LocalBaseURL)
+	}
+}
