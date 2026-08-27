@@ -26,7 +26,20 @@ type CommandMeta struct {
 	// loop services no interrupt, no approval and no shutdown, and posts nothing — the
 	// panel simply freezes. A slow command is dispatched to a worker instead. The line
 	// REPL ignores this: it has one user, one terminal, and nothing else to service.
+	//
+	// A command that ASKS the user something is the sharpest case: the answer arrives as
+	// a command on the very loop the command is blocking, so running it inline is not
+	// slow, it is a deadlock.
 	Slow bool
+	// SlowWithoutArgument marks a command that blocks ONLY in its bare form.
+	//
+	// `/backend` is the case: with a target it resolves, swaps and returns, and with no
+	// target it opens a picker and waits for a person. Marking the whole command Slow
+	// would move the argument form off the loop too — and that form reconfigures the
+	// endpoint, which is the one thing that must stay ordered against the turns using
+	// it. A command that returns promptly belongs on the loop, where "promptly" is
+	// enforced by the loop being single-threaded rather than by a comment.
+	SlowWithoutArgument bool
 }
 
 // COMMAND_REGISTRY is the ordered, canonical command table. Aliases (? ⇐ help;
@@ -46,7 +59,7 @@ var COMMAND_REGISTRY = []CommandMeta{
 	{Name: "explain", Syntax: "/explain [runId]", Palette: "reconstruct a run's timeline", Help: "replay a run; no id lists recent runs"},
 	{Name: "models", Syntax: "/models", Palette: "backend-owned model routing", Help: "show backend-owned model routing"},
 	{Name: "cost", Syntax: "/cost", Palette: "what this session has spent", Help: "upstream cost this session ran up, as the backend reported it"},
-	{Name: "backend", Syntax: "/backend [target]", Palette: "which backend answers", Help: "switch backend (remembered); no arg lists, 'default' forgets"},
+	{Name: "backend", Syntax: "/backend [target]", Palette: "which backend answers", Help: "switch backend (remembered); no arg asks, 'default' forgets", SlowWithoutArgument: true},
 	{Name: "login", Syntax: "/login", Palette: "sign in to your account", Help: "sign in through your browser", Slow: true},
 	{Name: "logout", Syntax: "/logout", Palette: "sign out on this machine", Help: "sign out on this machine", Slow: true},
 	{Name: "account", Syntax: "/account", Palette: "who you are signed in as", Help: "account state, plan, and which backend it belongs to", Slow: true},
@@ -213,20 +226,45 @@ func padRight(s string, width int) string {
 	return s + strings.Repeat(" ", width-n)
 }
 
-// IsSlowCommand reports whether a slash line names a command marked Slow — see
-// CommandMeta.Slow for what that means and who is expected to care.
+// IsExclusiveCommand reports whether a slash LINE takes the session for itself.
 //
-// Aliases resolve first, so `/signin` answers the same as `/login`; an unknown command
-// is not slow, because the answer it produces is immediate.
-func IsSlowCommand(line string) bool {
-	cmd, _, _ := parseCommand(strings.TrimSpace(line))
+// The same invocations as IsSlowCommand's SlowWithoutArgument half, asked for a
+// different reason: those are the ones that RESERVE the session while they wait on a
+// decision (`/backend` with no argument), so a turn or another command admitted
+// meanwhile would be refused by that reservation — after the host had already accepted
+// it. `/login` is slow and NOT exclusive: it waits on a browser, holds nothing, and
+// there is no reason someone cannot keep working while it does.
+func IsExclusiveCommand(line string) bool {
+	cmd, arg, _ := parseCommand(strings.TrimSpace(line))
 	if cmd == "" {
 		return false
 	}
 	name := canonical(cmd)
 	for _, c := range COMMAND_REGISTRY {
 		if c.Name == name {
-			return c.Slow
+			return c.SlowWithoutArgument && strings.TrimSpace(arg) == ""
+		}
+	}
+	return false
+}
+
+// IsSlowCommand reports whether a slash LINE will block — see CommandMeta.Slow for what
+// that means and who is expected to care.
+//
+// It takes the whole line, not a name, because SlowWithoutArgument is a property of the
+// invocation rather than of the command: `/backend` opens a picker and waits for a
+// person, `/backend local` resolves and returns. Aliases resolve first, so `/signin`
+// answers the same as `/login`; an unknown command is not slow, because the answer it
+// produces is immediate.
+func IsSlowCommand(line string) bool {
+	cmd, arg, _ := parseCommand(strings.TrimSpace(line))
+	if cmd == "" {
+		return false
+	}
+	name := canonical(cmd)
+	for _, c := range COMMAND_REGISTRY {
+		if c.Name == name {
+			return c.Slow || (c.SlowWithoutArgument && strings.TrimSpace(arg) == "")
 		}
 	}
 	return false

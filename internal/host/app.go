@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/daintreehq/assistant/internal/agent"
@@ -159,13 +160,19 @@ type CommandOutcome struct {
 	ConversationCleared bool
 }
 
-// AskChoiceRequest is a multiple-choice question the model needs answered before it can
-// continue (user.askMultipleChoice). Mirrored locally rather than imported from
-// internal/tools for the same reason ConfirmRequest is: this package compiles in
-// isolation against agent/config/domain and must not reach into the tool layer.
+// AskChoiceRequest is a multiple-choice question that must be answered before its
+// caller can continue — the model mid-turn (user.askMultipleChoice), or the CLI itself
+// on a slash command that exists to pick one of a short list. Mirrored locally rather
+// than imported from internal/tools for the same reason ConfirmRequest is: this package
+// compiles in isolation against agent/config/domain and must not reach into the tool
+// layer.
 type AskChoiceRequest struct {
 	// ToolCallID ties the question to its tool call (informational).
 	ToolCallID string
+	// Local marks a question the CLI asked on its own account, which belongs to no turn.
+	// See tools.AskChoiceRequest.Local: without it the bridge stamps whatever turn is
+	// running and the answer lands in a turn that never asked.
+	Local bool
 	// Question is the human-facing prompt, with no option labels baked in.
 	Question string
 	// Options are the labelled choices in order. Labels (A, B, C…) are assigned by the
@@ -182,6 +189,17 @@ type AskChoiceOption struct {
 	Text  string
 }
 
+// ErrQuestionDismissed reports that the question WAS put to the user and they closed it
+// without choosing. Distinct from a context cancellation, which means the turn went away
+// underneath the sheet — the model must be able to tell "you declined to answer" (decide
+// without asking) from "the turn was abandoned" (the question was never reached).
+var ErrQuestionDismissed = errors.New("host: question dismissed without an answer")
+
+// ErrQuestionBusy reports that another question is already outstanding. The host renders
+// ONE sheet, so a second request would replace the first and strand whoever asked it —
+// see Bridge.AskChoice. Recoverable: the caller decides without asking, or asks later.
+var ErrQuestionBusy = errors.New("host: a question is already waiting for an answer")
+
 // AskChoiceAnswer is the host's selection. Index is 0-based.
 type AskChoiceAnswer struct {
 	Label string
@@ -196,8 +214,8 @@ type AppHooks struct {
 	// Confirm is the tool-confirm hook: a mutating tool calls it and blocks until
 	// the approval is decided (true) / rejected / times out (false).
 	Confirm func(ctx context.Context, req ConfirmRequest) bool
-	// AskChoice is the question hook: the model asks a finite question and the
-	// dispatch blocks until the host answers or the question is cancelled.
+	// AskChoice is the question hook: a finite question is put to the host and the
+	// caller blocks until it answers or the question is cancelled.
 	//
 	// It exists because the HOST is the product surface, and without it the one thing
 	// a user actually runs was the one surface that could not be asked a question —
@@ -277,6 +295,15 @@ type CommandProgressRunner interface {
 	// RunCommandWithProgress is RunCommand plus a stage reporter. progress is called
 	// with short human-readable lines and may be called from the calling goroutine only.
 	RunCommandWithProgress(ctx context.Context, line string, progress func(stage string)) CommandOutcome
+
+	// IsExclusiveCommand reports whether a slash line takes the session for itself —
+	// the commands that reserve it while waiting on a user decision.
+	//
+	// The host refuses prompts and other commands while one is running, rather than
+	// admitting them and letting the runtime refuse them a moment later: an admitted
+	// prompt has already started a turn and already been echoed, so failing it there
+	// reads as the engine breaking rather than as the session being busy.
+	IsExclusiveCommand(line string) bool
 
 	// IsSlowCommand reports whether a slash line names a command that may block for
 	// longer than the command loop can afford to stop for.

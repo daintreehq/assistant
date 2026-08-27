@@ -1,12 +1,16 @@
 // Package questionx holds user.askMultipleChoice — the one tool that lets the model
 // ask the human a single, finite, multiple-choice question mid-turn and BLOCK on the
-// answer. It is the only structured way the assistant collects a decision from the
-// user: the model supplies a question + 2–26 plain-text options; the CLI assigns
-// A/B/C… labels, renders a selection sheet in place of the composer, waits for the
-// pick, and returns the chosen option as a normal tool result so the model continues
-// the SAME turn with the answer in hand. The tool never mutates anything — it drives a
-// UI interaction (RiskUI) and reaches the user purely through ToolContext.AskChoice, so
-// the family needs no external providers.
+// answer. It is the only structured way the MODEL collects a decision from the user:
+// the model supplies a question + 2–26 plain-text options; the CLI assigns A/B/C…
+// labels, the surface renders a selection sheet (in the embedded host, above a composer
+// disabled for as long as it is up), waits for the pick, and returns the chosen option
+// as a normal tool result so the model continues the SAME turn with the answer in hand.
+// The tool never mutates anything — it drives a UI interaction (RiskUI) and reaches the
+// user purely through ToolContext.AskChoice, so the family needs no external providers.
+//
+// The CHANNEL is not the model's alone: a slash command that exists to pick one of a
+// short list uses the same one, marked Local (see tools.AskChoiceRequest). This tool is
+// the model's door to it.
 package questionx
 
 import (
@@ -33,7 +37,7 @@ const (
 
 const (
 	minOptions       = 2
-	maxOptions       = 26 // A..Z — the label alphabet
+	maxOptions       = tools.MaxChoiceOptions // A..Z — the label alphabet
 	maxQuestionRunes = 500
 	maxOptionRunes   = 240
 )
@@ -177,7 +181,7 @@ func handleAsk(ctx context.Context, raw json.RawMessage, tctx *tools.ToolContext
 		} else {
 			seen[key] = true
 		}
-		opts[i] = tools.ChoiceOption{Label: labelFor(i), Text: clean}
+		opts[i] = tools.ChoiceOption{Label: tools.ChoiceLabel(i), Text: clean}
 	}
 	def := 0
 	if a.DefaultIndex != nil {
@@ -210,8 +214,9 @@ func handleAsk(ctx context.Context, raw json.RawMessage, tctx *tools.ToolContext
 				"The user closed the question without choosing an option. Decide without asking, or ask differently.",
 				tools.Unrecoverable())
 		}
-		// Any other error means the surface couldn't ask (e.g. ErrNoAskChoiceHook in a
-		// one-shot / host run that offered the tool but has no interactive sheet).
+		// Any other error means the surface couldn't ask — ErrNoAskChoiceHook in a
+		// one-shot that offered the tool but has nobody to ask, or a surface that has a
+		// sheet and is already using it for somebody else's question.
 		return tools.Fail(codeUnavailable, "Could not ask the user: "+err.Error(), tools.Unrecoverable())
 	}
 
@@ -226,12 +231,6 @@ func handleAsk(ctx context.Context, raw json.RawMessage, tctx *tools.ToolContext
 		"options":     opts,
 	}
 	return tools.Ok(summary, result)
-}
-
-// labelFor maps a 0-based option index to its display label: 0→A, 1→B, … 25→Z. The
-// caller has already bounded the option count to maxOptions, so this never overflows Z.
-func labelFor(i int) string {
-	return string(rune('A' + i))
 }
 
 // ansiRe matches a CSI escape sequence (ESC [ … final-byte) so a stray colour code in

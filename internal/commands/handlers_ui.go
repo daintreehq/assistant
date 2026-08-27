@@ -12,6 +12,7 @@ import (
 	"github.com/daintreehq/assistant/internal/backend"
 	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/storage"
+	"github.com/daintreehq/assistant/internal/tools"
 	"github.com/daintreehq/assistant/internal/workflowgraph"
 )
 
@@ -108,7 +109,7 @@ func HandleUICommandWithProgress(ctx context.Context, line string, a *app.App, p
 	case "account":
 		return UICommandResult{Handled: true, Title: "Account", Text: accountText(ctx, a)}
 	case "backend":
-		return UICommandResult{Handled: true, Title: "Backend", Text: backendText(a, arg)}
+		return UICommandResult{Handled: true, Title: "Backend", Text: backendText(ctx, a, arg)}
 	case "routing":
 		return UICommandResult{Handled: true, Title: "Routing", Text: routingText(ctx, a)}
 	case "permissions":
@@ -611,12 +612,103 @@ func modelsText(a *app.App) string {
 		padRight("model", 8) + ": daintree-assistant"
 }
 
-func backendText(a *app.App, arg string) string {
-	arg = strings.TrimSpace(arg)
-	if arg == "" {
-		return a.DescribeBackendChoices()
+func backendText(ctx context.Context, a *app.App, arg string) string {
+	if arg = strings.TrimSpace(arg); arg != "" {
+		return BackendSwitchText(a, arg)
 	}
-	return BackendSwitchText(a, arg)
+	// A pinned session cannot switch at all, so there is nothing to pick. The listing
+	// says why, which is the only useful answer here.
+	if a.BackendSwitchable() {
+		if text, asked := backendPickText(ctx, a); asked {
+			return text
+		}
+	}
+	// No picker on this surface (one-shot, a non-TTY). The printed menu is the whole
+	// answer there — it names the live endpoint and says how to switch — so falling back
+	// to it is a degradation in FORM only.
+	return a.DescribeBackendChoices()
+}
+
+// backendPickText runs `/backend` with no argument as a real multiple-choice question.
+// The bool reports whether the question was actually PUT to someone: false means this
+// surface has no picker and the caller should print the menu instead.
+//
+// The command blocks here while the sheet is open, which is why the bare form is
+// registered SlowWithoutArgument — the embedded host runs commands inline on its command
+// loop, and a loop parked on a question it is itself supposed to deliver the answer to
+// would deadlock. `/backend <target>` stays on the loop: it resolves and returns.
+func backendPickText(ctx context.Context, a *app.App) (string, bool) {
+	// RESERVED BEFORE THE QUESTION IS ASKED, not checked after it is answered.
+	//
+	// Asking first and checking later is the one outcome a question must never produce:
+	// the sheet opens during a turn, the user reads it, chooses — and is told the switch
+	// could not be made. Reserving up front means the picker is either refused before
+	// anyone looks at it, or is guaranteed to apply when it is answered.
+	token, release, err := a.ReserveEndpointSwitch()
+	if err != nil {
+		// The same words the typed command uses for the same refusal. Two surfaces
+		// describing one condition differently is how a user ends up unsure which of
+		// them is telling the truth.
+		return "A turn is running. Switching endpoints mid-turn would send its next round " +
+			"somewhere that cannot read it — wait for this one to finish, then try again.", true
+	}
+	defer release()
+
+	question, picks, def := a.BackendChoiceQuestion()
+	opts := make([]tools.ChoiceOption, len(picks))
+	for i, p := range picks {
+		opts[i] = tools.ChoiceOption{Label: tools.ChoiceLabel(i), Text: p.Text}
+	}
+	ans, err := a.AskChoice(ctx, tools.AskChoiceRequest{
+		// LOCAL: this is the CLI asking on its own account, not the model mid-turn, so
+		// the answer must not be recorded inside whatever turn happens to be running.
+		Local:    true,
+		Question: question,
+		Options:  opts,
+		Default:  def,
+	})
+	switch {
+	case err == nil:
+		// Answered. Fall through to applying it.
+	case errors.Is(err, tools.ErrNoAskChoiceHook):
+		// The ONLY route back to the printed menu. Nothing was put to anybody, so the
+		// listing is still the whole answer here.
+		return "", false
+	case errors.Is(err, tools.ErrQuestionDismissed), errors.Is(err, context.Canceled), ctx.Err() != nil:
+		// The question WAS put and settled without a choice — dismissed, or cancelled
+		// with the command by an interrupt or a teardown. Both leave the session exactly
+		// where it was, and both report it: a silent return reads as the command having
+		// failed, and printing the menu after an interrupt answers a question the user
+		// just took back.
+		//
+		// The two are not split apart here on purpose. The distinction is real and
+		// matters to the MODEL, which has to decide whether to ask again; it means
+		// nothing to a person who already knows which of the two they just did.
+		return "Still on " + a.SnapshotConfig().BackendURL + ". Nothing changed.", true
+	default:
+		// Something else went wrong — another question already holds the sheet, or the
+		// surface failed. Reported as itself. Folding it into "nothing changed" would be
+		// true about the endpoint and a lie about why, and it is the branch where the
+		// reason is the only useful part of the answer.
+		return "Could not ask: " + err.Error(), true
+	}
+	if ans.Index < 0 || ans.Index >= len(picks) {
+		// Defensive: AskChoice only returns an in-range index on success. Acting on one
+		// would switch the endpoint to whatever happened to be adjacent.
+		//
+		// Reported as the FAULT it is, not as "nothing changed". Nothing did change, but
+		// saying only that describes a user who declined — and this is a surface handing
+		// back an answer to a question it was never asked, which is a bug somebody needs
+		// to see rather than a decision somebody made.
+		return fmt.Sprintf(
+			"Could not switch: the answer named option %d, which is not one of the %d offered. Nothing changed.",
+			ans.Index+1, len(picks),
+		), true
+	}
+	// Applied under OUR OWN reservation. BackendSwitchText's plain route is refused
+	// while one is held — which is the whole point, and would otherwise refuse the very
+	// switch the reservation was taken to guarantee.
+	return backendSwitchTextReserved(a, token, picks[ans.Index].Target), true
 }
 
 // BackendSwitchText applies a backend selection and renders the result. Exported so the
@@ -624,15 +716,21 @@ func backendText(a *app.App, arg string) string {
 // surfaces describing the same action differently is how a user ends up unsure whether
 // the sheet did the same thing.
 func BackendSwitchText(a *app.App, arg string) string {
+	return backendSwitchTextReserved(a, 0, arg)
+}
+
+// backendSwitchTextReserved is BackendSwitchText carrying the caller's endpoint
+// reservation, if it holds one. A zero token means "no reservation".
+func backendSwitchTextReserved(a *app.App, token uint64, arg string) string {
 	var (
 		target string
 		err    error
 	)
 	reset := strings.EqualFold(arg, app.BackendResetAlias)
 	if reset {
-		target, err = a.ResetBackendURL()
+		target, err = a.ResetReservedBackendURL(token)
 	} else {
-		target, err = a.SetBackendURL(arg)
+		target, err = a.SetReservedBackendURL(token, arg)
 	}
 	if err != nil {
 		if errors.Is(err, agent.ErrTurnInProgress) {
@@ -650,9 +748,11 @@ func BackendSwitchText(a *app.App, arg string) string {
 		return "Backend is now " + target + " — it answers from your next message.\n\n" +
 			"But: " + err.Error()
 	}
-	// "from your next message", not "switched": a turn already streaming finishes on the
-	// client it started on, so claiming the change is live would be false for a few more
-	// seconds in exactly the case someone would notice.
+	// "from your next message", not "switched": the switch is refused outright while a
+	// turn is running, so by the time this line is written the endpoint has changed and
+	// the NEXT turn is the first that can use it. Saying "switched" would invite the
+	// reader to attribute the answer they are still reading to the endpoint they just
+	// chose.
 	//
 	// The two outcomes say opposite things about the FILE, and saying the wrong one is
 	// worse than saying nothing: "remembered" after a reset would leave the user
@@ -662,10 +762,6 @@ func BackendSwitchText(a *app.App, arg string) string {
 		out += "The remembered choice is forgotten; new sessions use the default."
 	} else {
 		out += "Remembered for future sessions."
-	}
-	if a.SnapshotConfig().BackendURLPinnedByEnv {
-		out += "\n\nNOTE: DAINTREE_BACKEND_URL (or --backend-url) is set and will OVERRIDE this\n" +
-			"on the next launch. Unset it for the choice to stick."
 	}
 	return out
 }

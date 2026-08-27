@@ -62,9 +62,10 @@ const (
 	// from the control plane: the backend can be reachable while Daintree is not, and
 	// vice versa, and the two failures want different fixes.
 	RequiresBackend Connection = "assistant-backend"
-	// RequiresInteractive needs a human at a TTY. A one-shot, `--json`, host, or
+	// RequiresInteractive needs a human who can be asked. A one-shot, `--json`, or
 	// unattended-wake run has no surface to ask on, and the handler fails cleanly rather
-	// than blocking forever.
+	// than blocking forever. The embedded host IS such a surface — it renders a real
+	// sheet — so it is not among them.
 	RequiresInteractive Connection = "interactive-session"
 )
 
@@ -96,7 +97,8 @@ var NoArgs = map[string]any{
 // ToolProgress is one in-tool progress beat the registry (and long handlers)
 // emit so the live footer never looks frozen.
 type ToolProgress struct {
-	// Phase is one of "validating" | "awaiting_approval" | "running" | "retrying".
+	// Phase is one of "validating" | "awaiting_approval" | "awaiting_question" |
+	// "running" | "retrying" — the ProgressX constants below.
 	Phase string `json:"phase"`
 	// Message is a short human-facing substep ("launching terminal").
 	Message string `json:"message,omitempty"`
@@ -115,7 +117,8 @@ const (
 )
 
 // ErrNoAskChoiceHook is returned by a main-actor ToolContext.AskChoice when the
-// runtime has no interactive question surface wired (one-shot, host --stdio, non-TTY).
+// runtime has no interactive question surface wired (one-shot, a non-TTY). The embedded
+// host is NOT among them — it renders a real sheet and answers over question:answer.
 // The user.askMultipleChoice handler maps it to a QUESTION_UNAVAILABLE failure. A nil
 // ToolContext.AskChoice (a non-interactive watcher/timer/workflow actor) is distinct —
 // the handler reports QUESTION_NOT_INTERACTIVE for that case instead.
@@ -135,12 +138,42 @@ type ChoiceOption struct {
 	Text  string `json:"text"`
 }
 
-// AskChoiceRequest is handed to ToolContext.AskChoice when the model needs a finite
-// user decision (user.askMultipleChoice). The interactive surface renders a selection
-// sheet in place of the composer and blocks the tool call until the user answers.
+// MaxChoiceOptions is the option-count ceiling every question surface shares — the size
+// of the label alphabet, A–Z. A question with more options than there are letters has no
+// way to name them all.
+const MaxChoiceOptions = 26
+
+// ChoiceLabel maps a 0-based option index to its display label: 0→A, 1→B, … 25→Z, and ""
+// past the end of the alphabet.
+//
+// One function rather than one per surface, because the label is an IDENTITY: it travels
+// on the wire, it is what the transcript records, and it is how the model names what the
+// user chose. Two implementations of the same alphabet is two chances for the sheet and
+// the answer to disagree about which option "B" was.
+func ChoiceLabel(i int) string {
+	if i < 0 || i >= MaxChoiceOptions {
+		return ""
+	}
+	return string(rune('A' + i))
+}
+
+// AskChoiceRequest is a finite user decision put to the interactive surface, which
+// renders a selection sheet and blocks the caller until it is answered or dismissed.
+//
+// Usually the MODEL asking (user.askMultipleChoice), but not only: a slash command whose
+// whole job is "pick one of these" is the same interaction, and is marked Local.
 type AskChoiceRequest struct {
 	// ToolCallID ties the sheet to its live footer row (informational).
 	ToolCallID string `json:"toolCallId,omitempty"`
+	// Local marks a question the CLIENT asked on its own account — a slash command —
+	// rather than one the model asked mid-turn.
+	//
+	// It exists because a local question belongs to no turn. Without it the surface
+	// stamps whatever turn happens to be running, and the answer is then recorded inside
+	// a turn that never asked the question — a transcript that says the model was told
+	// something it was not. The model can never set it: the tool builds its own request
+	// and never copies this field from arguments.
+	Local bool `json:"local,omitempty"`
 	// Question is the concise, human-facing prompt (no option labels baked in).
 	Question string `json:"question"`
 	// Options are the labelled choices, in order (2–26 entries).

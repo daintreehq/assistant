@@ -623,3 +623,93 @@ func TestResetBackendURLKeepsTheStoredChoiceWhenTheAccountLayerCannotBeBuilt(t *
 		t.Errorf("a refused reset left the stored preference as %q, want it untouched at %q", stored, backend.LocalBaseURL)
 	}
 }
+
+// The picker's ROWS have to match what the typed command would have done, because the
+// two are the same act reached two ways. A row whose Target is not a thing
+// ResolveBackendTarget accepts is a row that silently does nothing when it is chosen.
+func TestBackendChoiceQuestionOffersOnlyApplicableTargets(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+
+	_, picks, _ := a.BackendChoiceQuestion()
+	if len(picks) < len(BackendChoices) {
+		t.Fatalf("the picker dropped menu entries: %+v", picks)
+	}
+	for _, p := range picks {
+		if strings.TrimSpace(p.Text) == "" {
+			t.Errorf("a pick has no text: %+v", p)
+		}
+		if _, err := ResolveBackendTarget(p.Target); err != nil {
+			t.Errorf("pick %q has an unusable target %q: %v", p.Text, p.Target, err)
+		}
+	}
+}
+
+// The highlight must start on the endpoint that is actually answering. Starting on the
+// first row instead means Enter — the fastest key on the sheet — switches away from the
+// backend the user is on, in a picker they opened to find out which one that was.
+func TestBackendChoiceQuestionDefaultsToTheLiveEndpoint(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+
+	if _, err := a.SetBackendURL("local"); err != nil {
+		t.Fatalf("SetBackendURL: %v", err)
+	}
+	_, picks, def := a.BackendChoiceQuestion()
+	if def < 0 || def >= len(picks) {
+		t.Fatalf("default index %d is out of range for %d picks", def, len(picks))
+	}
+	if picks[def].Target != "local" {
+		t.Errorf("the highlight starts on %q, not the live endpoint", picks[def].Target)
+	}
+	// …and the row says so, because the highlight stops meaning anything the moment
+	// someone presses an arrow.
+	if !strings.Contains(picks[def].Text, "current") {
+		t.Errorf("the live row is not marked: %q", picks[def].Text)
+	}
+}
+
+// A custom endpoint is not in the menu but IS what is answering. Without a row of its
+// own every option on the sheet is a switch AWAY from it, and there is no way to keep it.
+func TestBackendChoiceQuestionKeepsACustomEndpointSelectable(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+
+	if _, err := a.SetBackendURL("https://custom.example"); err != nil {
+		t.Fatalf("SetBackendURL: %v", err)
+	}
+	_, picks, def := a.BackendChoiceQuestion()
+	if picks[def].Target != "https://custom.example" {
+		t.Errorf("the custom endpoint is not the highlighted row: %+v", picks[def])
+	}
+	if !strings.Contains(picks[def].Text, "custom.example") {
+		t.Errorf("the custom endpoint is not named: %q", picks[def].Text)
+	}
+}
+
+// "Forget" appears only when there is something to forget. It resolves to the same URL
+// as picking the deployed backend today and would not if the default ever moved, so
+// offering it unconditionally would put two rows on the sheet that do the same thing.
+func TestBackendChoiceQuestionOffersForgetOnlyWhenSomethingIsRemembered(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+
+	hasForget := func() bool {
+		_, picks, _ := a.BackendChoiceQuestion()
+		for _, p := range picks {
+			if p.Target == BackendResetAlias {
+				return true
+			}
+		}
+		return false
+	}
+	if hasForget() {
+		t.Error("a fresh session offers to forget a choice that was never made")
+	}
+	if _, err := a.SetBackendURL("local"); err != nil {
+		t.Fatalf("SetBackendURL: %v", err)
+	}
+	if !hasForget() {
+		t.Error("a remembered choice cannot be forgotten from the picker")
+	}
+}

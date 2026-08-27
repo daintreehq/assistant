@@ -44,9 +44,10 @@ type AppHooks struct {
 	// error is treated as a DECLINE.
 	Confirm func(ctx context.Context, req tools.ConfirmRequest) (bool, error)
 	// AskChoice presents a multiple-choice question to the interactive main actor and
-	// blocks until they answer (or the turn is cancelled). Wired only by interactive
-	// surfaces (attached session, line REPL); nil elsewhere (one-shot, host), so the tool
-	// reports that the runtime can't ask.
+	// blocks until they answer (or the turn is cancelled). Wired by every interactive
+	// surface — the attached session, the line REPL, and the embedded host, which
+	// renders a real sheet; nil only where nobody can be asked (one-shot, a non-TTY), so
+	// the tool reports that the runtime can't ask.
 	AskChoice func(ctx context.Context, req tools.AskChoiceRequest) (tools.AskChoiceAnswer, error)
 	// Log emits an out-of-band line to the user.
 	Log func(msg string)
@@ -123,9 +124,11 @@ type CreateOptions struct {
 // itself so a builder can reach config/store/mcp/queue/backend.
 type ToolBuilder func(a *App) ([]*tools.Tool, error)
 
-// App is the composition root. Fields are effectively read-only after Create
-// except Config.Tier (mutated by /permissions, under cfgMu), Hooks (merged by
-// SetHooks), and scheduler (set lazily by StartScheduler).
+// App is the composition root. Fields are effectively read-only after Create except
+// Config.Tier (mutated by /permissions, under cfgMu), Config.BackendURL together with
+// Auth and the swappable Backend (mutated by /backend, under cfgMu and the session's own
+// lock — see SetBackendURL), Hooks (merged by SetHooks), and scheduler (set lazily by
+// StartScheduler).
 type App struct {
 	Config config.AppConfig
 	Store  *storage.Store
@@ -219,7 +222,8 @@ type App struct {
 	hooksMu sync.RWMutex
 	hooks   AppHooks
 
-	// cfgMu guards Config — today only Tier (/permissions) is mutated at runtime.
+	// cfgMu guards Config — Tier (/permissions) and BackendURL together with Auth
+	// (/backend) are mutated at runtime.
 	// buildContext copies the WHOLE Config and PromptContext reads it on agent/tool
 	// goroutines, so every runtime write must be serialized against them or the race
 	// detector flags a torn read. Any future runtime-mutable field belongs under this
@@ -312,6 +316,25 @@ func (a *App) snapshotHooks() AppHooks {
 	a.hooksMu.RLock()
 	defer a.hooksMu.RUnlock()
 	return a.hooks
+}
+
+// AskChoice puts a multiple-choice question to whatever interactive surface is attached
+// and BLOCKS until it answers, the user dismisses it, or the context is cancelled.
+// Returns tools.ErrNoAskChoiceHook when no surface is wired (one-shot, non-TTY), so a
+// caller can fall back to printing rather than dead-ending.
+//
+// Exported because the question channel is not the model's alone. A slash command whose
+// whole job is "pick one of these" — /backend is the first — is the same interaction the
+// model gets, and rendering it instead as a numbered block of text is how a surface with
+// a real picker ended up showing a terminal menu inside a GUI panel. The hook is read
+// LIVE (via snapshotHooks) for the same reason every other hook is: SetHooks swaps
+// surfaces without rebuilding the session.
+func (a *App) AskChoice(ctx context.Context, req tools.AskChoiceRequest) (tools.AskChoiceAnswer, error) {
+	fn := a.snapshotHooks().AskChoice
+	if fn == nil {
+		return tools.AskChoiceAnswer{}, tools.ErrNoAskChoiceHook
+	}
+	return fn(ctx, req)
 }
 
 // SetTier updates the permission tier under cfgMu. Callers refresh the runtime

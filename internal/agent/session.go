@@ -90,8 +90,14 @@ func CoreToolNames() []string {
 	return out
 }
 
-// ErrTurnInProgress is returned by Send when a turn is already running (the
-// single-flight guard). Concurrent sends are a wiring bug — one app, one session.
+// ErrTurnInProgress reports that the session is not free to start a turn.
+//
+// Usually the single-flight guard — a turn is already running, and concurrent sends are
+// a wiring bug, one app, one session. It is ALSO returned while an endpoint reservation
+// is outstanding (see ReserveEndpoint), which is not a bug at all: a switch is waiting
+// on a decision the user has yet to make. One error for both because to every caller it
+// is the same fact — the session is occupied — and a second sentinel would turn every
+// admission check into a two-branch decision that means one thing.
 var ErrTurnInProgress = errors.New("agent: a turn is already in progress")
 
 // Session is the turn engine (was AgentSession). It runs one user/autonomous turn
@@ -102,13 +108,24 @@ type Session struct {
 	deps SessionDeps
 
 	// mu guards ALL mutable session state below (messages, seq, backendState,
-	// inFlight) — the turn goroutine and concurrent UI slash commands
-	// (Clear/Compact, Messages, Artifacts) both touch it, so every access
-	// is under this lock. Critical sections are kept SHORT: the streaming turn reads
+	// inFlight, and the endpoint reservation) — the turn goroutine and concurrent UI
+	// slash commands (Clear/Compact, Messages, Artifacts, /backend) both touch it, so
+	// every access is under this lock. Critical sections are kept SHORT: the streaming turn reads
 	// an immutable SNAPSHOT of messages under the lock and releases it before the
 	// (long) model stream — it never holds the lock across a network call.
 	mu       sync.Mutex
 	inFlight bool // a turn is running (single-flight guard + mutate-mid-turn gate)
+	// endpointHeld is the live endpoint reservation's token, or 0 when none is held —
+	// see ReserveEndpoint. It gates turn admission exactly as inFlight does, and is a
+	// separate field because the two are settled by different owners and a single flag
+	// could be cleared by whichever finished first.
+	//
+	// A TOKEN rather than a bool, because releasing is deferred and a deferred release
+	// can outlive the thing it was written for. With a bool, a stale release from a
+	// reservation that has already ended silently unlocks the NEXT one — the classic
+	// ABA, and here it would unlock a picker mid-decision.
+	endpointHeld uint64
+	endpointSeq  uint64
 
 	messages  []models.ChatMessage // live visible history (user/assistant/tool; begins at index 0)
 	seq       int                  // next DB seq to write (monotonic)
@@ -494,11 +511,18 @@ func (s *Session) foldInInjections() int {
 
 // Clear empties the visible history and persists a CLEAR breadcrumb. Returns
 // ErrTurnInProgress when a turn is in flight (a mid-turn clear would corrupt the
-// streaming snapshot) — do NOT mutate in that case.
+// streaming snapshot) or while an endpoint reservation is outstanding — do NOT mutate
+// in either case.
+//
+// The reservation half is not symmetry. A host renders `conversationCleared` by wiping
+// its transcript AND its live state, the pending question sheet included — so a `/clear`
+// admitted here removes the sheet of a picker that is still parked on an answer, leaving
+// its reservation held by a command nobody can now finish and every later turn refused
+// against a decision the user can no longer see.
 func (s *Session) Clear() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.inFlight {
+	if s.inFlight || s.endpointHeld != 0 {
 		return ErrTurnInProgress
 	}
 	s.clearLocked()
@@ -554,16 +578,100 @@ func (s *Session) clearLocked() {
 // surface that can switch endpoints goes through here, so the guard cannot be bypassed
 // by a caller that forgot about it.
 func (s *Session) DropBackendState() error {
+	return s.SwapBackend(nil)
+}
+
+// SwapBackend drops the backend state token and runs `apply` — the endpoint swap itself
+// — WITHOUT letting go of the session in between. Returns ErrTurnInProgress, changing
+// nothing, when a turn is already running.
+//
+// The lock has to span both halves, and this is the whole reason the method exists.
+// DropBackendState on its own only proves no turn had started when it was CALLED: it
+// releases the session, and a turn is free to begin in the gap before the client is
+// actually replaced. That turn opens against the old endpoint and finishes its later
+// rounds against the new one — the exact cross-endpoint turn the guard is written to
+// prevent, reached by passing the guard rather than by bypassing it.
+//
+// `apply` runs under the session lock, so it must not reach back into the Session or
+// block on anything that might: it is expected to be constructor work plus a pointer
+// swap. It is nil for a caller that only wants the token dropped.
+func (s *Session) SwapBackend(apply func()) error {
+	return s.swapBackend(0, apply)
+}
+
+// SwapBackendReserved is SwapBackend for the holder of a reservation, which is the one
+// caller allowed to swap while one is outstanding.
+//
+// Everyone else is refused, and that is the point: a reservation exists so a decision
+// the user is still making will be applicable when they make it, and an explicit
+// `/backend <target>` arriving meanwhile would settle in whichever order the two
+// goroutines reached the mutex rather than in the order the commands were given.
+func (s *Session) SwapBackendReserved(token uint64, apply func()) error {
+	return s.swapBackend(token, apply)
+}
+
+func (s *Session) swapBackend(token uint64, apply func()) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.inFlight {
+		return ErrTurnInProgress
+	}
+	// Held must EQUAL presented, in both directions. A zero token means "I hold no
+	// reservation", which is only true when none is held at all; a non-zero one must be
+	// the live one. The weaker `held != 0 && held != token` let any stale token commit
+	// once its reservation had ended, which is the same unauthorized swap the token was
+	// introduced to stop.
+	if s.endpointHeld != token {
 		return ErrTurnInProgress
 	}
 	s.backendState = ""
 	if s.deps.BackendStateStore != nil {
 		_ = s.deps.BackendStateStore.PutSessionBackendState(s.deps.SessionID, "")
 	}
+	if apply != nil {
+		apply()
+	}
 	return nil
+}
+
+// ReserveEndpoint claims the session for an endpoint switch that is about to be DECIDED
+// rather than one about to happen, and blocks turn admission until Release is called.
+//
+// It exists for `/backend` with no argument, which puts a picker in front of the user
+// and then waits — for seconds, or for as long as they leave the sheet open. Checking
+// "is a turn running?" only at the moment the answer arrives produces the worst possible
+// interaction: the sheet opens, the user reads it, chooses, and is told the switch could
+// not be made. Reserving first means the question is either refused BEFORE it is asked
+// or is guaranteed to be applicable when it is answered.
+//
+// The reservation gates turns exactly as a running turn does, and reports itself as
+// ErrTurnInProgress for the same reason: to every caller it is the same fact — the
+// session is not free — and inventing a second error would make every admission check a
+// two-branch decision that means one thing.
+//
+// Release MUST be deferred by the caller. A reservation that outlives its picker blocks
+// every turn in the session, so the one thing this must never do is depend on the sheet
+// being answered.
+func (s *Session) ReserveEndpoint() (token uint64, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inFlight || s.endpointHeld != 0 {
+		return 0, ErrTurnInProgress
+	}
+	s.endpointSeq++
+	s.endpointHeld = s.endpointSeq
+	return s.endpointHeld, nil
+}
+
+// ReleaseEndpoint drops the reservation named by `token`. A token that is not the live
+// one — a stale release from a reservation that has already ended, or a duplicate — is
+// ignored rather than clearing whatever happens to be held now.
+func (s *Session) ReleaseEndpoint(token uint64) {
+	s.mu.Lock()
+	if token != 0 && s.endpointHeld == token {
+		s.endpointHeld = 0
+	}
+	s.mu.Unlock()
 }
 
 // Compact replaces the working history with one "[checkpoint…]" user note plus a
@@ -577,7 +685,9 @@ func (s *Session) DropBackendState() error {
 func (s *Session) Compact(summary string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.inFlight {
+	// The reservation counts as a turn here for the same reason it does in Clear: a
+	// compaction rewrites the history a parked picker's command will return into.
+	if s.inFlight || s.endpointHeld != 0 {
 		return ErrTurnInProgress
 	}
 	// Snapshot BEFORE compactLocked reslices; keepValidTail copies + orphan-cleans, so
@@ -638,10 +748,15 @@ type SendOptions struct {
 // single-flight: a concurrent call returns ErrTurnInProgress. The reply string is
 // the model's final answer OR a sentinel string on a model/tool failure (Send
 // never returns an error for those — wake reactors prefix-match the sentinels).
-// The error return is reserved for the single-flight guard.
+// The error return is reserved for ADMISSION: the single-flight guard, and an
+// outstanding endpoint reservation (see ReserveEndpoint). Both report ErrTurnInProgress.
 func (s *Session) Send(ctx context.Context, userInput string, opts SendOptions) (string, error) {
 	s.mu.Lock()
-	if s.inFlight {
+	// endpointHeld refuses a turn for the same reason inFlight does: an endpoint switch
+	// is pending a decision, and a turn admitted now would either be swapped underneath
+	// or force the switch to be refused after the user had already chosen. See
+	// ReserveEndpoint.
+	if s.inFlight || s.endpointHeld != 0 {
 		s.mu.Unlock()
 		return "", ErrTurnInProgress
 	}

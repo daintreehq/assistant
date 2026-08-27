@@ -118,9 +118,10 @@ func backendAliasList() string {
 //     next round to a backend that cannot read the `state` token the previous one
 //     signed. The attached session refuses /backend while its own turn is in flight, but that
 //     flag only knows about the attached session — an autonomous wake turn, the line REPL, a
-//     one-shot, or an MCP-driven session would all sail past it. Session.DropBackendState
-//     returns ErrTurnInProgress from under the session lock, which is the only place that
-//     knows for certain.
+//     one-shot, or an MCP-driven session would all sail past it. Session.SwapBackend
+//     returns ErrTurnInProgress from under the session lock, and HOLDS that lock across
+//     the swap — the only place that knows for certain, and the only way to know it for
+//     longer than an instant.
 //   - Dropping that state token. It is server-SIGNED and endpoint-specific, so carrying
 //     it across a switch hands the new backend a token it cannot verify. The conversation
 //     survives; only the server's runbook-selection state is endpoint-bound, and the new
@@ -133,6 +134,13 @@ func backendAliasList() string {
 var ErrBackendPinned = errors.New("this session's endpoint was pinned by whatever launched it (DAINTREE_BACKEND_URL or --backend-url), so it cannot be switched from in here — change it where the session is started")
 
 func (a *App) SetBackendURL(rawURL string) (string, error) {
+	return a.setBackendURL(0, rawURL)
+}
+
+// setBackendURL is SetBackendURL with the caller's endpoint reservation, if it holds
+// one. A zero token means "no reservation", which is refused while somebody else holds
+// one — see Session.SwapBackendReserved.
+func (a *App) setBackendURL(token uint64, rawURL string) (string, error) {
 	// PINNED sessions cannot be switched at all.
 	//
 	// DAINTREE_BACKEND_URL (or --backend-url) means a HOST chose this session's
@@ -171,12 +179,30 @@ func (a *App) SetBackendURL(rawURL string) (string, error) {
 		// install, or `/backend local` while the environment happens to supply local),
 		// and returning here silently reported "Remembered for future sessions" while
 		// writing nothing at all.
-		if err := config.SaveBackendURL(a.snapshotConfig().EndpointPath, target); err != nil {
-			return target, fmt.Errorf("already using this endpoint — but could not save the choice: %w", err)
+		//
+		// Routed through the SESSION even though there is nothing to swap. It is still a
+		// durable write to the same preference a parked picker is about to make, and a
+		// fast path that skipped the gate let an unreserved `/backend <current>` report
+		// success and pin the endpoint while somebody else owned the decision.
+		var saveErr error
+		gated := func() {
+			saveErr = config.SaveBackendURL(a.snapshotConfig().EndpointPath, target)
+		}
+		if a.Session != nil {
+			if err := a.Session.SwapBackendReserved(token, gated); err != nil {
+				return "", err
+			}
+		} else {
+			gated()
+		}
+		if saveErr != nil {
+			return target, fmt.Errorf("already using this endpoint — but could not save the choice: %w", saveErr)
 		}
 		a.clearEndpointRejections()
 		return target, nil
 	}
+	// The swap, as ONE indivisible act against the session.
+	//
 	// Rebuild through the SAME config builder Create uses, so the replacement inherits
 	// every hook — the debug-log tracing especially, whose absence would only show up
 	// much later as a session log with a hole in it from the moment of the switch.
@@ -204,9 +230,12 @@ func (a *App) SetBackendURL(rawURL string) (string, error) {
 	// all — and then PERSISTED that endpoint, so the next launch started there too. A
 	// broken state root is not a reason to lose the working endpoint you were already on.
 	//
-	// This runs before DropBackendState on purpose: that call is the first thing in this
-	// function that MUTATES the session, and a refusal that has already discarded the
-	// server's signed runbook-selection state has not, in fact, changed nothing.
+	// Built HERE rather than inside the swap closure, and that placement is the whole
+	// guarantee: the closure runs under the session lock AFTER the state token has already
+	// been dropped, so a refusal raised from in there would have discarded the server's
+	// signed runbook-selection state while reporting that nothing changed. A closure cannot
+	// return an error either. Everything that can refuse happens before the session is
+	// touched at all.
 	if mgr == nil {
 		if fault := accountLayerFault(cfg); fault != nil {
 			// Wrapped, not formatted flat. ResetBackendURL runs its own cleanup after this
@@ -220,20 +249,32 @@ func (a *App) SetBackendURL(rawURL string) (string, error) {
 		}
 	}
 
-	// BEFORE the swap. If a turn is running we must change nothing at all — a swap that
-	// happened and then reported failure would be the worst of both.
-	if a.Session != nil {
-		if err := a.Session.DropBackendState(); err != nil {
-			return "", err
-		}
+	swap := func() {
+		sw.Swap(backend.NewClient(backendClientConfig(cfg, a.CostLedger, accountTokenSource(mgr))))
+
+		a.cfgMu.Lock()
+		a.Config.BackendURL = target
+		a.Auth = mgr
+		a.cfgMu.Unlock()
 	}
 
-	sw.Swap(backend.NewClient(backendClientConfig(cfg, a.CostLedger, accountTokenSource(mgr))))
+	// Held ACROSS the whole swap, not merely checked before it. If a turn is running we
+	// must change nothing at all — a swap that happened and then reported failure would
+	// be the worst of both — and a check that releases the session before swapping lets
+	// a turn start in the gap, open against the old endpoint and finish against the new
+	// one. See Session.SwapBackend.
+	if a.Session != nil {
+		if err := a.Session.SwapBackendReserved(token, swap); err != nil {
+			return "", err
+		}
+	} else {
+		swap()
+	}
 
-	a.cfgMu.Lock()
-	a.Config.BackendURL = target
-	a.Auth = mgr
-	a.cfgMu.Unlock()
+	// Read AFTER the swap, not from inside it. EndpointPath is derived from the state
+	// root and does not move with the endpoint, but taking it from the live config keeps
+	// this reading one source of truth rather than a value carried out of a closure.
+	endpointPath := a.snapshotConfig().EndpointPath
 
 	// PERSIST. A switch that evaporated on restart is the thing this command exists to
 	// stop: the daily case is a developer on a local backend who dips into the deployed
@@ -244,7 +285,7 @@ func (a *App) SetBackendURL(rawURL string) (string, error) {
 	// effect for this session, so a read-only home directory should not turn a working
 	// switch into a failed one. The caller says "switched, but it will not survive a
 	// restart" rather than pretending either half did not happen.
-	if err := config.SaveBackendURL(cfg.EndpointPath, target); err != nil {
+	if err := config.SaveBackendURL(endpointPath, target); err != nil {
 		return target, fmt.Errorf("switched for this session only — could not save the choice: %w", err)
 	}
 	// AFTER the save, never before it, and for the same reason the branch above clears
@@ -286,8 +327,10 @@ func (a *App) DescribeBackendChoices() string {
 		// named — a menu with nothing marked would read as "none of these".
 		fmt.Fprintf(&b, "→    custom    %s\n", mcp.SanitizeURL(current))
 	}
-	b.WriteString("\nSwitch with `/backend <number|alias|url>` — applies from the next message,\n")
-	b.WriteString("and is remembered across restarts. `/backend " + BackendResetAlias + "` forgets it again.\n")
+	// One physical line per paragraph. These are read in a narrow side panel as often as
+	// in a terminal, and a line already broken at 80 columns wraps a second time there —
+	// which is what turned this listing into the ragged block that made it look broken.
+	b.WriteString("\nSwitch with `/backend <number|alias|url>` — it applies from the next message and is remembered across restarts. `/backend " + BackendResetAlias + "` forgets it again.\n")
 
 	cfg := a.snapshotConfig()
 	stored, storedErr := config.LoadBackendURL(cfg.EndpointPath)
@@ -317,11 +360,13 @@ func (a *App) DescribeBackendChoices() string {
 		fmt.Fprintf(&b, "\nRemembered: %s\n", mcp.SanitizeURL(stored))
 	}
 	if cfg.BackendURLPinnedByEnv {
-		// The one failure this listing has to be able to explain. Someone switches, sees
-		// it confirmed, restarts, and lands somewhere else because a shell profile
-		// exports the variable — without this line the feature just looks broken.
-		b.WriteString("\nNOTE: DAINTREE_BACKEND_URL (or --backend-url) is set, and it OVERRIDES the\n")
-		b.WriteString("remembered choice on every launch. Unset it for `/backend` to stick.\n")
+		// The one failure this listing has to be able to explain, and it has to explain
+		// the RIGHT one. This note used to say the pin would override the choice at the
+		// next launch, which describes a switch that succeeds and is quietly undone
+		// later; what actually happens is that every switch is refused now
+		// (ErrBackendPinned). Someone reading the old wording would try, be refused, and
+		// have been told to expect something else entirely.
+		b.WriteString("\nNOTE: DAINTREE_BACKEND_URL (or --backend-url) pinned this session's endpoint, so it cannot be switched from in here. Change it where the session is started.\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -345,7 +390,13 @@ func (a *App) clearEndpointRejections() {
 // user who wants "no preference" should end up with nothing on disk, not with the
 // current default frozen into a file that would keep pinning it after the default moved.
 func (a *App) ResetBackendURL() (string, error) {
-	target, err := a.SetBackendURL(backend.DefaultBaseURL)
+	return a.ResetReservedBackendURL(0)
+}
+
+// ResetReservedBackendURL is ResetBackendURL carrying the caller's endpoint
+// reservation, if it holds one. A zero token means "no reservation".
+func (a *App) ResetReservedBackendURL(token uint64) (string, error) {
+	target, err := a.setBackendURL(token, backend.DefaultBaseURL)
 	// DELETE EVEN WHEN THE SWITCH FAILED TO PERSIST. SetBackendURL writes the default to
 	// the file on its way through, so returning early on a save error would leave the
 	// preference pinned to a value the user just asked to forget — the one outcome this
@@ -367,13 +418,128 @@ func (a *App) ResetBackendURL() (string, error) {
 	if ferr := config.ForgetBackendURL(a.snapshotConfig().EndpointPath); ferr != nil {
 		return target, fmt.Errorf("switched for this session only — could not clear the stored choice: %w", ferr)
 	}
-	return target, err
+	// `err` is DISCARDED once the file is gone, and only here.
+	//
+	// The one error it can still carry at this point is SetBackendURL's "could not save
+	// the choice" — and this command's whole purpose is for no choice to be saved. The
+	// write failing and the delete succeeding is the requested end state reached by a
+	// shorter route, so reporting the failed write would tell the user a reset they got
+	// in full only half worked.
+	return target, nil
 }
 
-// HasStoredBackendURL reports whether a choice is currently remembered. The picker uses
-// it to offer "forget it" only when there is something to forget, so the option never
-// appears as a no-op.
-func (a *App) HasStoredBackendURL() bool {
-	stored, _ := config.LoadBackendURL(a.snapshotConfig().EndpointPath)
-	return stored != ""
+// BackendPick is one row of the `/backend` picker: what the user sees, and the argument
+// that applies it. Target is fed straight back to SetBackendURL/ResetBackendURL through
+// BackendSwitchText, so the picker and the typed command take exactly the same route —
+// two surfaces that reached the same switch by different code is how they end up
+// disagreeing about what "default" means.
+type BackendPick struct {
+	// Text is the option as it is rendered, one line, no label letter (the client
+	// assigns those).
+	Text string
+	// Target is what `/backend <target>` would have been typed as.
+	Target string
+}
+
+// BackendChoiceQuestion builds the multiple-choice form of `/backend` with no argument:
+// the same menu DescribeBackendChoices prints, as a question a surface with a real picker
+// can render.
+//
+// It is a QUESTION rather than a listing because "which backend answers?" is a choice
+// with a fixed, short answer set — the exact shape the question channel exists for. The
+// listing survives for surfaces that cannot ask (one-shot, a non-TTY), which is why this
+// returns data rather than rendering: the caller decides which of the two it can use.
+//
+// The picks are ordered menu-first so a number typed by habit still means what it meant
+// in the printed listing. The live endpoint is marked in its own row rather than only
+// through Default, because Default is the initial highlight and stops saying anything
+// the moment someone presses an arrow.
+func (a *App) BackendChoiceQuestion() (question string, picks []BackendPick, defaultIndex int) {
+	cfg := a.snapshotConfig()
+	current := cfg.BackendURL
+	picks = make([]BackendPick, 0, len(BackendChoices)+2)
+	matched := false
+	for _, c := range BackendChoices {
+		text := c.Alias + " — " + c.URL + " · " + c.Note
+		if c.URL == current {
+			text += " · current"
+			matched = true
+			defaultIndex = len(picks)
+		}
+		picks = append(picks, BackendPick{Text: text, Target: c.Alias})
+	}
+	if !matched && current != "" {
+		// A custom endpoint is not in the menu but IS what is answering. Without a row
+		// of its own the picker would offer no way to KEEP it — every option would be a
+		// switch, and the highlight would start on an endpoint the user is not using.
+		defaultIndex = len(picks)
+		picks = append(picks, BackendPick{
+			Text:   "custom — " + mcp.SanitizeURL(current) + " · current",
+			Target: current,
+		})
+	}
+	// Offered only when there is something to forget. "Forget" and "pick the deployed
+	// one" resolve to the same URL today and would not if the default ever moved, so the
+	// row appears only when the two are genuinely different acts.
+	stored, storedErr := config.LoadBackendURL(cfg.EndpointPath)
+	if storedErr == nil && stored != "" {
+		picks = append(picks, BackendPick{
+			Text:   "forget the remembered choice — new sessions use whatever the default is",
+			Target: BackendResetAlias,
+		})
+	}
+
+	// The question DISCLOSES that answering it writes something down.
+	//
+	// "Which backend should answer this session?" was the honest half of a durable act:
+	// every ordinary choice is saved for future sessions, including re-picking the row
+	// already marked current, which is exactly how someone pins an endpoint they only
+	// meant to confirm. A picker that hides its own persistence is a picker people
+	// answer without meaning to.
+	question = "Which backend should answer? Your choice applies from the next message and is remembered for future sessions."
+	if storedErr != nil {
+		// Surfaced, not swallowed — the printed listing says this and the picker must
+		// not be the quieter of the two. A preference that exists but cannot be read
+		// means this session is on the default WITHOUT the user having chosen it, which
+		// changes what every row below means.
+		question += " (A remembered choice exists but could not be read, so it is being ignored: " + storedErr.Error() + ")"
+	}
+	return question, picks, defaultIndex
+}
+
+// ReserveEndpointSwitch claims the session for a switch that is about to be DECIDED, and
+// blocks turn admission until the returned release is called. It is always safe to call
+// the release, including on the error path, which is why one is returned either way.
+//
+// The command layer holds this across the `/backend` picker. Without it the sheet can be
+// opened during a turn, read, answered — and then refused, which is the one outcome a
+// question must never produce: the user made the decision it asked for and it did not
+// count. See agent.Session.ReserveEndpoint.
+func (a *App) ReserveEndpointSwitch() (token uint64, release func(), err error) {
+	if a.Session == nil {
+		return 0, func() {}, nil
+	}
+	tok, err := a.Session.ReserveEndpoint()
+	if err != nil {
+		return 0, func() {}, err
+	}
+	return tok, func() { a.Session.ReleaseEndpoint(tok) }, nil
+}
+
+// SetReservedBackendURL is SetBackendURL for the holder of a reservation from
+// ReserveEndpointSwitch. Passing the token is what lets the swap through the
+// reservation that exists to guarantee it; everyone else is refused while one is held.
+func (a *App) SetReservedBackendURL(token uint64, rawURL string) (string, error) {
+	return a.setBackendURL(token, rawURL)
+}
+
+// BackendSwitchable reports whether a switch could succeed at all.
+//
+// False means the endpoint was PINNED by whatever launched this session, and every
+// route to a swap refuses (see ErrBackendPinned) — so the picker must not open. A sheet
+// whose every option is refused the moment it is chosen is worse than no sheet: it
+// presents a decision the session is not allowed to make, and the refusal arrives only
+// after the user has committed to one.
+func (a *App) BackendSwitchable() bool {
+	return !a.snapshotConfig().BackendURLPinnedByEnv
 }

@@ -203,8 +203,9 @@ func (a *App) buildContext(actor domain.ToolActor, actorID string) *tools.ToolCo
 	// AskChoice is wired ONLY for the interactive main actor and left nil otherwise, so
 	// user.askMultipleChoice reports QUESTION_NOT_INTERACTIVE on a nil check for a
 	// watcher/timer/workflow. When the main actor runs in a surface with no question hook
-	// (one-shot, host), the live hook is nil and the closure returns ErrNoAskChoiceHook,
-	// which the handler maps to QUESTION_UNAVAILABLE.
+	// (a one-shot, a non-TTY — NOT the embedded host, which wires one), the live hook is
+	// nil and the closure returns ErrNoAskChoiceHook, which the handler maps to
+	// QUESTION_UNAVAILABLE.
 	var askChoice func(context.Context, tools.AskChoiceRequest) (tools.AskChoiceAnswer, error)
 	if actor == domain.ActorMain {
 		askChoice = func(ctx context.Context, req tools.AskChoiceRequest) (tools.AskChoiceAnswer, error) {

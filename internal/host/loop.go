@@ -40,6 +40,20 @@ func (h *Host) handleCommand(cmd HostCommand) {
 		return
 	}
 
+	// A command that owns the session refuses prompts and other commands for as long as
+	// it holds it — see Host.cmdExclusive. Deliberately narrow: question answers,
+	// approvals, interrupt and shutdown all still land, because the thing holding the
+	// session is a sheet that only an answer (or a Stop) can settle.
+	//
+	// Prompts are let back in slightly EARLIER than commands (cmdPromptsReleased), so
+	// the two are asked separately.
+	promptsBlocked, commandsBlocked := h.exclusiveGates()
+	if (cmd.Type == CmdPrompt && promptsBlocked) || (cmd.Type == CmdCommand && commandsBlocked) {
+		h.report("command-busy",
+			"A command is waiting on your answer. Answer it, or interrupt it, before sending anything else.")
+		return
+	}
+
 	switch cmd.Type {
 	case CmdPrompt:
 		h.handlePrompt(cmd.Text)
@@ -86,13 +100,44 @@ func (h *Host) handleCommand(cmd HostCommand) {
 // next tool-iteration boundary ("between tasks"), matching the host composer — rather
 // than rejected. The send runs on a worker goroutine so the command loop keeps servicing
 // interrupt/decide.
-func (h *Host) handlePrompt(text string) {
+func (h *Host) handlePrompt(text string) { h.admitPrompt(text, false) }
+
+// admitPrompt is handlePrompt with the caller saying whether the prompt was RECLAIMED —
+// already accepted by the engine and already removed from the injection queue.
+//
+// The distinction only matters when a command owns the session. An inbound prompt is
+// refused (the words are still in the composer); a reclaimed one is HELD, because
+// refusing it throws away a message nobody was told about.
+//
+// Checked HERE rather than before the call, under the same lock hold that claims busy.
+// A separate guard was a TOCTOU: it read the flag, released the lock and then called in,
+// and a `/backend` claiming exclusivity in that gap meant the reclaimed prompt was
+// admitted anyway and lost to the reservation it had just been protected from.
+func (h *Host) admitPrompt(text string, reclaimed bool) {
 	// Mint the aborter + claim busy under one lock so a worker's finally can't race
 	// the busy check. interrupt cancels turnCancel. The generation counter is the
 	// identity guard: a stale finally must not null a newer turn's cancel (Go funcs
 	// aren't comparable, so we tag each turn).
 	ctx, cancel := context.WithCancel(h.runCtx)
 	h.turnMu.Lock()
+	if h.cmdExclusive && !h.cmdPromptsReleased {
+		if reclaimed {
+			// Appended under the SAME hold that observed the flag. Unlocking first and
+			// re-locking to append is the same TOCTOU one layer down: the command's
+			// unwind can clear exclusivity and drain an empty queue in that gap, and the
+			// append then lands behind a drain that will never run again — the prompt
+			// stranded for the life of the session.
+			h.deferredPrompts = append(h.deferredPrompts, text)
+			h.turnMu.Unlock()
+			cancel()
+			return
+		}
+		h.turnMu.Unlock()
+		cancel()
+		h.report("command-busy",
+			"A command is waiting on your answer. Answer it, or interrupt it, before sending anything else.")
+		return
+	}
 	if h.closing {
 		// Teardown already latched: no new turn may start (the turnWG join below
 		// would otherwise race a fresh Add).
@@ -120,7 +165,7 @@ func (h *Host) handlePrompt(text string) {
 		h.turnMu.Unlock()
 		if !stillBusy {
 			if stranded := h.reclaimStrandedInjections(); stranded != "" {
-				h.handlePrompt(stranded)
+				h.dispatchReclaimedPrompt(stranded)
 				return
 			}
 		}
@@ -200,7 +245,7 @@ func (h *Host) finishPromptTurn(gen uint64, ctx context.Context) {
 	if stranded != "" {
 		// Dispatch the stranded prompt as a fresh command turn. Deferred wakes
 		// stay queued — that turn's own finally drains them.
-		h.handlePrompt(stranded)
+		h.dispatchReclaimedPrompt(stranded)
 		return
 	}
 	if more {
@@ -240,11 +285,12 @@ func (h *Host) reclaimStrandedInjections() string {
 // wake fold into it via InjectPrompt instead. Shutdown/hibernate/parent-exit DO
 // cancel wakes — see teardown/cancelWake.
 func (h *Host) handleInterrupt() {
-	// A slow command first, and unconditionally. `/login` is the only work here a user
-	// can be left staring at with no other way out — the browser tab is theirs to
-	// abandon, and Stop is where they will reach for that. Cancelled alongside a turn
-	// rather than instead of one: the two are independent, so a login running beside a
-	// turn must not survive a Stop aimed at either.
+	// A slow command first, and unconditionally. A slow command is the work a user can
+	// be left staring at with no other way out — a browser tab that is theirs to
+	// abandon, a picker they have decided not to answer — and Stop is where they will
+	// reach for that. Cancelled alongside a turn rather than instead of one: the two are
+	// independent, so a command running beside a turn must not survive a Stop aimed at
+	// either.
 	h.cancelCommand()
 
 	h.turnMu.Lock()
@@ -332,7 +378,21 @@ func (h *Host) cancelCommand() {
 // InjectPrompt.
 func (h *Host) reactWake() {
 	h.turnMu.Lock()
-	if h.busy || h.closing || !h.ready || h.bridge == nil || h.app == nil {
+	// cmdExclusive gates this as firmly as busy does, and the reason is a data-loss bug
+	// rather than a preference. A session-owning command holds the endpoint reservation
+	// — `/backend` with no argument does, while its picker is open — so a wake admitted
+	// here would reach Session.Send and be refused. The burst has ALREADY been marked
+	// notified by the scheduler and has already been drained from pendingWake by the
+	// time that happens, and the retry path requeues only once (wakeRetried): a second
+	// refusal drops the events for good, in this process and across a restart.
+	//
+	// Deferring instead costs nothing. The events stay queued, and the command's own
+	// unwind re-drives this the moment it finishes.
+	//
+	// EXCLUSIVE, not merely slow. `/login` is slow and holds nothing — prompts are
+	// admitted throughout it — so deferring autonomous work for its five minutes would
+	// be a policy this codebase states nowhere and contradicts everywhere else.
+	if h.busy || h.cmdExclusive || h.closing || !h.ready || h.bridge == nil || h.app == nil {
 		h.turnMu.Unlock()
 		return
 	}
@@ -450,7 +510,7 @@ func (h *Host) reactWake() {
 	cancel() // release the child context's resources
 	if stranded != "" {
 		// Deferred wakes stay queued — the dispatched turn's finally drains them.
-		h.handlePrompt(stranded)
+		h.dispatchReclaimedPrompt(stranded)
 		return
 	}
 	if more {
@@ -496,9 +556,10 @@ func (h *Host) teardown(reason HostShutdownReason, resumeSessionID string) {
 		h.cancelTurn()
 		h.cancelWake()
 		// And an in-flight slow command. It is the one worker that can be parked on a
-		// human rather than a model — a sign-in waits five minutes for a browser — so
-		// leaving it out meant every shutdown during one burned the whole join timeout
-		// and then closed the App under it.
+		// human rather than a model — a sign-in waits five minutes for a browser, a
+		// picker waits as long as someone leaves its sheet open — so leaving it out
+		// meant every shutdown during one burned the whole join timeout and then closed
+		// the App under it.
 		h.cancelCommand()
 		// Reject every outstanding approval so a parked dispatch unblocks (declined).
 		if h.bridge != nil {
@@ -646,6 +707,69 @@ func flushExit(code int) {
 	os.Exit(code)
 }
 
+// dispatchReclaimedPrompt re-dispatches a prompt the engine ACCEPTED and then could not
+// consume — one buffered as an injection into a turn that ended before folding it in.
+//
+// It is not `handlePrompt`, because the words are already the user's and already taken.
+// The inbound gate in handleCommand REFUSES a prompt while a session-owning command
+// holds the session, which is right for something typed a moment ago and still in the
+// composer; refusing one of these would throw away a message the engine has already
+// removed from the injection queue and told nobody about. So it is HELD instead, and the
+// command's own unwind dispatches it.
+//
+// The window is real and narrow, and it is NOT "while busy is still set" — a bare
+// `/backend` is refused outright then (handleSlashCommandAsync gates an exclusive
+// command on h.busy). It is the sliver AFTER the finishing turn clears busy and BEFORE
+// it has re-dispatched what it reclaimed: the loop is free, an exclusive command can be
+// admitted, and the reclaimed prompt then arrives into a session somebody else owns.
+func (h *Host) dispatchReclaimedPrompt(text string) { h.admitPrompt(text, true) }
+
+// drainDeferredPrompts dispatches everything dispatchReclaimedPrompt held back. Called
+// from the unwind of the command that was holding the session; nothing else will, since
+// these prompts belong to no turn whose finally would come along for them.
+//
+// A prompt held when TEARDOWN runs is lost: handlePrompt refuses once `closing` is
+// latched, and there is nowhere durable to put a prompt (the wake queue has
+// RearmAttention; prose has no equivalent). That is the same fate a stranded injection
+// already meets at shutdown — reclaimStrandedInjections is skipped while closing — so it
+// is a known limit of the injection strand rather than something this lane introduced.
+func (h *Host) drainDeferredPrompts() {
+	h.turnMu.Lock()
+	pending := h.deferredPrompts
+	h.deferredPrompts = nil
+	h.turnMu.Unlock()
+	for _, text := range pending {
+		// Back through the GUARD, not straight to a turn.
+		//
+		// No other EXCLUSIVE command can interpose from this caller: cmdBusy is still set
+		// until after the worker's unwind, so nothing can take the session while this
+		// loop runs. (Prompts and ordinary commands still can — they are simply not what
+		// would hurt.) The guard is here for the OTHER strand-recovery callers, which
+		// re-dispatch a reclaimed prompt from a finishing turn or wake with no such
+		// protection, and because a re-check that is correct from every caller is worth
+		// more than one that is correct only from the caller it was written for.
+		// admitPrompt re-checks under the lock that claims busy, so a prompt lands or is
+		// held again, never in between.
+		h.dispatchReclaimedPrompt(text)
+	}
+}
+
+// exclusiveHeld reports whether a command currently owns the session. Takes turnMu
+// itself so callers on the loop read it the same way every other flag there is read.
+func (h *Host) exclusiveHeld() bool {
+	h.turnMu.Lock()
+	defer h.turnMu.Unlock()
+	return h.cmdExclusive
+}
+
+// exclusiveGates reports whether prompts and commands are currently refused. They are
+// released at different moments — see Host.cmdPromptsReleased.
+func (h *Host) exclusiveGates() (promptsBlocked, commandsBlocked bool) {
+	h.turnMu.Lock()
+	defer h.turnMu.Unlock()
+	return h.cmdExclusive && !h.cmdPromptsReleased, h.cmdExclusive
+}
+
 // handleSlashCommand runs a slash line and posts its output.
 //
 // Not a turn: no turn:start/turn:end is emitted and the model is never consulted, so a
@@ -670,6 +794,21 @@ func (h *Host) runAndPostCommand(line string) CommandOutcome {
 // runAndPostCommandCtx is runAndPostCommand against a caller-supplied context, so a slow
 // command can be cancelled without cancelling the whole run.
 func (h *Host) runAndPostCommandCtx(ctx context.Context, line string) CommandOutcome {
+	return h.runAndPostCommandWith(ctx, line, nil)
+}
+
+// runAndPostCommandWith runs a slash line, runs `beforePost` if given, and only then
+// posts the result.
+//
+// The seam exists because the RESULT is what a host uses to decide the command is over.
+// Daintree keeps its composer disabled from the moment a local question is answered
+// until that frame arrives; posting it while this command still owned the session meant
+// the composer came back live a beat early, and a prompt submitted in that beat was
+// refused by the gate — accepted by the transport, cleared from the draft, and never
+// seen by the model. The gate has to be down before the result says so.
+func (h *Host) runAndPostCommandWith(
+	ctx context.Context, line string, beforePost func(),
+) CommandOutcome {
 	var out CommandOutcome
 	if runner, ok := h.app.(CommandProgressRunner); ok {
 		// Progress arrives as ordinary info notices — the same channel a degraded MCP or
@@ -679,6 +818,9 @@ func (h *Host) runAndPostCommandCtx(ctx context.Context, line string) CommandOut
 		})
 	} else {
 		out = h.app.RunCommand(ctx, line)
+	}
+	if beforePost != nil {
+		beforePost()
 	}
 	h.post(EvCommandResult{
 		Command:             line,
@@ -693,6 +835,20 @@ func (h *Host) runAndPostCommandCtx(ctx context.Context, line string) CommandOut
 	return out
 }
 
+// releaseExclusive drops the session-ownership gate and hands back anything held behind
+// it. Idempotent: the worker's own unwind calls it again.
+func (h *Host) releaseExclusive() {
+	h.turnMu.Lock()
+	// PROMPTS only. Commands stay blocked until this command's own result has been
+	// posted and its unwind clears cmdExclusive — see Host.cmdPromptsReleased.
+	first := h.cmdExclusive && !h.cmdPromptsReleased
+	h.cmdPromptsReleased = true
+	h.turnMu.Unlock()
+	if first {
+		h.drainDeferredPrompts()
+	}
+}
+
 // handleSlashCommandAsync runs a SLOW slash line on a worker goroutine.
 //
 // The command loop is single-threaded, and everything it does not service while blocked
@@ -700,11 +856,16 @@ func (h *Host) runAndPostCommandCtx(ctx context.Context, line string) CommandOut
 // That is a fair trade for a command that reads a table and returns. It is not a fair
 // trade for `/login`, which opens a browser and then waits up to five minutes for a
 // loopback callback — for those five minutes the panel would accept no input, show no
-// progress, and be indistinguishable from a hung engine.
+// progress, and be indistinguishable from a hung engine. Nor for a command that ASKS,
+// where the answer arrives as a command on the very loop it would be blocking: inline,
+// that is not a freeze, it is a deadlock.
 //
 // Registered in the same worker group as a turn, under the same `closing` check, so
-// teardown's bounded join covers an abandoned sign-in rather than racing it.
+// teardown's bounded join covers an abandoned command rather than racing it.
 func (h *Host) handleSlashCommandAsync(line string) {
+	runner, isRunner := h.app.(CommandProgressRunner)
+	exclusive := isRunner && runner.IsExclusiveCommand(line)
+
 	// Its own context, not h.runCtx: teardown and interrupt both need a handle on this
 	// specific wait, and h.runCtx is only cancelled once the process is already going.
 	ctx, cancel := context.WithCancel(h.runCtx)
@@ -716,20 +877,39 @@ func (h *Host) handleSlashCommandAsync(line string) {
 		h.report("not-ready", "Host is shutting down.")
 		return
 	}
+	// A turn already ADMITTED owns the session even though Session.inFlight is not
+	// claimed until its worker reaches Send. Without this, a bare `/backend` arriving in
+	// that gap takes the reservation and the accepted prompt's Send is then refused —
+	// the user's message swallowed by a command they typed afterwards.
+	if h.busy && exclusive {
+		h.turnMu.Unlock()
+		cancel()
+		h.report("command-busy",
+			"A turn is running. Wait for it to finish before switching what the session is bound to.")
+		return
+	}
 	if h.cmdBusy {
 		h.turnMu.Unlock()
 		cancel()
-		// REJECTED, not queued. These commands change the account, and running a
-		// second while the first is still deciding means the two settle in whichever
-		// order the network returns rather than the order they were typed — a /logout
-		// sent after a /login can land first and leave the session signed in. Saying so
-		// is also the honest answer: the first one is waiting on the user, and they are
-		// the only one who can finish it.
+		// REJECTED, not queued. These commands change what the session is bound to —
+		// the account, the endpoint — and running a second while the first is still
+		// deciding means the two settle in whichever order they happen to finish rather
+		// than the order they were typed: a /logout sent after a /login can land first
+		// and leave the session signed in. Saying so is also the honest answer: the
+		// first one is waiting on the user, and they are the only one who can finish it.
 		h.report("command-busy",
-			"Another account command is still running. Finish it in your browser, or interrupt it, before starting another.")
+			"Another command is still waiting on you. Finish or interrupt it before starting another.")
 		return
 	}
 	h.cmdBusy = true
+	// Set HERE, on the loop, before the goroutine below is scheduled. Setting it inside
+	// the worker would leave a window in which the command has been dispatched and the
+	// gate is not yet up, and a prompt arriving in that window is admitted, starts a
+	// turn, and is then refused by a reservation it never saw coming.
+	if exclusive {
+		h.cmdExclusive = true
+		h.cmdPromptsReleased = false
+	}
 	h.cmdCancel = cancel
 	h.turnWG.Add(1)
 	h.turnMu.Unlock()
@@ -737,18 +917,43 @@ func (h *Host) handleSlashCommandAsync(line string) {
 	go func() {
 		defer h.turnWG.Done()
 		defer func() {
+			// Idempotent with the release before the result was posted: that one is the
+			// one that matters for ordering, this one covers the paths that never reach
+			// it (a panic, a command that returned before the seam).
+			h.releaseExclusive()
 			h.turnMu.Lock()
 			h.cmdBusy = false
+			h.cmdExclusive = false
+			h.cmdPromptsReleased = false
 			h.cmdCancel = nil
+			// A wake that arrived while this command held the session was DEFERRED
+			// rather than attempted (see reactWake), so it is still queued and nothing
+			// else will come along to drive it. This is that something.
+			more := len(h.pendingWake) > 0 && !h.closing && !h.busy
 			h.turnMu.Unlock()
 			cancel()
+			if more {
+				go h.reactWake()
+			}
 			// A panic in a command worker is fatal-for-command, not fatal-for-host —
 			// the same rule a turn worker follows.
 			if r := recover(); r != nil {
 				h.report("command-failed", fmt.Sprintf("command panicked: %v\n%s", r, debug.Stack()))
+				// And it STILL reports a result. Every dispatched command reports
+				// exactly once — the panic path is the one that used to report none,
+				// and a host that holds UI open until a command's result (Daintree
+				// disables its composer while a picker's command finishes applying an
+				// answer) would then hold it open for the rest of the session, waiting
+				// on a frame that can no longer arrive.
+				h.post(EvCommandResult{
+					Command: line,
+					Text:    "That command failed and could not finish.",
+				})
 			}
 		}()
-		out := h.runAndPostCommandCtx(ctx, line)
+		// The gate comes down BEFORE the result is published, because the result is what
+		// tells the host the command is over. See runAndPostCommandWith.
+		out := h.runAndPostCommandWith(ctx, line, h.releaseExclusive)
 		if out.Quit {
 			// Unreachable by construction: no command is both Slow and quitting, and
 			// tearing down from inside the worker group would deadlock on its own join.

@@ -514,8 +514,13 @@ func (e EvApprovalDecided) encode(sid string, seq uint64) ([]byte, error) {
 	})
 }
 
-// EvQuestionRequested — question:requested. The model needs a finite user decision
-// (user.askMultipleChoice) and the turn is BLOCKED until the host answers.
+// EvQuestionRequested — question:requested. A finite user decision is needed and
+// whoever asked is BLOCKED until the host answers.
+//
+// Usually the model mid-turn (user.askMultipleChoice); also the CLI itself, on a slash
+// command that exists to pick one of a short list. Those carry NO TurnID, because they
+// belong to no turn — see AskChoiceRequest.Local. Only one may be outstanding at a time
+// (Bridge.AskChoice refuses a second), so a host may model this as a single sheet.
 //
 // It is a separate event from approval:requested because the two decisions are not the
 // same shape. An approval is "may I do this?" and has one safe default — no. A question

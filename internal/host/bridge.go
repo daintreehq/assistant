@@ -62,9 +62,17 @@ type pendingQuestion struct {
 
 // questionOutcome is what the host said. Cancelled is explicit rather than encoded as a
 // sentinel index, because "no answer" and "option -1" must never be confusable.
+//
+// Dismissed is a SECOND fact about the same settlement, not a third state: every
+// dismissal is a cancellation, but not every cancellation is a dismissal. The
+// difference is who ended it — the user closed the sheet, or the turn was abandoned
+// underneath it (interrupt, teardown, timeout) — and the model needs it, because
+// "you declined to answer" tells it to decide without asking while "the turn was
+// cancelled" tells it nothing about the question at all.
 type questionOutcome struct {
 	index     int
 	cancelled bool
+	dismissed bool
 }
 
 // Bridge adapts the in-process agent EventSink + tool-confirm hook into wire
@@ -748,16 +756,51 @@ func (b *Bridge) AskChoice(ctx context.Context, req AskChoiceRequest) (AskChoice
 	}
 
 	b.mu.Lock()
-	turnID := b.activeTurnID
+	// ONE outstanding question at a time, refused rather than queued.
+	//
+	// The host renders a single sheet — it has one composer to sit above and one set of
+	// keys to own — so a second request does not produce a second sheet, it REPLACES the
+	// first. The first asker is then parked on a question nobody can see, until its
+	// timeout or an interrupt. Reachable even though `/backend` reserves the session
+	// before it asks: the reservation excludes TURNS, not other questions, and the
+	// question channel has more than one producer now.
+	//
+	// Refusing is the honest answer and the recoverable one. The model is told it could
+	// not ask and decides without asking or tries later; a command reports that
+	// something else is already waiting. Queueing would mean holding a dispatch open for
+	// an unbounded time behind a decision the user has not been shown yet.
+	if len(b.pendingQuestions) > 0 {
+		b.mu.Unlock()
+		return AskChoiceAnswer{}, ErrQuestionBusy
+	}
+	// A LOCAL question belongs to no turn. Stamping the active one would record the
+	// answer inside a turn that never asked it — see AskChoiceRequest.Local.
+	turnID := ""
+	if !req.Local {
+		turnID = b.activeTurnID
+	}
 	now := b.now()
 	pq := &pendingQuestion{resolve: resolve, options: opts}
 	b.pendingQuestions[questionID] = pq
-	b.mu.Unlock()
 
-	// The request frame is posted BEFORE the timer is armed. Arming first leaves a
-	// window — a very short timeout, or a descheduled goroutine — in which
-	// question:answered(cancelled) reaches the host ahead of the question:requested it
-	// answers, leaving a ghost sheet the host can never close.
+	// REGISTERED, ARMED AND ANNOUNCED UNDER ONE LOCK HOLD — the same shape Confirm uses,
+	// and for a sharper reason.
+	//
+	// Registering and then unlocking to post leaves a window in which the question is
+	// settleable but has never been announced. An interrupt or a teardown landing there
+	// drains it (SettlePendingQuestions) and posts question:answered FIRST; the host has
+	// no record to match it against, so it discards it, and the question:requested that
+	// follows opens a sheet whose pending entry has already been deleted. Every click on
+	// it then reaches a ResolveQuestion that no-ops: an immortal sheet, on a turn that
+	// was cancelled before it was ever drawn.
+	//
+	// Arming inside the same hold removes the old "is it still pending?" dance with it —
+	// nothing can have settled yet, because nothing has been able to see it.
+	if b.approvalTimeoutMs > 0 {
+		pq.timer = time.AfterFunc(time.Duration(b.approvalTimeoutMs)*time.Millisecond, func() {
+			b.abandonQuestion(questionID)
+		})
+	}
 	b.post(EvQuestionRequested{
 		QuestionID:  questionID,
 		Question:    req.Question,
@@ -767,19 +810,7 @@ func (b *Bridge) AskChoice(ctx context.Context, req AskChoiceRequest) (AskChoice
 		TurnID:      turnID,
 		ToolCallID:  req.ToolCallID,
 	})
-
-	// Armed only if this question is STILL pending: the host may already have answered
-	// between the post above and here, and arming a timer for a settled question would
-	// leave it to fire against an id that no longer exists.
-	if b.approvalTimeoutMs > 0 {
-		b.mu.Lock()
-		if live, ok := b.pendingQuestions[questionID]; ok && live == pq {
-			pq.timer = time.AfterFunc(time.Duration(b.approvalTimeoutMs)*time.Millisecond, func() {
-				b.ResolveQuestion(questionID, -1)
-			})
-		}
-		b.mu.Unlock()
-	}
+	b.mu.Unlock()
 
 	select {
 	case out := <-resolve:
@@ -789,6 +820,13 @@ func (b *Bridge) AskChoice(ctx context.Context, req AskChoiceRequest) (AskChoice
 		if ctx.Err() != nil {
 			return AskChoiceAnswer{}, ctx.Err()
 		}
+		if out.dismissed {
+			// The user WAS asked and closed the sheet. Its own error, because the two
+			// unanswered outcomes mean opposite things to the model: a dismissal is a
+			// decision not to decide (stop asking), a cancellation is the turn going
+			// away underneath the question (the question was never the point).
+			return AskChoiceAnswer{}, ErrQuestionDismissed
+		}
 		if out.cancelled || out.index < 0 || out.index >= len(opts) {
 			// Out of range is treated as a cancellation, not clamped. Clamping would
 			// answer with an option the user never selected.
@@ -797,15 +835,28 @@ func (b *Bridge) AskChoice(ctx context.Context, req AskChoiceRequest) (AskChoice
 		chosen := opts[out.index]
 		return AskChoiceAnswer{Label: chosen.Label, Index: out.index, Text: chosen.Text}, nil
 	case <-ctx.Done():
-		b.ResolveQuestion(questionID, -1)
+		b.abandonQuestion(questionID)
 		return AskChoiceAnswer{}, ctx.Err()
 	}
 }
 
-// ResolveQuestion settles an outstanding question. A negative index cancels it. No-op
-// when nothing is pending under that id, so a duplicate answer from a host that retried
-// is harmless.
+// ResolveQuestion settles an outstanding question with the HOST's own answer. A negative
+// index is the host saying the user closed the sheet without choosing — a dismissal, not
+// an abandoned turn. No-op when nothing is pending under that id, so a duplicate answer
+// from a host that retried is harmless.
 func (b *Bridge) ResolveQuestion(questionID string, index int) {
+	b.settleQuestion(questionID, index, index < 0)
+}
+
+// abandonQuestion settles an outstanding question that NOBODY answered — the timeout
+// fired, the turn was interrupted, or the session is tearing down. Separate from
+// ResolveQuestion so the two reasons a question ends without an answer cannot be
+// collapsed into one sentinel on the way to the model.
+func (b *Bridge) abandonQuestion(questionID string) {
+	b.settleQuestion(questionID, -1, false)
+}
+
+func (b *Bridge) settleQuestion(questionID string, index int, dismissed bool) {
 	b.mu.Lock()
 	pq, ok := b.pendingQuestions[questionID]
 	if !ok {
@@ -829,7 +880,7 @@ func (b *Bridge) ResolveQuestion(questionID string, index int) {
 	}
 	b.post(ev)
 	select {
-	case pq.resolve <- questionOutcome{index: index, cancelled: ev.Cancelled}:
+	case pq.resolve <- questionOutcome{index: index, cancelled: ev.Cancelled, dismissed: dismissed && ev.Cancelled}:
 	default:
 	}
 }
@@ -845,7 +896,7 @@ func (b *Bridge) SettlePendingQuestions() {
 	}
 	b.mu.Unlock()
 	for _, id := range ids {
-		b.ResolveQuestion(id, -1)
+		b.abandonQuestion(id)
 	}
 }
 

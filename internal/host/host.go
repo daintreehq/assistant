@@ -70,12 +70,38 @@ type Host struct {
 	//
 	// A slow command is the only work here that waits on a person rather than on a
 	// model: `/login` blocks until a browser round trip completes or its five-minute
-	// callback window expires. Without a cancel, shutdown reaches its bounded join with
+	// callback window expires, and `/backend` with no argument blocks on a picker the
+	// user has yet to answer. Without a cancel, shutdown reaches its bounded join with
 	// that wait still running and tears the App down underneath it; without the busy
-	// flag, two of them overlap and settle in whichever order the network decides —
+	// flag, two of them overlap and settle in whichever order they finish —
 	// a `/logout` sent after a `/login` can finish first and leave the session signed in.
-	cmdCancel           context.CancelFunc
-	cmdBusy             bool
+	cmdCancel context.CancelFunc
+	cmdBusy   bool
+	// cmdExclusive marks that the in-flight slow command has taken the SESSION, not
+	// merely the command lane — `/backend` with no argument reserves it while its picker
+	// is open.
+	//
+	// Set on the loop, before the worker is scheduled, which is what makes it a real
+	// gate: the loop is single-threaded, so a prompt arriving after the command was
+	// dispatched cannot slip past by reaching the runtime before the worker does. Prompts
+	// and other commands are refused while it is set; answers, approvals, interrupt and
+	// shutdown are not, or the very sheet holding the session could never be settled.
+	cmdExclusive bool
+	// cmdPromptsReleased opens PROMPT admission again while cmdExclusive is still set.
+	//
+	// The two are released at different moments on purpose. Prompts have to be
+	// admissible by the time `command:result` reaches the host, because that frame is
+	// what a host uses to re-enable its composer — a prompt submitted on the strength of
+	// it and then refused would be accepted by the transport, cleared from the draft and
+	// never seen by the model. COMMANDS have the opposite requirement: another one
+	// admitted in that same window posts its own `command:result` FIRST, so the host
+	// renders the older command's outcome last and shows a state that is no longer live.
+	// They stay blocked until this command's result is out.
+	cmdPromptsReleased bool
+	// deferredPrompts holds prompts that were ALREADY ACCEPTED and could not be
+	// dispatched because a session-owning command had the session — see
+	// dispatchReclaimedPrompt. Drained when that command releases it.
+	deferredPrompts     []string
 	turnGen             uint64
 	pendingWake         []domain.QueueEvent
 	wakeRetried         bool
