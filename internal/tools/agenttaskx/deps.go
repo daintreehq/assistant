@@ -69,6 +69,27 @@ type Deps struct {
 	// the filter (scope "session" then lists all rows), so unwired tests keep the old
 	// behaviour.
 	SessionStartedAt int64
+	// WorktreePin is the turn's worktree binding (internal/tools/worktreepin), driven
+	// by the Session. A spawn that names no worktreeId defaults to it, so a fan-out
+	// dispatched as a concurrent cohort cannot straddle a mid-turn worktree switch.
+	// nil (or an unbound pin) ⇒ the id stays omitted and Daintree picks its live
+	// active worktree, which is exactly the pre-pin behaviour.
+	WorktreePin WorktreePin
+}
+
+// WorktreePin is the read side of the turn's worktree binding. Narrow on purpose:
+// this family never drives the pin, it only asks what the turn is anchored to.
+type WorktreePin interface {
+	ID() string
+	Describe() (id, path, branch string)
+}
+
+// pinnedWorktreeID is the nil-safe read of the turn's binding.
+func (d Deps) pinnedWorktreeID() string {
+	if d.WorktreePin == nil {
+		return ""
+	}
+	return d.WorktreePin.ID()
 }
 
 // daemonActive resolves the nil-safe DaemonActive (absent ⇒ assume active).

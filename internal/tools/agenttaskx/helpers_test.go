@@ -1,9 +1,13 @@
 package agenttaskx
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/tools"
 )
 
 func TestComputeIdempotencyKeyMirrorsForwardedArgs(t *testing.T) {
@@ -179,4 +183,33 @@ func TestParseTerminalListBothSources(t *testing.T) {
 	if got[0].id != "a" || got[0].name != "Claude: x" || got[1].id != "b" {
 		t.Errorf("parsed wrong: %+v", got)
 	}
+}
+
+// spawnMain dispatches a spawn as the interactive main turn — the actor every one of
+// these tests is implicitly exercising. The actor is a real parameter in production
+// because an OFF-turn dispatch (a durable timer firing agentTask.spawnForEdits) must
+// not inherit the turn's worktree binding; see runsInsideATurn.
+//
+// A turn ALWAYS has a worktree binding in production (the session binds one before any
+// tool runs), and a spawn without one now fails rather than falling back, so an unset
+// pin is given the default below. Tests that mean to exercise the unbound path call
+// spawnUnpinned; tests that mean to exercise a specific worktree set Deps.WorktreePin
+// themselves and this leaves it alone.
+func spawnMain(ctx context.Context, deps Deps, a *spawnArgs) tools.ToolResult {
+	if deps.WorktreePin == nil {
+		deps.WorktreePin = fixedPin{id: defaultTestWorktree, path: defaultTestWorktree, branch: "main"}
+	}
+	return spawn(ctx, deps, a, domain.ActorMain)
+}
+
+// defaultTestWorktree is the worktree spawnMain pins when a test does not care which
+// one it is. Canonical-shaped (an absolute path) because Daintree worktree ids ARE
+// paths, and the cohort classifier refuses anything else.
+const defaultTestWorktree = "/p/app"
+
+// spawnUnpinned dispatches with NO worktree binding at all — the degraded case where
+// the turn never managed to read a current worktree.
+func spawnUnpinned(ctx context.Context, deps Deps, a *spawnArgs, actor domain.ToolActor) tools.ToolResult {
+	deps.WorktreePin = nil
+	return spawn(ctx, deps, a, actor)
 }

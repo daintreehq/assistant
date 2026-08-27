@@ -8,9 +8,17 @@ import (
 
 func keysOf(t *testing.T, args string) []string {
 	t.Helper()
-	keys, ok := spawnParallelConflictKeys(json.RawMessage(args))
+	return keysOfPinned(t, args, "")
+}
+
+// keysOfPinned classifies against a bound turn worktree. The pin is what the handler
+// substitutes for an omitted worktreeId, so the classifier has to see the same value or
+// it would refuse cohorts the handler is about to send to one known worktree.
+func keysOfPinned(t *testing.T, args, pinned string) []string {
+	t.Helper()
+	keys, ok := spawnParallelConflictKeys(json.RawMessage(args), pinned)
 	if !ok {
-		t.Fatalf("spawnParallelConflictKeys(%s) refused cohort membership; want keys", args)
+		t.Fatalf("spawnParallelConflictKeys(%s, %q) refused cohort membership; want keys", args, pinned)
 	}
 	return keys
 }
@@ -28,7 +36,7 @@ func TestSpawnParallelConflictKeys(t *testing.T) {
 		"alias on explore also refuses":          `{"mode":"explore","worktreeId":"main","title":"t","taskPrompt":"p"}`,
 		"unparseable args":                       `{"mode":`,
 	} {
-		if keys, ok := spawnParallelConflictKeys(json.RawMessage(args)); ok {
+		if keys, ok := spawnParallelConflictKeys(json.RawMessage(args), ""); ok {
 			t.Errorf("%s: got keys %v, want cohort refusal (ok=false)", name, keys)
 		}
 	}
@@ -75,6 +83,38 @@ func TestSpawnParallelConflictKeys(t *testing.T) {
 	editC := keysOf(t, `{"mode":"edit","worktreeId":"/w/other","title":"c","taskPrompt":"p"}`)
 	if editC[1] == wantWt {
 		t.Errorf("distinct worktrees must not share a key: %q", editC[1])
+	}
+}
+
+// A bound turn worktree is the value the HANDLER launches with when worktreeId is
+// omitted, so the classifier must key on it too. Without this an edit fan-out into the
+// turn's own worktree serialized on a target that was never actually unknown.
+func TestSpawnParallelConflictKeysUseTheTurnWorktree(t *testing.T) {
+	// Omitted + pinned resolves the edit worktree dimension instead of refusing.
+	pinned := keysOfPinned(t, `{"mode":"edit","title":"a","taskPrompt":"p"}`, "/w/app/")
+	if len(pinned) != 2 || pinned[1] != "worktree:/w/app" {
+		t.Errorf("pinned edit keys = %v, want a cleaned worktree:/w/app dimension", pinned)
+	}
+
+	// An explicit id still WINS over the pin — naming a worktree is how the model sends
+	// an agent somewhere other than where the turn began, and the key must follow the
+	// launch, not the binding.
+	explicit := keysOfPinned(t, `{"mode":"edit","worktreeId":"/w/other","title":"a","taskPrompt":"p"}`, "/w/app")
+	if explicit[1] != "worktree:/w/other" {
+		t.Errorf("explicit worktree key = %q, want worktree:/w/other", explicit[1])
+	}
+
+	// With NO pin bound the omitted case is still genuinely unknown, so an edit spawn
+	// keeps refusing cohort membership rather than guessing it shares a target.
+	if keys, ok := spawnParallelConflictKeys(json.RawMessage(`{"mode":"edit","title":"a","taskPrompt":"p"}`), ""); ok {
+		t.Errorf("unpinned edit spawn got keys %v, want cohort refusal", keys)
+	}
+
+	// A branch-shaped pin cannot be proven to name a distinct worktree without an MCP
+	// read this classifier must never make, so it refuses exactly like a branch-shaped
+	// argument does.
+	if keys, ok := spawnParallelConflictKeys(json.RawMessage(`{"mode":"edit","title":"a","taskPrompt":"p"}`), "main"); ok {
+		t.Errorf("branch-shaped pin got keys %v, want cohort refusal", keys)
 	}
 }
 

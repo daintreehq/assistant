@@ -163,7 +163,7 @@ func TestClosestAgentID(t *testing.T) {
 func TestSpawnRejectsUnknownAgent(t *testing.T) {
 	mcp := &scriptMCP{connected: true, agentRoster: agentRoster("claude", "antigravity")}
 	st := newSagaStore()
-	res := spawn(context.Background(), Deps{MCP: mcp, DB: st}, &spawnArgs{
+	res := spawnMain(context.Background(), Deps{MCP: mcp, DB: st}, &spawnArgs{
 		AgentID: "antiravity", Mode: "explore", Title: "explore it", TaskPrompt: "go",
 	})
 	if res.Ok || res.Error.Code != codeUnknownAgent {
@@ -185,7 +185,7 @@ func TestSpawnRejectsUnknownAgent(t *testing.T) {
 func TestSpawnAllowsConfiguredAgent(t *testing.T) {
 	mcp := &scriptMCP{connected: true, agentRoster: agentRoster("claude", "antigravity"), launchResult: launchOK("term_5")}
 	st := newSagaStore()
-	res := spawn(context.Background(), Deps{MCP: mcp, DB: st}, &spawnArgs{
+	res := spawnMain(context.Background(), Deps{MCP: mcp, DB: st}, &spawnArgs{
 		AgentID: "antigravity", Mode: "explore", Title: "explore it", TaskPrompt: "go",
 	})
 	if !res.Ok {
@@ -202,7 +202,7 @@ func TestSpawnRejectsRegisteredButUnavailableAgent(t *testing.T) {
 		agentRoster: agentRosterWithAvailability(map[string]string{"codex": "missing"}),
 	}
 	st := newSagaStore()
-	res := spawn(context.Background(), Deps{MCP: mcp, DB: st}, &spawnArgs{
+	res := spawnMain(context.Background(), Deps{MCP: mcp, DB: st}, &spawnArgs{
 		AgentID: "codex", Mode: "edit", Title: "edit it", TaskPrompt: "go",
 	})
 	if res.Ok || res.Error.Code != codeAgentUnavailable {

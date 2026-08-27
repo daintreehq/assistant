@@ -126,7 +126,7 @@ real process environment (or the assistant's own `.env`), **never** from the bou
 | `DAINTREE_WINDOW_ID` | Launching window id. **Informational**; the enforceable binding is server-side. | **Yes** → `cfg.WindowID` |
 | `DAINTREE_ASSISTANT_AUTO_APPROVE` | `"1"` when the user turned off permission prompts. Reported back on `host:ready`. | **Yes** → `cfg.AutoApprove` |
 | `DAINTREE_ASSISTANT_DEBUG_LOG` | `"1"` when the user enabled debug logging. | **Yes** → `cfg.DebugLog` |
-| `DAINTREE_ASSISTANT_SCRATCH_DIR`, `DAINTREE_PANE_ID`, `DAINTREE_CWD`, `DAINTREE_WORKTREE_ID` | Host-provided metadata. | **No** — injected but not consumed. |
+| `DAINTREE_ASSISTANT_SCRATCH_DIR`, `DAINTREE_PANE_ID`, `DAINTREE_CWD`, `DAINTREE_WORKTREE_ID` | Host-provided metadata. | **No** — injected but not consumed. `DAINTREE_WORKTREE_ID` deliberately so: it is the worktree the assistant PANEL was created in, and the panel outlives any number of worktree switches, so by the time a turn runs it may name a worktree the user left hours ago. The live answer comes from MCP (below). |
 
 Daintree strips inherited `DAINTREE_*` variables from the shell environment before injecting
 its own, so a stale token in the user's OS environment cannot leak in.
@@ -407,7 +407,17 @@ project-scoped and survive; they are adopted by the next owner rather than torn 
 
 Project scope is carried by `DAINTREE_PROJECT_ID` and, more importantly, by the per-session
 bearer bound to that project. **Worktree identity is not in env or cwd** — query it over MCP
-(`actions.getContext` / `worktree.getCurrent`); it is pinned at launch.
+(`actions.getContext` / `worktree.getCurrent`).
+
+It is **pinned per TURN, not per launch**. Daintree resolves an omitted `worktreeId` on
+`agent.launch` against its LIVE active-worktree selection, read at the instant the call
+lands — right for a palette pick, wrong for a turn: a fan-out of spawns dispatches as a
+concurrent cohort, so a human switching worktrees mid-batch would split that cohort across
+two worktrees, and a spawn late in a long turn would land wherever they had wandered to.
+So the CLI binds the worktree its first round observed and forwards that id EXPLICITLY on
+every spawn for the rest of the turn (`internal/tools/worktreepin`). A switch arriving
+mid-turn still updates what the model SEES — the runtime block carries the live snapshot
+every round — it just no longer moves where that turn's agents LAND. The next turn rebinds.
 
 `SESSION_BINDING_GONE` and `BINDING_STALE` from the MCP side are **terminal**: the bound
 window or project is gone. Stop retrying that session and surface it. They are not transient
@@ -567,7 +577,9 @@ bump of `host.ProtocolVersion`, which regenerates
 - `SESSION_BINDING_GONE` / `BINDING_STALE` are **terminal** — stop retrying that session and
   surface it to the user; they mean the bound window/project is gone.
 - Worktree identity is **not** in env or cwd — query it over MCP (`actions.getContext` /
-  `worktree.getCurrent`); it's pinned at launch.
+  `worktree.getCurrent`). The CLI pins it per TURN and forwards it explicitly on every
+  spawn, so a mid-turn worktree switch changes what the model sees without moving where
+  its agents land. `DAINTREE_WORKTREE_ID` is not that value and is not read.
 - `/clear` can be **refused** (a turn in flight). Gate any transcript wipe on
   `command:result.conversationCleared === true`, never on the command text.
 - Hiding keeps the CLI alive; **New session** kills it and drops the host-side transcript;

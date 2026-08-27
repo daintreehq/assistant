@@ -32,9 +32,11 @@ import (
 // recentOutput may be absent (nil) per entry — callers fall back to a deep read.
 type TerminalStatusEntry struct {
 	AgentState    string
-	WaitingReason string  // "question" | "prompt" | "" (meaningful only while waiting)
-	RecentOutput  *string // nil when absent; "" is a valid "no output yet"
-	ExitCode      *int
+	WaitingReason string // "prompt" | "question" | "approval" | "error" | "" (meaningful only while waiting).
+	// The last three are BLOCKED states — see domain.IsBlockingWaitingReason. This used
+	// to name only question/prompt, and the two it omitted were both scored as finished.
+	RecentOutput *string // nil when absent; "" is a valid "no output yet"
+	ExitCode     *int
 	// NotFound marks Daintree's per-entry "Terminal not found" shape: an unknown
 	// id does NOT abort the batched terminal.getStatus and is NOT omitted from the
 	// response — it comes back as a present entry with a per-entry error and a null

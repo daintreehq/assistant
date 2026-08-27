@@ -15,7 +15,7 @@ func TestSpawnCancelledBeforeLaunch(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	res := spawn(ctx, Deps{MCP: mcp, DB: newSagaStore()}, &spawnArgs{Title: "do it", TaskPrompt: "make a change"})
+	res := spawnMain(ctx, Deps{MCP: mcp, DB: newSagaStore()}, &spawnArgs{Title: "do it", TaskPrompt: "make a change"})
 	if res.Ok || res.Error.Code != codeCancelled {
 		t.Fatalf("expected CANCELLED, got %+v", res)
 	}
@@ -40,7 +40,7 @@ func TestSpawnAbortTornLaunchUnresolvedIsAmbiguous(t *testing.T) {
 	}
 	st := newSagaStore()
 
-	res := spawn(ctx, Deps{MCP: mcp, DB: st}, &spawnArgs{Title: "do it", TaskPrompt: "make a change"})
+	res := spawnMain(ctx, Deps{MCP: mcp, DB: st}, &spawnArgs{Title: "do it", TaskPrompt: "make a change"})
 	if res.Ok || res.Error.Code != codeAgentLaunchAmbiguous {
 		t.Fatalf("abort-torn launch should be AMBIGUOUS, got %+v", res)
 	}
@@ -76,7 +76,7 @@ func TestSpawnAbortTornLaunchReconcilesRunningAgent(t *testing.T) {
 	}
 	st := newSagaStore()
 
-	res := spawn(ctx, Deps{MCP: mcp, DB: st}, &spawnArgs{Title: "do it", TaskPrompt: "make a change"})
+	res := spawnMain(ctx, Deps{MCP: mcp, DB: st}, &spawnArgs{Title: "do it", TaskPrompt: "make a change"})
 	if !res.Ok {
 		t.Fatalf("a launch that survived the abort must be reported as running, got %+v", res.Error)
 	}
@@ -97,7 +97,7 @@ func TestSpawnPostLaunchFailureNotMaskedAsCancelled(t *testing.T) {
 	st := newSagaStore()
 	st.insertWatcherErr = errBoom("sqlite boom")
 
-	res := spawn(ctx, Deps{MCP: mcp, DB: st}, &spawnArgs{
+	res := spawnMain(ctx, Deps{MCP: mcp, DB: st}, &spawnArgs{
 		Title: "do it", TaskPrompt: "make a change", Watcher: &spawnWatcher{Create: true},
 	})
 	if !res.Ok {

@@ -80,6 +80,18 @@ func entExit(code int, out string) TerminalStatusEntry {
 	return TerminalStatusEntry{AgentState: "exited", ExitCode: &code, RecentOutput: strp(out)}
 }
 
+// awaitResultRaw exposes the whole result map, for assertions about the top-level
+// id arrays (stillWorking / askingQuestion / blocked) rather than just perTerminal.
+func awaitResultRaw(t *testing.T, out map[string]*awaitOutcome, ids []string) map[string]any {
+	t.Helper()
+	res := buildAwaitResult(ids, out, 0, 0, false, 0, false)
+	if !res.Ok {
+		t.Fatalf("buildAwaitResult returned not-ok")
+	}
+	m, _ := res.Result.(map[string]any)
+	return m
+}
+
 func awaitResult(t *testing.T, out map[string]*awaitOutcome, ids []string) (bool, map[string]map[string]any) {
 	t.Helper()
 	res := buildAwaitResult(ids, out, 0, 0, false, 0, false)
@@ -732,5 +744,191 @@ func TestExtractJSONTool_UnknownIDFailsFast(t *testing.T) {
 	}
 	if res.Error == nil || res.Error.Code != codeUnknownTerminals {
 		t.Fatalf("want %s, got %+v", codeUnknownTerminals, res.Error)
+	}
+}
+
+// A settle wait against an agent parked on a question / approval / blocking error must
+// STOP, not grind. The cohort wait (awaitAll) has always settled on that signal; the
+// in-turn extract settle kept polling, so a real session burned its whole 30-attempt,
+// 58s budget on an agent that had been asking for input the entire time and then
+// reported a bare "condition not met" naming neither the cause nor the remedy.
+func TestSettlePollStopsOnABlockedAgent(t *testing.T) {
+	for _, tc := range []struct {
+		reason string
+		text   string
+	}{
+		{domain.WaitingQuestion, "asking a question"},
+		{domain.WaitingApproval, "waiting on an approval prompt"},
+		{domain.WaitingError, "stopped on a blocking error"},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			r := &cohortReader{seq: []map[string]TerminalStatusEntry{
+				{"t1": ent("working", "", "thinking")},
+				{"t1": ent("waiting", tc.reason, "Do you want to proceed?")},
+			}}
+			router := &safeRouter{}
+			deps := Deps{Reader: r, Router: router}
+			w := settledWait()
+			// tailBytes small enough that the inline recentOutput satisfies the window,
+			// so no deep terminal.getOutput read is attempted (this fake serves none).
+			poll := pollUntil(context.Background(), deps, pollArgs{
+				terminalIDs: []string{"t1"}, wait: &w, pollIntervalMs: 0,
+				maxAttempts: 30, tailBytes: 4, isSettleWait: true,
+			})
+
+			if poll.matched {
+				t.Fatal("a blocked agent must never match a settle wait")
+			}
+			if !poll.blocked || poll.blockedReason != tc.reason {
+				t.Fatalf("blocked=%v reason=%q, want blocked with %q", poll.blocked, poll.blockedReason, tc.reason)
+			}
+			// The whole point: it stopped on the tick it saw the block, rather than
+			// spending the remaining 28 polls proving the same thing.
+			if poll.attempts != 2 {
+				t.Errorf("attempts = %d, want 2 (stop on the blocking read, not the cap)", poll.attempts)
+			}
+			// No judge is spent on a blocked agent — the block is deterministic, and a
+			// judge on a tail still holding earlier output is how it got scored finished.
+			if router.judgeCalls != 0 {
+				t.Errorf("judgeCalls = %d, want 0 for a deterministic block", router.judgeCalls)
+			}
+
+			// The failure the model actually reads must name the state and the remedy,
+			// under a code distinct from a timeout: "wait longer" is precisely wrong here.
+			res := waitFailure("terminal.extract", poll, 1234)
+			if res.Ok || res.Error.Code != codeTerminalBlocked {
+				t.Fatalf("want TERMINAL_BLOCKED, got %+v", res)
+			}
+			if !strings.Contains(res.Error.Message, tc.text) {
+				t.Errorf("message %q should name the blocked state %q", res.Error.Message, tc.text)
+			}
+			details, _ := res.Error.Details.(map[string]any)
+			if details["blockedReason"] != tc.reason {
+				t.Errorf("details.blockedReason = %v, want %q", details["blockedReason"], tc.reason)
+			}
+		})
+	}
+}
+
+// A genuine timeout must carry the evidence that says WHY, because the four causes have
+// four different fixes and the old message could not tell them apart.
+func TestWaitTimeoutCarriesItsEvidence(t *testing.T) {
+	// Still working at the cap: the honest answer is "it had not finished".
+	r := &cohortReader{seq: []map[string]TerminalStatusEntry{{"t1": ent("working", "", "grinding")}}}
+	w := settledWait()
+	poll := pollUntil(context.Background(), Deps{Reader: r, Router: &safeRouter{}}, pollArgs{
+		terminalIDs: []string{"t1"}, wait: &w, pollIntervalMs: 0,
+		maxAttempts: 3, tailBytes: 4, isSettleWait: true,
+	})
+	res := waitFailure("terminal.extract", poll, 5000)
+	if res.Ok || res.Error.Code != codeWaitTimeout {
+		t.Fatalf("want WAIT_TIMEOUT, got %+v", res)
+	}
+	details, _ := res.Error.Details.(map[string]any)
+	if details["agentState"] != "working" {
+		t.Errorf("details.agentState = %v, want working", details["agentState"])
+	}
+	if details["judgeCalls"] != 0 {
+		t.Errorf("details.judgeCalls = %v, want 0 (working is never judged)", details["judgeCalls"])
+	}
+	if !strings.Contains(res.Error.Message, "still working") {
+		t.Errorf("message should say it was still working, got %q", res.Error.Message)
+	}
+
+	// An unreadable state is the case that looks identical to every other one in the
+	// old message, and is the only one where the terminal may simply be gone.
+	blind := &cohortReader{seq: []map[string]TerminalStatusEntry{{"t1": ent("", "", "")}}}
+	w2 := settledWait()
+	poll2 := pollUntil(context.Background(), Deps{Reader: blind, Router: &safeRouter{}}, pollArgs{
+		terminalIDs: []string{"t1"}, wait: &w2, pollIntervalMs: 0,
+		maxAttempts: 2, tailBytes: 4, isSettleWait: true,
+	})
+	res2 := waitFailure("terminal.extract", poll2, 100)
+	if !strings.Contains(res2.Error.Message, "could not be read") {
+		t.Errorf("an unreadable state should say so, got %q", res2.Error.Message)
+	}
+}
+
+// A cohort where one agent stops on a BLOCKING ERROR (rate limit, auth, network) and
+// the rest finish. Every claim below was wrong at some point:
+//
+//   - the blocked agent used to settle as FINISHED, because only "question" was
+//     treated as a blocked waiting reason;
+//   - after that was fixed it settled as failed-and-not-finished, but the TOP LEVEL
+//     still reported allFinished:true — contradicting its own perTerminal entry —
+//     because allFinished keyed on the status string rather than the finished flag;
+//   - and the blocked terminal appeared in NO top-level array, so an orchestrator
+//     reading stillWorking/askingQuestion saw nothing to act on.
+//
+// It also pins the distinction that makes this subtle: a nonzero EXIT is also status
+// "failed", but it IS finished (the process is gone) and must keep counting toward
+// allFinished. Only a LIVE blocked agent does not.
+func TestAwaitCohort_BlockingErrorIsNotFinished(t *testing.T) {
+	reader := &cohortReader{seq: []map[string]TerminalStatusEntry{
+		{"t1": ent("working", "", "w1"), "t2": ent("working", "", "w2")},
+		{"t1": ent("waiting", "", "done t1"), "t2": ent("working", "", "w2b")},
+		{"t1": ent("waiting", "", "done t1"), "t2": ent("waiting", domain.WaitingError, "rate limit exceeded")},
+	}}
+	deps := Deps{Reader: reader, Router: &safeRouter{}}
+	ids := []string{"t1", "t2"}
+
+	out, _, _ := awaitCohort(context.Background(), deps, ids, 0, 10, 0,
+		clockSeq(0, 2000, 4000, 6000, 8000, 10000))
+
+	allFinished, per := awaitResult(t, out, ids)
+	if allFinished {
+		t.Error("allFinished must be false while one agent is stopped on a blocking error")
+	}
+	if per["t1"]["status"] != "finished" || per["t1"]["finished"] != true {
+		t.Errorf("the healthy agent should still be finished, got %v", per["t1"])
+	}
+	if per["t2"]["status"] != "failed" {
+		t.Errorf("a blocking error should settle as failed, got %v", per["t2"])
+	}
+	if per["t2"]["finished"] != false {
+		t.Errorf("a blocked agent is settled but NOT finished, got %v", per["t2"])
+	}
+	// Named for what it is: "asking a question" would send the orchestrator hunting
+	// for a question in a tail that holds a rate-limit banner.
+	if reason, _ := per["t2"]["reason"].(string); reason != "stopped on a blocking error" {
+		t.Errorf("reason = %q, want it to name the blocking error", reason)
+	}
+
+	raw := awaitResultRaw(t, out, ids)
+	blocked, _ := raw["blocked"].([]string)
+	if len(blocked) != 1 || blocked[0] != "t2" {
+		t.Errorf("blocked = %v, want [t2] so the orchestrator has something to act on", blocked)
+	}
+	if asking, _ := raw["askingQuestion"].([]string); len(asking) != 0 {
+		t.Errorf("a blocking error is not answerable, so askingQuestion should be empty, got %v", asking)
+	}
+	if working, _ := raw["stillWorking"].([]string); len(working) != 0 {
+		t.Errorf("the blocked agent settled, so stillWorking should be empty, got %v", working)
+	}
+}
+
+// The other half of the distinction: a nonzero EXIT is status "failed" too, but the
+// process is gone, so it IS finished and allFinished must stay true for a cohort of
+// them. Gating allFinished on the status string alone would break this.
+func TestAwaitCohort_NonzeroExitStillCountsAsFinished(t *testing.T) {
+	reader := &cohortReader{seq: []map[string]TerminalStatusEntry{
+		{"t1": ent("working", "", "w1")},
+		{"t1": entExit(1, "boom")},
+	}}
+	deps := Deps{Reader: reader, Router: &safeRouter{}}
+	ids := []string{"t1"}
+
+	out, _, _ := awaitCohort(context.Background(), deps, ids, 0, 10, 0, clockSeq(0, 2000, 4000))
+
+	allFinished, per := awaitResult(t, out, ids)
+	if !allFinished {
+		t.Errorf("a nonzero exit is terminal, so the cohort has finished; got per=%+v", per)
+	}
+	if per["t1"]["status"] != "failed" || per["t1"]["finished"] != true {
+		t.Errorf("a nonzero exit is failed AND finished, got %v", per["t1"])
+	}
+	raw := awaitResultRaw(t, out, ids)
+	if blocked, _ := raw["blocked"].([]string); len(blocked) != 0 {
+		t.Errorf("an exited terminal is not blocked, got %v", blocked)
 	}
 }

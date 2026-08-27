@@ -71,8 +71,10 @@ const (
 // TerminalStatus is one watched terminal's FSM snapshot for one poll.
 type TerminalStatus struct {
 	AgentState    string
-	WaitingReason string // "question" | "prompt" | "" (meaningful only while waiting)
-	ExitCode      *int
+	WaitingReason string // "prompt" | "question" | "approval" | "error" | "" (meaningful only while waiting).
+	// The last three are BLOCKED states — see domain.IsBlockingWaitingReason. This used
+	// to name only question/prompt, and the two it omitted were both scored as finished.
+	ExitCode *int
 }
 
 // StatusReadResult is the outcome of one batched status read. OK is true on a
@@ -838,8 +840,11 @@ func (c *Coordinator) feedStatuses(t *tracked, res StatusReadResult, gone map[st
 			o.Reason = "terminal is gone (closed or exited)"
 		case v.Status == domain.SettleStatusFailed && exitCode != nil:
 			o.Reason = fmt.Sprintf("exited with code %d", *exitCode)
-		case v.Status == domain.SettleStatusQuestion:
-			o.Reason = "asking a question"
+		case domain.IsBlockingWaitingReason(waitingReason):
+			// question / approval / blocking error, each named for what it is — the
+			// wake prompt renders this reason verbatim, so "asking a question" over a
+			// permission dialog sends the model hunting for the wrong thing.
+			o.Reason = domain.BlockedReasonText(waitingReason)
 		case v.Status == domain.SettleStatusFinished && !st.seenWorking && agentState == string(domain.AgentWaiting):
 			// Settled purely on the spawn grace: honest uncertainty travels with the
 			// outcome so the wake reads it as "verify", not gospel.
@@ -1145,7 +1150,11 @@ func composeGroupEvent(members []*tracked, anyFailed, anyExpired, anyQuestion bo
 	case anyExpired:
 		outcomeWord = "timed out"
 	case anyQuestion:
-		outcomeWord = "finished (a question is waiting)"
+		// "needs an answer", not "a question is waiting": this bucket now also covers
+		// an agent parked on an APPROVAL dialog, and the per-invocation line beneath
+		// names which it is. Saying "question" over an approval sends the reader
+		// looking for a question in a tail that holds a permission prompt.
+		outcomeWord = "finished (one needs an answer)"
 	}
 
 	if len(members) == 1 {

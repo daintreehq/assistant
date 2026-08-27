@@ -276,7 +276,7 @@ func terminalListResult(entries ...map[string]any) MCPCallResult {
 }
 
 func runSpawn(deps Deps, a spawnArgs) tools.ToolResult {
-	return spawn(context.Background(), deps, &a)
+	return spawnMain(context.Background(), deps, &a)
 }
 
 func baseSpawn() spawnArgs {

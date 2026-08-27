@@ -192,6 +192,20 @@ type PinnedMemoryLister interface {
 	ListPinnedMemories(limit int) ([]domain.MemoryRecord, error)
 }
 
+// WorktreePin is the turn-scoped worktree binding seam (satisfied by
+// *worktreepin.Pin). The session owns turn boundaries, so it is the only thing
+// that can say when a binding starts; the tool families that spawn agents read the
+// bound id back through their own copy of the same pin. Narrow on purpose — the
+// session never reads the pin, it only drives it.
+type WorktreePin interface {
+	// BeginTurn releases the previous turn's binding.
+	BeginTurn()
+	// Offer proposes this round's observed worktree. `fresh` says the snapshot was
+	// fetched during THIS turn (authoritative) rather than served from the
+	// cross-turn cache (provisional, and correctable by a later fresh offer).
+	Offer(id, path, branch string, fresh bool)
+}
+
 // ArtifactPersister is the durable-mirror seam for oversized tool-result overflow
 // payloads (satisfied by *storage.Store). When a serialized result overflows the
 // inline cap the session stashes the full envelope in its bounded in-memory
@@ -334,6 +348,15 @@ type SessionDeps struct {
 	// ("unknown"), which is cached as such rather than reviving a stale prior selection.
 	// The app wires this to App.refreshCurrentWorktree.
 	CurrentWorktreeFetcher func(ctx context.Context) *prompts.WorktreeContext
+	// WorktreePin is the turn-scoped worktree binding every spawn defaults to
+	// (internal/tools/worktreepin). The session is the only thing that knows where a
+	// turn begins and ends, so it drives the pin: BeginTurn at the top of runTurn,
+	// then one Offer per round carrying the same snapshot the runtime block already
+	// consulted. The pin keeps the FIRST offer, which is why a worktree switch
+	// arriving mid-turn changes what the model SEES without moving where its agents
+	// LAND. nil ⇒ no pinning (the test default), and spawns fall back to Daintree's
+	// live active-worktree selection exactly as they did before.
+	WorktreePin WorktreePin
 	// PromptContext is the seed/fallback context (used when PromptContextFunc is nil — the
 	// test default). Stable fields build request.startup; live fields build the structured
 	// runtime block on each round.

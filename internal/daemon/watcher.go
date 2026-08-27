@@ -420,7 +420,14 @@ func resolveAbsent(ctx *CheckContext, rec domain.WatcherRecord, options *watcher
 			return domain.ClassTerminalExited, 0.95, "Terminal exited.", evidence, signals, false
 
 		case agentState == "waiting":
-			if options.SpawnMode == "explore" && listed.WaitingReason != "question" {
+			// !IsBlockingWaitingReason, not != "question": Daintree's vocabulary is
+			// prompt|question|approval|error, and an explore agent parked on an
+			// APPROVAL dialog or stopped on a blocking ERROR is no more finished than
+			// one asking a question. Checking only "question" sent both to the finish
+			// judge, which — on a tail still showing real output from earlier in the
+			// turn — confirmed them done, published a completion and STOPPED the
+			// watcher, leaving a blocked agent unsupervised.
+			if options.SpawnMode == "explore" && !domain.IsBlockingWaitingReason(listed.WaitingReason) {
 				// Explore-idle = finished its turn — but ONLY after a real working→waiting
 				// transition (or the spawn grace has elapsed); see exploreSettledComplete.
 				// Explore is READ-ONLY by intent, so a genuine completion is terminal
@@ -570,7 +577,9 @@ func resolvePresent(ctx *CheckContext, rec domain.WatcherRecord, options *watche
 		return domain.ClassTerminalExited, 0.95, "Terminal exited.", evidence, signals, false
 
 	case agentState == "waiting":
-		if options.SpawnMode == "explore" && waitingReason != "question" {
+		// See the terminal.list branch above: approval and error are blocked states
+		// too, and judging them is how a blocked explore agent got reported finished.
+		if options.SpawnMode == "explore" && !domain.IsBlockingWaitingReason(waitingReason) {
 			// Explore-idle = finished its turn — but ONLY after a real working→waiting
 			// transition (or the spawn grace has elapsed); see exploreSettledComplete. A
 			// freshly spawned agent parks at "waiting" before it picks up the prompt, so

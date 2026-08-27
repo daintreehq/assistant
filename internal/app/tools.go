@@ -45,15 +45,7 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 	var all []*tools.Tool
 
 	// Families returning value slices ([]tools.Tool) — take element addresses.
-	all = append(all, addr(tools.SetRequires(agenttaskx.Tools(agenttaskx.Deps{
-		MCP:          agentTaskMCPAdapter{c: a.MCP},
-		DB:           a.Store,
-		Config:       a.Config,
-		DaemonActive: func() bool { return a.scheduler != nil },
-		// The builder runs once during App.Create, before any turn can spawn — so
-		// "now" is an exact lower bound for this session's launches.
-		SessionStartedAt: domain.NowMS(),
-	}), tools.RequiresDaintreeMCP))...)
+	all = append(all, addr(tools.SetRequires(agenttaskx.Tools(a.agentTaskDeps()), tools.RequiresDaintreeMCP))...)
 	all = append(all, addr(artifactx.Tools(artifactx.Deps{
 		Store: artifactStoreAdapter{app: a},
 	}))...)
@@ -249,4 +241,24 @@ func mcpwrapToolNames() []string {
 		names = append(names, t.Name)
 	}
 	return names
+}
+
+// agentTaskDeps builds the spawn family's dependencies. Extracted from the builder so
+// a test can assert the WIRING rather than only the logic: every agenttaskx unit test
+// constructs its own Deps, so a field left unset here is invisible to all of them.
+// One field has already been missed that way (WorktreePin), and the consequence was
+// not a degraded default but a hard rejection at the host.
+func (a *App) agentTaskDeps() agenttaskx.Deps {
+	return agenttaskx.Deps{
+		MCP:          agentTaskMCPAdapter{c: a.MCP},
+		DB:           a.Store,
+		Config:       a.Config,
+		DaemonActive: func() bool { return a.scheduler != nil },
+		// The SAME pin object the Session drives (BeginTurn/Offer), not a copy: two
+		// pins would mean the spawn tool defaulting from a binding nothing ever set.
+		WorktreePin: a.worktreePin,
+		// The builder runs once during App.Create, before any turn can spawn — so
+		// "now" is an exact lower bound for this session's launches.
+		SessionStartedAt: domain.NowMS(),
+	}
 }

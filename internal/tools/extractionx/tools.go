@@ -14,7 +14,12 @@ import (
 const (
 	codeMCPUnavailable = "MCP_UNAVAILABLE"
 	codeWaitTimeout    = "WAIT_TIMEOUT"
-	codeExtract        = "EXTRACT"
+	// codeTerminalBlocked is the distinct outcome for a wait that stopped because the
+	// agent is parked on something polling cannot clear. Separate from WAIT_TIMEOUT on
+	// purpose: a timeout invites "wait longer", and waiting longer is exactly the wrong
+	// move here — the remedy is to read the tail and answer, approve, or fix.
+	codeTerminalBlocked = "TERMINAL_BLOCKED"
+	codeExtract         = "EXTRACT"
 )
 
 // settledWait is the "agent has finished its turn" signal: it settled into a
@@ -290,6 +295,81 @@ var extractSchema = json.RawMessage(`{
   "required": ["terminalIds"]
 }`)
 
+// waitFailure renders the two ways a wait can end without matching. Both carry the
+// LAST OBSERVATION, which is the whole point: "Wait condition not met after 30
+// attempt(s)" is unfalsifiable on its own — it reads identically whether the agent sat
+// in `working`, whether the status read came back blank, whether a churning tail held
+// the quiet gate shut, or whether the finished judge kept saying no. Those have four
+// different fixes, and the model (and anyone reading a session log later) can only pick
+// one if the failure says which happened.
+func waitFailure(toolName string, poll pollResult, elapsedMs int64) tools.ToolResult {
+	details := map[string]any{
+		"attempts": poll.attempts, "finished": poll.finished, "elapsedMs": elapsedMs,
+		"agentState": poll.lastAgentState, "waitingReason": poll.lastWaitingReason,
+	}
+	// Only report a silence age that was actually measured. A failed deep read
+	// deliberately contributes none (a transport hiccup is not silence), which
+	// surfaces as an aggregate 0 — indistinguishable from "output landed this
+	// instant" unless the unknown is named as one.
+	if poll.outputAgeKnown {
+		details["msSinceOutput"] = poll.lastMsSinceOutput
+	}
+	// judgeCalls is only meaningful for a settle wait. An explicit condition
+	// (contains/regex/stateIs/noOutputForMs) is deterministic and never spends a
+	// judge, so reporting 0 there invites the reader to conclude something failed.
+	if poll.settleWait {
+		details["judgeCalls"] = poll.judgeCalls
+		if poll.lastJudgeVerdict != "" {
+			details["lastJudgeVerdict"] = poll.lastJudgeVerdict
+		}
+	}
+	if poll.blocked {
+		details["blocked"] = true
+		details["blockedReason"] = poll.blockedReason
+		// The remedy differs by reason, and a generic "send the answer or approval"
+		// is actively wrong for an error: an agent out of quota or unauthenticated
+		// cannot be unblocked by typing at it.
+		remedy := "Read the tail to see what it is asking, then send the answer with terminal.sendCommand"
+		switch poll.blockedReason {
+		case domain.WaitingApproval:
+			remedy = "Read the tail to see what it wants to do, then approve or decline it with terminal.sendCommand"
+		case domain.WaitingError:
+			remedy = "Read the tail for the error (rate limit, auth, network are the usual ones). It needs that condition fixed, not an answer typed at it — report it if you cannot fix it yourself"
+		}
+		return tools.Fail(codeTerminalBlocked, fmt.Sprintf(
+			"The agent is %s, so it will not finish on its own and %s stopped waiting after %d attempt(s) (%dms). %s — do NOT simply wait again.",
+			domain.BlockedReasonText(poll.blockedReason), toolName, poll.attempts, elapsedMs, remedy),
+			tools.WithDetails(details))
+	}
+	// Name the most likely cause from what was actually observed, so the model's next
+	// move is informed rather than a blind retry.
+	hint := ""
+	switch {
+	case poll.lastAgentState == "":
+		hint = " The agent's state could not be read at all — the terminal may be gone, or the status read may be failing; check it is still listed before waiting again."
+	case poll.lastAgentState == string(domain.AgentWorking):
+		hint = " It was still working on the last read, so it genuinely had not finished — wait again with a larger maxAttempts."
+	case !poll.settleWait:
+		// An explicit condition simply never came true; there is no judge to blame
+		// and no state gate to explain, so say what was actually asked for.
+		hint = " The condition you asked for never held. Read the tail (terminal.read) to see what the terminal actually shows, then wait on a condition that matches it."
+	case poll.judgeCalls == 0:
+		hint = " No finish check was ever spent: the agent never reached a state this wait can judge. Read the tail directly (terminal.read) rather than waiting again."
+	case poll.lastJudgeVerdict == "no":
+		hint = " Finish checks ran and judged it unfinished, so it was mid-output — wait again with a larger maxAttempts."
+	default:
+		hint = " Finish checks ran but could not decide. Read the tail directly (terminal.read) to see where it actually got to."
+	}
+	age := "time since new output unknown (the last read failed)"
+	if poll.outputAgeKnown {
+		age = fmt.Sprintf("%dms since new output", poll.lastMsSinceOutput)
+	}
+	return tools.Fail(codeWaitTimeout, fmt.Sprintf(
+		"Wait condition not met after %d attempt(s) (%dms); last seen agentState=%q, %s.%s",
+		poll.attempts, elapsedMs, poll.lastAgentState, age, hint),
+		tools.WithDetails(details))
+}
+
 func newExtractTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.extract",
@@ -346,18 +426,27 @@ func newExtractTool(deps Deps) tools.Tool {
 				result := map[string]any{
 					"finished": poll.finished, "matched": poll.matched, "attempts": poll.attempts,
 					"elapsedMs": elapsedMs, "terminalIds": base.terminalIDs,
+					"agentState": poll.lastAgentState, "waitingReason": poll.lastWaitingReason,
 				}
 				if retired := retireConsumedSupervisors(ctx, deps, base, poll); retired > 0 {
 					result["watchersRetired"] = retired
+				}
+				// A gate reports booleans rather than failing, so a blocked agent has to
+				// be visible IN the summary or it reads as a plain unmet condition and
+				// the model waits again on something that cannot clear itself.
+				if poll.blocked {
+					result["blocked"] = true
+					result["blockedReason"] = poll.blockedReason
+					return tools.Ok(fmt.Sprintf(
+						"finished=false, condition not met (%d attempt(s)): the agent is %s. Read the tail and send the answer or approval — waiting again will not clear it.",
+						poll.attempts, domain.BlockedReasonText(poll.blockedReason)), result)
 				}
 				return tools.Ok(
 					fmt.Sprintf("finished=%v, condition %s (%d attempt(s)).", poll.finished, met, poll.attempts),
 					result)
 			}
 			if base.wait != nil && !poll.matched {
-				return tools.Fail(codeWaitTimeout,
-					fmt.Sprintf("Wait condition not met after %d attempt(s) (%dms).", poll.attempts, elapsedMs),
-					tools.WithDetails(map[string]any{"attempts": poll.attempts, "finished": poll.finished}))
+				return waitFailure("terminal.extract", poll, elapsedMs)
 			}
 
 			extracted, err := runExtract(ctx, deps, base.core(a.Instruction, "text", ""), poll.combinedTail)
@@ -465,9 +554,7 @@ func newExtractJSONTool(deps Deps) tools.Tool {
 			elapsedMs := time.Now().UnixMilli() - startedAt
 
 			if base.wait != nil && !poll.matched {
-				return tools.Fail(codeWaitTimeout,
-					fmt.Sprintf("Wait condition not met after %d attempt(s) (%dms).", poll.attempts, elapsedMs),
-					tools.WithDetails(map[string]any{"attempts": poll.attempts, "finished": poll.finished}))
+				return waitFailure("terminal.extract.json", poll, elapsedMs)
 			}
 
 			extracted, err := runExtract(ctx, deps, base.core(a.Instruction, "json", a.JSONSchema), poll.combinedTail)

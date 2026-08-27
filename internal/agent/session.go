@@ -323,6 +323,12 @@ type Session struct {
 	// selection masquerading as current. Guarded by worktreeMu.
 	worktreeSnap *prompts.WorktreeContext
 
+	// turnStartedAt is when the current turn began, stamped under worktreeMu so it is
+	// comparable with worktreeFetchedAt without a second lock. It is the freshness
+	// datum for the worktree pin: a snapshot fetched at or after it was read for THIS
+	// turn; anything older is inherited from the cross-turn cache and may predate a
+	// worktree switch the user made just before sending.
+	turnStartedAt time.Time
 	// worktreeFetchedAt is when the last refresh COMPLETED (zero ⇒ never fetched).
 	// Consulted-at-send-time staleness beyond worktreeSnapshotTTL triggers a detached
 	// refresh; the round itself always proceeds on the cached value. Guarded by
@@ -923,7 +929,30 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	//      round's first-byte path). Warm it at turn start — TTL-gated, so a turn
 	//      arriving seconds after the last fetch kicks nothing — and each round below
 	//      reads the freshest cached snapshot (currentWorktreeContext).
-	s.maybeRefreshWorktreeAsync()
+	// FORCED, unlike the per-round consult: the TTL gate would skip the read entirely
+	// for a cache under 15s old, and that is exactly the window a user who switches
+	// worktrees and immediately sends falls into. The turn's binding must not be
+	// decided by a snapshot taken before they switched, so a turn always asks.
+	s.maybeRefreshWorktreeAsync(true)
+
+	// 3e″. Release the worktree pin so THIS turn's first round rebinds it. Every agent
+	//      the turn spawns defaults to that binding, which is what stops a human
+	//      switching worktrees mid-turn from splitting a concurrent spawn cohort across
+	//      two of them (Daintree resolves an omitted worktreeId against its LIVE
+	//      selection, at the instant each launch lands). Released here rather than bound
+	//      here on purpose: the snapshot above is served from a TTL'd cache that the
+	//      refresh just kicked may not have filled yet, so binding at this instant could
+	//      pin the PREVIOUS worktree. The per-round offer below binds once the refresh
+	//      has landed instead — see worktreepin's package comment.
+	if s.deps.WorktreePin != nil {
+		s.deps.WorktreePin.BeginTurn()
+	}
+	// The freshness datum for the pin: a snapshot fetched at or after this instant was
+	// read FOR this turn and is authoritative; anything older is the cross-turn cache
+	// and may predate a worktree switch, so it binds only provisionally.
+	s.worktreeMu.Lock()
+	s.turnStartedAt = time.Now()
+	s.worktreeMu.Unlock()
 
 	// 3d. An autonomous wake turn carries the verbose [automatic wake-up] blob as its
 	//     "goal"; the footer's goal anchor substitutes the active-workflow objective for it
@@ -1089,6 +1118,15 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			// can neither block this round nor degrade the shared MCP transport
 			// mid-round (no post-read promptContext re-snapshot needed anymore).
 			promptContext.Worktree = s.currentWorktreeContext(ctx)
+			// Offer the SAME snapshot the runtime block just took to this turn's
+			// worktree pin. The first non-empty offer binds and the rest are ignored,
+			// so the model keeps seeing the live worktree every round while its spawns
+			// stay anchored to the one the turn started in.
+			if s.deps.WorktreePin != nil {
+				if w := promptContext.Worktree; w != nil && w.Present {
+					s.deps.WorktreePin.Offer(w.ID, w.Path, w.Branch, s.worktreeSnapshotIsFresh())
+				}
+			}
 		}
 		// Served from the same cross-turn cache, under a policy that would rather omit the
 		// roster than assert a stale one (issue #334). Round 0 passes true so it — and only
@@ -2779,7 +2817,7 @@ func (s *Session) currentWorktreeContext(ctx context.Context) *prompts.WorktreeC
 	if s.deps.CurrentWorktreeFetcher == nil {
 		return nil
 	}
-	s.maybeRefreshWorktreeAsync()
+	s.maybeRefreshWorktreeAsync(false)
 
 	s.worktreeMu.Lock()
 	cold := s.worktreeFetchedAt.IsZero()
@@ -2809,6 +2847,20 @@ func (s *Session) currentWorktreeContext(ctx context.Context) *prompts.WorktreeC
 	return s.worktreeSnap
 }
 
+// worktreeSnapshotIsFresh reports whether the cached worktree snapshot was fetched
+// at or after this turn began — i.e. whether it was read FOR this turn rather than
+// inherited from the cross-turn cache. The pin uses it to decide whether a binding
+// is authoritative or merely provisional; a zero turnStartedAt (no turn running, or
+// an unstamped test session) reads as NOT fresh, which is the conservative answer.
+func (s *Session) worktreeSnapshotIsFresh() bool {
+	s.worktreeMu.Lock()
+	defer s.worktreeMu.Unlock()
+	if s.turnStartedAt.IsZero() || s.worktreeFetchedAt.IsZero() {
+		return false
+	}
+	return !s.worktreeFetchedAt.Before(s.turnStartedAt)
+}
+
 // maybeRefreshWorktreeAsync starts a detached, best-effort refresh of the cached
 // current-worktree snapshot when that cache is stale (older than worktreeSnapshotTTL)
 // or was never filled, and only when no refresh is already in flight — the exact
@@ -2831,7 +2883,7 @@ func (s *Session) currentWorktreeContext(ctx context.Context) *prompts.WorktreeC
 // -race failure of TestCurrentWorktreeCachedSnapshotServesEveryBackendRound (turn
 // start kicks the fetch, round 0 consults the still-cold cache, the fetch lands
 // between that consult's two locks).
-func (s *Session) maybeRefreshWorktreeAsync() {
+func (s *Session) maybeRefreshWorktreeAsync(force bool) {
 	if s.deps.CurrentWorktreeFetcher == nil {
 		return
 	}
@@ -2840,7 +2892,9 @@ func (s *Session) maybeRefreshWorktreeAsync() {
 		s.worktreeMu.Unlock()
 		return
 	}
-	if !s.worktreeFetchedAt.IsZero() && time.Since(s.worktreeFetchedAt) <= worktreeSnapshotTTL {
+	// force skips the TTL only — never the in-flight dedupe above, so a forced turn
+	// start still joins a read already running rather than starting a second one.
+	if !force && !s.worktreeFetchedAt.IsZero() && time.Since(s.worktreeFetchedAt) <= worktreeSnapshotTTL {
 		s.worktreeMu.Unlock()
 		return
 	}
@@ -3877,7 +3931,7 @@ func closedTerminalIDs(res domain.ToolResult) []string {
 // + TTL gates making repeated calls free.
 func (s *Session) WarmOpenTerminals() {
 	s.refreshRosterAsync()
-	s.maybeRefreshWorktreeAsync()
+	s.maybeRefreshWorktreeAsync(false)
 }
 
 // refreshRosterAsync starts a detached, best-effort refresh of the cached open-terminal

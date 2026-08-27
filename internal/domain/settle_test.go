@@ -67,6 +67,50 @@ func TestSettleAgentFSM(t *testing.T) {
 		},
 
 		// --- the soft "waiting" arm ---
+		// The three BLOCKED reasons. Only "question" was ever handled; approval and
+		// error fell through to the seenWorking/grace branch below and were scored
+		// FINISHED, so a cohort wait reported an agent parked on a trust prompt or dead
+		// on a rate limit as done, and the relay sent it the next round.
+		{
+			name:          "an approval dialog blocks like a question does",
+			agentState:    string(AgentWaiting),
+			waitingReason: WaitingApproval,
+			seenWorking:   true,
+			msSinceSpawn:  grace + 1,
+			want:          AgentSettleVerdict{Settled: true, Status: SettleStatusQuestion, Finished: false},
+		},
+		{
+			// A blocking error is settled and FAILED, but NOT Finished: unlike a nonzero
+			// exit the process is alive and the work is undone, which is what keeps its
+			// supervisor watcher in place instead of being retired.
+			name:          "a blocking error is failed and not finished",
+			agentState:    string(AgentWaiting),
+			waitingReason: WaitingError,
+			seenWorking:   true,
+			msSinceSpawn:  grace + 1,
+			want:          AgentSettleVerdict{Settled: true, Status: SettleStatusFailed, Finished: false},
+		},
+		{
+			// The ordinary settled-at-a-prompt case must be untouched by the widened
+			// vocabulary — blocking it would strand every normal completion.
+			name:          "an ordinary prompt still finishes",
+			agentState:    string(AgentWaiting),
+			waitingReason: WaitingPrompt,
+			seenWorking:   true,
+			msSinceSpawn:  grace + 1,
+			want:          AgentSettleVerdict{Settled: true, Status: SettleStatusFinished, Finished: true},
+		},
+		{
+			// A blocked agent is blocked whether or not it was ever seen working, and
+			// whether or not the spawn grace has elapsed — those gates exist to avoid a
+			// FALSE finish, and this is not a finish at all.
+			name:          "an approval blocks even before the grace, never having worked",
+			agentState:    string(AgentWaiting),
+			waitingReason: WaitingApproval,
+			seenWorking:   false,
+			msSinceSpawn:  1,
+			want:          AgentSettleVerdict{Settled: true, Status: SettleStatusQuestion, Finished: false},
+		},
 		{
 			// A question blocks on the ORCHESTRATOR, so it settles the wait (stop
 			// polling, hand back to the model) without being finished work.

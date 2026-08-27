@@ -33,6 +33,7 @@ import (
 	"github.com/daintreehq/assistant/internal/tools"
 	"github.com/daintreehq/assistant/internal/tools/scratchx"
 	"github.com/daintreehq/assistant/internal/tools/terminalobs"
+	"github.com/daintreehq/assistant/internal/tools/worktreepin"
 	"github.com/daintreehq/assistant/internal/workflowgraph"
 )
 
@@ -191,6 +192,13 @@ type App struct {
 	// its first poll instead of burning the 20s settle grace re-collecting evidence
 	// a previous wait already had. In-memory, discarded with the App.
 	terminalObs *terminalobs.Memory
+
+	// worktreePin is the turn-scoped worktree binding (internal/tools/worktreepin):
+	// the Session DRIVES it (releases at turn start, offers the round's snapshot) and
+	// the spawn family READS it, so every agent a turn launches defaults to the
+	// worktree that turn started in instead of whatever row is selected when each
+	// launch happens to reach Daintree. In-memory, discarded with the App.
+	worktreePin *worktreepin.Pin
 
 	// ownership is the owner-boot reconciliation summary (what this process adopted
 	// when it took the project DB over): resumed watchers/async, unpublished
@@ -633,6 +641,7 @@ func Create(opts CreateOptions) (*App, error) {
 		// registry so the scratch.* family can capture the concrete store directly.
 		scratchStore: scratchx.NewStore(),
 		terminalObs:  terminalobs.NewMemory(),
+		worktreePin:  worktreepin.New(),
 	}
 
 	// mcp → queue → router → registry → runbooks.
@@ -872,6 +881,7 @@ func Create(opts CreateOptions) (*App, error) {
 		PromptContext:          a.PromptContext(),
 		EnsureStartupContext:   a.ensureStartupForTurn,
 		CurrentWorktreeFetcher: a.refreshCurrentWorktree,
+		WorktreePin:            a.worktreePin,
 		// Live runtime context: pulled every round so a post-construction MCP connect,
 		// /permissions tier change, or scheduler start reaches the backend (replaces the
 		// removed RefreshRuntimeContext push). a.PromptContext reads live MCP/scheduler state.

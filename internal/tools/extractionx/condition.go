@@ -17,7 +17,9 @@ import (
 // signals are the deterministic signals one read folds into for condition eval.
 type signals struct {
 	AgentState    string
-	WaitingReason string // "question" | "prompt" | "" (meaningful only while waiting)
+	WaitingReason string // "prompt" | "question" | "approval" | "error" | "" (meaningful only while waiting).
+	// The last three are BLOCKED states — see domain.IsBlockingWaitingReason. This used
+	// to name only question/prompt, and the two it omitted were both scored as finished.
 	RuntimeStatus string // "running" | "exited"
 	ExitCode      *int
 	Tail          string

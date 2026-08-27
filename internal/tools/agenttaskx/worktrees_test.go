@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/daintreehq/assistant/internal/domain"
 )
 
 // worktreeRoster builds a worktree.list structuredContent payload. Each triple is
@@ -180,7 +182,7 @@ func TestSpawnRejectsUnknownWorktree(t *testing.T) {
 			[3]string{"/p/app-wt", "/p/app-wt", "feature-x"},
 		)}
 	st := newSagaStore()
-	res := spawn(context.Background(), Deps{MCP: mcp, DB: st}, &spawnArgs{
+	res := spawnMain(context.Background(), Deps{MCP: mcp, DB: st}, &spawnArgs{
 		AgentID: "claude", Mode: "explore", Title: "explore it", TaskPrompt: "go", WorktreeID: "no-such-branch",
 	})
 	if res.Ok || res.Error.Code != codeUnknownWorktree {
@@ -205,7 +207,7 @@ func TestSpawnNormalizesBranchWorktreeId(t *testing.T) {
 	mcp := &scriptMCP{connected: true, launchResult: launchOK("term_7"),
 		worktreeList: worktreeRoster([3]string{"/p/app", "/p/app", "main"})}
 	st := newSagaStore()
-	res := spawn(context.Background(), Deps{MCP: mcp, DB: st}, &spawnArgs{
+	res := spawnMain(context.Background(), Deps{MCP: mcp, DB: st}, &spawnArgs{
 		AgentID: "claude", Mode: "explore", Title: "explore it", TaskPrompt: "go", WorktreeID: "main",
 	})
 	if !res.Ok {
@@ -221,23 +223,153 @@ func TestSpawnNormalizesBranchWorktreeId(t *testing.T) {
 	}
 }
 
-// An omitted (or whitespace-only) worktreeId issues NO worktree.list read and forwards no
-// worktreeId, so Daintree picks the active worktree — the recommended common path.
-func TestSpawnOmittedWorktreeSkipsRead(t *testing.T) {
+// An omitted (or whitespace-only) worktreeId with NO binding available used to be
+// forwarded as-is, letting Daintree pick its live active worktree. That fallback is
+// gone: Daintree now REFUSES an agent-dispatched launch that names no worktree, so
+// forwarding it buys a guaranteed refusal with a worse message. Fail locally instead,
+// launching nothing and writing no saga row.
+func TestSpawnUnpinnedOmittedWorktreeFailsLocally(t *testing.T) {
 	for _, wt := range []string{"", "   "} {
 		mcp := &scriptMCP{connected: true, launchResult: launchOK("term_1")}
 		st := newSagaStore()
-		res := spawn(context.Background(), Deps{MCP: mcp, DB: st}, &spawnArgs{
+		res := spawnUnpinned(context.Background(), Deps{MCP: mcp, DB: st}, &spawnArgs{
 			AgentID: "claude", Mode: "explore", Title: "t", TaskPrompt: "go", WorktreeID: wt,
-		})
+		}, domain.ActorMain)
+		if res.Ok || res.Error.Code != codeUnknownWorktree {
+			t.Fatalf("worktreeId %q with no binding should fail locally, got %+v", wt, res)
+		}
+		if mcp.launchCount() != 0 {
+			t.Fatalf("worktreeId %q must not reach agent.launch at all", wt)
+		}
+		if len(st.launches) != 0 {
+			t.Fatalf("worktreeId %q must not write a saga record", wt)
+		}
+		details, _ := res.Error.Details.(map[string]any)
+		if unavailable, _ := details["turnWorktreeUnavailable"].(bool); !unavailable {
+			t.Errorf("details should mark this as the turn having no worktree, got %+v", details)
+		}
+	}
+}
+
+// A durable timer can invoke agentTask.spawnForEdits at its firing time, which happens
+// OUTSIDE any turn. The pin is a process-wide ambient value with no owner tag, so an
+// off-turn dispatch that consumed it would silently borrow whichever worktree the last
+// interactive turn bound — possibly one the user left hours ago. It must name its own.
+func TestSpawnOffTurnActorDoesNotBorrowTheTurnPin(t *testing.T) {
+	for _, actor := range []domain.ToolActor{domain.ActorTimer, domain.ActorWatcher, domain.ActorWorkflow} {
+		mcp := &scriptMCP{connected: true, launchResult: launchOK("term_1"),
+			worktreeList: worktreeRoster([3]string{"/p/app", "/p/app", "main"})}
+		st := newSagaStore()
+		deps := Deps{MCP: mcp, DB: st, WorktreePin: fixedPin{id: "/p/app", path: "/p/app", branch: "main"}}
+		res := spawn(context.Background(), deps, &spawnArgs{
+			AgentID: "claude", Mode: "explore", Title: "t", TaskPrompt: "go",
+		}, actor)
+
+		if res.Ok || res.Error.Code != codeUnknownWorktree {
+			t.Fatalf("%s: an off-turn spawn must not inherit the turn's worktree, got %+v", actor, res)
+		}
+		if mcp.launchCount() != 0 {
+			t.Fatalf("%s: nothing may launch", actor)
+		}
+		details, _ := res.Error.Details.(map[string]any)
+		if details["actor"] != string(actor) {
+			t.Errorf("%s: details should name the actor, got %+v", actor, details)
+		}
+	}
+
+	// The turn actors DO consume it — that is the whole point of the binding.
+	for _, actor := range []domain.ToolActor{domain.ActorMain, domain.ActorWake} {
+		mcp := &scriptMCP{connected: true, launchResult: launchOK("term_2"),
+			worktreeList: worktreeRoster([3]string{"/p/app", "/p/app", "main"})}
+		deps := Deps{MCP: mcp, DB: newSagaStore(), WorktreePin: fixedPin{id: "/p/app", path: "/p/app", branch: "main"}}
+		res := spawn(context.Background(), deps, &spawnArgs{
+			AgentID: "claude", Mode: "explore", Title: "t", TaskPrompt: "go",
+		}, actor)
 		if !res.Ok {
-			t.Fatalf("worktreeId %q must spawn, got %+v", wt, res.Error)
+			t.Fatalf("%s runs inside a turn and must use the pin, got %+v", actor, res.Error)
 		}
-		if mcp.called("worktree.list") {
-			t.Fatalf("worktreeId %q must NOT trigger a worktree.list read", wt)
+		if got := mcp.lastLaunchArgs()["worktreeId"]; got != "/p/app" {
+			t.Fatalf("%s: launch forwarded %v, want the pinned /p/app", actor, got)
 		}
-		if _, forwarded := mcp.lastLaunchArgs()["worktreeId"]; forwarded {
-			t.Fatalf("an omitted worktreeId (%q) must not be forwarded to agent.launch", wt)
-		}
+	}
+}
+
+// fixedPin is a bound turn worktree.
+type fixedPin struct{ id, path, branch string }
+
+func (f fixedPin) ID() string                         { return f.id }
+func (f fixedPin) Describe() (string, string, string) { return f.id, f.path, f.branch }
+
+// The bug this closes: Daintree resolves an omitted worktreeId against its LIVE active
+// selection at the instant the launch lands, so a human switching worktrees while a
+// concurrent spawn cohort was in flight split that cohort across two worktrees. The
+// turn's pin is substituted here so the launch args SAY where the turn meant, and the
+// pinned id goes through the same validation an explicit one does.
+func TestSpawnOmittedWorktreeUsesTheTurnPin(t *testing.T) {
+	mcp := &scriptMCP{connected: true, launchResult: launchOK("term_9"),
+		worktreeList: worktreeRoster([3]string{"/p/app", "/p/app", "main"})}
+	deps := Deps{MCP: mcp, DB: newSagaStore(), WorktreePin: fixedPin{id: "/p/app", path: "/p/app", branch: "main"}}
+	res := spawnMain(context.Background(), deps, &spawnArgs{
+		AgentID: "claude", Mode: "explore", Title: "t", TaskPrompt: "go",
+	})
+	if !res.Ok {
+		t.Fatalf("a pinned spawn must succeed, got %+v", res.Error)
+	}
+	if got := mcp.lastLaunchArgs()["worktreeId"]; got != "/p/app" {
+		t.Fatalf("launch forwarded worktreeId %v, want the pinned /p/app", got)
+	}
+	// The agent's own instructions must name the same worktree the launch targets.
+	if prompt, _ := mcp.lastLaunchArgs()["prompt"].(string); !strings.Contains(prompt, "Work in worktree: /p/app") {
+		t.Fatalf("prompt should embed the pinned worktree id, got %q", prompt)
+	}
+}
+
+// Naming a worktree is how the model sends an agent somewhere OTHER than where the turn
+// began, so an explicit id must beat the pin. Getting this backwards would make the pin
+// a cage rather than a default.
+func TestSpawnExplicitWorktreeBeatsTheTurnPin(t *testing.T) {
+	mcp := &scriptMCP{connected: true, launchResult: launchOK("term_10"),
+		worktreeList: worktreeRoster(
+			[3]string{"/p/app", "/p/app", "main"},
+			[3]string{"/p/app-wt", "/p/app-wt", "feature-x"},
+		)}
+	deps := Deps{MCP: mcp, DB: newSagaStore(), WorktreePin: fixedPin{id: "/p/app", path: "/p/app", branch: "main"}}
+	res := spawnMain(context.Background(), deps, &spawnArgs{
+		AgentID: "claude", Mode: "explore", Title: "t", TaskPrompt: "go", WorktreeID: "feature-x",
+	})
+	if !res.Ok {
+		t.Fatalf("an explicit worktree must spawn, got %+v", res.Error)
+	}
+	if got := mcp.lastLaunchArgs()["worktreeId"]; got != "/p/app-wt" {
+		t.Fatalf("launch forwarded worktreeId %v, want the explicitly named /p/app-wt", got)
+	}
+}
+
+// A worktree deleted or closed mid-turn is not the model's mistake and it cannot fix it
+// by re-reading, so the refusal must say the TURN'S worktree is gone rather than blaming
+// an id the model never passed. Nothing may launch into a substitute.
+func TestSpawnRejectsAVanishedTurnPin(t *testing.T) {
+	mcp := &scriptMCP{connected: true, launchResult: launchOK("term_11"),
+		worktreeList: worktreeRoster([3]string{"/p/other", "/p/other", "main"})}
+	st := newSagaStore()
+	deps := Deps{MCP: mcp, DB: st, WorktreePin: fixedPin{id: "/p/gone", path: "/p/gone", branch: "dead"}}
+	res := spawnMain(context.Background(), deps, &spawnArgs{
+		AgentID: "claude", Mode: "explore", Title: "t", TaskPrompt: "go",
+	})
+	if res.Ok || res.Error.Code != codeUnknownWorktree {
+		t.Fatalf("want UNKNOWN_WORKTREE for a vanished pin, got %+v", res)
+	}
+	if mcp.launchCount() != 0 {
+		t.Fatal("must not launch into a substitute worktree when the turn's own is gone")
+	}
+	if len(st.launches) != 0 {
+		t.Fatal("must not write a saga record when the turn's worktree is gone")
+	}
+	details, _ := res.Error.Details.(map[string]any)
+	if fromTurn, _ := details["fromTurnWorktree"].(bool); !fromTurn {
+		t.Errorf("details must mark the id as the turn's, not the caller's: %+v", details)
+	}
+	if !strings.Contains(res.Error.Message, "turn started in") {
+		t.Errorf("message should say the turn's worktree is gone, got %q", res.Error.Message)
 	}
 }

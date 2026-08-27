@@ -110,7 +110,7 @@ var spawnSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "worktreeId": { "type": "string", "description": "Worktree to run the agent in. Usually OMIT it — Daintree uses the active worktree. The id is a PATH (\"/Users/you/Projects/app\"); a branch name is accepted only as a fallback, and an unresolvable value is rejected with the available list." },
+    "worktreeId": { "type": "string", "description": "Worktree to run the agent in. OMIT it to use the worktree this turn started in; pass one only to send the agent ELSEWHERE. The id is a PATH (\"/Users/you/Projects/app\"); a branch name is accepted only as a fallback, and an unresolvable value is rejected with the available list." },
     "agentId": { "type": "string", "description": "Agent to launch (default \"claude\")." },
     "mode": { "type": "string", "enum": ["edit", "explore"], "description": "Spawn intent (default \"edit\"). \"edit\" tells the agent to make code changes; \"explore\" tells it to investigate read-only and not touch any files." },
     "title": { "type": "string", "description": "Short title for the task and any watcher — the task alone, e.g. \"auth refactor\". The agent name is added to the tab for you, so never write an agent name into this title yourself." },
@@ -131,7 +131,8 @@ func newSpawnForEditsTool(deps Deps) tools.Tool {
 		Description: "Spawn a visible Daintree agent in a worktree. Use mode:\"edit\" (default) to make code changes, or " +
 			"mode:\"explore\" for a read-only investigation (the agent is told not to touch files). This is the ONLY way to spawn " +
 			"an agent — never hand-roll a raw agent.launch via daintree.call. The CLI never edits files itself. To supervise the " +
-			"agent, set the FLAT fields watch:true and watchGoal:\"…\" (top-level scalars) — do NOT nest them under a \"watcher\" key.",
+			"agent, set the FLAT fields watch:true and watchGoal:\"…\" (top-level scalars) — do NOT nest them under a \"watcher\" key. " +
+			"An omitted worktreeId means the worktree this turn started in, and that stays fixed for the whole turn.",
 		Consequence: "Opens a visible agent terminal in a worktree that can edit project files. Changes stay in the worktree until you commit them.",
 		Risk:        domain.RiskProject,
 		Schema:      spawnSchema,
@@ -140,12 +141,17 @@ func newSpawnForEditsTool(deps Deps) tools.Tool {
 		// is ~5s of MCP wall-clock with no ordering dependency on its siblings. The
 		// conflict key keeps same-target edit spawns serial (see below).
 		ParallelHomogeneous: true,
-		ParallelConflictKey: spawnParallelConflictKeys,
-		Decode:              tools.StrictDecoder(func() any { return &spawnArgs{} }),
-		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
+		// Read the pin ONCE per cohort classification, not once per member: a
+		// binding cannot change mid-turn, but reading it per member would make the
+		// purity of the classifier depend on that fact rather than assert it.
+		ParallelConflictKey: func(raw json.RawMessage) ([]string, bool) {
+			return spawnParallelConflictKeys(raw, deps.pinnedWorktreeID())
+		},
+		Decode: tools.StrictDecoder(func() any { return &spawnArgs{} }),
+		Handle: func(ctx context.Context, raw json.RawMessage, tc *tools.ToolContext) tools.ToolResult {
 			var a spawnArgs
 			_ = json.Unmarshal(raw, &a)
-			return spawn(ctx, deps, &a)
+			return spawn(ctx, deps, &a, actorOf(tc))
 		},
 	}
 }
@@ -165,16 +171,24 @@ func newSpawnForEditsTool(deps Deps) tools.Tool {
 //     session's byte-level dedup cannot see.
 //   - "worktree:<cleaned absolute path>" (edit mode only). Edit spawns share
 //     mutable state through their worktree, and concurrent launch into one
-//     working tree is unproven server-side. Only an explicit canonical-shaped id
-//     (an absolute path — Daintree worktree ids ARE paths) can prove two edit
-//     spawns target DISTINCT worktrees: an omitted id targets the unknown active
-//     worktree, and a branch-style alias (e.g. "main") resolves to a path only
-//     via an MCP read this classifier must never make — both refuse cohort
-//     membership entirely (ok=false ⇒ serial). Explore spawns are read-only by
-//     contract, so their worktree is not a conflict dimension; an alias-spelled
-//     explore worktree still refuses cohorts so the name key above is always
-//     computed from the same value the handler will resolve and launch with.
-func spawnParallelConflictKeys(raw json.RawMessage) ([]string, bool) {
+//     working tree is unproven server-side. Only a canonical-shaped id (an
+//     absolute path — Daintree worktree ids ARE paths) can prove two edit spawns
+//     target DISTINCT worktrees. That id may now come from the TURN'S PIN as well
+//     as from the arguments: the handler substitutes the pin for an omitted
+//     worktree, so classifying an omitted one as "unknown" would refuse cohorts
+//     the handler is about to send to one provably-identical, already-known
+//     worktree. With no pin bound the omitted case is still genuinely unknown and
+//     still refuses (ok=false ⇒ serial). A branch-style alias (e.g. "main")
+//     resolves to a path only via an MCP read this classifier must never make, so
+//     it keeps refusing. Explore spawns are read-only by contract, so their
+//     worktree is not a conflict dimension; an alias-spelled explore worktree
+//     still refuses cohorts so the name key above is always computed from the
+//     same value the handler will resolve and launch with.
+//
+// pinnedWorktreeID is read ONCE by the caller and passed in rather than reached
+// for here, so the classifier stays pure and every member of one cohort is
+// classified against the same binding.
+func spawnParallelConflictKeys(raw json.RawMessage, pinnedWorktreeID string) ([]string, bool) {
 	var a spawnArgs
 	if json.Unmarshal(raw, &a) != nil {
 		return nil, false
@@ -186,6 +200,9 @@ func spawnParallelConflictKeys(raw json.RawMessage) ([]string, bool) {
 		a.Mode = "edit"
 	}
 	worktreeID := strings.TrimSpace(a.WorktreeID)
+	if worktreeID == "" {
+		worktreeID = strings.TrimSpace(pinnedWorktreeID)
+	}
 	if worktreeID != "" {
 		if !strings.HasPrefix(worktreeID, "/") {
 			return nil, false
@@ -202,7 +219,33 @@ func spawnParallelConflictKeys(raw json.RawMessage) ([]string, bool) {
 	return keys, true
 }
 
-func spawn(ctx context.Context, deps Deps, a *spawnArgs) tools.ToolResult {
+// actorOf is the nil-safe read of the dispatching actor. An absent ToolContext (the
+// bare shape used throughout the unit tests) reads as the main interactive turn, which
+// keeps those tests on the ordinary path.
+func actorOf(tc *tools.ToolContext) domain.ToolActor {
+	if tc == nil || tc.Actor == "" {
+		return domain.ActorMain
+	}
+	return tc.Actor
+}
+
+// runsInsideATurn reports whether this actor's dispatch happens within a Session turn,
+// and may therefore consume that turn's worktree binding. ActorMain is the interactive
+// turn and ActorWake the supervisor's autonomous one — both run inside runTurn, which is
+// what releases and rebinds the pin.
+//
+// Everything else fires OUTSIDE any turn: a durable timer can invoke
+// agentTask.spawnForEdits at its firing time, the watcher engine and the workflow layer
+// dispatch on their own schedules, and a sub-agent runs its own loop. The pin is a
+// process-wide ambient value with no owner tag, so an off-turn dispatch that read it
+// would silently borrow whichever worktree the last interactive turn happened to bind —
+// possibly one the user left hours ago, possibly one being rebound concurrently. A
+// scheduled spawn has to say where it means to run.
+func runsInsideATurn(actor domain.ToolActor) bool {
+	return actor == domain.ActorMain || actor == domain.ActorWake
+}
+
+func spawn(ctx context.Context, deps Deps, a *spawnArgs, actor domain.ToolActor) tools.ToolResult {
 	if !deps.MCP.Connected() {
 		return tools.Fail(codeMCPUnavailable,
 			"Daintree MCP is not connected, so no agent can be spawned to make edits. Connect Daintree (set DAINTREE_MCP_URL / DAINTREE_MCP_TOKEN), then use /reconnect to retry.")
@@ -242,6 +285,38 @@ func spawn(ctx context.Context, deps Deps, a *spawnArgs) tools.ToolResult {
 	// omitted worktree (so it doesn't change the idempotency key, leak into the prompt, or
 	// get forwarded).
 	worktreeID := strings.TrimSpace(a.WorktreeID)
+	// An omitted worktree falls back to the TURN'S PIN rather than to nothing. Sending
+	// no worktreeId at all makes Daintree resolve the target against its LIVE active
+	// selection at the instant the launch lands, so a human switching worktrees while a
+	// concurrent spawn cohort is in flight splits that cohort across two worktrees, and
+	// a spawn late in a long turn lands wherever they wandered to. The pin is the
+	// worktree this turn started in; substituting it here makes the launch args say
+	// explicitly what the caller meant implicitly. An UNBOUND pin leaves the id empty
+	// and the old ambient behaviour stands.
+	//
+	// Substituted BEFORE resolveWorktreeID so the pinned id goes through exactly the
+	// same validation as a model-supplied one: the pin is a snapshot, and a worktree
+	// deleted mid-turn must be rejected with the available list, not launched into.
+	pinnedWorktree := false
+	if worktreeID == "" && runsInsideATurn(actor) {
+		if pinned := deps.pinnedWorktreeID(); pinned != "" {
+			worktreeID, pinnedWorktree = pinned, true
+		}
+	}
+	// Still nothing to launch into. This is NOT the old ambient fallback any more:
+	// Daintree refuses an agent-dispatched agent.launch that names no worktree, so
+	// forwarding an omitted id from here buys a guaranteed refusal with a worse
+	// message. Fail locally instead, and say which of the two situations it is.
+	if worktreeID == "" {
+		if !runsInsideATurn(actor) {
+			return tools.Fail(codeUnknownWorktree, fmt.Sprintf(
+				"A %s-dispatched spawn must name the worktree to run in — it cannot inherit one, because it is not running inside a turn. Pass worktreeId (a path from the worktree-listing capability).", actor),
+				tools.WithDetails(map[string]any{"actor": string(actor)}))
+		}
+		return tools.Fail(codeUnknownWorktree,
+			"The worktree for this turn could not be determined, so there is nowhere to launch. Read the current worktree (worktree.getCurrent or worktree.list) and pass worktreeId explicitly.",
+			tools.WithDetails(map[string]any{"actor": string(actor), "turnWorktreeUnavailable": true}))
+	}
 	// Validate + NORMALIZE an explicitly-provided worktreeId against Daintree's real
 	// worktrees BEFORE it feeds the prompt, the idempotency key, and the launch args.
 	// Daintree keys worktrees by their id (a path) and silently returns a terminal-less
@@ -249,22 +324,39 @@ func spawn(ctx context.Context, deps Deps, a *spawnArgs) tools.ToolResult {
 	// of the worktree id is the canonical trap (daintreehq/daintree#10812), and it fails
 	// invisibly exactly like a bad agentId. Resolve maps a branch/path match to the
 	// canonical id (so "main" just works) or rejects a genuinely unknown value with the
-	// available list; an OMITTED worktree skips the read entirely and lets Daintree pick the
-	// active worktree (the recommended path). Fail OPEN when the list can't be read so a
-	// discovery hiccup never blocks a spawn. Done before the idempotent-retry lookup so the
+	// available list. A worktree taken from the TURN'S PIN is validated the same way and does
+	// NOT skip the read: it is canonical by construction (Daintree's own worktree.getCurrent
+	// produced it), but it is a SNAPSHOT, and a worktree deleted or closed mid-turn would
+	// otherwise hit exactly the invisible failure this resolve exists to catch. That costs
+	// one extra cheap worktree.list per spawn, alongside the agent-roster read below; both
+	// fail OPEN, so a discovery hiccup never blocks a spawn. Only a spawn with no pin bound
+	// and no argument skips the read and lets Daintree pick its live active worktree. Done before the idempotent-retry lookup so the
 	// key is a function of the CANONICAL id — "main" and the resolved path dedupe to one
 	// launch, not two.
 	if worktreeID != "" {
 		resolved, ok, available, suggestion := resolveWorktreeID(ctx, deps.MCP, worktreeID)
 		if !ok {
-			msg := fmt.Sprintf("Unknown worktree %q — it matches no worktree's id, path, or branch.", worktreeID)
-			if suggestion != "" {
-				msg += fmt.Sprintf(" Did you mean %q?", suggestion)
+			// Blame the right party. A model-supplied id that misses is the model's
+			// error and the advice is "pick one from this list"; a PINNED id that
+			// misses means the worktree this turn started in is gone (deleted or
+			// closed mid-turn), which the model never chose and cannot self-correct
+			// by re-reading — it has to ask or be told where to go instead.
+			var msg string
+			if pinnedWorktree {
+				msg = fmt.Sprintf("The worktree this turn started in (%q) no longer exists — it was deleted or closed since the turn began, so nothing was launched.", worktreeID)
+				msg += " Available worktrees (branch then id): " + formatWorktrees(available) +
+					". Name the worktree to spawn into explicitly, or ask the user which one they meant."
+			} else {
+				msg = fmt.Sprintf("Unknown worktree %q — it matches no worktree's id, path, or branch.", worktreeID)
+				if suggestion != "" {
+					msg += fmt.Sprintf(" Did you mean %q?", suggestion)
+				}
+				msg += " Available worktrees (branch then id): " + formatWorktrees(available) +
+					". Usually OMIT worktreeId to run in the worktree this turn started in; otherwise pass a worktree id (a path) from this list."
 			}
-			msg += " Available worktrees (branch then id): " + formatWorktrees(available) +
-				". Usually OMIT worktreeId to run in the active worktree; otherwise pass a worktree id (a path) from this list."
 			return tools.Fail(codeUnknownWorktree, msg, tools.WithDetails(map[string]any{
-				"requestedWorktreeId": worktreeID, "availableWorktrees": worktreesDetail(available), "suggestion": suggestion,
+				"requestedWorktreeId": worktreeID, "availableWorktrees": worktreesDetail(available),
+				"suggestion": suggestion, "fromTurnWorktree": pinnedWorktree,
 			}))
 		}
 		worktreeID = resolved

@@ -93,10 +93,10 @@ func newAwaitAllTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.awaitAll",
 		Description: "Wait for a COHORT of agent terminals to reach an idle prompt. Polls agentState only — no model call, no output read. Call ONCE for the whole cohort, not once per agent. " +
-			"Returns allFinished, a perTerminal array whose status is \"finished\" | \"failed\" | \"question\" | \"working\" (no content), plus top-level stillWorking / askingQuestion id arrays. " +
-			"Terminals settling finished/failed RETIRE their spawn-attached watcher (watchersRetired) — do not watcher.cancel them; expect no later completion notification. " +
-			"An idle reading is imperfect: peek each tail afterwards (no-wait terminal.extract/read) and re-await any 'finished' terminal still looking busy. " +
-			"Re-await stillWorking at most twice (three calls per terminal); past that it is hung — escalate via queue.publish (severity 'blocked') + watcher.terminal.create and end the turn. " +
+			"Returns allFinished, a perTerminal array (status \"finished\" | \"failed\" | \"question\" | \"working\" plus a `finished` flag, no content), and top-level stillWorking / askingQuestion / blocked ids. " +
+			"askingQuestion and blocked settled WITHOUT finishing: allFinished is false and they keep their watchers; only a real finish/exit retires one (watchersRetired) — never watcher.cancel those. " +
+			"An idle reading is imperfect: peek each tail afterwards and re-await any 'finished' terminal still looking busy. " +
+			"Re-await stillWorking at most twice (three calls per terminal); past that it is hung — escalate via queue.publish + watcher.terminal.create and end the turn. " +
 			fmt.Sprintf("ENFORCED: all awaitAll calls in a turn share a cumulative %ds foreground-wait budget. ", int(waitbudget.TurnBudget/time.Second)) +
 			"On budgetExhausted:true do NOT re-await — hand the stragglers to watcher.terminal.create + queue.publish and end the turn. " +
 			"On interruptedByUser:true the user messaged mid-wait — it is already in the conversation, so read it and adapt before re-awaiting. " +
@@ -167,7 +167,11 @@ func newAwaitAllTool(deps Deps) tools.Tool {
 			retired := 0
 			if d.Supervisors != nil {
 				for _, id := range a.TerminalIDs {
-					if o := outcomes[id]; o != nil && (o.status == domain.SettleStatusFinished || o.status == domain.SettleStatusFailed) {
+					// Gate on `finished`, not on the status alone: a terminal that
+					// settled FAILED because it is blocked on an error has not finished
+					// and is still worth supervising, so its watcher must survive. Only
+					// a real completion (or a real exit) hands the outcome over.
+					if o := outcomes[id]; o != nil && o.finished && (o.status == domain.SettleStatusFinished || o.status == domain.SettleStatusFailed) {
 						retired += d.Supervisors.RetireForTerminal(ctx, id, o.status)
 					}
 				}
@@ -277,8 +281,12 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 				o.reason = "terminal is gone (closed or exited)"
 			case v.Status == domain.SettleStatusFailed && exitCode != nil:
 				o.reason = fmt.Sprintf("exited with code %d", *exitCode)
-			case v.Status == domain.SettleStatusQuestion:
-				o.reason = "asking a question"
+			case domain.IsBlockingWaitingReason(waitingReason):
+				// Covers question, approval AND a blocking error, each named for what
+				// it actually is. "asking a question" for all three would send the
+				// model looking for a question in a tail that holds a permission
+				// dialog or a rate-limit banner.
+				o.reason = domain.BlockedReasonText(waitingReason)
 			}
 			t.outcome = o
 		}
@@ -352,6 +360,12 @@ func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts 
 	perTerminal := make([]map[string]any, 0, len(ids))
 	stillWorking := make([]string, 0, len(ids))
 	askingQuestion := make([]string, 0, len(ids))
+	// blocked collects terminals that SETTLED without finishing and are not answerable
+	// as a question — today that is an agent stopped on a blocking error (rate limit,
+	// auth, network). Without it such a terminal appears in NO top-level array: it is
+	// not still working, and it is not asking anything, so the only trace of it is one
+	// entry inside perTerminal.
+	blocked := make([]string, 0, len(ids))
 	var okCount, failCount, questionCount, workingCount int
 	allFinished := true
 
@@ -375,15 +389,26 @@ func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts 
 			entry["reason"] = o.reason
 		}
 		perTerminal = append(perTerminal, entry)
+		// allFinished follows the per-terminal `finished` flag, never the status alone.
+		// A nonzero EXIT is status "failed" AND finished (the process is gone, so the
+		// cohort really has finished); an agent stopped on a live blocking error is
+		// "failed" and NOT finished. Keying on status would report allFinished:true
+		// beside an entry saying finished:false — the top level contradicting its own
+		// detail, which is worse than either answer alone.
+		if !o.finished {
+			allFinished = false
+		}
 		switch o.status {
 		case "finished":
 			okCount++
 		case "failed":
 			failCount++
+			if !o.finished {
+				blocked = append(blocked, id)
+			}
 		case "question":
 			questionCount++
 			askingQuestion = append(askingQuestion, id)
-			allFinished = false
 		}
 	}
 
@@ -425,6 +450,7 @@ func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts 
 		"perTerminal":    perTerminal,
 		"stillWorking":   stillWorking,
 		"askingQuestion": askingQuestion,
+		"blocked":        blocked,
 		"attempts":       attempts,
 		"elapsedMs":      elapsedMs,
 		"terminalIds":    ids,

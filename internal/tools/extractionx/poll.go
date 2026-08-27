@@ -17,6 +17,10 @@ type readResult struct {
 	combinedTail string // terminal-labelled tail fed to the model
 	finished     bool   // every target terminal exited (or is gone)
 	seenWorking  bool   // every target terminal has been observed working at least once
+	// outputAgeKnown is true when at least one terminal's read succeeded and so
+	// contributed a real silence age. False means MsSinceOutput is a default, not a
+	// measurement (every read failed), and must not be reported as one.
+	outputAgeKnown bool
 }
 
 // readSignals performs one read across all target terminals, folded into a single
@@ -163,7 +167,8 @@ func readSignals(ctx context.Context, deps Deps, terminalIDs []string, tailBytes
 		runtime = "exited"
 	}
 	ms := int64(0)
-	if minMsSinceOutput != math.MaxInt64 {
+	ageKnown := minMsSinceOutput != math.MaxInt64
+	if ageKnown {
 		ms = int64(minMsSinceOutput)
 	}
 
@@ -186,9 +191,10 @@ func readSignals(ctx context.Context, deps Deps, terminalIDs []string, tailBytes
 			Tail:          strings.Join(raw, "\n\n"),
 			MsSinceOutput: ms,
 		},
-		combinedTail: strings.Join(labelled, "\n\n"),
-		finished:     allExited,
-		seenWorking:  seenWorkingAll,
+		combinedTail:   strings.Join(labelled, "\n\n"),
+		finished:       allExited,
+		seenWorking:    seenWorkingAll,
+		outputAgeKnown: ageKnown,
 	}
 }
 
@@ -203,6 +209,37 @@ type pollResult struct {
 	// alive). Carried so a consumed completion can be classified failed on a nonzero
 	// exit instead of blindly reported finished (retireConsumedSupervisors).
 	exitCode *int
+	// blocked is set when the poll stopped early because the agent is parked on
+	// something polling cannot clear (a question, an approval dialog, a blocking
+	// error). blockedReason carries which. A blocked poll is NOT matched — it did not
+	// finish — but it is a materially different answer from "the budget ran out", and
+	// the caller reports it as such.
+	blocked       bool
+	blockedReason string
+	// The last observation, carried out for diagnostics. A wait that fails is the ONE
+	// moment these are worth reporting: without them "condition not met after 30
+	// attempts" is unfalsifiable — it cannot distinguish an agent stuck in `working`,
+	// a status read that returned nothing, a tail churning under the quiet gate, or a
+	// judge that kept saying no. Every one of those has a different fix.
+	lastAgentState    string
+	lastWaitingReason string
+	lastMsSinceOutput int64
+	// judgeCalls counts finished-judge calls actually spent, and lastJudgeVerdict is
+	// the most recent one ("no", "unsure" — a "yes" ends the poll). judgeCalls == 0 on
+	// a settle wait means the pre-filter never once let a judge run, which points at
+	// the agent state rather than at the judge.
+	judgeCalls       int
+	lastJudgeVerdict string
+	// settleWait records whether this was the coerced wait:{} settle. An EXPLICIT
+	// condition never spends a judge by design, so judgeCalls==0 means nothing there
+	// and a hint reading it as "the agent never reached a judgeable state" is simply
+	// wrong about a wait that was never going to judge.
+	settleWait bool
+	// outputAgeKnown is false when the last read could not establish how long the
+	// terminal has been quiet — a failed deep read preserves the prior state and
+	// contributes no silence age, which surfaces as an aggregate 0. Reporting that as
+	// "0ms since new output" is false precision about a number nobody measured.
+	outputAgeKnown bool
 }
 
 // The settle-wait timing knobs (spawn grace, judge cooldown, quiet threshold,
@@ -255,6 +292,9 @@ func pollUntil(ctx context.Context, deps Deps, args pollArgs) pollResult {
 	}
 	attempts := 0
 	var read *readResult
+	judgeCalls := 0
+	lastJudgeVerdict := ""
+	blockedReason := ""
 	nowMS := args.nowFn
 	if nowMS == nil {
 		nowMS = func() int64 { return time.Now().UnixMilli() }
@@ -297,7 +337,7 @@ func pollUntil(ctx context.Context, deps Deps, args pollArgs) pollResult {
 			if lastJudgeAt != 0 {
 				lastJudgeAge = now - lastJudgeAt
 			}
-			shouldJudge, terminalAccept := domain.FinishPreFilter(domain.FinishPreFilterInput{
+			switch domain.FinishPreFilter(domain.FinishPreFilterInput{
 				AgentState:       r.signals.AgentState,
 				WaitingReason:    r.signals.WaitingReason,
 				SeenWorking:      r.seenWorking,
@@ -309,20 +349,50 @@ func pollUntil(ctx context.Context, deps Deps, args pollArgs) pollResult {
 				QuietMS:          domain.FinishQuietThresholdMS,
 				IsFinalAttempt:   attempts >= args.maxAttempts,
 				TailEmpty:        strings.TrimSpace(r.combinedTail) == "",
-			})
-			if terminalAccept {
+			}) {
+			case domain.FinishAccept:
 				return true
-			}
-			if !shouldJudge {
+			case domain.FinishBlocked:
+				// Parked on a question / approval / blocking error. Polling cannot
+				// clear it, so stop now and let the caller SAY what it is — the cohort
+				// wait (terminal.awaitAll) has always settled on this signal, and an
+				// extract that ground on to its cap instead was the divergence between
+				// two paths that share one finish policy.
+				blockedReason = r.signals.WaitingReason
+				return false
+			case domain.FinishJudge:
+				fin, confident := confirmFinished(ctx, deps, &r)
+				lastJudgeAt = now
+				judgeCalls++
+				switch {
+				case fin:
+					lastJudgeVerdict = "yes"
+				case confident:
+					lastJudgeVerdict = "no"
+				default:
+					lastJudgeVerdict = "unsure"
+				}
+				return fin
+			default:
 				return false
 			}
-			fin, _ := confirmFinished(ctx, deps, &r)
-			lastJudgeAt = now
-			return fin
 		}()
 		if matched {
 			return pollResult{matched: true, attempts: attempts, combinedTail: r.combinedTail,
-				finished: r.finished, exitCode: r.signals.ExitCode}
+				finished: r.finished, exitCode: r.signals.ExitCode,
+				lastAgentState: r.signals.AgentState, lastWaitingReason: r.signals.WaitingReason,
+				lastMsSinceOutput: r.signals.MsSinceOutput, outputAgeKnown: r.outputAgeKnown,
+				judgeCalls: judgeCalls, lastJudgeVerdict: lastJudgeVerdict,
+				settleWait: args.isSettleWait}
+		}
+		if blockedReason != "" {
+			return pollResult{matched: false, attempts: attempts, combinedTail: r.combinedTail,
+				finished: r.finished, exitCode: r.signals.ExitCode,
+				blocked: true, blockedReason: blockedReason,
+				lastAgentState: r.signals.AgentState, lastWaitingReason: r.signals.WaitingReason,
+				lastMsSinceOutput: r.signals.MsSinceOutput, outputAgeKnown: r.outputAgeKnown,
+				judgeCalls: judgeCalls, lastJudgeVerdict: lastJudgeVerdict,
+				settleWait: args.isSettleWait}
 		}
 
 		if attempts < args.maxAttempts && args.pollIntervalMs > 0 {
@@ -330,11 +400,17 @@ func pollUntil(ctx context.Context, deps Deps, args pollArgs) pollResult {
 		}
 	}
 
-	res := pollResult{matched: false, attempts: attempts}
+	res := pollResult{matched: false, attempts: attempts,
+		judgeCalls: judgeCalls, lastJudgeVerdict: lastJudgeVerdict,
+		settleWait: args.isSettleWait}
 	if read != nil {
 		res.combinedTail = read.combinedTail
 		res.finished = read.finished
 		res.exitCode = read.signals.ExitCode
+		res.lastAgentState = read.signals.AgentState
+		res.lastWaitingReason = read.signals.WaitingReason
+		res.lastMsSinceOutput = read.signals.MsSinceOutput
+		res.outputAgeKnown = read.outputAgeKnown
 	}
 	return res
 }

@@ -92,9 +92,17 @@ func TestWorktree_FetchDoesNotBlockModelRound(t *testing.T) {
 	s.DrainBackgroundWork()
 }
 
-// Cross-turn cache: turn 1's detached refresh populates the snapshot; turn 2 serves it
-// with NO fetch of its own (the cache is younger than the TTL).
-func TestWorktree_FreshCacheServedWithoutRefetch(t *testing.T) {
+// Every TURN re-reads the worktree exactly once, even when the cache is younger than
+// the TTL, while still SERVING that cache to the round so nothing blocks.
+//
+// This used to assert the opposite — that turn 2 re-read nothing — and that was the
+// bug. The binding a turn's spawns inherit is taken from this snapshot, so a cache up
+// to one TTL (15s) old could name the worktree the user had just LEFT: "switch
+// worktree, then immediately ask" lands squarely inside that window. The per-ROUND
+// consult is still TTL-gated (see TestWorktree_TTLExpiryKicksDetachedRefresh and the
+// multi-round coverage below), so the cost of the correction is one cheap detached
+// read per user turn, never per round.
+func TestWorktree_EachTurnForcesOneRefresh(t *testing.T) {
 	var calls atomic.Int32
 	r := &fakeRouter{results: []models.ChatResult{{Content: "a"}, {Content: "b"}}}
 	deps, be := recordingDeps(r, &fakeTools{})
@@ -113,12 +121,15 @@ func TestWorktree_FreshCacheServedWithoutRefetch(t *testing.T) {
 	}
 	s.DrainBackgroundWork()
 
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("fetcher entered %d times, want exactly 1 (turn 2 must serve the fresh cache)", got)
+	// One per turn: turn 1 (cold) and turn 2 (forced). Not one per ROUND, and not
+	// zero — a turn that inherits its predecessor's snapshot cannot tell whether the
+	// user switched worktrees in between.
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("fetcher entered %d times, want exactly 2 (one forced read per turn)", got)
 	}
 	rc := be.runtimeAt(1)
 	if rc.Worktree == nil || rc.Worktree.Current == nil || rc.Worktree.Current.Branch != "feature/cached" {
-		t.Fatalf("turn 2 should serve the warmed snapshot, got %+v", rc.Worktree)
+		t.Fatalf("turn 2 should still SERVE the warmed snapshot while its own read lands, got %+v", rc.Worktree)
 	}
 }
 
@@ -172,8 +183,8 @@ func TestWorktree_TTLExpiryKicksDetachedRefresh(t *testing.T) {
 }
 
 // A cache YOUNGER than the TTL kicks nothing: the turn-start warm and the per-round
-// consult are both TTL-gated, so back-to-back turns pay zero MCP reads.
-func TestWorktree_YoungCacheKicksNoRefresh(t *testing.T) {
+// consult is TTL-gated, so a multi-round turn pays at most the turn's own single read.
+func TestWorktree_YoungCacheStillServesTheRoundWhileTheTurnRereads(t *testing.T) {
 	var calls atomic.Int32
 	r := &fakeRouter{results: []models.ChatResult{{Content: "ok"}}}
 	deps, be := recordingDeps(r, &fakeTools{})
@@ -192,12 +203,15 @@ func TestWorktree_YoungCacheKicksNoRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.DrainBackgroundWork()
-	if got := calls.Load(); got != 0 {
-		t.Fatalf("a young cache must not re-fetch, fetcher entered %d times", got)
+	// The turn asks despite the young cache — that read is what makes the worktree
+	// binding trustworthy — but it is DETACHED, so the round is served from the cache
+	// that was already there rather than waiting for it.
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("a turn must re-read even a young cache, fetcher entered %d times, want 1", got)
 	}
 	rc := be.runtimeAt(0)
 	if rc.Worktree == nil || rc.Worktree.Current == nil || rc.Worktree.Current.Branch != "feature/young" {
-		t.Fatalf("the round should serve the young cache, got %+v", rc.Worktree)
+		t.Fatalf("the round should serve the young cache without blocking, got %+v", rc.Worktree)
 	}
 }
 
@@ -345,4 +359,34 @@ func (t *ctxCapturingTools) Dispatch(ctx context.Context, name, args string, tur
 		t.onDispatch(ctx)
 	}
 	return t.fakeTools.Dispatch(ctx, name, args, turn)
+}
+
+// A turn's forced read is ONE read, not one per round. This is the property the
+// cross-turn cache exists for, and the one at risk when turn start stopped honouring
+// the TTL: if the force had leaked into the per-round consult, a long agentic turn
+// would pay an MCP round-trip on every round's first-byte path — the exact cost the
+// cache was built to remove.
+func TestWorktree_MultiRoundTurnStillReadsOnce(t *testing.T) {
+	var calls atomic.Int32
+	// Three model rounds in one turn: two tool-calling rounds then a final answer.
+	r := &fakeRouter{results: []models.ChatResult{
+		{ToolCalls: []models.ToolCallRequest{{ID: "c1", Type: "function", Function: models.ToolCallFunction{Name: "noop", Arguments: "{}"}}}},
+		{ToolCalls: []models.ToolCallRequest{{ID: "c2", Type: "function", Function: models.ToolCallFunction{Name: "noop", Arguments: "{}"}}}},
+		{Content: "done"},
+	}}
+	deps, _ := recordingDeps(r, &fakeTools{})
+	deps.CurrentWorktreeFetcher = func(context.Context) *prompts.WorktreeContext {
+		calls.Add(1)
+		return &prompts.WorktreeContext{Present: true, Branch: "feature/multi"}
+	}
+	s := NewSession(deps)
+
+	if _, err := s.Send(context.Background(), "go", SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s.DrainBackgroundWork()
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("fetcher entered %d times across a 3-round turn, want exactly 1", got)
+	}
 }
