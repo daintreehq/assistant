@@ -23,6 +23,10 @@ type slowApp struct {
 
 func (s *slowApp) IsSlowCommand(string) bool { return true }
 
+// Slow but NOT exclusive — the `/login` shape: it waits on a browser and holds nothing,
+// so the session stays open to prompts while it does.
+func (s *slowApp) IsExclusiveCommand(string) bool { return false }
+
 func (s *slowApp) RunCommandWithProgress(ctx context.Context, line string, progress func(string)) CommandOutcome {
 	if progress != nil {
 		progress("working")
@@ -96,7 +100,7 @@ func TestASecondSlowCommandIsRefusedWhileOneIsRunning(t *testing.T) {
 	}
 	// The refusal has to be legible: the user is being told to go and finish something.
 	deadline := time.Now().Add(2 * time.Second)
-	for !strings.Contains(sink.String(), "still running") {
+	for !strings.Contains(sink.String(), "still waiting on you") {
 		if time.Now().After(deadline) {
 			t.Fatalf("no refusal was reported for the second command:\n%s", sink.String())
 		}

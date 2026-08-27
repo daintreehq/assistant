@@ -156,16 +156,22 @@ func (s *Session) ArchiveCompactionTranscript(transcript string) string {
 	return s.artifacts.set(transcript)
 }
 
-// CompactWithTranscript is the manual /compact entry: it rejects a busy session
+// CompactWithTranscript is the manual /compact entry: it rejects an OCCUPIED session
 // BEFORE archiving, then archives the transcript, appends the breadcrumb to the
 // summary, and compacts. Ordering matters — archiving first and letting Compact
 // reject afterwards stranded a multi-megabyte orphaned artifact (durable row + a
 // hot-cache slot) on every /compact attempted while a turn was in flight. The
 // pre-check leaves a tiny window in which a turn starts before Compact re-checks;
 // that rare race just recreates the bounded, GC'd orphan — never corruption.
+//
+// "Occupied" has to mean exactly what Compact means by it, or the pre-check stops
+// pre-checking. It checked only inFlight while Compact also refuses an outstanding
+// endpoint reservation, so a /compact during an open `/backend` picker archived the
+// transcript and was then refused — recreating the orphan on the one path written to
+// prevent it.
 func (s *Session) CompactWithTranscript(summary, transcript string) error {
 	s.mu.Lock()
-	busy := s.inFlight
+	busy := s.inFlight || s.endpointHeld != 0
 	s.mu.Unlock()
 	if busy {
 		return ErrTurnInProgress

@@ -33,7 +33,7 @@ added here appears in the native palette with no change on the host side.
 | `/explain [runId]` | replay a run; no id lists recent runs |
 | `/models` | show backend-owned model routing |
 | `/cost` | upstream cost this session ran up, as the backend reported it |
-| `/backend [target]` | switch backend (remembered); no arg lists, 'default' forgets |
+| `/backend [target]` | switch backend (remembered); no arg asks, 'default' forgets |
 | `/login` | sign in through your browser |
 | `/logout` | sign out on this machine |
 | `/account` | account state, plan, and which backend it belongs to |

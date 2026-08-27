@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -216,11 +217,21 @@ func (h *hostAppAdapter) SetHooks(hooks host.AppHooks) {
 			}
 			ans, err := hooks.AskChoice(cctx, host.AskChoiceRequest{
 				ToolCallID: req.ToolCallID,
+				Local:      req.Local,
 				Question:   req.Question,
 				Options:    opts,
 				Default:    req.Default,
 			})
 			if err != nil {
+				// Translated at the seam, not passed through. The two packages keep
+				// their own sentinels on purpose (internal/host compiles in isolation
+				// against agent/config/domain), and without this mapping the tool layer
+				// sees an unrecognised error and reports a working question surface as
+				// QUESTION_UNAVAILABLE — telling the model to try another route when
+				// the user simply declined.
+				if errors.Is(err, host.ErrQuestionDismissed) {
+					return tools.AskChoiceAnswer{}, tools.ErrQuestionDismissed
+				}
 				return tools.AskChoiceAnswer{}, err
 			}
 			return tools.AskChoiceAnswer{Label: ans.Label, Index: ans.Index, Text: ans.Text}, nil
@@ -268,6 +279,18 @@ func (h *hostAppAdapter) RunCommandWithProgress(
 // that decides everything else about a command.
 func (h *hostAppAdapter) IsSlowCommand(line string) bool {
 	return commands.IsSlowCommand(line)
+}
+
+// The adapter must satisfy the runner interface in full. Asserted at COMPILE TIME
+// because the host only ever reaches these methods through a type assertion
+// (`h.app.(CommandProgressRunner)`) — an adapter that fell one method short would not
+// fail to build, it would silently stop being a runner, and every slow command would
+// quietly run inline again. Which, for a command that asks, is a deadlock.
+var _ host.CommandProgressRunner = (*hostAppAdapter)(nil)
+
+// IsExclusiveCommand answers host.CommandProgressRunner from the same table.
+func (h *hostAppAdapter) IsExclusiveCommand(line string) bool {
+	return commands.IsExclusiveCommand(line)
 }
 
 // CommandCatalog mirrors the CLI's own registry, so the two surfaces cannot offer

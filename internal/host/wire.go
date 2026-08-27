@@ -337,7 +337,7 @@ type HostCommandType string
 const (
 	CmdPrompt         HostCommandType = "prompt"
 	CmdApprovalDecide HostCommandType = "approval:decide"
-	// CmdQuestionAnswer answers a multiple-choice question the model asked
+	// CmdQuestionAnswer answers a multiple-choice question the engine asked
 	// (user.askMultipleChoice). Approvals and questions are DIFFERENT decisions —
 	// "may I do this?" versus "which of these did you mean?" — and collapsing them
 	// onto the approval frames would force a host to render a yes/no sheet for a

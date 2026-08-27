@@ -208,8 +208,15 @@ func TestAsk_RejectsBlankAfterSanitize(t *testing.T) {
 func TestAsk_LabelForAlphabet(t *testing.T) {
 	cases := map[int]string{0: "A", 1: "B", 25: "Z"}
 	for idx, want := range cases {
-		if got := labelFor(idx); got != want {
-			t.Errorf("labelFor(%d) = %q, want %q", idx, got, want)
+		if got := tools.ChoiceLabel(idx); got != want {
+			t.Errorf("ChoiceLabel(%d) = %q, want %q", idx, got, want)
 		}
+	}
+	// Past the alphabet there is no label to give. Returning "" rather than a wrapped
+	// rune keeps a surface that over-fills a question from labelling two options "["
+	// and "\\" — the option count is bounded at maxOptions precisely so this never
+	// happens, and this is the check that the bound is the one doing the work.
+	if got := tools.ChoiceLabel(tools.MaxChoiceOptions); got != "" {
+		t.Errorf("ChoiceLabel past Z = %q, want an empty label", got)
 	}
 }

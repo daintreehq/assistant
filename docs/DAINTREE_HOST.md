@@ -195,7 +195,7 @@ Every command is an object with a string `sessionId` and a string `type`.
 | --- | --- | --- |
 | `prompt` | `text` | Start a user turn. Sent while a turn is running, it is **folded into** the in-flight turn as an interjection rather than rejected. |
 | `approval:decide` | `approvalId`, `decision` | Answer a parked confirmation. |
-| `question:answer` | `questionId`, `choiceIndex` | Answer a multiple-choice question. `choiceIndex` is 0-based; **negative means dismissed**, which cancels the tool call rather than answering it. Required and must be a number — a missing one would default to 0 and silently answer "the first option" for a user who never chose. |
+| `question:answer` | `questionId`, `choiceIndex` | Answer a multiple-choice question. `choiceIndex` is 0-based; **negative means dismissed**, which fails the tool call as declined rather than answering it — distinct from the turn being cancelled underneath it, see §8. Required and must be a number — a missing one would default to 0 and silently answer "the first option" for a user who never chose. |
 | `interrupt` | — | Cancel the running turn. Leaves autonomous wake work alone. |
 | `hibernate` | — | Graceful teardown, reason `hibernate`. |
 | `shutdown` | — | Graceful teardown, reason `exit`. |
@@ -396,8 +396,30 @@ index that cancels rather than clamping, questions tied to their `runId` and `to
 interrupt and close releasing them, and a parked question waking a long poll. Approvals and
 questions stay distinct tools throughout.
 
-`/backend`'s endpoint picker reuses this channel, marked local so Esc dismisses it instead of
-cancelling the turn.
+### The question channel is not only the model's
+
+`/backend` with no argument reuses it. A slash command whose whole job is "pick one of these" is the same interaction the model gets, and rendering it instead as a numbered block of text is how a host with a real picker ended up showing a terminal menu inside a GUI panel. It goes out as an ordinary `question:requested` — the host needs to know nothing about where a question came from — and the bare form is registered **slow** (`CommandMeta.SlowWithoutArgument`), because the answer arrives as a command on the very loop the command would otherwise be blocking. Inline, that is not a freeze, it is a deadlock. `/backend <target>` is deliberately NOT slow: it resolves and returns, and it reconfigures the endpoint, which has to stay ordered against the turns using it.
+
+The picker RESERVES the session before it opens (`Session.ReserveEndpoint`), so no turn can RUN while the sheet is up: an autonomous wake is deferred rather than attempted (its burst stays queued and the command's own unwind re-drives it), and a typed prompt cannot be submitted because the composer stays disabled through the command's result. Asking first and checking afterwards produces the one outcome a question must never produce: the user makes the decision it asked for and is then told it could not be applied. A picker opened during a running turn is refused before anyone looks at it.
+
+The picker does **not** open when the endpoint was pinned by `DAINTREE_BACKEND_URL` / `--backend-url`: every option would be refused the moment it was chosen, so the command prints the listing that explains the pin instead. Daintree deliberately does not set that variable (it strips an inherited one), so the panel gets the picker.
+
+A local question carries **no `turnId`**. It belongs to no turn, and stamping whatever turn happened to be running would record the answer inside a turn that never asked — a transcript claiming the model was told something it was not.
+
+### One outstanding question at a time
+
+The host draws ONE sheet, so a second `question:requested` would replace the first rather than joining it, leaving whoever asked first parked on a question nobody can see. A second request is therefore **refused** while one is outstanding: the model is told it could not ask and decides without asking, and a command reports that something else is already waiting. Queueing is deliberately not offered — it would hold a dispatch open for an unbounded time behind a decision the user has not been shown yet.
+
+### Dismissed is not cancelled
+
+`question:answered.cancelled` covers both, because the host only needs to know the sheet is gone. The ENGINE distinguishes them, and the model is told which:
+
+| What happened | Reaches the model as |
+| --- | --- |
+| `question:answer` with a negative `choiceIndex` | `QUESTION_DISMISSED` — the user declined to answer; decide without asking |
+| `interrupt`, teardown, or the answer timeout | `QUESTION_CANCELLED` — the turn went away underneath the sheet |
+
+Collapsing the two tells a model that a user who closed a sheet had cancelled the turn, which invites a retry through a route that will be refused the same way.
 
 | | **Terminal transcript** (host scrollback) | **Conversation** (`state.db` history) | **Project state** (memory, workflows, audit, inbox) | **Background supervision** (watchers, async, timers) |
 | --- | --- | --- | --- | --- |

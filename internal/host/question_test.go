@@ -254,3 +254,288 @@ func waitForQuestionID(t *testing.T, frames func() []map[string]any) string {
 	t.Fatal("no question:requested frame was emitted")
 	return ""
 }
+
+// A dismissal and an abandonment are both "no answer" and they mean opposite things to
+// the model: one is a decision not to decide (stop asking), the other is the turn going
+// away underneath the sheet (the question was never reached). Before this the two were
+// the same `context.Canceled`, so QUESTION_DISMISSED existed as a documented outcome
+// that nothing could ever produce, and a user who closed a sheet was reported to the
+// model as having cancelled the turn.
+func TestAskChoiceSeparatesDismissalFromAbandonment(t *testing.T) {
+	t.Run("the host answering with a negative index is a dismissal", func(t *testing.T) {
+		b, frames := newQuestionBridge()
+		done := make(chan error, 1)
+		go func() {
+			_, err := b.AskChoice(context.Background(), threeOptions())
+			done <- err
+		}()
+
+		b.ResolveQuestion(waitForQuestionID(t, frames), -1)
+
+		select {
+		case err := <-done:
+			if !errors.Is(err, ErrQuestionDismissed) {
+				t.Fatalf("err = %v, want ErrQuestionDismissed", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("AskChoice never returned after dismissal")
+		}
+	})
+
+	t.Run("a drained question is an abandonment, not a dismissal", func(t *testing.T) {
+		// SettlePendingQuestions runs on interrupt and teardown. Nobody declined
+		// anything there — the turn is being taken away — so reporting a dismissal
+		// would tell the model the user made a decision they were never shown.
+		b, frames := newQuestionBridge()
+		done := make(chan error, 1)
+		go func() {
+			_, err := b.AskChoice(context.Background(), threeOptions())
+			done <- err
+		}()
+
+		waitForQuestionID(t, frames)
+		b.SettlePendingQuestions()
+
+		select {
+		case err := <-done:
+			if errors.Is(err, ErrQuestionDismissed) {
+				t.Fatal("a drained question was reported as a dismissal")
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("err = %v, want a cancellation", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("AskChoice never returned after the drain")
+		}
+	})
+
+	t.Run("an out-of-range index is an abandonment, not a dismissal", func(t *testing.T) {
+		// A non-negative index past the end is a HOST bug, not a user declining. It is
+		// already refused rather than clamped; this pins that it is not quietly
+		// promoted into a decision the user is then told to have made.
+		b, frames := newQuestionBridge()
+		done := make(chan error, 1)
+		go func() {
+			_, err := b.AskChoice(context.Background(), threeOptions())
+			done <- err
+		}()
+
+		b.ResolveQuestion(waitForQuestionID(t, frames), 99)
+
+		select {
+		case err := <-done:
+			if errors.Is(err, ErrQuestionDismissed) {
+				t.Fatal("an out-of-range index was reported as a dismissal")
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("err = %v, want a cancellation", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("AskChoice never returned")
+		}
+	})
+}
+
+// waitForQuestionIDAfter is waitForQuestionID for a SECOND question: it skips the id
+// already seen, which the shared helper would return forever because it scans from the
+// front of the frame log.
+func waitForQuestionIDAfter(t *testing.T, frames func() []map[string]any, seen string) string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, f := range frames() {
+			if f["type"] != "question:requested" {
+				continue
+			}
+			if id, _ := f["questionId"].(string); id != "" && id != seen {
+				return id
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("no second question:requested frame was emitted")
+	return ""
+}
+
+// ONE sheet, so one outstanding question. The host draws a single sheet above a single
+// composer, so a second request would REPLACE the first rather than joining it — and the
+// first asker would sit parked on a question nobody can see until its timeout. Reachable
+// since `/backend` began asking on its own account beside a running turn.
+func TestAskChoiceRefusesASecondOutstandingQuestion(t *testing.T) {
+	b, frames := newQuestionBridge()
+
+	first := make(chan error, 1)
+	go func() {
+		_, err := b.AskChoice(context.Background(), threeOptions())
+		first <- err
+	}()
+	qid := waitForQuestionID(t, frames)
+
+	if _, err := b.AskChoice(context.Background(), threeOptions()); !errors.Is(err, ErrQuestionBusy) {
+		t.Fatalf("the second question returned %v, want ErrQuestionBusy", err)
+	}
+	// Refused WITHOUT disturbing the first: it is still answerable, and still the one on
+	// screen. A refusal that settled the live sheet would be the bug with extra steps.
+	b.ResolveQuestion(qid, 1)
+	select {
+	case err := <-first:
+		if err != nil {
+			t.Fatalf("the first question was disturbed by the refusal: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first question never returned")
+	}
+
+	// …and the sheet frees up again once it settles.
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.AskChoice(context.Background(), threeOptions())
+		done <- err
+	}()
+	b.ResolveQuestion(waitForQuestionIDAfter(t, frames, qid), 0)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("a question after the first settled returned %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the channel never reopened")
+	}
+}
+
+// A LOCAL question belongs to no turn. Stamping the running one would record the answer
+// inside a turn that never asked — a transcript claiming the model was told something it
+// was not.
+func TestAskChoiceLeavesALocalQuestionOutsideTheRunningTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		local   bool
+		wantSet bool
+	}{
+		{name: "the model asking mid-turn carries its turn", local: false, wantSet: true},
+		{name: "the CLI asking on its own account carries none", local: true, wantSet: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, frames := newQuestionBridge()
+			b.mu.Lock()
+			b.activeTurnID = "trn_live"
+			b.mu.Unlock()
+
+			done := make(chan struct{})
+			go func() {
+				req := threeOptions()
+				req.Local = tc.local
+				_, _ = b.AskChoice(context.Background(), req)
+				close(done)
+			}()
+			qid := waitForQuestionID(t, frames)
+
+			var requested map[string]any
+			for _, f := range frames() {
+				if f["type"] == "question:requested" {
+					requested = f
+				}
+			}
+			if requested == nil {
+				t.Fatal("no question:requested frame was emitted")
+			}
+			got, present := requested["turnId"]
+			if tc.wantSet {
+				if !present || got != "trn_live" {
+					t.Errorf("turnId = %v (present=%v), want trn_live", got, present)
+				}
+			} else if present {
+				t.Errorf("a local question carried turnId %v; it belongs to no turn", got)
+			}
+
+			b.ResolveQuestion(qid, 0)
+			<-done
+		})
+	}
+}
+
+// A question is never announced AFTER it has been settled.
+//
+// Registering under the lock and posting after it leaves a window in which the question
+// is settleable but has never been announced. An interrupt landing there drains it and
+// posts question:answered FIRST; a host with no record of the question discards that,
+// and the question:requested arriving next opens a sheet whose pending entry is already
+// gone — so every click on it reaches a ResolveQuestion that no-ops. An immortal sheet,
+// for a turn cancelled before it was ever drawn.
+//
+// The Post hook BLOCKS inside the request frame and a second goroutine calls
+// SettlePendingQuestions while it is stuck there, which is exactly the interleaving.
+//
+// NOT deterministic, and the difference matters. The sleep before releasing is a window,
+// not a synchronisation point: nothing reports "the drainer has reached the mutex", so a
+// pass means the ordering held across a generous window rather than that the drain was
+// ever really in contention. It is a strong smoke test for the ordering and no more; the
+// guarantee itself is structural — registration, arming and announcement share one lock
+// hold, so there is no point at which a drain can observe an unannounced question.
+func TestAskChoiceNeverAnnouncesAQuestionItHasAlreadySettled(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		order    []string
+		inPost   = make(chan struct{})
+		release  = make(chan struct{})
+		postOnce sync.Once
+	)
+	post := func(ev HostEvent) {
+		name := ""
+		switch ev.(type) {
+		case EvQuestionRequested:
+			name = "requested"
+		case EvQuestionAnswered:
+			name = "answered"
+		}
+		if name == "" {
+			return
+		}
+		if name == "requested" {
+			// Park INSIDE the announcement, and let the drainer run while we are here.
+			postOnce.Do(func() {
+				close(inPost)
+				<-release
+			})
+		}
+		mu.Lock()
+		order = append(order, name)
+		mu.Unlock()
+	}
+
+	b := NewBridge(BridgeOptions{SessionID: "ses_test", Post: post})
+	done := make(chan struct{})
+	go func() {
+		_, _ = b.AskChoice(context.Background(), threeOptions())
+		close(done)
+	}()
+
+	<-inPost
+	drained := make(chan struct{})
+	go func() {
+		// Blocks until AskChoice releases the bridge lock, which is the point: the drain
+		// cannot observe a question that has not finished being announced.
+		b.SettlePendingQuestions()
+		close(drained)
+	}()
+	// Give the drainer a real chance to get in front of the announcement.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("AskChoice never returned")
+	}
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SettlePendingQuestions never returned")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(order) == 0 || order[0] != "requested" {
+		t.Fatalf("frames came out as %v; the question was settled before it was announced", order)
+	}
+}

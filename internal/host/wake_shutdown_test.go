@@ -401,3 +401,272 @@ func TestWakeAfterCloseLatchDoesNotStart(t *testing.T) {
 		t.Fatalf("wake started after teardown latched closing (%d sends)", n)
 	}
 }
+
+// A wake that lands while a command OWNS the session is DEFERRED, not attempted.
+//
+// This is the bug the endpoint reservation introduced and this test exists to pin. The
+// picker reserves the session, so a wake admitted here reaches Send and is refused — but
+// by then reactWake has already drained pendingWake, and the scheduler has already
+// marked the burst notified. The retry path requeues exactly once (wakeRetried), so the
+// reactor's own chained second attempt fails with nothing left to requeue into, and the
+// events are gone for good — in this process AND across a restart, because the durable
+// re-arm has nothing to re-arm.
+//
+// Deferring costs nothing: the burst stays queued and the command's unwind re-drives it.
+func TestWakeIsDeferredNotDroppedWhileACommandOwnsTheSession(t *testing.T) {
+	sess := newWakeSession()
+	h, _, _ := newWakeHost(t, sess)
+
+	h.turnMu.Lock()
+	h.cmdBusy = true
+	h.cmdExclusive = true
+	h.pendingWake = append(h.pendingWake, domain.QueueEvent{
+		ID: "ev1", Source: domain.SourceTerminalWatcher, Severity: domain.SeverityAttention,
+		Title: "agent finished", Summary: "terminal settled",
+	})
+	h.turnMu.Unlock()
+
+	h.reactWake()
+
+	// Not attempted…
+	if n := sess.sendCount(); n != 0 {
+		t.Fatalf("a wake ran %d turns while a command held the session", n)
+	}
+	// …and STILL QUEUED, which is the half that matters. Drained-and-refused is how
+	// events that were already marked notified get lost.
+	h.turnMu.Lock()
+	queued := len(h.pendingWake)
+	h.turnMu.Unlock()
+	if queued != 1 {
+		t.Fatalf("pendingWake holds %d events, want the burst kept for later", queued)
+	}
+
+	// And it runs once the command lets go.
+	h.turnMu.Lock()
+	h.cmdBusy = false
+	h.cmdExclusive = false
+	h.turnMu.Unlock()
+	go h.reactWake()
+	select {
+	case <-sess.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the deferred wake never ran after the command finished")
+	}
+}
+
+// …and the command's own unwind is what re-drives it. Nothing else will: the burst was
+// never handed to a turn, so no turn's finally will come along to drain it.
+func TestASlowCommandRedrivesADeferredWakeWhenItFinishes(t *testing.T) {
+	sess := newWakeSession()
+	h, _, _ := newWakeHost(t, sess)
+	// EXCLUSIVE, because that is the only kind whose wakes are deferred and therefore
+	// the only kind that owes a re-drive. A merely-slow command never deferred one.
+	h.app = &exclusiveApp{slowApp{App: h.app, entered: make(chan struct{}, 1), release: make(chan struct{})}}
+	excl, _ := h.app.(*exclusiveApp)
+	close(excl.release) // the command returns as soon as it is dispatched
+
+	h.turnMu.Lock()
+	h.pendingWake = append(h.pendingWake, domain.QueueEvent{
+		ID: "ev1", Source: domain.SourceTerminalWatcher, Severity: domain.SeverityAttention,
+		Title: "agent finished", Summary: "terminal settled",
+	})
+	h.turnMu.Unlock()
+
+	h.handleSlashCommandAsync("/backend")
+
+	select {
+	case <-sess.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the queued wake was never re-driven when the command finished")
+	}
+}
+
+// exclusiveApp is slowApp that also OWNS the session — the `/backend` shape.
+type exclusiveApp struct{ slowApp }
+
+func (e *exclusiveApp) IsExclusiveCommand(string) bool { return true }
+
+// A SLOW command that does not own the session must NOT defer autonomous work.
+//
+// `/login` waits on a browser and holds nothing — prompts are admitted throughout it —
+// so deferring wakes for its five minutes would be a policy stated nowhere else. The
+// deferral exists for the endpoint reservation, and only session-owning commands take
+// one; gating on `cmdBusy` instead swept /login in with them.
+func TestWakeIsNotDeferredForANonExclusiveSlowCommand(t *testing.T) {
+	sess := newWakeSession()
+	h, _, _ := newWakeHost(t, sess)
+
+	h.turnMu.Lock()
+	h.cmdBusy = true // slow…
+	h.cmdExclusive = false
+	h.pendingWake = append(h.pendingWake, domain.QueueEvent{
+		ID: "ev1", Source: domain.SourceTerminalWatcher, Severity: domain.SeverityAttention,
+		Title: "agent finished", Summary: "terminal settled",
+	})
+	h.turnMu.Unlock()
+
+	go h.reactWake()
+	select {
+	case <-sess.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a wake was deferred for a command that holds nothing")
+	}
+}
+
+// A prompt RECLAIMED from a turn that finished underneath a picker is held, not lost.
+//
+// The inbound gate refuses a prompt while a command owns the session, which is right for
+// something still in the composer. These are different: the engine already accepted the
+// words and has already removed them from the injection queue, so refusing one throws
+// away a message nobody was told about. The window is narrow and real, and it is the
+// sliver AFTER a finishing turn clears busy and BEFORE it has re-dispatched what it
+// reclaimed: the loop is free, an exclusive command can be admitted, and the reclaimed
+// prompt then arrives into a session somebody else owns.
+func TestAReclaimedPromptIsHeldWhileACommandOwnsTheSession(t *testing.T) {
+	sess := newWakeSession()
+	h, _, _ := newWakeHost(t, sess)
+
+	h.turnMu.Lock()
+	h.cmdExclusive = true
+	h.turnMu.Unlock()
+
+	h.dispatchReclaimedPrompt("the message that was already accepted")
+
+	if n := sess.sendCount(); n != 0 {
+		t.Fatalf("the reclaimed prompt started %d turns against an owned session", n)
+	}
+	h.turnMu.Lock()
+	held := len(h.deferredPrompts)
+	h.turnMu.Unlock()
+	if held != 1 {
+		t.Fatalf("the reclaimed prompt was neither dispatched nor held (%d held)", held)
+	}
+
+	// …and it runs when the session is handed back.
+	h.turnMu.Lock()
+	h.cmdExclusive = false
+	h.turnMu.Unlock()
+	h.drainDeferredPrompts()
+
+	select {
+	case <-sess.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the held prompt was never dispatched after the command released the session")
+	}
+	if got := sess.sentTexts(); len(got) != 1 || got[0] != "the message that was already accepted" {
+		t.Fatalf("the held prompt came back as %v", got)
+	}
+}
+
+// The reclaim guard and the admission it guards are ONE act.
+//
+// A guard that reads cmdExclusive, releases the lock and then admits is a TOCTOU: a
+// `/backend` claiming exclusivity in that gap means the reclaimed prompt is admitted
+// anyway, its Send is refused by the reservation, and text the engine had already
+// accepted is lost. The check therefore lives under the same lock hold that claims busy.
+//
+// Exercised at the TRANSITION rather than with the flag already set: the prompt is
+// dispatched into a session that is free while exclusivity is claimed from another
+// goroutine. Whichever order the two land in, the prompt must either run or be held —
+// never be admitted into a session it cannot use, and never both.
+func TestAReclaimedPromptIsNeverAdmittedIntoAnExclusiveSession(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		sess := newWakeSession()
+		h, _, _ := newWakeHost(t, sess)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			h.turnMu.Lock()
+			h.cmdExclusive = true
+			h.turnMu.Unlock()
+		}()
+		go func() {
+			defer wg.Done()
+			h.dispatchReclaimedPrompt("already accepted")
+		}()
+		wg.Wait()
+
+		// One outcome or the other, settled. The turn path is asynchronous — admission
+		// claims busy and spawns a worker — so "ran" has to be waited for rather than
+		// sampled, or a slow schedule reads as a lost prompt.
+		deadline := time.Now().Add(2 * time.Second)
+		held, ran := 0, false
+		for {
+			h.turnMu.Lock()
+			held = len(h.deferredPrompts)
+			busy := h.busy
+			h.turnMu.Unlock()
+			ran = busy || sess.sendCount() > 0
+			if held+boolToInt(ran) == 1 || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if held+boolToInt(ran) != 1 {
+			t.Fatalf("iteration %d: held=%d ran=%v — the prompt was duplicated or lost", i, held, ran)
+		}
+		h.runCancel()
+	}
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// The other end of the same hazard: a reclaimed prompt racing the RELEASE.
+//
+// The hold path observed cmdExclusive, released the lock and re-took it to append.
+// Between those the command's unwind can clear exclusivity and drain an empty queue —
+// and the append then lands behind a drain that will never run again, stranding the
+// prompt for the life of the session. Acquisition and release are different races and
+// only one of them is covered by racing the flag ON.
+func TestAReclaimedPromptIsNeverStrandedByTheDrainItRaced(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		sess := newWakeSession()
+		h, _, _ := newWakeHost(t, sess)
+
+		h.turnMu.Lock()
+		h.cmdExclusive = true
+		h.turnMu.Unlock()
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		// The command finishing: clear exclusivity, then drain whatever was held.
+		go func() {
+			defer wg.Done()
+			h.turnMu.Lock()
+			h.cmdExclusive = false
+			h.turnMu.Unlock()
+			h.drainDeferredPrompts()
+		}()
+		go func() {
+			defer wg.Done()
+			h.dispatchReclaimedPrompt("already accepted")
+		}()
+		wg.Wait()
+
+		// Either it was held and the drain took it, or it was admitted directly. What it
+		// must never be is sitting in deferredPrompts with nothing left to drain it.
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			h.turnMu.Lock()
+			held := len(h.deferredPrompts)
+			busy := h.busy
+			h.turnMu.Unlock()
+			if held == 0 && (busy || sess.sendCount() > 0) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("iteration %d: held=%d busy=%v sends=%d — the prompt was stranded",
+					i, held, busy, sess.sendCount())
+			}
+			time.Sleep(time.Millisecond)
+		}
+		h.runCancel()
+	}
+}
