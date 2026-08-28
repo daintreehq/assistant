@@ -116,6 +116,38 @@ const (
 	ProgressRetrying         = "retrying"
 )
 
+// The wording the registry itself puts on those automatic beats. Named rather than
+// written inline at the emit sites so that Lifecycle() below can recognise them
+// without a second copy of the strings to drift against.
+const (
+	ProgressMsgValidating       = "validating request"
+	ProgressMsgAwaitingApproval = "waiting for approval"
+	ProgressMsgRunning          = "running"
+)
+
+var autoProgressMessage = map[string]string{
+	ProgressValidating:       ProgressMsgValidating,
+	ProgressAwaitingApproval: ProgressMsgAwaitingApproval,
+	ProgressRunning:          ProgressMsgRunning,
+}
+
+// Lifecycle reports whether this beat is one the registry emits for EVERY call as it
+// walks validate → approve → run, in the registry's own wording.
+//
+// It exists so a consumer that already tracks a call's state can drop them. The
+// Daintree host does: it renders queued/running/waiting from tool:state and draws the
+// substep underneath, so these beats made every running row restate its own status
+// one line down in lowercase ("Waiting on 3 terminals … Running" over "running"), and
+// left it there for the life of the call, since the last beat is the one that sticks.
+//
+// A handler that reuses one of these phases with a message of its own is NOT
+// lifecycle — the message is the whole information ("polling terminal 3 of 5"), and
+// only the registry's exact automatic wording is matched.
+func (p ToolProgress) Lifecycle() bool {
+	msg, ok := autoProgressMessage[p.Phase]
+	return ok && p.Message == msg
+}
+
 // ErrNoAskChoiceHook is returned by a main-actor ToolContext.AskChoice when the
 // runtime has no interactive question surface wired (one-shot, a non-TTY). The embedded
 // host is NOT among them — it renders a real sheet and answers over question:answer.

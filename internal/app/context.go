@@ -346,8 +346,17 @@ func (t *toolRunner) Dispatch(ctx context.Context, name, argsJSON string, turn a
 	tctx.ToolCallID = turn.CallID
 	if turn.Progress != nil {
 		callID := turn.CallID
+		// Per call, so it needs no lock: one call's beats are emitted by the one
+		// goroutine dispatching it.
+		parked := false
 		tctx.ReportProgress = func(p tools.ToolProgress) {
-			turn.Progress(callID, p.Message)
+			route := routeProgress(p, &parked)
+			if route.state != "" && turn.State != nil {
+				turn.State(callID, route.state)
+			}
+			if route.substep != "" {
+				turn.Progress(callID, route.substep)
+			}
 		}
 	}
 	return t.app.Registry.Dispatch(ctx, name, json.RawMessage(argsJSON), tctx)

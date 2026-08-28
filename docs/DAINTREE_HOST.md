@@ -233,8 +233,8 @@ session; a consumer that sees a gap knows it lost something.
 | `turn:end` | `turnId`, `endedAt`, `outcome?`, `content?` |
 | `tool:batch` | `calls` — the whole batch announced as queued, before sequential dispatch |
 | `tool:started` | `toolCallId`, `toolId`, `argsSummary`, `startedAt`, `danger`, `turnId?` |
-| `tool:state` | `toolCallId`, `state` — promotes one announced call through its lifecycle |
-| `tool:progress` | `toolCallId`, `message` — an in-tool substep |
+| `tool:state` | `toolCallId`, `state` — promotes one announced call through its lifecycle, `waiting` included: a mutating call parks there for the whole time it is blocked on the user's approval. It returns to `active` when the user APPROVES; a decline or a confirm error settles it `failed`, and an interrupt settles it `cancelled` |
+| `tool:progress` | `toolCallId`, `message` — an in-tool substep, and ONLY that. The engine's own lifecycle (validating, parked for approval, running) never comes down this channel: it is `tool:state`, and a host that drew a progress beat as a caption under a row it had already labelled was printing the row's status twice |
 | `tool:settled` | result classification, severity, `turnId?`, `asyncId?` |
 | `approval:requested` | `approvalId`, `toolId`, `summary`, `requestedAt`, `needsTypedConfirm`, `riskClass?`, `consequence?`, `argsSummary?`, `turnId?` |
 | `approval:decided` | `approvalId`, `decision`, `decidedAt` |

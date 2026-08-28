@@ -89,6 +89,14 @@ type TurnContext struct {
 	CallID string
 	// Progress forwards an in-tool substep message for CallID. Nil-safe.
 	Progress func(callID string, msg string)
+	// State promotes CallID's live row to a new lifecycle state. Nil-safe.
+	//
+	// The turn loop drives queued→active→done/failed itself; this exists for the ONE
+	// transition it cannot see, because the transition happens inside the registry:
+	// a mutating call parks on the user's approval, and only dispatch knows when that
+	// begins and ends. Without it "waiting" was a state the wire vocabulary defined,
+	// the host drew an amber row for, and nothing ever emitted.
+	State func(callID string, state ToolState)
 }
 
 // AssistantBackend is the native Daintree backend seam (satisfied by

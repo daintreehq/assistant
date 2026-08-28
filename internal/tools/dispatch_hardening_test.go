@@ -129,3 +129,109 @@ func TestDispatchPanicInReportProgressIsContained(t *testing.T) {
 		t.Fatalf("a panicking ReportProgress must not fail the call, got %+v", res.Error)
 	}
 }
+
+// Every beat the registry emits on its OWN — no handler involved — must be
+// recognisable as lifecycle, so a consumer that already tracks the call's state can
+// drop the lot and lose no information. The Daintree host does exactly that: it draws
+// a progress beat as a substep line under a row it has already labelled from
+// tool:state, so an automatic beat that slipped through would sit there restating the
+// row's own status for the life of the call.
+func TestRegistryAutomaticProgressBeatsAreAllLifecycle(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Register(echoTool("x.echo", domain.RiskRead))
+	s := &fakeStore{}
+
+	ctx := baseCtx(s, nil, domain.TierSystem, domain.ActorMain)
+	var beats []ToolProgress
+	ctx.ReportProgress = func(p ToolProgress) { beats = append(beats, p) }
+
+	if res := r.Dispatch(context.Background(), "x.echo", json.RawMessage(`{"x":1}`), ctx); !res.Ok {
+		t.Fatalf("dispatch failed: %+v", res.Error)
+	}
+	if len(beats) == 0 {
+		t.Fatal("dispatch emitted no progress beats, so this proves nothing")
+	}
+	for _, p := range beats {
+		if !p.Lifecycle() {
+			t.Fatalf("registry beat %+v is not recognised as lifecycle, so it reaches the host as a substep", p)
+		}
+	}
+}
+
+// The counterpart: a handler's own message under one of those phases is information
+// the host has nowhere else, and must survive the filter.
+func TestHandlerProgressUnderALifecyclePhaseSurvives(t *testing.T) {
+	p := ToolProgress{Phase: ProgressRunning, Message: "polling terminal 3 of 5"}
+	if p.Lifecycle() {
+		t.Fatal("a handler substep was classified as an automatic lifecycle beat")
+	}
+}
+
+// The approval gate announces itself BEFORE the call runs, and the run beat follows.
+// The embedded host reads that pair as the call parking on the user and being released
+// again — "waiting" is a state the wire vocabulary has always defined and nothing ever
+// emitted, because the turn loop drives queued→active→done and cannot see a gate that
+// opens inside dispatch. If these two ever arrive out of order, or the run beat stops
+// following an approval, a row parks amber and never comes back.
+func TestApprovalGateAnnouncesItselfBeforeRunning(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Register(echoTool("g.echo", domain.RiskGit))
+	s := &fakeStore{}
+
+	ctx := baseCtx(s, nil, domain.TierSystem, domain.ActorMain)
+	ctx.Confirm = func(_ context.Context, _ ConfirmRequest) (bool, error) { return true, nil }
+	var phases []string
+	ctx.ReportProgress = func(p ToolProgress) {
+		// Checked HERE as well as on the ungated path above: the approval beat is the
+		// one the host reads as a state rather than a caption, and a gated call is the
+		// only way to produce it.
+		if !p.Lifecycle() {
+			t.Errorf("registry beat %+v is not recognised as lifecycle", p)
+		}
+		phases = append(phases, p.Phase)
+	}
+
+	if res := r.Dispatch(context.Background(), "g.echo", json.RawMessage(`{"x":1}`), ctx); !res.Ok {
+		t.Fatalf("approved call should succeed, got %+v", res.Error)
+	}
+
+	approval, running := -1, -1
+	for i, phase := range phases {
+		switch phase {
+		case ProgressAwaitingApproval:
+			approval = i
+		case ProgressRunning:
+			running = i
+		}
+	}
+	if approval < 0 {
+		t.Fatalf("a call that stopped for confirmation never said so: %v", phases)
+	}
+	if running < 0 {
+		t.Fatalf("an approved call never reported that it ran: %v", phases)
+	}
+	if approval > running {
+		t.Fatalf("the approval park was announced after the run: %v", phases)
+	}
+}
+
+// And a call that never reaches the gate never claims it did — otherwise every read
+// would park its row on an approval nobody was asked for.
+func TestUngatedCallNeverAnnouncesAnApprovalPark(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Register(echoTool("x.echo", domain.RiskRead))
+	s := &fakeStore{}
+
+	ctx := baseCtx(s, nil, domain.TierSystem, domain.ActorMain)
+	var phases []string
+	ctx.ReportProgress = func(p ToolProgress) { phases = append(phases, p.Phase) }
+
+	if res := r.Dispatch(context.Background(), "x.echo", json.RawMessage(`{"x":1}`), ctx); !res.Ok {
+		t.Fatalf("dispatch failed: %+v", res.Error)
+	}
+	for _, phase := range phases {
+		if phase == ProgressAwaitingApproval {
+			t.Fatalf("an unconfirmed read announced an approval park: %v", phases)
+		}
+	}
+}

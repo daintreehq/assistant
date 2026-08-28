@@ -1673,13 +1673,14 @@ type batchRepeat struct {
 // handful of per-agent reads into one wait, not a thundering herd.
 const maxParallelToolDispatch = 6
 
-// dispatchCall runs one call through the registry with its per-call progress
-// plumbing (an in-tool substep emits ToolProgress(callID, msg) tagged so the UI maps
-// it to the right activity row). Safe OFF the turn goroutine: Dispatch's
-// side-channels (audit DB, debug log) are goroutine-safe, and ToolProgress feeds the
-// mutex-guarded UI pump while the durable run-event sink no-ops it. Everything else
-// (ToolCall/ToolResult/ToolState, transcript, breaker folds) must stay on the turn
-// goroutine.
+// dispatchCall runs one call through the registry with its per-call live plumbing (an
+// in-tool substep emits ToolProgress(callID, msg), and the approval park emits
+// ToolState(callID, waiting), both tagged so the UI maps them to the right activity
+// row). Safe OFF the turn goroutine: Dispatch's side-channels (audit DB, debug log)
+// are goroutine-safe, and both of those feed the mutex-guarded UI pump while the
+// durable run-event sink no-ops them. Everything else (ToolCall/ToolResult, the
+// turn-loop's own ToolState promotions, transcript, breaker folds) must stay on the
+// turn goroutine.
 func (s *Session) dispatchCall(ctx context.Context, call models.ToolCallRequest, internalName string, turn TurnContext) domain.ToolResult {
 	argsJSON := call.Function.Arguments
 	if argsJSON == "" {
@@ -1692,6 +1693,16 @@ func (s *Session) dispatchCall(ctx context.Context, call models.ToolCallRequest,
 			return
 		}
 		s.events.ToolProgress(callID, msg)
+	}
+	// Safe off the turn goroutine for the same reason ToolProgress is: ToolState is
+	// live-footer vocabulary, so the durable run-event sink no-ops it (events.go) and
+	// the only sink that acts on it is the mutex-guarded UI pump. The transition it
+	// carries — parked on approval, then released — can only be reached by a call
+	// that hits dispatch's confirmation gate, and such a call is never one of the
+	// parallel workers: ParallelSafe requires RiskRead, and ParallelMutationSafe
+	// requires the prompt to be gone before grouping.
+	callTurn.State = func(callID string, st ToolState) {
+		s.events.ToolState(callID, st)
 	}
 	return s.deps.Tools.Dispatch(ctx, internalName, argsJSON, callTurn)
 }

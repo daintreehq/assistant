@@ -90,7 +90,7 @@ func (r *Registry) Dispatch(ctx context.Context, name string, rawArgs json.RawMe
 	//    on success use the PARSED args (defaults/coercion applied). No Decode ⇒
 	//    pass through unvalidated. Validation precedes the tier gate: a
 	//    malformed call to a high-tier tool returns INVALID_ARGS, not TIER_DENIED.
-	tctx.reportProgress(ToolProgress{Phase: ProgressValidating, Message: "validating request"})
+	tctx.reportProgress(ToolProgress{Phase: ProgressValidating, Message: ProgressMsgValidating})
 	var effConsequence string
 	args := rawArgs
 	if len(args) == 0 {
@@ -179,7 +179,7 @@ func (r *Registry) Dispatch(ctx context.Context, name string, rawArgs json.RawMe
 		if !tctx.Config.AutoApprove {
 			// autoApprove only removes the prompt for main; the tier gate above
 			// already bounded what's permitted.
-			tctx.reportProgress(ToolProgress{Phase: ProgressAwaitingApproval, Message: "waiting for approval"})
+			tctx.reportProgress(ToolProgress{Phase: ProgressAwaitingApproval, Message: ProgressMsgAwaitingApproval})
 			approved := false
 			if tctx.Confirm != nil {
 				// A thrown/errored confirm is treated as a DECLINE, never approval.
@@ -263,7 +263,7 @@ func (r *Registry) runHandler(ctx context.Context, tool *Tool, name string, risk
 	args json.RawMessage, tctx *ToolContext, started int64, okOutcome string,
 	grant *domain.AutomationGrantRecord) (res ToolResult) {
 
-	tctx.reportProgress(ToolProgress{Phase: ProgressRunning, Message: "running"})
+	tctx.reportProgress(ToolProgress{Phase: ProgressRunning, Message: ProgressMsgRunning})
 
 	res = func() (out ToolResult) {
 		defer func() {
