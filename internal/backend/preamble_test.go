@@ -2,7 +2,9 @@ package backend
 
 import (
 	"context"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -237,7 +239,6 @@ func TestAnUnusablePreambleIsDroppedNotFatal(t *testing.T) {
 	}{
 		{"malformed json", "event: preamble\ndata: {not json}\n\n"},
 		{"empty content", "event: preamble\ndata: {\"id\":\"p\",\"content\":\"\",\"provisional\":true,\"commit_on\":\"done\"}\n\n"},
-		{"whitespace only", "event: preamble\ndata: {\"id\":\"p\",\"content\":\"   \\n \",\"provisional\":true,\"commit_on\":\"done\"}\n\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -320,5 +321,141 @@ func TestPreambleFieldsAreDecoded(t *testing.T) {
 	}
 	if got.ID != "pre_1" || !got.Provisional || got.CommitOn != "done" {
 		t.Fatalf("decoded %+v, want id pre_1, provisional true, commit_on done", got)
+	}
+}
+
+// A confirmation is TYPED OUT: the backend sends it as a run of fragments over
+// about a second, and the client has to accumulate them. The callback forwards
+// only the new SUFFIX each time, because every renderer downstream appends.
+func TestPreambleFragmentsAccumulateAndForwardSuffixes(t *testing.T) {
+	stream := "event: meta\ndata: {}\n\n" +
+		`event: preamble` + "\n" + `data: {"id":"pre_1","content":"Running","provisional":true,"commit_on":"done"}` + "\n\n" +
+		`event: preamble` + "\n" + `data: {"id":"pre_1","content":" a scored","provisional":true,"commit_on":"done"}` + "\n\n" +
+		`event: preamble` + "\n" + `data: {"id":"pre_1","content":" contest.","provisional":true,"commit_on":"done"}` + "\n\n" +
+		`event: delta` + "\n" + `data: {"content":"Body."}` + "\n\n" +
+		"event: done\ndata: {}\n\n"
+
+	srv := sseServer(t, stream, nil)
+	c := NewClient(ClientConfig{BaseURL: srv.URL})
+
+	var shown []string
+	res, err := c.RespondStream(context.Background(), RespondRequest{}, StreamCallbacks{
+		OnPreamble: func(p StreamPreamble) { shown = append(shown, p.Content) },
+	})
+	if err != nil {
+		t.Fatalf("stream failed: %v", err)
+	}
+	// Suffixes, never the accumulation: forwarding the whole text each time would
+	// stack quadratically in every renderer.
+	want := []string{"Running", " a scored", " contest."}
+	if len(shown) != len(want) {
+		t.Fatalf("OnPreamble got %q, want %q", shown, want)
+	}
+	for i := range want {
+		if shown[i] != want[i] {
+			t.Fatalf("OnPreamble got %q, want %q", shown, want)
+		}
+	}
+	// What COMMITS is the whole sentence, joined onto the answer once.
+	if res.Preamble != "Running a scored contest." {
+		t.Fatalf("Preamble = %q, want the accumulated sentence", res.Preamble)
+	}
+	if res.Message.Content != "Running a scored contest.\n\nBody." {
+		t.Fatalf("Message.Content = %q", res.Message.Content)
+	}
+}
+
+// A whitespace-only fragment is legitimate: separators travel with the fragment
+// that follows them, so trimming one away joins two words on screen and in the
+// committed message.
+func TestPreambleKeepsWhitespaceOnlyFragments(t *testing.T) {
+	stream := "event: meta\ndata: {}\n\n" +
+		`event: preamble` + "\n" + `data: {"id":"p","content":"Running","provisional":true,"commit_on":"done"}` + "\n\n" +
+		`event: preamble` + "\n" + `data: {"id":"p","content":" ","provisional":true,"commit_on":"done"}` + "\n\n" +
+		`event: preamble` + "\n" + `data: {"id":"p","content":"a contest.","provisional":true,"commit_on":"done"}` + "\n\n" +
+		"event: done\ndata: {\"finish_reason\":\"stop\"}\n\n"
+
+	srv := sseServer(t, stream, nil)
+	c := NewClient(ClientConfig{BaseURL: srv.URL})
+
+	res, err := c.RespondStream(context.Background(), RespondRequest{}, StreamCallbacks{})
+	if err != nil {
+		t.Fatalf("stream failed: %v", err)
+	}
+	if res.Preamble != "Running a contest." {
+		t.Fatalf("Preamble = %q, want the space preserved", res.Preamble)
+	}
+}
+
+// A first attempt that dies mid-sentence, then an identical replay. The replay
+// re-types from the first word; only the part the user has NOT seen may reach
+// the screen, and the whole sentence must commit.
+func TestPreamblePartialAttemptIsCompletedByAnIdenticalReplay(t *testing.T) {
+	first := "event: meta\ndata: {}\n\n" +
+		`event: preamble` + "\n" + `data: {"id":"p","content":"Running","provisional":true,"commit_on":"done"}` + "\n\n" +
+		`event: preamble` + "\n" + `data: {"id":"p","content":" a","provisional":true,"commit_on":"done"}` + "\n\n" +
+		"event: error\ndata: {\"error\":{\"code\":\"upstream_unavailable\"}}\n\n"
+	second := "event: meta\ndata: {}\n\n" +
+		`event: preamble` + "\n" + `data: {"id":"p","content":"Running","provisional":true,"commit_on":"done"}` + "\n\n" +
+		`event: preamble` + "\n" + `data: {"id":"p","content":" a","provisional":true,"commit_on":"done"}` + "\n\n" +
+		`event: preamble` + "\n" + `data: {"id":"p","content":" contest.","provisional":true,"commit_on":"done"}` + "\n\n" +
+		`event: delta` + "\n" + `data: {"content":"Body."}` + "\n\n" +
+		"event: done\ndata: {\"finish_reason\":\"stop\"}\n\n"
+
+	bodies := []string{first, second}
+	var served int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		i := served
+		if i >= len(bodies) {
+			i = len(bodies) - 1
+		}
+		served++
+		_, _ = io.WriteString(w, bodies[i])
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(ClientConfig{BaseURL: srv.URL})
+
+	var shown []string
+	res, err := c.RespondStream(context.Background(), RespondRequest{}, StreamCallbacks{
+		OnPreamble: func(p StreamPreamble) { shown = append(shown, p.Content) },
+	})
+	if err != nil {
+		t.Fatalf("stream failed: %v", err)
+	}
+	// "Running" and " a" from attempt one; the replay re-sends both, which are
+	// silently absorbed, and only " contest." is new.
+	if got := strings.Join(shown, ""); got != "Running a contest." {
+		t.Fatalf("forwarded %q (%v), want each byte exactly once", got, shown)
+	}
+	if res.Preamble != "Running a contest." {
+		t.Fatalf("Preamble = %q, want the completed sentence", res.Preamble)
+	}
+}
+
+// A confirmation whose fragments are ALL whitespace is a preview with no text in
+// it. Individual blank fragments are legitimate — separators travel with the
+// fragment that follows them — so the emptiness check belongs on the
+// accumulation, not on each event.
+func TestAnAllWhitespacePreambleCommitsNothing(t *testing.T) {
+	body := "event: meta\ndata: {}\n\n" +
+		`event: preamble` + "\n" + `data: {"id":"p","content":"  ","provisional":true,"commit_on":"done"}` + "\n\n" +
+		`event: preamble` + "\n" + `data: {"id":"p","content":" \n","provisional":true,"commit_on":"done"}` + "\n\n" +
+		"event: delta\ndata: {\"content\":\"hi\"}\n\n" +
+		"event: done\ndata: {\"finish_reason\":\"stop\"}\n\n"
+
+	srv := sseServer(t, body, nil)
+	c := NewClient(ClientConfig{BaseURL: srv.URL})
+
+	res, err := c.RespondStream(context.Background(), RespondRequest{}, StreamCallbacks{})
+	if err != nil {
+		t.Fatalf("stream failed: %v", err)
+	}
+	if res.Preamble != "" {
+		t.Fatalf("Preamble = %q, want nothing committed", res.Preamble)
+	}
+	if res.Message.Content != "hi" {
+		t.Fatalf("content = %q, want the answer with no stray spacing", res.Message.Content)
 	}
 }

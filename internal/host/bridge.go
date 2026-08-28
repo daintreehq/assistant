@@ -88,9 +88,15 @@ type Bridge struct {
 	now               func() int64
 	approvalTimeoutMs int
 
-	mu               sync.Mutex
-	activeTurnID     string
-	interrupted      bool // latched until next startExchange
+	mu           sync.Mutex
+	activeTurnID string
+	interrupted  bool // latched until next startExchange
+	// The preview's separator state. It arrives as a RUN of fragments, so the
+	// blank line before the answer is written once at the first executor token
+	// rather than appended to each one. Both reset per exchange with the rest of
+	// the turn state.
+	preambleWritten  bool
+	separatorWritten bool
 	pendingApprovals map[string]*pendingApproval
 	pendingQuestions map[string]*pendingQuestion
 	// liveTools tracks announced-but-unsettled calls by id → last known state, so an
@@ -165,6 +171,9 @@ func (b *Bridge) AssistantStart() {
 	}
 	turnID := genID("turn")
 	b.activeTurnID = turnID
+	// Per-turn, like everything else here: each turn types its own preview.
+	b.preambleWritten = false
+	b.separatorWritten = false
 	now := b.now()
 	wake := b.wakeTurn
 	b.mu.Unlock()
@@ -175,8 +184,24 @@ func (b *Bridge) AssistantStart() {
 // screen, and this event exists to put legible text in front of someone early. Hosts
 // already replace what they accumulated from turn:token with turn:end's authoritative
 // content, which on success carries this same text exactly once.
+//
+// The preview arrives as a RUN of fragments typed out over about a second, so the
+// blank line dividing it from the answer is NOT appended here — doing that put one
+// between every pair of words. It is written once, at the first executor token
+// (AssistantToken), which is the only point that knows the preview has ended.
 func (b *Bridge) AssistantPreamble(text string) {
-	b.AssistantToken(text + "\n\n")
+	b.mu.Lock()
+	if b.interrupted || b.activeTurnID == "" {
+		b.mu.Unlock()
+		return
+	}
+	turnID := b.activeTurnID
+	b.preambleWritten = true
+	b.mu.Unlock()
+	// Posted DIRECTLY, never through AssistantToken: that path owes the preview
+	// its closing separator, so routing a fragment through it would write the
+	// blank line ahead of the first word and then believe it was done.
+	b.postStream(EvTurnToken{TurnID: turnID, Chunk: text})
 }
 
 func (b *Bridge) AssistantToken(chunk string) {
@@ -186,7 +211,16 @@ func (b *Bridge) AssistantToken(chunk string) {
 		return
 	}
 	turnID := b.activeTurnID
+	// The preview's closing blank line, written once and only when real content
+	// follows it. A tool-call round with no prose correctly gets none.
+	separator := b.preambleWritten && !b.separatorWritten
+	if separator {
+		b.separatorWritten = true
+	}
 	b.mu.Unlock()
+	if separator {
+		b.postStream(EvTurnToken{TurnID: turnID, Chunk: "\n\n"})
+	}
 	b.postStream(EvTurnToken{TurnID: turnID, Chunk: chunk})
 }
 

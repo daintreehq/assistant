@@ -470,8 +470,10 @@ func (c *Client) renewedCredential(ctx context.Context, path, previous string) (
 // replaySafe reports that a streamed turn can still be replayed without a human noticing.
 //
 // contentStreamed alone is NOT that boundary, which is the mistake this replaces. It
-// tracks executor prose only — a preamble is painted on screen before any of it arrives,
-// so replaying after one duplicates visible text. Meta is a different objection with the
+// tracks executor prose only — a preamble is painted on screen before any of it arrives.
+// Since fragments accumulate, an identical replay no longer duplicates anything on
+// screen; what a replay still costs is the SELECTOR run the meta arguments below
+// stand for, and a divergent one would strand a partial sentence. Meta is a different objection with the
 // same answer: it proves the selector already ran, so the backend has already been paid
 // for work a replay would buy a second time.
 func (c *Client) replaySafe(contentStreamed bool, shownPreamble string, meta ...*StreamMeta) bool {
@@ -642,25 +644,48 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 			userOnContent(s)
 		}
 	}
-	// The preamble is FIRST-WINS across attempts, and deliberately not the retry
-	// boundary — see StreamCallbacks.OnPreamble.
+	// The preamble arrives as a RUN of fragments the backend types out, so this
+	// accumulates rather than taking one and stopping. `shownPreamble` is what is
+	// on screen; `attemptPreamble` is what the CURRENT attempt has sent.
 	//
-	// First-wins is what keeps the screen and the committed history the same text.
-	// A replayed attempt asks the fast model again and gets its own wording, so
-	// last-wins would commit a sentence the user never read: they saw attempt 1's
-	// preamble, and nothing on screen is rewritten by attempt 2 arriving. The cost
-	// is that the winning attempt's executor was handed slightly different wording
-	// as its prior turn than the history records — a one-turn inconsistency on a
-	// rare path, against showing one thing and recording another on every retry.
+	// The rule is LONGEST-WINS, and it is what makes a retry safe without any
+	// attempt bookkeeping. A confirmation is authored text looked up from the
+	// runbook, so every attempt sends the same string: a replay re-types it from
+	// the beginning, silently catches up to what is already displayed, and only
+	// the part beyond it reaches the screen. Nothing is shown twice, and — unlike
+	// first-wins — an attempt that DIED mid-sentence is completed by the next one
+	// instead of leaving a truncated prefix on screen and in history.
+	//
+	// Only the SUFFIX is forwarded, because every renderer downstream appends
+	// (host.Bridge turns it into a turn token, and the console sink writes it).
+	// Forwarding the accumulation would stack it quadratically.
 	shownPreamble := ""
+	attemptPreamble := ""
 	userOnPreamble := cb.OnPreamble
 	cb.OnPreamble = func(p StreamPreamble) {
-		if shownPreamble != "" {
-			return // already on screen; a replay must not stack a second one
+		attemptPreamble += p.Content
+		if len(attemptPreamble) <= len(shownPreamble) {
+			return // a replay catching up to what the user already read
 		}
-		shownPreamble = p.Content
+		if !strings.HasPrefix(attemptPreamble, shownPreamble) {
+			// The replay is saying something ELSE. Extending would splice its
+			// tail onto a sentence the user read from the previous attempt and
+			// produce text neither one sent, so this falls back to first-wins:
+			// what is on screen stays, and the divergent wording is dropped.
+			// Unreachable while confirmations are authored per runbook (every
+			// attempt looks up the same string); it is the model-written preamble
+			// stage, which asks again and gets new wording, that needs it.
+			return
+		}
+		fragment := attemptPreamble[len(shownPreamble):]
+		shownPreamble = attemptPreamble
 		if userOnPreamble != nil {
-			userOnPreamble(p)
+			userOnPreamble(StreamPreamble{
+				ID:          p.ID,
+				Content:     fragment,
+				Provisional: p.Provisional,
+				CommitOn:    p.CommitOn,
+			})
 		}
 	}
 
@@ -708,6 +733,9 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 	started := time.Now()
 	for attempt := 0; ; attempt++ {
 		pendingMeta = nil // each attempt brings its own meta
+		// Each attempt re-types the confirmation from its first word; the
+		// longest-wins rule above turns that into a silent catch-up.
+		attemptPreamble = ""
 		result, serr := c.respondStreamOnce(ctx, body, cb)
 		if serr == nil {
 			acct.succeeded()
@@ -719,6 +747,14 @@ func (c *Client) RespondStream(ctx context.Context, req RespondRequest, cb Strea
 			// executor these same bytes as its own prior assistant turn, so ONE
 			// joined message is the honest shape; committing two would claim a turn
 			// boundary the executor never saw.
+			// Whitespace-only is treated as nothing. A single fragment CAN
+			// legitimately be blank — separators travel with the fragment that
+			// follows them — but a whole confirmation that is blank is a preview
+			// with no text in it, and joining it onto the answer would prepend
+			// stray spacing to the committed message.
+			if strings.TrimSpace(shownPreamble) == "" {
+				shownPreamble = ""
+			}
 			result.Preamble = shownPreamble
 			if shownPreamble != "" {
 				if body := result.Message.Content; body != "" {

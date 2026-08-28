@@ -19,6 +19,12 @@ type consoleSink struct {
 	failed      bool // an Error event fired this run (drives the one-shot exit code)
 	cancelled   bool // an AssistantCancelled event fired (drives exit code 2)
 	answerOpen  bool // streamed prose has started and still needs its closing newline
+	// Whether any preview fragment has been written, and whether the blank line
+	// dividing it from the answer has been. The preview arrives as a RUN of
+	// fragments, so the separator cannot be appended per fragment — it would
+	// land between every pair of words.
+	preambleWritten  bool
+	separatorWritten bool
 }
 
 // NewConsoleSink builds a console sink over a renderer. It records whether stdout is a
@@ -68,14 +74,33 @@ func (s *consoleSink) Phase(p domain.RunPhase) {
 func (s *consoleSink) AssistantStart() {}
 
 // AssistantPreamble paints the fast preview into the answer the user is already
-// watching, separator included so the live text matches the message that commits.
-// This is a SCREEN, so it shows provisional text: a preview nobody sees buys nothing,
-// and a failed turn leaving words on a terminal is what streaming has always meant.
+// watching. This is a SCREEN, so it shows provisional text: a preview nobody sees
+// buys nothing, and a failed turn leaving words on a terminal is what streaming has
+// always meant.
+//
+// The text arrives as a RUN of fragments typed out over about a second, so the
+// blank line that divides it from the answer cannot be appended here — it would
+// land between every pair of words. It is written once instead, at the first
+// executor token (see AssistantToken), which is the only point that knows the
+// preview has ended. A tool-call round with no prose correctly gets none.
 func (s *consoleSink) AssistantPreamble(t string) {
-	s.AssistantToken(t + "\n\n")
+	s.write(t)
+	s.preambleWritten = true
 }
 
 func (s *consoleSink) AssistantToken(t string) {
+	// The one point that can tell the preview from the answer: the preview goes
+	// through AssistantPreamble, so the first token arriving HERE after one ends
+	// it and earns the blank line. Written once, and never on a tool-call round
+	// that produces no prose at all.
+	if s.preambleWritten && !s.separatorWritten {
+		s.separatorWritten = true
+		s.write("\n\n")
+	}
+	s.write(t)
+}
+
+func (s *consoleSink) write(t string) {
 	if !s.answerOpen {
 		s.r.AssistantStart()
 		s.answerOpen = true
@@ -92,6 +117,11 @@ func (s *consoleSink) AssistantCancelled(_ string) {
 }
 
 func (s *consoleSink) closeAnswer() {
+	// Per TURN. Left set, the next turn's preview and body run together
+	// (separator already spent) or a turn with no preview at all opens with a
+	// stray blank line.
+	s.preambleWritten = false
+	s.separatorWritten = false
 	if !s.answerOpen {
 		return
 	}
