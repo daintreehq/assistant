@@ -128,7 +128,18 @@ func presentToolVerb(name string) (label string, keys []string) {
 	case "terminal.disarmAll":
 		return "Disarmed all", nil
 	case "terminal.run.async":
-		return "Running", []string{"command", "prompt"}
+		// "Started", not "Running". Every other settled verb in this map is past tense,
+		// and this one was stuck in the active form — so a transcript went on saying
+		// "Running" about a command that had long since stopped, which is the exact
+		// tense bug presentToolActiveVerb exists to prevent, inverted. It also collided
+		// with the ROW's own state label: an active call with no async handle yet renders
+		// "Running" on the right, so the row read "Running … Running".
+		//
+		// "Started" rather than "Ran" because this call settles when the work is
+		// ACCEPTED, not when it finishes. The engine reports completion later as its own
+		// wake turn and never back to this row, so a verb claiming the command completed
+		// would assert something this panel is never told.
+		return "Started", []string{"command", "prompt"}
 	case "terminal.await.async":
 		return "Awaiting", []string{"terminalIds:ids"}
 	case "async.list":
