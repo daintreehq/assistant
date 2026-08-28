@@ -200,15 +200,19 @@ type StreamCallbacks struct {
 	// retry budget can now span a minute of wall clock, and an unexplained spinner is
 	// indistinguishable from a hang. Observational only — it must not block, and it
 	// never fires from the stream parser (only from the retry loop above it).
-	// OnPreamble fires when the backend sent a fast preview, once per attempt, after
-	// OnMeta and before any executor content. It is for RENDERING ONLY: the text is
-	// provisional until the terminal `done`, and RespondResult.Message.Content is
-	// what gets committed.
+	// OnPreamble fires when the backend sent a fast preview, after OnMeta and before
+	// any executor content. It is for RENDERING ONLY: the text is provisional until
+	// the terminal `done`, and RespondResult.Message.Content is what gets committed.
 	//
-	// Fires AT MOST ONCE per call, not once per attempt: a retried attempt sends its
-	// own freshly written preamble, and the client suppresses it so the text on
-	// screen and the text committed to history are the same bytes. A renderer
-	// therefore never has to replace or de-duplicate anything.
+	// Fires ONCE PER FRAGMENT, and each carries only the NEW bytes. A confirmation
+	// is typed out over about a second, so a turn showing one calls this many times;
+	// APPEND them. Concatenated in order they are the whole sentence, byte for byte,
+	// and that is also what `RespondResult.Preamble` holds at the end.
+	//
+	// A renderer never has to replace or de-duplicate: the client accumulates across
+	// attempts, so a retry that re-types the same sentence catches up silently and
+	// only its unseen suffix is forwarded, and a replay whose text DIVERGES is
+	// dropped rather than spliced onto what is already on screen.
 	//
 	// Deliberately NOT the retry boundary (OnContent is): preamble text is
 	// server-generated and idempotent, and treating it as visible content would make
@@ -376,7 +380,11 @@ func parseRespondStream(r io.Reader, cb StreamCallbacks) (RespondResult, error) 
 			if err := json.Unmarshal(data, &pre); err != nil {
 				return nil
 			}
-			if strings.TrimSpace(pre.Content) == "" {
+			// EMPTY, not blank. A confirmation is typed out as byte fragments and
+			// the separators travel with them, so a fragment can legitimately be
+			// nothing but whitespace; trimming would drop it and silently join
+			// two words on screen and in the committed message.
+			if pre.Content == "" {
 				return nil
 			}
 			// ENFORCED, not merely decoded. This client implements exactly one
