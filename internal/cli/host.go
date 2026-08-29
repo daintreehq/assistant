@@ -63,6 +63,24 @@ func hostOverrides(base config.ConfigOverrides, params host.AppParams) config.Co
 	return o
 }
 
+// hostOwnershipLog narrates lease acquisition on the host's diagnostic stream.
+//
+// This argument used to be nil, and the silence was the whole failure. Taking the
+// project lease blocks for up to 60s when another Daintree already owns the project,
+// and the embedded host is the ONE caller that does it with a person watching a
+// spinner rather than a terminal they can Ctrl-C. Every other path — the interactive
+// CLI, the one-shot runs — already passed a logger; the surface that needed it most
+// was the only one that did not, so a contended launch was reported to the human as
+// nothing whatsoever until the deadline finally turned it into an error.
+//
+// stderr, not the transport: this runs inside the App factory, before a session and
+// its transport exist, and the host contract already reserves stderr for exactly this
+// (`daintree-assistant host: …` — see the pin and auto-approve notices below). Daintree
+// reads the stream line by line and puts it in the main log.
+func hostOwnershipLog(line string) {
+	fmt.Fprintf(os.Stderr, "daintree-assistant host: %s\n", line)
+}
+
 // RunHost is the `host --stdio` entry: it builds the embedded-host App factory and
 // hands it to host.Run, which serves the stdio NDJSON protocol over os.Stdin/Stdout/
 // Stderr until teardown exits the process. The factory builds a real app.App per
@@ -107,7 +125,7 @@ func RunHost(ctx context.Context, opts Options) int {
 		// lifetime — host teardown os.Exits, and both the flock and the attach
 		// connection release on process death, which is exactly the handover the
 		// daemon listens for.
-		own, err := acquireOwnership(fctx, overrides, true, 60*time.Second, nil)
+		own, err := acquireOwnership(fctx, overrides, true, 60*time.Second, hostOwnershipLog)
 		if err != nil {
 			return nil, err
 		}

@@ -125,7 +125,10 @@ func AcquireOwnership(ctx context.Context, cfg config.AppConfig, opts AcquireOpt
 	lock := ipc.NewFileLock(filepath.Join(cfg.StateDir, ipc.OwnerLockName))
 	lockCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	if err := lock.Acquire(lockCtx, 250*time.Millisecond); err != nil {
+	stopNotices := noteOwnerLockWait(lockCtx, lock, logf)
+	err = lock.Acquire(lockCtx, 250*time.Millisecond)
+	stopNotices()
+	if err != nil {
 		if client != nil {
 			_ = client.Close()
 		}
@@ -135,6 +138,58 @@ func AcquireOwnership(ctx context.Context, cfg config.AppConfig, opts AcquireOpt
 		return nil, err
 	}
 	return &Ownership{Lock: lock, Client: client}, nil
+}
+
+// How long a contended lease waits before saying so, and how often it repeats.
+//
+// The first is short on purpose: an uncontended lock is taken in microseconds, so
+// anything still outstanding after a second is genuinely held by someone else and the
+// person watching has already started wondering. The repeat is slow enough that a full
+// 60s wait costs six lines rather than a scroll of them.
+const (
+	ownerLockFirstNotice = time.Second
+	ownerLockNoticeEvery = 10 * time.Second
+)
+
+// noteOwnerLockWait narrates a contended owner lease until the returned stop is called.
+//
+// AcquireOptions.Log has always documented "waiting for the supervisor to hand over…"
+// as one of the lines it receives, and no such line was ever emitted. The flock wait is
+// the one step of acquisition that can last the entire deadline, and it was the only
+// one that said nothing at all — so a second Daintree opening the same project spawned
+// an engine that opened no file, no socket and no database, wrote nothing to stderr,
+// and simply never became ready. Indistinguishable, from outside, from a hung process.
+//
+// The holder pid is the actionable half: it names the process to close. Reading it here
+// respects ReadLockHolderPid's contract — it is diagnostic only, and this is a
+// diagnostic; the flock remains the authority on who owns the project.
+func noteOwnerLockWait(ctx context.Context, lock *ipc.FileLock, logf func(string)) (stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		timer := time.NewTimer(ownerLockFirstNotice)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+			}
+			if pid := ipc.ReadLockHolderPid(lock.Path()); pid > 0 {
+				logf(fmt.Sprintf("waiting for the project lease held by pid %d…", pid))
+			} else {
+				logf("waiting for the project lease…")
+			}
+			timer.Reset(ownerLockNoticeEvery)
+		}
+	}()
+	// Joins the goroutine so the caller cannot return while a notice is mid-write and
+	// have it land after whatever the caller says next.
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // credentialsFromConfig snapshots the freshest connection credentials this
