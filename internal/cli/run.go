@@ -735,7 +735,7 @@ func RunOneShot(ctx context.Context, opts Options) int {
 			// delivered as it invokes them — so a callback with nowhere to render would
 			// consume exactly the async completions the durable inbox exists to hand to
 			// the next session.
-			a.StartScheduler(ctx, nil)
+			a.StartScheduler(ctx, nil, nil)
 			debuglog.BootTrace("oneshot.scheduler.started")
 		}
 		// The session header goes out AFTER the MCP connect and BEFORE the first round.

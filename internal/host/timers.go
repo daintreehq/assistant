@@ -86,6 +86,48 @@ func encodeTimerRow(r TimerRow) map[string]any {
 	}
 }
 
+// TimerOutcomeRow is one thing a timer DID — the record left behind when it fired.
+//
+// It is a different dimension from the schedule row, and the two must not be folded
+// together: `status = fired` is not success. The scheduler claims a timer and advances
+// it BEFORE running the payload, so a row can be fired and its tool have failed, been
+// blocked for want of authority, or never run at all. This is the half that says which.
+//
+// Sourced from the attention queue, joined on the timer id the scheduler stamps onto
+// every event a fire publishes.
+type TimerOutcomeRow struct {
+	EventID string
+	TimerID string
+	// Severity is the queue's own grading: "info" for a success (below the deck's
+	// attention threshold, which is exactly why the deck could not show these),
+	// "error" for a failure, "attention" for a reminder waiting to be read.
+	Severity  string
+	Title     string
+	Summary   string
+	CreatedAt int64
+	UpdatedAt int64
+	// Count is how many firings this row stands for. A repeating timer publishes under
+	// one stable dedupe key, so the twelfth failure updates the first row rather than
+	// adding a twelfth — and without the count a surface would report one.
+	Count int
+}
+
+// encodeTimerOutcome renders one outcome's wire object.
+func encodeTimerOutcome(r TimerOutcomeRow) map[string]any {
+	return map[string]any{
+		"eventId":  r.EventID,
+		"timerId":  r.TimerID,
+		"severity": r.Severity,
+		// Both are free text the model wrote, and the summary can carry a tool's own
+		// error output, which is the likeliest place on this path for a credential.
+		"title":     redact.String(r.Title),
+		"summary":   redact.String(r.Summary),
+		"createdAt": r.CreatedAt,
+		"updatedAt": r.UpdatedAt,
+		"count":     r.Count,
+	}
+}
+
 // EvTimers — timers:snapshot. Answers an inbound `timers`.
 //
 // Pull, like the operations deck, and for the same reason: a countdown ticks
@@ -98,6 +140,14 @@ type EvTimers struct {
 	// TakenAt is when the engine read the store, so a host can say how stale its
 	// list is rather than implying it is live.
 	TakenAt int64
+	// Outcomes are what recently-fired timers actually DID, newest first.
+	//
+	// They ride the same snapshot as the schedule rows because they answer one
+	// question together — "what is my assistant doing on a clock, and did the last
+	// one work" — and because a fired timer leaves the Timers list entirely, so a
+	// surface with only that list can never report an outcome at all. That was the
+	// original hole: a timer fired, failed, and the panel showed nothing.
+	Outcomes []TimerOutcomeRow
 	// ReadFailed reports that the timer table could not be read, so the empty list
 	// above means NOTHING.
 	//
@@ -115,10 +165,41 @@ func (e EvTimers) encode(sid string, seq uint64) ([]byte, error) {
 	for _, r := range e.Timers {
 		rows = append(rows, encodeTimerRow(r))
 	}
+	outcomes := make([]map[string]any, 0, len(e.Outcomes))
+	for _, o := range e.Outcomes {
+		outcomes = append(outcomes, encodeTimerOutcome(o))
+	}
 	return marshalEvent("timers:snapshot", sid, seq, map[string]any{
 		"timers":     rows,
+		"outcomes":   outcomes,
 		"takenAt":    e.TakenAt,
 		"readFailed": e.ReadFailed,
+	})
+}
+
+// EvTimerFired — timer:fired. An INVALIDATION, not a payload.
+//
+// It carries the id and nothing else, deliberately. A host reacts by re-reading
+// `timers`, which is one round trip and cannot drift from the snapshot; pushing the
+// outcome inline would be a second encoding of the same facts that has to be kept in
+// step with the first, for a view that is usually not even open.
+//
+// This is the event the feature was missing. A timer's own fire never wakes the
+// assistant (agent.IsActionableWake is false for SourceTimer, by design — a reminder
+// is for a human, not a prompt), and a successful tool call publishes at `info`, below
+// the attention threshold. So nothing at all reached the host: a timer fired, and the
+// panel showed exactly what it showed a second earlier.
+type EvTimerFired struct {
+	TimerID string
+	// FiredAt is when the scheduler ran it, so a host can order a burst of these
+	// without inventing a receipt time.
+	FiredAt int64
+}
+
+func (e EvTimerFired) encode(sid string, seq uint64) ([]byte, error) {
+	return marshalEvent("timer:fired", sid, seq, map[string]any{
+		"timerId": e.TimerID,
+		"firedAt": e.FiredAt,
 	})
 }
 

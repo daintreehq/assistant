@@ -96,7 +96,7 @@ func startRepl(ctx context.Context, a *app.App) int {
 
 	a.ConnectMcp(base)
 	st := a.MCP.Status()
-	a.StartScheduler(base, func(events []domain.QueueEvent) { printAttention(r, events) })
+	a.StartScheduler(base, func(events []domain.QueueEvent) { printAttention(r, events) }, nil)
 
 	printBanner(r, a, st.Connected, st.Transport)
 	// One-time "while you were away" notice (consumed on read): the supervisor

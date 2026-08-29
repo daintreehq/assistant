@@ -368,7 +368,7 @@ func TestSchedulerContextActiveAfterStart(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
 
-	a.StartScheduler(context.Background(), nil)
+	a.StartScheduler(context.Background(), nil, nil)
 
 	if !a.PromptContext().SchedulerActive {
 		t.Error("SchedulerActive = false after StartScheduler, want true")
@@ -397,7 +397,7 @@ func TestResumedWatchersForFooterSchedulerGate(t *testing.T) {
 
 	// Scheduler active → the gate opens and the seam mirrors the ownership summary
 	// (empty for a fresh store, but no longer forced nil by the gate).
-	a.StartScheduler(context.Background(), nil)
+	a.StartScheduler(context.Background(), nil, nil)
 	got, want := a.resumedWatchersForFooter(), a.Ownership().ResumedWatcherTitles
 	if len(got) != len(want) {
 		t.Fatalf("active footer seam must mirror the ownership summary: got %v, want %v", got, want)
@@ -486,8 +486,8 @@ func TestStartSchedulerIdempotent(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()
 
-	first := a.StartScheduler(context.Background(), nil)
-	second := a.StartScheduler(context.Background(), nil)
+	first := a.StartScheduler(context.Background(), nil, nil)
+	second := a.StartScheduler(context.Background(), nil, nil)
 	if first != second {
 		t.Error("StartScheduler returned a fresh scheduler on the second call (ticker leak)")
 	}
@@ -512,7 +512,7 @@ func TestShutdownReversesCleanlyNoGoroutineLeak(t *testing.T) {
 	}
 
 	baseline := runtime.NumGoroutine()
-	a.StartScheduler(context.Background(), nil)
+	a.StartScheduler(context.Background(), nil, nil)
 
 	if err := a.Shutdown(); err != nil {
 		t.Fatalf("Shutdown: %v", err)

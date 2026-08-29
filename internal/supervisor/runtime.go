@@ -451,7 +451,10 @@ func (r *Runtime) supervise(sctx context.Context) superviseReason {
 
 	// The scheduler + async coordinator: adoption of persisted rows happens
 	// inside coordinator.Start. Attention events route into the wake reactor.
-	a.StartScheduler(sctx, func(events []domain.QueueEvent) { r.onAttention(sctx, events) })
+	// nil timer hook: the daemon draws nothing, so it has nobody to invalidate. A
+	// fired timer's record is durable in the queue either way, and the next attached
+	// session reads it there.
+	a.StartScheduler(sctx, func(events []domain.QueueEvent) { r.onAttention(sctx, events) }, nil)
 
 	// Wake events buffered from a PRIOR span (a wake interrupted by a handover
 	// requeues its burst; onAttention may land after the reactor gate closed)

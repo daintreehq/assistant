@@ -432,6 +432,50 @@ func (h *hostAppAdapter) timerRows() ([]host.TimerRow, bool) {
 // all — an empty list and a failed read are different answers here (see EvTimers).
 func (h *hostAppAdapter) Timers(context.Context) ([]host.TimerRow, bool) { return h.timerRows() }
 
+// timerOutcomeLimit bounds the outcome list. Generous enough to cover a busy day of
+// repeats without becoming a history browser — the manager answers "did the last one
+// work", and anything older belongs to /inbox and the audit log.
+const timerOutcomeLimit = 40
+
+// TimerOutcomes returns what recently-fired timers did.
+//
+// It reads the attention queue INCLUDING resolved rows and including `info`, which is
+// the whole reason it is not just the deck's inbox: a successful call_safe_tool
+// publishes at info, below the surfacing threshold, so the deck was structurally
+// unable to show that a timer had worked. Filtered to rows the scheduler stamped with
+// a timer id.
+func (h *hostAppAdapter) TimerOutcomes(ctx context.Context) []host.TimerOutcomeRow {
+	if h.app == nil || h.app.Queue == nil {
+		return nil
+	}
+	limit := timerOutcomeLimit
+	events, err := h.app.Queue.Digest(ctx, domain.QueueDigestOptions{
+		MaxItems: &limit,
+		// A resolved outcome is still the answer to "did it run": resolving an event
+		// files it, it does not un-happen it.
+		IncludeResolved: true,
+	})
+	if err != nil {
+		return nil
+	}
+	out := make([]host.TimerOutcomeRow, 0, len(events))
+	for i := range events {
+		e := &events[i]
+		if e.Source != domain.SourceTimer || e.Target == nil || e.Target.TimerID == "" {
+			continue
+		}
+		row := host.TimerOutcomeRow{
+			EventID: e.ID, TimerID: e.Target.TimerID, Severity: string(e.Severity),
+			Title: e.Title, Summary: e.Summary, CreatedAt: e.CreatedAt, Count: e.Count,
+		}
+		if e.UpdatedAt != nil {
+			row.UpdatedAt = *e.UpdatedAt
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
 // CancelTimer retires one timer for the USER and records it as such.
 //
 // The audit row is written here rather than left to the dispatch pipeline
@@ -537,8 +581,11 @@ func (h *hostAppAdapter) ConnectMCP(ctx context.Context) error {
 	return nil
 }
 
-func (h *hostAppAdapter) StartScheduler(onAttention func(events []domain.QueueEvent)) {
-	h.app.StartScheduler(h.ctx, onAttention)
+func (h *hostAppAdapter) StartScheduler(
+	onAttention func(events []domain.QueueEvent),
+	onTimerFired func(timerID string),
+) {
+	h.app.StartScheduler(h.ctx, onAttention, onTimerFired)
 }
 
 func (h *hostAppAdapter) RearmAttention(ids []string) error {

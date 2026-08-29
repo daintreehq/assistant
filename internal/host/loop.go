@@ -1002,7 +1002,12 @@ func (h *Host) postTimers() {
 		return
 	}
 	rows, ok := h.app.Timers(h.runCtx)
-	h.bridge.post(EvTimers{Timers: rows, TakenAt: domain.NowMS(), ReadFailed: !ok})
+	h.bridge.post(EvTimers{
+		Timers:     rows,
+		Outcomes:   h.app.TimerOutcomes(h.runCtx),
+		TakenAt:    domain.NowMS(),
+		ReadFailed: !ok,
+	})
 }
 
 // cancelTimer retires one timer for the user and answers with the outcome.

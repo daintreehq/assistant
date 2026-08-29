@@ -263,7 +263,7 @@ func RunMCPServe(ctx context.Context, opts Options) int {
 		// after invoking it — so a no-op callback would silently consume exactly the
 		// async completions daintree.attention exists to hand back. With nil, the
 		// notifier stands down and the rows stay unnotified until a caller reads them.
-		a.StartScheduler(lifetime, nil)
+		a.StartScheduler(lifetime, nil, nil)
 
 		facts := mcpserver.RuntimeFacts{
 			Project:      a.Config.ProjectPath,

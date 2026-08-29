@@ -49,6 +49,14 @@ type App interface {
 	// strength of a failed read.
 	Timers(ctx context.Context) (rows []TimerRow, ok bool)
 
+	// TimerOutcomes returns what recently-fired timers did — the queue events the
+	// scheduler stamped with a timer id, newest first.
+	//
+	// Separate from Timers because a fired timer is gone from the schedule list: the
+	// two answer "what is queued" and "did the last one work", and only together do
+	// they describe a timer's whole life.
+	TimerOutcomes(ctx context.Context) []TimerOutcomeRow
+
 	// CancelTimer retires one timer on the USER's behalf and revokes the automation
 	// grants scoped to it.
 	//
@@ -80,7 +88,9 @@ type App interface {
 
 	// StartScheduler starts the daemon (watchers/timers tick in-host). onAttention
 	// receives each surfaced attention burst; the host filters for actionable wakes.
-	StartScheduler(onAttention func(events []domain.QueueEvent))
+	// onTimerFired receives the id of each timer that fires — a separate channel
+	// because a fired timer is not an attention event and mostly never becomes one.
+	StartScheduler(onAttention func(events []domain.QueueEvent), onTimerFired func(timerID string))
 
 	// RearmAttention durably re-arms delivered-but-unhandled attention events
 	// (nulls their notifiedAt in the project store) so the NEXT owner's notify

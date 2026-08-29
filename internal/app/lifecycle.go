@@ -164,7 +164,14 @@ func (a *App) warnOnDrift(st mcp.Status) {
 // call rebinds the attention callback rather than leaking a second ticker.
 // After the first start the runtime context is refreshed so the
 // prompt reflects an active scheduler.
-func (a *App) StartScheduler(ctx context.Context, onAttention func(events []domain.QueueEvent)) *daemon.Scheduler {
+//
+// onTimerFired is optional (nil for every caller that does not draw timers) and
+// receives the id of each timer as it fires.
+func (a *App) StartScheduler(
+	ctx context.Context,
+	onAttention func(events []domain.QueueEvent),
+	onTimerFired func(timerID string),
+) *daemon.Scheduler {
 	if a.scheduler != nil {
 		a.scheduler.SetOnAttention(onAttention)
 		return a.scheduler
@@ -178,6 +185,7 @@ func (a *App) StartScheduler(ctx context.Context, onAttention func(events []doma
 		// immediate watcher re-check instead of waiting the next tick interval.
 		ResourceUpdates: a.MCP.ResourceUpdates(),
 		OnAttention:     onAttention,
+		OnTimerFired:    onTimerFired,
 	})
 	a.scheduler.Start(ctx)
 	// The async coordinator shares the scheduler's lifecycle in THIS process

@@ -34,6 +34,7 @@ type fakeApp struct {
 	// timerRows is what Timers() returns; cancelOutcome is what CancelTimer()
 	// returns, and cancelled records the ids it was asked for.
 	timerRows     []TimerRow
+	timerOutcomes []TimerOutcomeRow
 	timersFailed  bool
 	operations    OperationsSnapshot
 	cancelOutcome TimerCancelOutcome
@@ -45,16 +46,19 @@ func (f *fakeApp) ConnectMCP(context.Context) error { return nil }
 func (f *fakeApp) RunCommand(context.Context, string) CommandOutcome {
 	return f.command
 }
-func (f *fakeApp) CostSnapshot() (float64, bool)                   { return 0, false }
-func (f *fakeApp) McpStatus() (bool, *int, string)                 { return false, nil, "" }
-func (f *fakeApp) CommandCatalog() []CommandMeta                   { return nil }
-func (f *fakeApp) Operations(context.Context) OperationsSnapshot   { return f.operations }
-func (f *fakeApp) Timers(context.Context) ([]TimerRow, bool)       { return f.timerRows, !f.timersFailed }
-func (f *fakeApp) StartScheduler(func(events []domain.QueueEvent)) {}
-func (f *fakeApp) Session() *agent.Session                         { return f.session }
-func (f *fakeApp) RiskOf(string) (domain.RiskClass, bool)          { return "", false }
-func (f *fakeApp) Config() config.AppConfig                        { return config.AppConfig{} }
-func (f *fakeApp) Shutdown(context.Context) error                  { return nil }
+func (f *fakeApp) CostSnapshot() (float64, bool)                 { return 0, false }
+func (f *fakeApp) McpStatus() (bool, *int, string)               { return false, nil, "" }
+func (f *fakeApp) CommandCatalog() []CommandMeta                 { return nil }
+func (f *fakeApp) Operations(context.Context) OperationsSnapshot { return f.operations }
+func (f *fakeApp) Timers(context.Context) ([]TimerRow, bool) {
+	return f.timerRows, !f.timersFailed
+}
+func (f *fakeApp) TimerOutcomes(context.Context) []TimerOutcomeRow                       { return f.timerOutcomes }
+func (f *fakeApp) StartScheduler(func(events []domain.QueueEvent), func(timerID string)) {}
+func (f *fakeApp) Session() *agent.Session                                               { return f.session }
+func (f *fakeApp) RiskOf(string) (domain.RiskClass, bool)                                { return "", false }
+func (f *fakeApp) Config() config.AppConfig                                              { return config.AppConfig{} }
+func (f *fakeApp) Shutdown(context.Context) error                                        { return nil }
 
 func (f *fakeApp) CancelTimer(_ context.Context, id string) TimerCancelOutcome {
 	f.mu.Lock()

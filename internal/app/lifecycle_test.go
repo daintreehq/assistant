@@ -584,7 +584,7 @@ func TestWaitForSessionAsyncIsFreeWithoutWork(t *testing.T) {
 	if err := a.WaitForSessionAsync(spy); err != nil {
 		t.Fatalf("WaitForSessionAsync before StartScheduler = %v, want nil", err)
 	}
-	a.StartScheduler(context.Background(), nil)
+	a.StartScheduler(context.Background(), nil, nil)
 	if err := a.WaitForSessionAsync(spy); err != nil {
 		t.Fatalf("WaitForSessionAsync with no work = %v, want nil", err)
 	}
@@ -599,7 +599,7 @@ func TestWaitForSessionAsyncIsFreeWithoutWork(t *testing.T) {
 func TestWaitForSessionAsyncIgnoresForeignSessionWork(t *testing.T) {
 	a := newOfflineApp(t)
 	shutdownOnce(t, a)
-	a.StartScheduler(context.Background(), nil)
+	a.StartScheduler(context.Background(), nil, nil)
 
 	if err := a.asyncCoordinator.Register(asyncRec("asy_theirs", "ses_someone_else"), []string{"term-1"}); err != nil {
 		t.Fatalf("Register: %v", err)
@@ -622,7 +622,7 @@ func TestWaitForSessionAsyncIgnoresForeignSessionWork(t *testing.T) {
 func TestWaitForSessionAsyncBlocksOnOwnWorkUntilDeadline(t *testing.T) {
 	a := newOfflineApp(t)
 	stop := shutdownOnce(t, a)
-	a.StartScheduler(context.Background(), nil)
+	a.StartScheduler(context.Background(), nil, nil)
 
 	if err := a.asyncCoordinator.Register(asyncRec("asy_mine", a.SessionID), []string{"term-1"}); err != nil {
 		t.Fatalf("Register: %v", err)
@@ -676,7 +676,7 @@ func TestWaitForSessionAsyncBlocksOnOwnWorkUntilDeadline(t *testing.T) {
 func TestWaitForSessionAsyncReturnsWhenOwnWorkClears(t *testing.T) {
 	a := newOfflineApp(t)
 	shutdownOnce(t, a)
-	a.StartScheduler(context.Background(), nil)
+	a.StartScheduler(context.Background(), nil, nil)
 
 	if err := a.asyncCoordinator.Register(asyncRec("asy_mine", a.SessionID), []string{"term-1"}); err != nil {
 		t.Fatalf("Register: %v", err)

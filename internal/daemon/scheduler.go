@@ -24,6 +24,17 @@ type SchedulerDeps struct {
 	TickMS int64
 	// OnAttention is called with newly-created attention+ events after each tick.
 	OnAttention func(events []domain.QueueEvent)
+	// OnTimerFired is called once per timer that fires, AFTER its payload has been
+	// dispatched and its outcome published.
+	//
+	// It exists because a fired timer is otherwise invisible. OnAttention only carries
+	// attention-and-above, and a call_safe_tool that SUCCEEDS publishes at info — so
+	// the one signal saying "the thing you scheduled has happened" reached nothing. It
+	// is deliberately just an id: a host uses it to invalidate and re-read, rather than
+	// receiving a payload it would have to keep in sync with the snapshot.
+	//
+	// Called on a scheduler goroutine; implementations must not block.
+	OnTimerFired func(timerID string)
 	// ResourceUpdates is the MCP client's resource-update wake channel (each value
 	// is a changed resource URI). When a subscribed terminal's agent state pushes a
 	// transition, the loop nudges active terminal watchers due and ticks immediately
@@ -691,6 +702,15 @@ func (s *Scheduler) fireTimer(ctx context.Context, rec domain.TimerRecord, now i
 		}
 		target = &t
 	}
+	// Stamp the timer onto every event this fire publishes, whether or not the model
+	// gave the timer a target of its own. It is what lets a surface join an outcome
+	// back to the schedule row STRUCTURALLY — the dedupe key is not a substitute, since
+	// it is "timer:<id>" for a fire but "denied:timer:<id>" for a blocked dispatch, and
+	// parsing either is a promise about a string nothing guarantees.
+	if target == nil {
+		target = &domain.EventTarget{}
+	}
+	target.TimerID = rec.ID
 
 	// Stable across every firing (NOT keyed by runCount) so a repeating timer
 	// updates one live inbox item in place. Shared by success and error paths.
@@ -808,6 +828,12 @@ func (s *Scheduler) fireTimer(ctx context.Context, rec domain.TimerRecord, now i
 	}()
 	// The timer was already advanced by the claim above (ClaimDueTimer), so there is no
 	// reschedule here — re-writing it would race a cancel that arrived during the fire.
+
+	// AFTER the dispatch and its publish, so a host that reacts by re-reading sees the
+	// outcome this fire produced rather than the state just before it.
+	if fired := s.deps.OnTimerFired; fired != nil {
+		fired(rec.ID)
+	}
 }
 
 // disableCorruptTimer publishes a visible error and disables a corrupt timer row.
@@ -816,6 +842,9 @@ func (s *Scheduler) disableCorruptTimer(rec domain.TimerRecord, now int64, err e
 		Source: domain.SourceTimer, Severity: domain.SeverityError,
 		Title:   rec.Title,
 		Summary: fmt.Sprintf("Disabling corrupt timer %s: %v", rec.ID, err),
+		// Stamped here too: a corrupt row is the timer a user is most likely to want
+		// to find, and it is the one whose own target could not be parsed.
+		Target: &domain.EventTarget{TimerID: rec.ID},
 	})
 	_ = s.deps.Store.UpdateTimer(rec.ID, map[string]any{"status": "fired", "lastFiredAt": now})
 	_, _ = s.deps.Store.RevokeGrantsByActor(rec.ID, now)

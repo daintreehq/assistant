@@ -454,6 +454,12 @@ func (h *Host) boot(desc SessionDescriptor) {
 		h.pendingWake = append(h.pendingWake, actionable...)
 		h.turnMu.Unlock()
 		go h.reactWake()
+	}, func(timerID string) {
+		// A fired timer is not a wake and never becomes one: the assistant is not
+		// prompted, the host is simply told the schedule moved so it can re-read.
+		// Posted directly — the bridge guards its own state, and this runs on a
+		// scheduler goroutine that must not block.
+		h.post(EvTimerFired{TimerID: timerID, FiredAt: domain.NowMS()})
 	})
 
 	// Hand off from the boot guard to the steady-state fatal path. h.ready is set
