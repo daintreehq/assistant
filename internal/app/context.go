@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/daintreehq/assistant/internal/agent"
@@ -19,6 +20,23 @@ import (
 // snapshot. The session splits it into the cacheable request.startup value (project,
 // agents, project instructions) and the fresh runtime/turn tail (tier, MCP, scheduler,
 // worktree).
+// DefaultDirectAgentID is the agent a spawn that names none should launch, read from the
+// cached startup roster. Prefers the resolution Daintree already made against live CLI
+// availability over the raw setting: the raw pick can name an agent whose CLI is missing,
+// and launching that produces a terminal that dies on arrival. Empty when no roster has
+// been read yet or the host reported neither — the caller keeps its own fallback.
+func (a *App) DefaultDirectAgentID() string {
+	a.startupMu.RLock()
+	defer a.startupMu.RUnlock()
+	if a.cachedAgents == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(a.cachedAgents.ResolvedDefaultAgentID); id != "" {
+		return id
+	}
+	return strings.TrimSpace(a.cachedAgents.DefaultAgentID)
+}
+
 func (a *App) PromptContext() prompts.MainPromptContext {
 	// Snapshot Config under cfgMu so a concurrent SetTier (/permissions) can't tear
 	// the Tier read while a turn is rebuilding its runtime context.

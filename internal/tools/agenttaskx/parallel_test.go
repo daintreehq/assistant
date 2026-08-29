@@ -16,7 +16,7 @@ func keysOf(t *testing.T, args string) []string {
 // it would refuse cohorts the handler is about to send to one known worktree.
 func keysOfPinned(t *testing.T, args, pinned string) []string {
 	t.Helper()
-	keys, ok := spawnParallelConflictKeys(json.RawMessage(args), pinned)
+	keys, ok := spawnParallelConflictKeys(json.RawMessage(args), pinned, "")
 	if !ok {
 		t.Fatalf("spawnParallelConflictKeys(%s, %q) refused cohort membership; want keys", args, pinned)
 	}
@@ -36,7 +36,7 @@ func TestSpawnParallelConflictKeys(t *testing.T) {
 		"alias on explore also refuses":          `{"mode":"explore","worktreeId":"main","title":"t","taskPrompt":"p"}`,
 		"unparseable args":                       `{"mode":`,
 	} {
-		if keys, ok := spawnParallelConflictKeys(json.RawMessage(args), ""); ok {
+		if keys, ok := spawnParallelConflictKeys(json.RawMessage(args), "", ""); ok {
 			t.Errorf("%s: got keys %v, want cohort refusal (ok=false)", name, keys)
 		}
 	}
@@ -106,14 +106,14 @@ func TestSpawnParallelConflictKeysUseTheTurnWorktree(t *testing.T) {
 
 	// With NO pin bound the omitted case is still genuinely unknown, so an edit spawn
 	// keeps refusing cohort membership rather than guessing it shares a target.
-	if keys, ok := spawnParallelConflictKeys(json.RawMessage(`{"mode":"edit","title":"a","taskPrompt":"p"}`), ""); ok {
+	if keys, ok := spawnParallelConflictKeys(json.RawMessage(`{"mode":"edit","title":"a","taskPrompt":"p"}`), "", ""); ok {
 		t.Errorf("unpinned edit spawn got keys %v, want cohort refusal", keys)
 	}
 
 	// A branch-shaped pin cannot be proven to name a distinct worktree without an MCP
 	// read this classifier must never make, so it refuses exactly like a branch-shaped
 	// argument does.
-	if keys, ok := spawnParallelConflictKeys(json.RawMessage(`{"mode":"edit","title":"a","taskPrompt":"p"}`), "main"); ok {
+	if keys, ok := spawnParallelConflictKeys(json.RawMessage(`{"mode":"edit","title":"a","taskPrompt":"p"}`), "main", ""); ok {
 		t.Errorf("branch-shaped pin got keys %v, want cohort refusal", keys)
 	}
 }
@@ -127,5 +127,25 @@ func TestSpawnToolOptsIntoHomogeneousParallel(t *testing.T) {
 	}
 	if tool.ParallelConflictKey == nil {
 		t.Fatal("agentTask.spawnForEdits must declare a ParallelConflictKey classifier")
+	}
+}
+
+// The classifier and the handler must resolve an omitted agentId identically, or the
+// cohort key names one agent while the launch (and the saga row keyed off that name)
+// names another. Both read the SAME Deps accessor; this pins the classifier half.
+func TestSpawnParallelConflictKeysUseTheHostDefaultAgent(t *testing.T) {
+	args := `{"mode":"explore","title":"survey","taskPrompt":"p"}`
+	keys, ok := spawnParallelConflictKeys(json.RawMessage(args), "", "codex")
+	if !ok {
+		t.Fatalf("explore spawn refused cohort membership: %v", keys)
+	}
+	if len(keys) == 0 || keys[0] != "name:"+buildAgentLaunchName("survey", "codex") {
+		t.Fatalf("name key = %v, want it keyed on the host default agent", keys)
+	}
+	// An explicit agentId is untouched by the default.
+	named := `{"mode":"explore","agentId":"gemini","title":"survey","taskPrompt":"p"}`
+	keys, ok = spawnParallelConflictKeys(json.RawMessage(named), "", "codex")
+	if !ok || keys[0] != "name:"+buildAgentLaunchName("survey", "gemini") {
+		t.Fatalf("explicit agent key = %v ok=%v, want the named agent", keys, ok)
 	}
 }

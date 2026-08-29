@@ -443,6 +443,45 @@ func TestStartupSnapshotSurfacesInPromptContext(t *testing.T) {
 // TestStartSchedulerIdempotent asserts a second StartScheduler call does not leak a
 // second ticker — it rebinds onto the existing scheduler and returns the same
 // instance (the idempotency invariant).
+// The spawn tool defaults an omitted agentId through this reader. It must prefer the
+// resolution Daintree made against live CLI availability over the raw setting: the raw
+// pick can name an agent whose CLI is missing, and launching that yields a terminal that
+// dies on arrival.
+func TestDefaultDirectAgentIDPrefersTheResolvedPick(t *testing.T) {
+	a := newOfflineApp(t)
+	defer a.Shutdown()
+
+	if got := a.DefaultDirectAgentID(); got != "" {
+		t.Fatalf("no roster read yet, want no default, got %q", got)
+	}
+
+	set := func(roster *prompts.AgentRosterContext) {
+		a.startupMu.Lock()
+		a.cachedAgents = roster
+		a.startupMu.Unlock()
+	}
+
+	set(&prompts.AgentRosterContext{DefaultAgentID: "codex", ResolvedDefaultAgentID: "claude"})
+	if got := a.DefaultDirectAgentID(); got != "claude" {
+		t.Fatalf("default = %q, want the resolved pick", got)
+	}
+	// No resolution offered (availability still hydrating): the explicit pick stands, as
+	// a stated preference beats no answer at all.
+	set(&prompts.AgentRosterContext{DefaultAgentID: "codex"})
+	if got := a.DefaultDirectAgentID(); got != "codex" {
+		t.Fatalf("default = %q, want the explicit pick", got)
+	}
+	// No pick at all ("None (first available)"): the resolution is the whole answer.
+	set(&prompts.AgentRosterContext{ResolvedDefaultAgentID: "gemini"})
+	if got := a.DefaultDirectAgentID(); got != "gemini" {
+		t.Fatalf("default = %q, want the first-available resolution", got)
+	}
+	set(&prompts.AgentRosterContext{})
+	if got := a.DefaultDirectAgentID(); got != "" {
+		t.Fatalf("roster reporting neither default = %q, want empty", got)
+	}
+}
+
 func TestStartSchedulerIdempotent(t *testing.T) {
 	a := newOfflineApp(t)
 	defer a.Shutdown()

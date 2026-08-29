@@ -120,14 +120,28 @@ Agents/Recipes: `agent.launch`, `agent.getState` (live single-agent state, keyed
 > **Agent discovery.** `agent.listAvailable` is the canonical narrow snapshot. It reads
 > the main process's current effective direct-agent registry (built-in + user + plugin),
 > excludes assistant-only `daintree-assistant`, and returns `{ complete,
-> availabilityComplete, agents: [{ id, displayName, source, availability?, installed?,
-> launchable?, pinned?, toolbarVisible? }] }`. `launchable` is true only for `ready` or
+> availabilityComplete, defaultAgentId?, resolvedDefaultAgentId?, agents: [{ id,
+> displayName, source, availability?, installed?, launchable?, pinned?, toolbarVisible?
+> }] }`. `launchable` is true only for `ready` or
 > `unauthenticated`, false for a known non-runnable state, and omitted when availability is
 > still unknown. Built-ins carry explicit tri-state `pinned`
 > plus resolved `toolbarVisible`; user/plugin agents have no toolbar fields. An omitted
 > availability means the CLI probe cache has not covered that new registry row yet — it is
 > not equivalent to `missing`. `ready` is immediately launchable; `unauthenticated` may
 > prompt for login; `installed` and `blocked` need setup/support before direct launch.
+>
+> **The default agent.** `defaultAgentId` is the user's explicit pick in Settings > CLI
+> Agents; `resolvedDefaultAgentId` is the agent a launch that names none would actually
+> spawn right now. They differ when the user picked "None (first available)" (no
+> `defaultAgentId`) or when the pick's CLI is not launchable. Both are roster-level, not a
+> per-row flag — the startup projection drops whole rows once its byte budget is spent, and
+> a flag on the default's row would vanish exactly when the catalog is large. Both exclude
+> assistant-only ids, so neither can name an agent the same result's rows omit. Neither is
+> derivable from the toolbar: the default is a launch preference, `pinned`/`toolbarVisible`
+> are a display preference, and an unpinned default is an ordinary configuration. A host
+> that reports neither leaves the CLI on its own built-in fallback. `resolvedDefaultAgentId`
+> is withheld until a live CLI probe completes, for the same reason `installed`/`launchable`
+> are. `agent.listToolbar` carries the same two fields.
 >
 > `agent.listToolbar` remains the built-in-only toolbar view, and `cliAvailability.get`
 > remains the raw coarse status map. The assistant uses the canonical combined action

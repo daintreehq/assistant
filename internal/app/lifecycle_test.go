@@ -276,13 +276,17 @@ func TestParseAvailableAgentsPreservesCompleteRegistryMetadata(t *testing.T) {
         {"id":"daintree-assistant","displayName":"Assistant","source":"built-in"},
         {"id":"  "}
     ]}`}
-	got, complete, availabilityComplete, ok := parseAvailableAgents(res)
+	roster, ok := parseAvailableAgents(res)
 	if !ok {
 		t.Fatal("canonical available-agent payload was not recognized")
 	}
-	if complete || availabilityComplete {
-		t.Fatalf("omitted completeness flags must remain false: complete=%v availability=%v", complete, availabilityComplete)
+	if roster.Complete || roster.AvailabilityComplete {
+		t.Fatalf("omitted completeness flags must remain false: complete=%v availability=%v", roster.Complete, roster.AvailabilityComplete)
 	}
+	if roster.DefaultAgentID != "" || roster.ResolvedDefaultAgentID != "" {
+		t.Fatalf("a payload naming no default must report none: %+v", roster)
+	}
+	got := roster.Agents
 	if len(got) != 2 {
 		t.Fatalf("agents = %+v, want two valid rows", got)
 	}
@@ -298,14 +302,49 @@ func TestParseAvailableAgentsPreservesCompleteRegistryMetadata(t *testing.T) {
 }
 
 func TestParseAvailableAgentsRejectsMissingWrapper(t *testing.T) {
-	if got, _, _, ok := parseAvailableAgents(mcp.CallResult{Text: `{"complete":true}`}); ok || got != nil {
-		t.Fatalf("missing agents wrapper parsed as got=%+v ok=%v", got, ok)
+	for _, text := range []string{
+		`{"complete":true}`,
+		`{"agents":"not-an-array"}`,
+		`{"agents":null}`,
+		// A default with no catalog is still an unusable read: the id it names cannot be
+		// checked against any row, so the whole result is reported unavailable.
+		`{"defaultAgentId":"codex"}`,
+	} {
+		if got, ok := parseAvailableAgents(mcp.CallResult{Text: text}); ok || got.Agents != nil {
+			t.Fatalf("%s parsed as got=%+v ok=%v", text, got, ok)
+		}
 	}
-	if got, _, _, ok := parseAvailableAgents(mcp.CallResult{Text: `{"agents":"not-an-array"}`}); ok || got != nil {
-		t.Fatalf("malformed agents wrapper parsed as got=%+v ok=%v", got, ok)
+}
+
+// The two default ids ride the roster, not its rows, and each result channel may carry
+// either one. A channel that omits a default must never blank out the other's answer.
+func TestParseAvailableAgentsCarriesDefaultAgentIDs(t *testing.T) {
+	roster, ok := parseAvailableAgents(mcp.CallResult{
+		Text: `{"agents":[{"id":"codex","source":"built-in"}],"defaultAgentId":" codex "}`,
+		StructuredContent: map[string]any{
+			"agents":                 []any{map[string]any{"id": "codex"}},
+			"resolvedDefaultAgentId": "claude",
+		},
+	})
+	if !ok {
+		t.Fatal("roster carrying defaults was not recognized")
 	}
-	if got, _, _, ok := parseAvailableAgents(mcp.CallResult{Text: `{"agents":null}`}); ok || got != nil {
-		t.Fatalf("null agents wrapper parsed as got=%+v ok=%v", got, ok)
+	if roster.DefaultAgentID != "codex" {
+		t.Fatalf("text-channel default lost or untrimmed: %q", roster.DefaultAgentID)
+	}
+	if roster.ResolvedDefaultAgentID != "claude" {
+		t.Fatalf("structured-channel resolved default lost: %q", roster.ResolvedDefaultAgentID)
+	}
+	// An explicitly empty value is an absent answer, not an instruction to forget one.
+	roster, ok = parseAvailableAgents(mcp.CallResult{
+		Text: `{"agents":[{"id":"codex"}],"defaultAgentId":"codex"}`,
+		StructuredContent: map[string]any{
+			"agents":         []any{map[string]any{"id": "codex"}},
+			"defaultAgentId": "",
+		},
+	})
+	if !ok || roster.DefaultAgentID != "codex" {
+		t.Fatalf("empty structured default overwrote the text default: %+v ok=%v", roster, ok)
 	}
 }
 
@@ -321,7 +360,8 @@ func TestParseAvailableAgentsUnionsTextAndStructuredRows(t *testing.T) {
 			},
 		},
 	}
-	rows, complete, availabilityComplete, ok := parseAvailableAgents(res)
+	roster, ok := parseAvailableAgents(res)
+	rows, complete, availabilityComplete := roster.Agents, roster.Complete, roster.AvailabilityComplete
 	if !ok || !complete || !availabilityComplete || len(rows) != 2 {
 		t.Fatalf("union = rows:%+v complete:%v availability:%v ok:%v", rows, complete, availabilityComplete, ok)
 	}
@@ -397,7 +437,8 @@ func TestParseAvailableAgentsProducesStablePayloadAcrossDiscoveryOrder(t *testin
 
 	var firstPayload []byte
 	for index, tc := range tests {
-		rows, complete, availabilityComplete, ok := parseAvailableAgents(tc.res)
+		roster, ok := parseAvailableAgents(tc.res)
+		rows, complete, availabilityComplete := roster.Agents, roster.Complete, roster.AvailabilityComplete
 		if !ok || !complete || !availabilityComplete || len(rows) != 4 {
 			t.Fatalf("%s: parse = rows:%+v complete:%v availability:%v ok:%v", tc.name, rows, complete, availabilityComplete, ok)
 		}

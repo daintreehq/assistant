@@ -285,6 +285,51 @@ func baseSpawn() spawnArgs {
 
 // --- spawn happy path -------------------------------------------------------
 
+// A spawn that names no agent launches the user's configured default, not the built-in
+// constant — the whole point of the host reporting one.
+func TestSpawnLaunchesTheHostDefaultAgentWhenNoneIsNamed(t *testing.T) {
+	mcp := &scriptMCP{
+		connected:    true,
+		launchResult: launchOK("term_1"),
+		agentRoster:  agentRoster("claude", "codex"),
+	}
+	deps := Deps{
+		MCP: mcp, DB: newSagaStore(),
+		DaemonActive: func() bool { return true },
+		DefaultAgent: func() string { return "codex" },
+	}
+
+	a := baseSpawn()
+	a.WorktreeID = "wt-1"
+	if res := runSpawn(deps, a); !res.Ok {
+		t.Fatalf("expected ok, got %+v", res.Error)
+	}
+	launch := mcp.lastLaunchArgs()
+	if launch["agentId"] != "codex" {
+		t.Fatalf("launched agentId = %v, want the host default %q", launch["agentId"], "codex")
+	}
+	// The tab label and the saga's reconciliation identity derive from the same id.
+	if launch["name"] != "Codex: Fix OAuth" {
+		t.Fatalf("launch name = %v, want it to name the default agent", launch["name"])
+	}
+}
+
+// A host that reports no default (older Daintree, or a discovery read that failed open)
+// still spawns: the built-in fallback stands.
+func TestSpawnFallsBackWhenTheHostReportsNoDefault(t *testing.T) {
+	mcp := &scriptMCP{connected: true, launchResult: launchOK("term_1"), agentRoster: agentRoster("claude")}
+	deps := Deps{MCP: mcp, DB: newSagaStore(), DaemonActive: func() bool { return true }}
+
+	a := baseSpawn()
+	a.WorktreeID = "wt-1"
+	if res := runSpawn(deps, a); !res.Ok {
+		t.Fatalf("expected ok, got %+v", res.Error)
+	}
+	if got := mcp.lastLaunchArgs()["agentId"]; got != fallbackAgentID {
+		t.Fatalf("launched agentId = %v, want the built-in fallback %q", got, fallbackAgentID)
+	}
+}
+
 func TestSpawnReadsTerminalIDAndAttachesWatcher(t *testing.T) {
 	mcp := &scriptMCP{connected: true, launchResult: launchOK("term_9")}
 	st := newSagaStore()

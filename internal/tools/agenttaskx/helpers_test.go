@@ -213,3 +213,31 @@ func spawnUnpinned(ctx context.Context, deps Deps, a *spawnArgs, actor domain.To
 	deps.WorktreePin = nil
 	return spawn(ctx, deps, a, actor)
 }
+
+// An omitted agentId means "whatever the user configured", not "claude". The built-in
+// constant is only the floor for a host that reports no default at all.
+func TestResolveLaunchAgentIDPrefersTheHostDefault(t *testing.T) {
+	cases := []struct{ agentID, hostDefault, want string }{
+		{"", "codex", "codex"},
+		{"  ", "  codex  ", "codex"},
+		{"", "", fallbackAgentID},
+		{"", "   ", fallbackAgentID},
+		// An explicit id always wins: the host default answers an omission, it never
+		// rewrites a caller who named an agent.
+		{"gemini", "codex", "gemini"},
+		{"  gemini  ", "", "gemini"},
+	}
+	for _, tc := range cases {
+		if got := resolveLaunchAgentID(tc.agentID, tc.hostDefault); got != tc.want {
+			t.Errorf("resolveLaunchAgentID(%q, %q) = %q, want %q", tc.agentID, tc.hostDefault, got, tc.want)
+		}
+	}
+}
+
+// The launch name is the saga's reconciliation identity, so the default has to reach it —
+// a label that still said "Claude:" while the launch went to codex would cross-bind.
+func TestBuildAgentLaunchNameUsesTheResolvedAgent(t *testing.T) {
+	if got := buildAgentLaunchName("fix auth", resolveLaunchAgentID("", "codex")); got != "Codex: fix auth" {
+		t.Fatalf("launch name = %q, want %q", got, "Codex: fix auth")
+	}
+}

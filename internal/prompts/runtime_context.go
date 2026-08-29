@@ -94,6 +94,20 @@ type AgentRosterContext struct {
 	Complete             bool
 	AvailabilityComplete bool
 	TotalCount           int
+	// DefaultAgentID is the user's explicit default-agent pick in Daintree's settings;
+	// ResolvedDefaultAgentID is the agent a launch that names none would actually spawn
+	// right now. They differ when there is no explicit pick ("None (first available)") or
+	// when the pick's CLI is not currently launchable. Both are empty when Daintree does
+	// not report them — an older host, or a resolution it could not certify — and neither
+	// is ever an assistant-only id: Daintree excludes those, because this roster is a
+	// catalog of agents to DELEGATE to.
+	//
+	// Deliberately roster-level rather than a per-agent flag. The startup projection drops
+	// whole rows once its byte budget is exhausted, so a flag on the default's own row
+	// would vanish silently exactly when the catalog is large; and a default can name an
+	// agent no row describes.
+	DefaultAgentID         string
+	ResolvedDefaultAgentID string
 }
 
 // AgentContext is one registered direct-agent candidate. Installed, Launchable, and

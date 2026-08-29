@@ -257,6 +257,10 @@ func (a *App) agentTaskDeps() agenttaskx.Deps {
 		// The SAME pin object the Session drives (BeginTurn/Offer), not a copy: two
 		// pins would mean the spawn tool defaulting from a binding nothing ever set.
 		WorktreePin: a.worktreePin,
+		// Read live, not captured: the roster is re-read on reconnect and on a project
+		// switch, and a spawn late in the session must default to the agent the user has
+		// configured NOW, not the one cached when the tool table was built.
+		DefaultAgent: a.DefaultDirectAgentID,
 		// The builder runs once during App.Create, before any turn can spawn — so
 		// "now" is an exact lower bound for this session's launches.
 		SessionStartedAt: domain.NowMS(),

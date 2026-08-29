@@ -111,7 +111,7 @@ var spawnSchema = json.RawMessage(`{
   "additionalProperties": false,
   "properties": {
     "worktreeId": { "type": "string", "description": "Worktree to run the agent in. OMIT it to use the worktree this turn started in; pass one only to send the agent ELSEWHERE. The id is a PATH (\"/Users/you/Projects/app\"); a branch name is accepted only as a fallback, and an unresolvable value is rejected with the available list." },
-    "agentId": { "type": "string", "description": "Agent to launch (default \"claude\")." },
+    "agentId": { "type": "string", "description": "Agent to launch. Omit it to use the user's configured default agent, which is the right choice unless they named one." },
     "mode": { "type": "string", "enum": ["edit", "explore"], "description": "Spawn intent (default \"edit\"). \"edit\" tells the agent to make code changes; \"explore\" tells it to investigate read-only and not touch any files." },
     "title": { "type": "string", "description": "Short title for the task and any watcher — the task alone, e.g. \"auth refactor\". The agent name is added to the tab for you, so never write an agent name into this title yourself." },
     "taskPrompt": { "type": "string", "description": "The instructions for the agent. Constraints are appended automatically." },
@@ -145,7 +145,7 @@ func newSpawnForEditsTool(deps Deps) tools.Tool {
 		// binding cannot change mid-turn, but reading it per member would make the
 		// purity of the classifier depend on that fact rather than assert it.
 		ParallelConflictKey: func(raw json.RawMessage) ([]string, bool) {
-			return spawnParallelConflictKeys(raw, deps.pinnedWorktreeID())
+			return spawnParallelConflictKeys(raw, deps.pinnedWorktreeID(), deps.defaultAgentID())
 		},
 		Decode: tools.StrictDecoder(func() any { return &spawnArgs{} }),
 		Handle: func(ctx context.Context, raw json.RawMessage, tc *tools.ToolContext) tools.ToolResult {
@@ -167,8 +167,10 @@ func newSpawnForEditsTool(deps Deps) tools.Tool {
 //     race one saga row AND cross-bind each other's terminal when one member's
 //     launch goes ambiguous. Same name ⇒ serial. Because the name derives from
 //     (title, agentId) with defaults applied, this also collapses raw-spelling
-//     twins (omitted vs explicit agentId "claude", differing watchGoal) that the
-//     session's byte-level dedup cannot see.
+//     twins (an omitted agentId vs. the default spelled out, differing watchGoal)
+//     that the session's byte-level dedup cannot see. Both the classifier and the
+//     handler read that default from the same Deps accessor, so the pair never
+//     resolves an omitted agentId two different ways.
 //   - "worktree:<cleaned absolute path>" (edit mode only). Edit spawns share
 //     mutable state through their worktree, and concurrent launch into one
 //     working tree is unproven server-side. Only a canonical-shaped id (an
@@ -185,17 +187,17 @@ func newSpawnForEditsTool(deps Deps) tools.Tool {
 //     still refuses cohorts so the name key above is always computed from the
 //     same value the handler will resolve and launch with.
 //
-// pinnedWorktreeID is read ONCE by the caller and passed in rather than reached
-// for here, so the classifier stays pure and every member of one cohort is
-// classified against the same binding.
-func spawnParallelConflictKeys(raw json.RawMessage, pinnedWorktreeID string) ([]string, bool) {
+// pinnedWorktreeID and hostDefaultAgentID are both read ONCE by the caller and passed in
+// rather than reached for here, so the classifier stays pure and every member of one
+// cohort is classified against the same binding and the same default agent.
+func spawnParallelConflictKeys(raw json.RawMessage, pinnedWorktreeID, hostDefaultAgentID string) ([]string, bool) {
 	var a spawnArgs
 	if json.Unmarshal(raw, &a) != nil {
 		return nil, false
 	}
 	// Mirror spawn()'s own normalization so every key is a function of the
 	// identity the handler acts on, not the model's spelling.
-	agentID := resolveLaunchAgentID(a.AgentID)
+	agentID := resolveLaunchAgentID(a.AgentID, hostDefaultAgentID)
 	if a.Mode == "" {
 		a.Mode = "edit"
 	}
@@ -259,7 +261,7 @@ func spawn(ctx context.Context, deps Deps, a *spawnArgs, actor domain.ToolActor)
 	// "settled" logic in finishBoundLaunch key off the SAME decision (see wantsWatcher).
 	wantWatcher := wantsWatcher(a)
 
-	agentID := resolveLaunchAgentID(a.AgentID)
+	agentID := resolveLaunchAgentID(a.AgentID, deps.defaultAgentID())
 	// Strip a self-prefixed title ("Claude: fix auth") here, at the argument, so every
 	// downstream surface reads it clean — not just the tab. a.Title also becomes the
 	// watcher title ("watch <title>"), the default watcher goal ("Supervise: <title>"),

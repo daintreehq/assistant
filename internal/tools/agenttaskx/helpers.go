@@ -15,8 +15,10 @@ import (
 const (
 	// agentLaunchNameMaxLen caps the human-readable agent.launch name (tab label).
 	agentLaunchNameMaxLen = 60
-	// defaultAgentID is the name prefix when the caller omits an agentId.
-	defaultAgentID = "claude"
+	// fallbackAgentID is the last-resort agent for a spawn that names none, used only
+	// when the host reports no default of its own — an older Daintree, or a discovery
+	// read that failed open.
+	fallbackAgentID = "claude"
 	// fallbackTaskTitle stands in for a title that carries no task text once the
 	// redundant agent label is stripped ("Claude:"). Shared, because the tab, the
 	// saga record, the watcher and the summary must all land on the same word.
@@ -81,10 +83,20 @@ func buildAgentPrompt(a *spawnArgs) string {
 // title/name derivation keys off ONE id. It stays the caller's own spelling:
 // resolveAgentID (spawn.go) runs later and only CHECKS the id against the live
 // roster — it never rewrites one — so this is the id the launch will carry.
-func resolveLaunchAgentID(agentID string) string {
+//
+// hostDefault is the agent Daintree says it would launch when none is named (Deps'
+// nil-safe read). It is preferred over the built-in fallback because the user set it and
+// the built-in constant merely guesses; an empty read means the host offered nothing, not
+// that the user chose nothing. Every call site must pass the SAME read, or the launch
+// name and the concurrency key derived from it disagree for exactly the spawns that omit
+// an agent — the case this parameter exists for.
+func resolveLaunchAgentID(agentID, hostDefault string) string {
 	id := strings.TrimSpace(agentID)
 	if id == "" {
-		id = defaultAgentID
+		id = strings.TrimSpace(hostDefault)
+	}
+	if id == "" {
+		id = fallbackAgentID
 	}
 	return id
 }
@@ -115,7 +127,10 @@ func resolveLaunchAgentID(agentID string) string {
 // callers substitute fallbackTaskTitle, and every caller must, so the tab, the
 // saga record and the watcher never disagree about what the task is called.
 func normalizeTaskTitle(title, agentID string) string {
-	id := resolveLaunchAgentID(agentID)
+	// No host default here, deliberately: every caller has already resolved the id the
+	// launch will carry, and this only derives a LABEL from it. Re-applying a default
+	// that could have moved since would strip (or keep) the wrong agent's prefix.
+	id := resolveLaunchAgentID(agentID, "")
 	task := strings.TrimSpace(wsRun.ReplaceAllString(title, " "))
 	for {
 		label, rest, found := strings.Cut(task, ":")
@@ -131,7 +146,7 @@ func normalizeTaskTitle(title, agentID string) string {
 // Exactly one prefix: a title that already carries it is normalized away first
 // (see normalizeTaskTitle).
 func buildAgentLaunchName(title, agentID string) string {
-	id := resolveLaunchAgentID(agentID)
+	id := resolveLaunchAgentID(agentID, "") // already-resolved id; see normalizeTaskTitle
 	// Capitalize the leading RUNE, not the leading byte: id[:1] on a non-ASCII
 	// id ("émile") slices a multi-byte rune in half and corrupts the prefix.
 	first, sz := utf8.DecodeRuneInString(id)

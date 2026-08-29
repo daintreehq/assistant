@@ -75,6 +75,10 @@ type Deps struct {
 	// nil (or an unbound pin) ⇒ the id stays omitted and Daintree picks its live
 	// active worktree, which is exactly the pre-pin behaviour.
 	WorktreePin WorktreePin
+	// DefaultAgent reads the agent Daintree would launch when a spawn names none —
+	// the user's setting, not this tool's guess. nil (or an empty read) falls back to
+	// the built-in default, which is what an older host that reports no default gets.
+	DefaultAgent func() string
 }
 
 // WorktreePin is the read side of the turn's worktree binding. Narrow on purpose:
@@ -90,6 +94,16 @@ func (d Deps) pinnedWorktreeID() string {
 		return ""
 	}
 	return d.WorktreePin.ID()
+}
+
+// defaultAgentID is the nil-safe read of the host's default agent. Read through this
+// on every path that resolves an omitted agentId, so the launch and the concurrency
+// classifier that precedes it can never key off two different agents.
+func (d Deps) defaultAgentID() string {
+	if d.DefaultAgent == nil {
+		return ""
+	}
+	return d.DefaultAgent()
 }
 
 // daemonActive resolves the nil-safe DaemonActive (absent ⇒ assume active).

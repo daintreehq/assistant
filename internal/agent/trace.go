@@ -140,6 +140,8 @@ func (s *Session) traceBackendRequest(runID, turnID string, round int, req backe
 			startup["totalAgentCount"] = roster.TotalCount
 			startup["complete"] = roster.Complete
 			startup["availabilityComplete"] = roster.AvailabilityComplete
+			startup["defaultAgentId"] = roster.DefaultAgentID
+			startup["resolvedDefaultAgentId"] = roster.ResolvedDefaultAgentID
 		}
 		fields["startup"] = startup
 		if req.State != nil {

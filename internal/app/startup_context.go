@@ -217,20 +217,19 @@ func (a *App) fetchProjectContext(ctx context.Context) *prompts.ProjectContext {
 
 func (a *App) fetchAgentRoster(ctx context.Context) *prompts.AgentRosterContext {
 	if res, ok := a.callStartupRead(ctx, "agent.listAvailable"); ok {
-		if rows, complete, availabilityComplete, parsed := parseAvailableAgents(res); parsed {
-			return &prompts.AgentRosterContext{
-				Agents:               rows,
-				Complete:             complete,
-				AvailabilityComplete: availabilityComplete,
-				TotalCount:           len(rows),
-			}
+		if roster, parsed := parseAvailableAgents(res); parsed {
+			return &roster
 		}
 	}
 
 	return nil
 }
 
-func parseAvailableAgents(res mcp.CallResult) ([]prompts.AgentContext, bool, bool, bool) {
+// parseAvailableAgents projects one agent.listAvailable result into the roster context.
+// The second return distinguishes a parsed catalog (possibly empty) from a result whose
+// shape carried no agent listing at all, which the caller reports as an unavailable read
+// rather than as an empty registry.
+func parseAvailableAgents(res mcp.CallResult) (prompts.AgentRosterContext, bool) {
 	type rawAgent struct {
 		ID             string `json:"id"`
 		DisplayName    string `json:"displayName"`
@@ -242,6 +241,7 @@ func parseAvailableAgents(res mcp.CallResult) ([]prompts.AgentContext, bool, boo
 		ToolbarVisible *bool  `json:"toolbarVisible"`
 	}
 	var complete, availabilityComplete, parsed bool
+	var defaultAgentID, resolvedDefaultAgentID string
 	byID := map[string]prompts.AgentContext{}
 	order := make([]string, 0)
 	addRows := func(raw any) bool {
@@ -297,6 +297,15 @@ func parseAvailableAgents(res mcp.CallResult) ([]prompts.AgentContext, bool, boo
 		if value, ok := obj["availabilityComplete"].(bool); ok {
 			availabilityComplete = value
 		}
+		// Only a non-empty id displaces what the other result channel supplied. The two
+		// channels are unioned, not ranked, so a field the text form omits must not blank
+		// out the structured form's answer (or the reverse).
+		if value, ok := obj["defaultAgentId"].(string); ok && strings.TrimSpace(value) != "" {
+			defaultAgentID = strings.TrimSpace(value)
+		}
+		if value, ok := obj["resolvedDefaultAgentId"].(string); ok && strings.TrimSpace(value) != "" {
+			resolvedDefaultAgentID = strings.TrimSpace(value)
+		}
 	}
 	if strings.TrimSpace(res.Text) != "" {
 		var obj map[string]any
@@ -308,7 +317,7 @@ func parseAvailableAgents(res mcp.CallResult) ([]prompts.AgentContext, bool, boo
 		applyObject(obj) // structured values update text rows without dropping text-only ids
 	}
 	if !parsed {
-		return nil, false, false, false
+		return prompts.AgentRosterContext{}, false
 	}
 	rows := make([]prompts.AgentContext, 0, len(order))
 	for _, id := range order {
@@ -338,7 +347,14 @@ func parseAvailableAgents(res mcp.CallResult) ([]prompts.AgentContext, bool, boo
 		}
 		return rows[i].ID < rows[j].ID
 	})
-	return rows, complete, availabilityComplete, true
+	return prompts.AgentRosterContext{
+		Agents:                 rows,
+		Complete:               complete,
+		AvailabilityComplete:   availabilityComplete,
+		TotalCount:             len(rows),
+		DefaultAgentID:         defaultAgentID,
+		ResolvedDefaultAgentID: resolvedDefaultAgentID,
+	}, true
 }
 
 func availabilityInstalled(state string) bool {

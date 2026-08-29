@@ -168,6 +168,11 @@ type AgentRosterSnapshot struct {
 	Complete             bool            `json:"complete"`
 	AvailabilityComplete bool            `json:"availability_complete"`
 	TotalCount           int             `json:"total_count"`
+	// DefaultAgentID is the user's explicit default-agent setting; ResolvedDefaultAgentID
+	// is the agent Daintree would actually launch when none is named. Roster-level, not a
+	// per-row flag, so neither can be lost with a row the catalog budget drops.
+	DefaultAgentID         string `json:"default_agent_id,omitempty"`
+	ResolvedDefaultAgentID string `json:"resolved_default_agent_id,omitempty"`
 }
 
 // AgentSnapshot preserves the exact registered identifier and required provenance.

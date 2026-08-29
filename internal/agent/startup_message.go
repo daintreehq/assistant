@@ -18,6 +18,7 @@ const (
 	startupProjectPathMaxRunes    = 4096
 	startupProjectStatusMaxRunes  = 64
 	startupAgentDisplayMaxRunes   = 512
+	startupAgentIDMaxBytes        = 512
 	startupWorktreeIDMaxRunes     = 4096
 	startupWorktreePathMaxRunes   = 4096
 	startupWorktreeBranchMaxRunes = 512
@@ -113,11 +114,29 @@ func buildAgentRosterSnapshot(roster *prompts.AgentRosterContext) *backend.Agent
 		total = len(roster.Agents)
 	}
 	return &backend.AgentRosterSnapshot{
-		Agents:               agents,
-		Complete:             roster.Complete,
-		AvailabilityComplete: roster.AvailabilityComplete,
-		TotalCount:           total,
+		Agents:                 agents,
+		Complete:               roster.Complete,
+		AvailabilityComplete:   roster.AvailabilityComplete,
+		TotalCount:             total,
+		DefaultAgentID:         startupExactID(roster.DefaultAgentID),
+		ResolvedDefaultAgentID: startupExactID(roster.ResolvedDefaultAgentID),
 	}
+}
+
+// startupExactID passes an agent id through unchanged or drops it whole, the same rule
+// the catalog rows follow: truncating an identifier yields a DIFFERENT one, which the
+// model would then hand back to agent.launch as if it were the default. An id carrying a
+// control character or exceeding the cap is therefore reported as absent, not repaired —
+// absent degrades to "no default reported", while a repaired id names the wrong agent.
+func startupExactID(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || len(trimmed) > startupAgentIDMaxBytes {
+		return ""
+	}
+	if strings.ContainsFunc(trimmed, func(r rune) bool { return r < ' ' || r == 0x7f }) {
+		return ""
+	}
+	return trimmed
 }
 
 func startupAgentSource(value string) (string, bool) {

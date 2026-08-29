@@ -136,6 +136,44 @@ func TestBuildStartupContextCapsRosterAtBackendRowLimit(t *testing.T) {
 	}
 }
 
+// The default agent rides the roster, not a row, precisely so the row budget cannot
+// take it: the catalog here overflows and drops every row, and the default must still
+// reach the backend.
+func TestBuildStartupContextKeepsDefaultAgentThroughRowDrop(t *testing.T) {
+	got := buildStartupContext(prompts.MainPromptContext{
+		AgentRoster: &prompts.AgentRosterContext{
+			Complete:               true,
+			Agents:                 []prompts.AgentContext{{ID: strings.Repeat("z", startupAgentCatalogByteBudget+1), Source: "plugin"}},
+			DefaultAgentID:         "codex",
+			ResolvedDefaultAgentID: "claude",
+		},
+	})
+	if got.AgentRoster == nil || len(got.AgentRoster.Agents) != 0 {
+		t.Fatalf("expected every row dropped: %+v", got.AgentRoster)
+	}
+	if got.AgentRoster.DefaultAgentID != "codex" || got.AgentRoster.ResolvedDefaultAgentID != "claude" {
+		t.Fatalf("defaults lost with the dropped rows: %+v", got.AgentRoster)
+	}
+}
+
+// An id is either exact or absent. Repairing one by truncation would name a DIFFERENT
+// agent, and the model would hand that back to agent.launch as the user's default.
+func TestStartupExactIDDropsRatherThanRepairs(t *testing.T) {
+	if got := startupExactID("  codex  "); got != "codex" {
+		t.Fatalf("trim = %q", got)
+	}
+	for _, value := range []string{
+		strings.Repeat("a", startupAgentIDMaxBytes+1),
+		"cod\nex",
+		"cod\x7fex",
+		"   ",
+	} {
+		if got := startupExactID(value); got != "" {
+			t.Fatalf("unrepresentable id %q was repaired to %q, want dropped", value, got)
+		}
+	}
+}
+
 func TestBuildStartupContextUsesEmptyRequiredValueWithoutStableFacts(t *testing.T) {
 	got := buildStartupContext(prompts.MainPromptContext{})
 	wire, err := json.Marshal(got)

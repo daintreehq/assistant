@@ -595,7 +595,11 @@ with something unparseable (usually a provider or compatibility problem).
   `project.getCurrent`, canonical `agent.listAvailable`, `worktree.getCurrent`, and the
   open-terminal warm-up while the logo is animating. The agent action returns the current
   effective built-in/user/plugin launch registry with display names, source, coarse CLI
-  availability, and built-in tri-state pin/resolved toolbar visibility. A fast first submit
+  availability, built-in tri-state pin/resolved toolbar visibility, and the user's default
+  agent (`default_agent_id` = their explicit pick, `resolved_default_agent_id` = what a
+  launch that names none actually gets). Those two ride the roster rather than a row, so
+  the catalog's byte budget can never drop them, and the spawn tool defaults an omitted
+  `agentId` through the same values instead of a hardcoded agent. A fast first submit
   joins the whole connect+prefetch gate rather than racing an empty snapshot; the post-logo
   bootstrap awaits that same single attempt instead of reconnecting. The primary lifecycle
   has an 8-second cancellation budget. A completed degraded attempt fails open for later
