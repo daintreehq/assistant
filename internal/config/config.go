@@ -236,6 +236,48 @@ var (
 // repeated "-", strip leading/trailing "-", truncate to 40, strip trailing "-"
 // again. If the slug is empty, just the 8-hex hash. WIRE-COMPATIBLE: path names
 // depend on this exact algorithm.
+// StateNamespaceEnv separates one host's project state from another's on the same
+// machine, without separating the account.
+//
+// A project's state is owned exclusively: one process holds `owner.lock` and with it the
+// right to open `state.db`. That is correct — the store's atomicity assumptions rest on
+// it — but it means two Daintree builds open on the SAME project cannot both run an
+// assistant. The second waits out its deadline and reports the project busy, which is
+// exactly what a developer running a dev build beside their installed app hits every
+// time.
+//
+// A namespace gives that second host its own per-project directory: its own database,
+// its own lease, no contention. It deliberately does NOT move the state ROOT, where
+// `auth/` and the endpoint preference live — so the isolated host is the same account
+// talking to the same backend, with a separate conversation for that project rather
+// than a separate installation. Moving the root instead would demand a fresh `/login`,
+// which is a far larger thing to ask for what is really a sandbox for one project.
+//
+// Trusted-only, like every other control variable: a bound project's `.env` must not be
+// able to decide which database the assistant opens.
+const StateNamespaceEnv = "DAINTREE_ASSISTANT_STATE_NAMESPACE"
+
+// stateNamespaceSuffix renders the namespace as a directory-name suffix, or "" when
+// unset. Slugged with the same rules as the project id so it cannot escape the state
+// root via separators or dots.
+func stateNamespaceSuffix(e *env) string {
+	raw := strings.TrimSpace(e.trustedGet(StateNamespaceEnv))
+	if raw == "" {
+		return ""
+	}
+	slug := slugNonAllowed.ReplaceAllString(strings.ToLower(raw), "-")
+	slug = slugCollapse.ReplaceAllString(slug, "-")
+	slug = strings.Trim(slug, "-")
+	if len(slug) > 24 {
+		slug = slug[:24]
+	}
+	slug = strings.TrimRight(slug, "-")
+	if slug == "" {
+		return ""
+	}
+	return "--" + slug
+}
+
 func ProjectIDToDir(rawID string) string {
 	sum := sha256.Sum256([]byte(rawID))
 	hash8 := hex.EncodeToString(sum[:])[:8]
@@ -429,7 +471,7 @@ func loadConfig(overrides ConfigOverrides, ensureStateDir bool) (AppConfig, erro
 	if cfg.StateDir == "" {
 		cfg.StateRoot = stateRoot
 		if cfg.ProjectID != "" {
-			cfg.StateDir = filepath.Join(stateRoot, ProjectIDToDir(cfg.ProjectID))
+			cfg.StateDir = filepath.Join(stateRoot, ProjectIDToDir(cfg.ProjectID)+stateNamespaceSuffix(e))
 		} else {
 			cfg.StateDir = stateRoot
 		}
