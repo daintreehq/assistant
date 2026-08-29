@@ -247,7 +247,7 @@ session; a consumer that sees a gap knows it lost something.
 
 | Event | Payload |
 | --- | --- |
-| `host:ready` | `protocolVersion`, `autoApprove`, `version?`, `backend?`, `tier?`, `tierGloss?`, `routing?`, `logFile?`, `resumedSessionId?` — see the masthead table above for what each absence means |
+| `host:ready` | `protocolVersion`, `autoApprove`, `version?`, `backend?`, `tier?`, `tierGloss?`, `routing?`, `logFile?`, `resumedSessionId?`, `controlSocket?`, `stateDir?` — see the masthead table above for what each absence means. `controlSocket` / `stateDir` (**v4**) say where this project's supervisor daemon listens, so a host can reach the project's timers once THIS engine is gone. Reported rather than derived: working the path out means reimplementing two hashes (project id → slug+SHA-256 state dir, absolute state dir → short socket name), and a host that drifted on either would fail silently, because a socket that is not there is indistinguishable from no daemon running. Remember the pair against the project id; it is stable across launches |
 | `host:error` | `code`, `message` |
 | `host:shutdown` | `reason` (`hibernate`/`revoke`/`error`/`exit`), `resumeSessionId?` |
 | `turn:start` | `turnId`, `role` (`user`/`assistant`), `startedAt` |

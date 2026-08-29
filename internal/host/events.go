@@ -114,6 +114,22 @@ type EvReady struct {
 	// list would drift the first time a command was added or renamed, and would offer
 	// the user something the engine refuses.
 	Commands []CommandMeta
+	// ControlSocket is where this project's supervisor daemon listens, and StateDir
+	// is the directory that path is derived from.
+	//
+	// Reported rather than left for a host to work out, because working it out means
+	// reimplementing TWO hashes — the project id becomes a slug plus a SHA-256 prefix
+	// to name the state dir, and the absolute state dir is hashed again to name a
+	// short socket. A host that re-derived them would be a second implementation of a
+	// path that has to agree exactly, and it would fail SILENTLY when it drifted: the
+	// socket simply would not be there, which is indistinguishable from no daemon
+	// running. Telling the host is one field and cannot drift.
+	//
+	// It is how a host reaches this project's timers once the engine is GONE. The
+	// daemon outlives the session, so a host that remembers this pair can still ask
+	// what is scheduled after the panel and the process are both closed.
+	ControlSocket string
+	StateDir      string
 }
 
 // CommandMeta is one entry in the command catalog.
@@ -132,11 +148,13 @@ func (e EvReady) encode(sid string, seq uint64) ([]byte, error) {
 	// "the default" from "a value that happens to be blank", and it keeps the frame
 	// small for the common case where every one of these is the default.
 	for k, v := range map[string]string{
-		"tier":      e.Tier,
-		"tierGloss": e.TierGloss,
-		"backend":   e.Backend,
-		"routing":   e.Routing,
-		"logFile":   e.LogFile,
+		"tier":          e.Tier,
+		"tierGloss":     e.TierGloss,
+		"backend":       e.Backend,
+		"routing":       e.Routing,
+		"logFile":       e.LogFile,
+		"controlSocket": e.ControlSocket,
+		"stateDir":      e.StateDir,
 	} {
 		if v != "" {
 			f[k] = v

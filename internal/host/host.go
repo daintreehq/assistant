@@ -15,6 +15,7 @@ import (
 	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/debuglog"
 	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/ipc"
 	"github.com/daintreehq/assistant/internal/projectinstructions"
 )
 
@@ -484,6 +485,13 @@ func (h *Host) boot(desc SessionDescriptor) {
 		// Resolvable here because StartDebugLog ran above; "" when logging is off.
 		LogFile:  debuglog.CurrentDebugLogPath(),
 		Commands: app.CommandCatalog(),
+		StateDir: rcfg.StateDir,
+	}
+	// Best-effort: the socket path is a pure function of the state dir, but it also
+	// creates the socket ROOT, and a host that cannot be told where to look is not a
+	// reason to fail a session that otherwise works.
+	if sock, err := ipc.SocketPathFor(rcfg.StateDir); err == nil {
+		ev.ControlSocket = sock
 	}
 	if desc.ResumeSessionID != "" {
 		ev.ResumedSessionID = desc.ResumeSessionID
