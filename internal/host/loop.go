@@ -71,6 +71,10 @@ func (h *Host) handleCommand(cmd HostCommand) {
 		}
 	case CmdOperations:
 		h.postOperations()
+	case CmdTimers:
+		h.postTimers()
+	case CmdTimerCancel:
+		h.cancelTimer(cmd.TimerID)
 	case CmdInterjectRetract:
 		h.retractInjection()
 	case CmdQuestionAnswer:
@@ -990,6 +994,33 @@ func (h *Host) postOperations() {
 		return
 	}
 	h.bridge.post(EvOperations{Snapshot: h.app.Operations(h.runCtx)})
+}
+
+// postTimers answers a timers request with the scheduled-timer list.
+func (h *Host) postTimers() {
+	if h.app == nil || h.bridge == nil {
+		return
+	}
+	rows, ok := h.app.Timers(h.runCtx)
+	h.bridge.post(EvTimers{Timers: rows, TakenAt: domain.NowMS(), ReadFailed: !ok})
+}
+
+// cancelTimer retires one timer for the user and answers with the outcome.
+//
+// It runs on the command loop rather than a worker. The operation is two local
+// SQLite writes with no network and no model call, so it settles in well under
+// the time an inline command is allowed to hold the loop — and putting it on a
+// worker would buy a race between a cancel and the snapshot that follows it for
+// no latency anyone can perceive.
+//
+// It answers even when nothing could be done. An unknown id, a storage fault and
+// a successful retire all produce exactly one timer:cancelled, because the host
+// UI has a row in a pending state and every path has to be able to settle it.
+func (h *Host) cancelTimer(timerID string) {
+	if h.app == nil || h.bridge == nil {
+		return
+	}
+	h.bridge.post(EvTimerCancelled{Outcome: h.app.CancelTimer(h.runCtx, timerID)})
 }
 
 // retractInjection takes back the most recently buffered follow-up (LIFO) and hands the

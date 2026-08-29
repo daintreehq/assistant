@@ -1,4 +1,4 @@
-# Daintree host — the `host --stdio` embedding contract (protocol v3)
+# Daintree host — the `host --stdio` embedding contract (protocol v4)
 
 This is the **host-side companion** to [`DAINTREE_MCP.md`](DAINTREE_MCP.md). That doc
 describes the protocol this CLI speaks *to* Daintree (the tool catalog, tiers, call shapes).
@@ -21,7 +21,7 @@ the binary, hands it a session, drives turns, answers approvals, and tears it do
 
 ---
 
-## `host:ready` — the session facts a host renders (protocol v3)
+## `host:ready` — the session facts a host renders (protocol v4)
 
 The first frame of a session is `host:ready`. Beyond `protocolVersion`, it carries the
 facts a host needs to state what this session *is* — the same set the CLI's own masthead
@@ -198,10 +198,36 @@ Every command is an object with a string `sessionId` and a string `type`.
 | `question:answer` | `questionId`, `choiceIndex` | Answer a multiple-choice question. `choiceIndex` is 0-based; **negative means dismissed**, which fails the tool call as declined rather than answering it — distinct from the turn being cancelled underneath it, see §8. Required and must be a number — a missing one would default to 0 and silently answer "the first option" for a user who never chose. |
 | `command` | `line` | Run a slash command the host's own composer resolved — the raw line, e.g. `"/account"`. An accepted command produces exactly one `command:result`; a REFUSED one produces a `host:error` and no result (see below). Commands are not conversation: sending `/status` as a `prompt` produces an answer about the *word* status, spends a turn doing it, and leaves the user believing they ran something. |
 | `operations` | — | Ask for the current operations reading. Answered with one `operations:snapshot`. A **poll, not a subscription** — pushing every store change to a host that may not be showing the deck is a great deal of traffic for a view nobody is looking at. |
+| `timers` | — | Ask for the scheduled-timer list alone. Answered with one `timers:snapshot`. Also a poll. Separate from `operations` because a timer manager refreshes on its own cadence and must not drag six unrelated deck sections along with it; the rows are identical, so the two surfaces cannot disagree. **v4.** |
+| `timer:cancel` | `timerId` | Retire one timer **on the user's behalf** and revoke the automation grants scoped to it. Answered with exactly one `timer:cancelled`, success or failure. The engine does NOT ask for confirmation — see [who confirms a timer cancel](#who-confirms-a-timer-cancel). A blank `timerId` is refused as unparseable (dropped). **v4.** |
 | `interject:retract` | — | Take back the most recent buffered interjection (LIFO). Answered with `interject:retracted`, which reports whether anything was actually taken back. |
 | `interrupt` | — | Cancel the running turn. Leaves autonomous wake work alone. |
 | `hibernate` | — | Graceful teardown, reason `hibernate`. |
 | `shutdown` | — | Graceful teardown, reason `exit`. |
+
+### Who confirms a timer cancel
+
+Nobody, on this side. `timer:cancel` does **not** raise an `approval:requested`, and a
+host must not wait for one.
+
+The approval channel exists for a specific situation: the *model* has decided to do
+something and a human is asked to allow it. A timer cancel is the other way round. The
+human is looking at a list the host drew, has picked one row out of it, and the host has
+already put a confirmation in front of them naming that timer and what cancelling it
+withdraws. Routing it back through an approval would ask the same person the same
+question a second time, about an object the engine would have to describe worse — it has
+the id, the host has the row on screen.
+
+So the split is: **the host owns the confirmation, the engine owns the operation.** The
+engine's half is the part a host cannot do — retiring the schedule row and revoking the
+automation grants scoped to that timer as one operation, and recording it in the audit log
+under actor `user`, which is what keeps "the person cancelled this" distinguishable from
+"the assistant decided to" when someone reads the session back.
+
+The mutation is idempotent enough to be safe to retry: cancelling an already-retired timer
+reports `alreadyInactive` with `cancelled: false` rather than pretending, and the grant
+sweep runs either way (a fire that died between claiming its timer and revoking its grant
+leaves live authority with nothing left to spend it).
 
 `decision` is coerced to the closed vocabulary `approved | rejected | timeout`. **An
 unrecognized value becomes `rejected`** — an unparseable decision must never be treated as an
@@ -242,6 +268,8 @@ session; a consumer that sees a gap knows it lost something.
 | `question:answered` | `questionId`, `choiceIndex`, `cancelled`, `answeredAt`, `label?`, `text?` |
 | `command:result` | `command`, `text`, `conversationCleared` (**always present**), `quit?`, `unknown?`, `turnId?` — the answer to one inbound `command`. See [the clear rule](#a-host-must-never-infer-the-clear-from-the-command-text) |
 | `operations:snapshot` | `inbox[]`, `workflows[]`, `agents[]`, `async[]`, `timers[]`, `audit[]` — the answer to one inbound `operations`. Row shapes below |
+| `timers:snapshot` | `timers[]` (the same row shape as `operations:snapshot`), `takenAt`, `readFailed` — the answer to one inbound `timers`. **`readFailed` is not cosmetic**: the operations deck is best-effort and drops a section it could not load, but a timer manager must never render a failed read as "nothing scheduled", because that is a claim a user acts on by walking away from work that is still queued. An empty `timers[]` means nothing while `readFailed` is true |
+| `timer:cancelled` | `timerId`, `cancelled`, `alreadyInactive`, `priorStatus`, `revokedGrants`, `grantRevokeFailed`, `error` — the answer to one inbound `timer:cancel` |
 | `mcp:status` | `connected`, `toolCount?`, `error?` — whether the Daintree control plane is reachable and how many tools it offers |
 | `usage` | per-round token accounting |
 | `cost` | `total`, `complete` |
@@ -290,7 +318,7 @@ engine too old to say".
 | `workflows` | `id`, `goal`, `status`, `progress`, `next`, `blocked` | open execution graphs — **the engine populates none today**; the shape is fixed so a host can bind to it before the producer lands |
 | `agents` | `id`, `title`, `goal`, `badge`, `agentState`, `preview`, `startedAt`, `needsAttention` | live watchers. `badge` and `preview` arrive empty: the cockpit merged a watcher with its terminal's tail, but that needs a live MCP read, so it is left to the host, which already has the terminal on screen |
 | `async` | `id`, `title`, `tool`, `startedAt` | live async futures |
-| `timers` | `id`, `label`, `dueAt` | scheduled timers |
+| `timers` | `id`, `label`, `dueAt`, `createdAt`, `payloadKind`, `toolName`, `runCount`, `repeatEveryMs`, `repeatMaxRuns`, `repeatUntilAt`, `targetWorktreeId`, `targetTerminalId`, `liveGrants`, `grantsUnknown` | scheduled timers. `payloadKind` is `reminder` \| `tool_call` \| `legacy`; `toolName` is set only for `tool_call`. `repeatEveryMs` 0 means one-shot, and `repeatMaxRuns` / `repeatUntilAt` 0 mean unbounded on that axis. `liveGrants` is how many automation grants this timer can still spend — what lets a cancel confirmation state its real consequence — and is meaningful only while `grantsUnknown` is false. `grantsUnknown` exists because a count of 0 cannot say whether a timer holds no authority or whether the engine failed to find out, and that difference is quoted on a destructive confirmation: a host must say it does not know rather than assert there is nothing to revoke. The stored payload's reminder text and tool ARGUMENTS are deliberately absent: neither is needed to decide whether to cancel a timer, and both are model-written free text that would otherwise cross into a renderer |
 | `audit` | `tool`, `outcome`, `durationMs`, `at` | the 8 most recent tool calls, newest first |
 
 Free text is redacted (`redact.String`) on the fields most likely to carry a credential —

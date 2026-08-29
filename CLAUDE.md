@@ -365,7 +365,7 @@ make install                                                  # go install with 
 ./bin/daintree-assistant doctor              # environment gate; `doctor --json` for the structured form
 ./bin/daintree-assistant support-bundle      # redacted diagnostics archive to send to a maintainer
 ./bin/daintree-assistant reset <scope>       # project-state | all-data (lease-aware, backs up)
-./bin/daintree-assistant host --stdio        # embedded host: stdio NDJSON, PROTOCOL_VERSION 3
+./bin/daintree-assistant host --stdio        # embedded host: stdio NDJSON, PROTOCOL_VERSION 4
 
 # Gates (run before considering work done)
 go test ./...                # the whole suite, no network — fakes for MCP + backend
@@ -481,7 +481,7 @@ internal/
   app/           App.Create(CreateOptions) — wires every dependency once, exposes the ToolContext factory
   commands/      slash-command catalog + handlers (structured results for the host + REPL)
   cli/           Run(Options) entry, line REPL (repl.go), host.go, mcpserve.go, render/, jsonout/
-  host/          embedded host (host.go) — stdio NDJSON transport, PROTOCOL_VERSION 3
+  host/          embedded host (host.go) — stdio NDJSON transport, PROTOCOL_VERSION 4
   mcpserver/     the assistant AS an MCP server (`mcp --stdio`) so another agent can drive
                  it as a sub-agent: per-session config (no server-held binding, because an
                  MCP client cannot restart us), async-first ask/poll because a turn takes

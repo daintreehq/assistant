@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/host"
 	"github.com/daintreehq/assistant/internal/supervisor"
+	"github.com/daintreehq/assistant/internal/timers"
 	"github.com/daintreehq/assistant/internal/tools"
 )
 
@@ -331,11 +333,12 @@ func (h *hostAppAdapter) Operations(ctx context.Context) host.OperationsSnapshot
 		return snap
 	}
 	if st := h.app.Store; st != nil {
-		if timers, err := st.ListTimers("scheduled"); err == nil {
-			for _, t := range timers {
-				snap.Timers = append(snap.Timers, host.TimerRow{ID: t.ID, Label: t.Title, DueAt: t.FireAt})
-			}
-		}
+		// Same builder as the timers:snapshot the manager pulls, so the deck's
+		// SCHEDULED section and the timer manager can never describe the same timer
+		// differently. The deck stays best-effort — a failed read drops the section
+		// rather than the whole deck, which is the rule every other section here
+		// follows; only the manager's own event distinguishes it.
+		snap.Timers, _ = h.timerRows()
 		if ws, err := st.ListLiveWatchers(); err == nil {
 			for _, w := range ws {
 				state := ""
@@ -381,6 +384,126 @@ func (h *hostAppAdapter) Operations(ctx context.Context) host.OperationsSnapshot
 		}
 	}
 	return snap
+}
+
+// timerRows builds the scheduled-timer rows from the shared view builder.
+// Best-effort like every other deck read: a store that errors yields no rows
+// rather than failing the whole snapshot.
+func (h *hostAppAdapter) timerRows() ([]host.TimerRow, bool) {
+	if h.app == nil || h.app.Store == nil {
+		return nil, false
+	}
+	views, err := timers.List(h.app.Store, domain.NowMS())
+	if err != nil {
+		return nil, false
+	}
+	out := make([]host.TimerRow, 0, len(views))
+	for _, v := range views {
+		row := host.TimerRow{
+			ID:            v.ID,
+			Label:         v.Title,
+			DueAt:         v.NextFireAt,
+			CreatedAt:     v.CreatedAt,
+			PayloadKind:   string(v.PayloadKind),
+			ToolName:      v.ToolName,
+			RunCount:      v.RunCount,
+			LiveGrants:    v.LiveGrants,
+			GrantsUnknown: v.GrantsUnknown,
+		}
+		if v.Repeat != nil {
+			row.RepeatEveryMs = v.Repeat.EveryMs
+			if v.Repeat.MaxRuns != nil {
+				row.RepeatMaxRuns = *v.Repeat.MaxRuns
+			}
+			if v.Repeat.UntilAt != nil {
+				row.RepeatUntilAt = *v.Repeat.UntilAt
+			}
+		}
+		if v.Target != nil {
+			row.TargetWorktreeID = v.Target.WorktreeID
+			row.TargetTerminalID = v.Target.TerminalID
+		}
+		out = append(out, row)
+	}
+	return out, true
+}
+
+// Timers answers the manager's read, reporting whether the store could be read at
+// all — an empty list and a failed read are different answers here (see EvTimers).
+func (h *hostAppAdapter) Timers(context.Context) ([]host.TimerRow, bool) { return h.timerRows() }
+
+// CancelTimer retires one timer for the USER and records it as such.
+//
+// The audit row is written here rather than left to the dispatch pipeline
+// because this call never enters that pipeline: it is not a tool the model
+// chose, so there is no ToolContext, no grant lookup and no confirmation to
+// resolve. Skipping the row entirely was the alternative, and it is the wrong
+// one — a timer that vanishes with nothing in the audit log looks, to anyone
+// reading back a session, exactly like a timer that was never scheduled.
+func (h *hostAppAdapter) CancelTimer(_ context.Context, timerID string) host.TimerCancelOutcome {
+	out := host.TimerCancelOutcome{TimerID: timerID}
+	if h.app == nil || h.app.Store == nil {
+		out.Error = "This session has no store, so no timer can be cancelled."
+		return out
+	}
+	now := domain.NowMS()
+	res, err := timers.Cancel(h.app.Store, timerID, now)
+	switch {
+	case errors.Is(err, timers.ErrNotFound):
+		out.Error = "No timer with id " + timerID + " — it may already have been cancelled."
+	case err != nil:
+		out.Error = err.Error()
+	case res.Contended:
+		// The scheduler fired it out from under the cancel and it is live again.
+		// Reported as a failure rather than a success because nothing was retired
+		// and the user's intent was not carried out — "try again" is the honest
+		// answer, and the row stays on screen to be tried.
+		out.PriorStatus = res.PriorStatus
+		out.Error = "That timer fired while it was being cancelled and is scheduled again — try cancelling it once more."
+	default:
+		out.Cancelled = !res.AlreadyInactive
+		out.AlreadyInactive = res.AlreadyInactive
+		out.PriorStatus = res.PriorStatus
+		out.RevokedGrants = res.RevokedGrants
+		out.GrantRevokeFailed = res.GrantRevokeErr != nil
+	}
+	h.auditUserCancel(out, now)
+	return out
+}
+
+// auditUserCancel records the cancel under domain.ActorUser. Best-effort: an
+// audit write that fails must not turn a completed cancel into a reported
+// failure, because the timer really is gone.
+func (h *hostAppAdapter) auditUserCancel(out host.TimerCancelOutcome, now int64) {
+	outcome := "ok"
+	summary := "Cancelled timer " + out.TimerID + " from the Daintree timer manager."
+	switch {
+	case out.Error != "":
+		outcome = "error"
+		summary = "Could not cancel timer " + out.TimerID + ": " + out.Error
+	case out.AlreadyInactive:
+		summary = "Timer " + out.TimerID + " was already " + out.PriorStatus + " — nothing to cancel."
+	}
+	if out.RevokedGrants > 0 {
+		summary += fmt.Sprintf(" Revoked %d automation grant(s).", out.RevokedGrants)
+	}
+	if out.GrantRevokeFailed {
+		summary += " Its automation grants could NOT be revoked."
+	}
+	argsJSON, err := json.Marshal(map[string]any{"id": out.TimerID})
+	if err != nil {
+		// A two-field object cannot fail to marshal, but a dropped error here
+		// would silently write an audit row with a malformed args column.
+		argsJSON = []byte(`{}`)
+	}
+	_, _ = h.app.Store.InsertAudit(domain.AuditRecord{
+		Ts:       now,
+		Actor:    domain.ActorUser,
+		ToolName: "timer.cancel",
+		ArgsJson: string(argsJSON),
+		Outcome:  outcome,
+		Summary:  summary,
+	})
 }
 
 func (h *hostAppAdapter) McpStatus() (bool, *int, string) {

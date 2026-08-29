@@ -158,7 +158,7 @@ func runHostBoot(t *testing.T, bin, stateDir string) ([]hostFrame, string) {
 		"projectId":       "p_stale",
 		"cwd":             t.TempDir(),
 		"tier":            "system",
-		"protocolVersion": 3,
+		"protocolVersion": 4,
 	})
 	if err != nil {
 		t.Fatal(err)

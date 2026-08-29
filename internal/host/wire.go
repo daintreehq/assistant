@@ -40,7 +40,21 @@ import (
 //  3. The event set covers what the runtime actually produces — phase, reasoning,
 //     interjections, the whole tool batch, tool state and progress, usage, cost, and
 //     notices — instead of the subset a strip needed.
-const ProtocolVersion = 3
+//
+// It is 4 as of the timer manager. v4 is a MINOR break, not a rewrite: the event
+// set and every v3 command are unchanged, and a v3 host talking to a v4 engine
+// still works. The bump exists for the other direction. `timer:cancel` is a
+// REQUIRED command — a host that sends it and gets nothing back leaves a row
+// spinning forever, because an unknown command type is silently DROPPED by
+// ParseCommand (deliberately: a garbled line must not produce an error frame).
+// So a host has to be able to tell, before it draws a cancel control, whether the
+// engine it is talking to will answer. `protocolVersion` on host:ready is the
+// only thing that can tell it. The additions:
+//
+//  4. `timers` / `timers:snapshot` and `timer:cancel` / `timer:cancelled` — the
+//     durable-timer manager, and the first inbound command that MUTATES engine
+//     state on a human's behalf rather than the model's.
+const ProtocolVersion = 4
 
 // BuildVersion is the engine build string reported in host:ready, injected by the
 // CLI layer at startup (main's -ldflags value). Package-level rather than an App
@@ -348,6 +362,19 @@ const (
 	CmdCommand HostCommandType = "command"
 	// CmdOperations asks for the current operations reading — a poll, not a stream.
 	CmdOperations HostCommandType = "operations"
+	// CmdTimers asks for the scheduled-timer list alone. Separate from
+	// CmdOperations because a timer manager refreshes on its own cadence and must
+	// not drag six unrelated deck sections along with it.
+	CmdTimers HostCommandType = "timers"
+	// CmdTimerCancel retires one timer on the USER's behalf — the first inbound
+	// command that mutates engine state without the model deciding to.
+	//
+	// Confirmation is the HOST's job here, not the engine's. The approval channel
+	// exists because the model asks to do something while a human watches; this is
+	// the human already having decided, in a dialog the host drew, about an object
+	// the host is showing. Routing it back through an approval would ask the same
+	// person the same question twice.
+	CmdTimerCancel HostCommandType = "timer:cancel"
 	// CmdInterjectRetract takes back the most recent buffered injection (LIFO).
 	CmdInterjectRetract HostCommandType = "interject:retract"
 	CmdInterrupt        HostCommandType = "interrupt"
@@ -369,6 +396,8 @@ type HostCommand struct {
 	CommandLine string
 	// question:answer
 	QuestionID string
+	// timer:cancel
+	TimerID string
 	// ChoiceIndex is the 0-based option the user picked. Negative means the user
 	// dismissed the question without choosing, which is a CANCELLATION of the tool
 	// call, not a selection — a host must be able to express "I closed the sheet"
@@ -447,8 +476,15 @@ func ParseCommand(line []byte) (HostCommand, error) {
 			return HostCommand{}, errNotCommand
 		}
 		cmd.ChoiceIndex = int(idx)
-	case CmdOperations:
-		// No fields: it is a request for the current reading.
+	case CmdOperations, CmdTimers:
+		// No fields: a request for the current reading.
+	case CmdTimerCancel:
+		// Identity, not just a string: a blank timerId is type-correct and names
+		// nothing, and the cancel would go on to report TIMER_NOT_FOUND for an id
+		// the host never meant to send.
+		if err := wantIdentityString(raw, "timerId", &cmd.TimerID); err != nil {
+			return HostCommand{}, errNotCommand
+		}
 	case CmdInterjectRetract:
 		// No fields: it always takes the most recent buffered injection (LIFO).
 	case CmdInterrupt, CmdHibernate, CmdShutdown:

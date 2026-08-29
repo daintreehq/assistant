@@ -139,30 +139,18 @@ func (a runbookStoreAdapter) UpdateRunbookRunState(_ context.Context, rec domain
 
 /* --------------------------------- timer --------------------------------- */
 
-type timerStoreAdapter struct{ s *storage.Store }
+// timerStoreAdapter narrows *storage.Store to the timer family's seam. Every
+// method but InsertTimer is inherited verbatim from the embedded store, because
+// the family's Store embeds timers.Store and *storage.Store already satisfies
+// that exactly — only the insert differs, returning an id rather than the row.
+type timerStoreAdapter struct{ *storage.Store }
 
-func (a timerStoreAdapter) InsertTimer(_ context.Context, rec domain.TimerRecord) (string, error) {
-	out, err := a.s.InsertTimer(rec)
+func (a timerStoreAdapter) InsertTimer(rec domain.TimerRecord) (string, error) {
+	out, err := a.Store.InsertTimer(rec)
 	if err != nil {
 		return "", err
 	}
 	return out.ID, nil
-}
-
-func (a timerStoreAdapter) ListTimers(_ context.Context, status string) ([]domain.TimerRecord, error) {
-	return a.s.ListTimers(status)
-}
-
-func (a timerStoreAdapter) GetTimer(_ context.Context, id string) (*domain.TimerRecord, error) {
-	return a.s.GetTimer(id)
-}
-
-func (a timerStoreAdapter) UpdateTimerStatus(_ context.Context, id, status string) error {
-	return a.s.UpdateTimer(id, map[string]any{"status": status})
-}
-
-func (a timerStoreAdapter) RevokeGrantsByActor(_ context.Context, actorID string) (int, error) {
-	return a.s.RevokeGrantsByActor(actorID, domain.NowMS())
 }
 
 /* -------------------------------- watcher -------------------------------- */

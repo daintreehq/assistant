@@ -16,16 +16,18 @@ type memStore struct {
 	revoked     []string
 	revokeCount int
 	revokeErr   error
+	patched     []map[string]any
+	grants      map[string][]domain.AutomationGrantRecord
 }
 
-func (m *memStore) InsertTimer(_ context.Context, rec domain.TimerRecord) (string, error) {
+func (m *memStore) InsertTimer(rec domain.TimerRecord) (string, error) {
 	m.inserted = append(m.inserted, rec)
 	return rec.ID, nil
 }
-func (m *memStore) ListTimers(context.Context, string) ([]domain.TimerRecord, error) {
+func (m *memStore) ListTimers(string) ([]domain.TimerRecord, error) {
 	return m.inserted, nil
 }
-func (m *memStore) GetTimer(_ context.Context, id string) (*domain.TimerRecord, error) {
+func (m *memStore) GetTimer(id string) (*domain.TimerRecord, error) {
 	for i := range m.inserted {
 		if m.inserted[i].ID == id {
 			return &m.inserted[i], nil
@@ -33,12 +35,28 @@ func (m *memStore) GetTimer(_ context.Context, id string) (*domain.TimerRecord, 
 	}
 	return nil, nil
 }
-func (m *memStore) UpdateTimerStatus(context.Context, string, string) error { return nil }
+func (m *memStore) ClaimDueTimer(id string, expectFireAt int64, patch map[string]any) (bool, error) {
+	for i := range m.inserted {
+		if m.inserted[i].ID != id || m.inserted[i].Status != "scheduled" ||
+			m.inserted[i].FireAt != expectFireAt {
+			continue
+		}
+		m.patched = append(m.patched, patch)
+		if st, ok := patch["status"].(string); ok {
+			m.inserted[i].Status = st
+		}
+		return true, nil
+	}
+	return false, nil
+}
+func (m *memStore) ListGrants(actorID string, _ int64) ([]domain.AutomationGrantRecord, error) {
+	return m.grants[actorID], nil
+}
 
 // revokeCount is deliberately NOT 1: a handler that hard-coded the count, or read it
 // from the wrong place, would sail past an assertion of 1. revokeErr, when set, drives
 // the cascade-failure branch.
-func (m *memStore) RevokeGrantsByActor(_ context.Context, id string) (int, error) {
+func (m *memStore) RevokeGrantsByActor(id string, _ int64) (int, error) {
 	m.revoked = append(m.revoked, id)
 	if m.revokeErr != nil {
 		return 0, m.revokeErr

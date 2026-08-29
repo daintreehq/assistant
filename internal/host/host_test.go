@@ -31,6 +31,13 @@ type fakeApp struct {
 
 	mu      sync.Mutex
 	rearmed []string
+	// timerRows is what Timers() returns; cancelOutcome is what CancelTimer()
+	// returns, and cancelled records the ids it was asked for.
+	timerRows     []TimerRow
+	timersFailed  bool
+	operations    OperationsSnapshot
+	cancelOutcome TimerCancelOutcome
+	cancelled     []string
 }
 
 func (f *fakeApp) SetHooks(h AppHooks)              { f.hooks = h }
@@ -41,12 +48,28 @@ func (f *fakeApp) RunCommand(context.Context, string) CommandOutcome {
 func (f *fakeApp) CostSnapshot() (float64, bool)                   { return 0, false }
 func (f *fakeApp) McpStatus() (bool, *int, string)                 { return false, nil, "" }
 func (f *fakeApp) CommandCatalog() []CommandMeta                   { return nil }
-func (f *fakeApp) Operations(context.Context) OperationsSnapshot   { return OperationsSnapshot{} }
+func (f *fakeApp) Operations(context.Context) OperationsSnapshot   { return f.operations }
+func (f *fakeApp) Timers(context.Context) ([]TimerRow, bool)       { return f.timerRows, !f.timersFailed }
 func (f *fakeApp) StartScheduler(func(events []domain.QueueEvent)) {}
 func (f *fakeApp) Session() *agent.Session                         { return f.session }
 func (f *fakeApp) RiskOf(string) (domain.RiskClass, bool)          { return "", false }
 func (f *fakeApp) Config() config.AppConfig                        { return config.AppConfig{} }
 func (f *fakeApp) Shutdown(context.Context) error                  { return nil }
+
+func (f *fakeApp) CancelTimer(_ context.Context, id string) TimerCancelOutcome {
+	f.mu.Lock()
+	f.cancelled = append(f.cancelled, id)
+	f.mu.Unlock()
+	out := f.cancelOutcome
+	out.TimerID = id
+	return out
+}
+
+func (f *fakeApp) cancelledIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.cancelled...)
+}
 
 func (f *fakeApp) RearmAttention(ids []string) error {
 	f.mu.Lock()
@@ -198,7 +221,7 @@ func TestHostProtocolMismatch(t *testing.T) {
 
 func TestHostReadyAndShutdown(t *testing.T) {
 	factory := func(context.Context, AppParams) (App, error) { return &fakeApp{}, nil }
-	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`
+	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":4}`
 	lines := driveHost(t, factory, []string{desc, `{"type":"shutdown","sessionId":"s"}`})
 
 	var sawReady, sawShutdown bool
@@ -220,7 +243,7 @@ func TestHostReadyAndShutdown(t *testing.T) {
 
 func TestHostForeignMessageDropped(t *testing.T) {
 	factory := func(context.Context, AppParams) (App, error) { return &fakeApp{}, nil }
-	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`
+	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":4}`
 	// Wrong-session command must be dropped silently (no error), then shutdown.
 	lines := driveHost(t, factory, []string{
 		desc,
@@ -269,7 +292,7 @@ func TestHostCommandLoopNotBlockedByWedgedStdout(t *testing.T) {
 
 	go h.Run(context.Background())
 
-	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`
+	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":4}`
 	// Feed: descriptor, a decide for a (non-existent) approval (a no-op resolve that
 	// still proves the loop services decide), then shutdown — all while stdout is
 	// wedged. The loop processing these without blocking is the regression guard.
@@ -305,7 +328,7 @@ func TestHostCommandLoopNotBlockedByWedgedStdout(t *testing.T) {
 
 func TestHostHibernateCarriesResume(t *testing.T) {
 	factory := func(context.Context, AppParams) (App, error) { return &fakeApp{}, nil }
-	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`
+	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":4}`
 	lines := driveHost(t, factory, []string{desc, `{"type":"hibernate","sessionId":"s"}`})
 	var saw bool
 	for _, m := range lines {
@@ -371,7 +394,7 @@ func TestFatalTeardownReasonExitsNonZero(t *testing.T) {
 // turn every exit non-zero, only the ones that actually went wrong.
 func TestCleanTeardownExitsZero(t *testing.T) {
 	factory := func(context.Context, AppParams) (App, error) { return &fakeApp{}, nil }
-	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`
+	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":4}`
 	_, code := driveHostCode(t, factory, []string{desc, `{"type":"shutdown","sessionId":"s"}`})
 	if code != 0 {
 		t.Errorf("an ordinary clean shutdown reported exit code %d, want 0", code)
@@ -411,7 +434,7 @@ func TestAppShutdownTimeoutStillExits(t *testing.T) {
 	h.exit = func(c int) { once.Do(func() { code = c; close(exited) }); runtimeGoexit() }
 
 	go h.Run(context.Background())
-	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`
+	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":4}`
 	go func() {
 		_, _ = pw.Write([]byte(desc + "\n"))
 		time.Sleep(30 * time.Millisecond)
@@ -487,7 +510,7 @@ func TestPendingWakeQueuedBeforeReadyFiresOnceReadyIsSet(t *testing.T) {
 // to a clean parent-driven exit.
 func TestOversizedInboundLineIsBadFrameNotCleanExit(t *testing.T) {
 	factory := func(context.Context, AppParams) (App, error) { return &fakeApp{}, nil }
-	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`
+	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":4}`
 	huge := strings.Repeat("a", maxFrameBytes+1)
 	lines := driveHost(t, factory, []string{desc, huge})
 
@@ -514,7 +537,7 @@ func TestOversizedInboundLineIsBadFrameNotCleanExit(t *testing.T) {
 // fatal pre-app path already uses, instead of the fire-and-forget report().
 func TestPreReadyPanicReportsBootstrapError(t *testing.T) {
 	factory := func(context.Context, AppParams) (App, error) { panic("boom") }
-	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`
+	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":4}`
 	lines := driveHost(t, factory, []string{desc})
 
 	var saw bool
@@ -573,7 +596,7 @@ func TestPreReadyPanicBlocksExitUntilTheReportIsDelivered(t *testing.T) {
 	h.exit = func(c int) { once.Do(func() { code = c; close(exited) }); runtimeGoexit() }
 
 	go h.Run(context.Background())
-	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`
+	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":4}`
 	go func() { _, _ = pw.Write([]byte(desc + "\n")) }()
 	t.Cleanup(func() { _ = pw.Close(); _ = pr.Close() })
 
@@ -619,7 +642,7 @@ func TestGenericReadErrorIsFatalNotCleanExit(t *testing.T) {
 	h.exit = func(c int) { once.Do(func() { code = c; close(exited) }); runtimeGoexit() }
 
 	go h.Run(context.Background())
-	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`
+	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":4}`
 	go func() { _, _ = pw.Write([]byte(desc + "\n")) }()
 
 	// Give the descriptor a moment to be processed, then break the pipe with a
@@ -665,7 +688,7 @@ func TestCleanEOFWithoutShutdownCommandExitsZero(t *testing.T) {
 	h.exit = func(c int) { once.Do(func() { code = c; close(exited) }); runtimeGoexit() }
 
 	go h.Run(context.Background())
-	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`
+	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":4}`
 	_, _ = pw.Write([]byte(desc + "\n"))
 	time.Sleep(30 * time.Millisecond) // let the descriptor be processed and host:ready post
 	_ = pw.Close()                    // clean EOF: no shutdown command ever sent
@@ -709,7 +732,7 @@ func TestTerminalFrameDeliveryFailureExitsNonZero(t *testing.T) {
 	h.exit = func(c int) { once.Do(func() { code = c; close(exited) }); runtimeGoexit() }
 
 	go h.Run(context.Background())
-	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`
+	desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":4}`
 	go func() {
 		_, _ = pw.Write([]byte(desc + "\n"))
 		time.Sleep(30 * time.Millisecond)

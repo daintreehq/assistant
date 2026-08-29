@@ -40,6 +40,24 @@ type App interface {
 	// looking at.
 	Operations(ctx context.Context) OperationsSnapshot
 
+	// Timers returns the scheduled-timer list on its own — the timer manager's
+	// read. Same rows as Operations().Timers, built from the same place, so a host
+	// showing both cannot be told two different things.
+	//
+	// `ok` is false when the store could not be read. It is separate from an empty
+	// list because a manager must not tell a user nothing is scheduled on the
+	// strength of a failed read.
+	Timers(ctx context.Context) (rows []TimerRow, ok bool)
+
+	// CancelTimer retires one timer on the USER's behalf and revokes the automation
+	// grants scoped to it.
+	//
+	// It does NOT run the model's timer.cancel tool. That call would dispatch under
+	// an actor meaning "the assistant decided to", and the audit log would then
+	// record a button press as something the model chose to do. This goes straight
+	// to the shared operation and records the row under domain.ActorUser.
+	CancelTimer(ctx context.Context, timerID string) TimerCancelOutcome
+
 	// CommandCatalog is the command set this engine will accept.
 	CommandCatalog() []CommandMeta
 

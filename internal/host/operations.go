@@ -25,7 +25,8 @@ type OperationsSnapshot struct {
 	Agents []AgentRow
 	// Async is the live async-futures ledger, oldest first.
 	Async []AsyncRow
-	// Timers are scheduled operations, soonest first.
+	// Timers are scheduled operations, soonest first. Shape in timers.go, shared
+	// with the timers:snapshot the timer manager pulls.
 	Timers []TimerRow
 	// Audit is the most recent tool calls, newest first.
 	Audit []AuditRow
@@ -72,13 +73,6 @@ type AsyncRow struct {
 	Title     string
 	Tool      string
 	StartedAt int64
-}
-
-// TimerRow is one scheduled operation.
-type TimerRow struct {
-	ID    string
-	Label string
-	DueAt int64
 }
 
 // AuditRow is one recent tool call.
@@ -131,11 +125,12 @@ func (e EvOperations) encode(sid string, seq uint64) ([]byte, error) {
 			"id": r.ID, "title": redact.String(r.Title), "tool": r.Tool, "startedAt": r.StartedAt,
 		})
 	}
+	// Same encoder as timers:snapshot — the deck's SCHEDULED section and the timer
+	// manager are two views of one list, so they share the row shape rather than
+	// each spelling it out and drifting a field at a time (see timers.go).
 	timers := make([]map[string]any, 0, len(s.Timers))
 	for _, r := range s.Timers {
-		timers = append(timers, map[string]any{
-			"id": r.ID, "label": redact.String(r.Label), "dueAt": r.DueAt,
-		})
+		timers = append(timers, encodeTimerRow(r))
 	}
 	audit := make([]map[string]any, 0, len(s.Audit))
 	for _, r := range s.Audit {

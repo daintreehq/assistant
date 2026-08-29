@@ -440,6 +440,24 @@ const (
 	// the correct outcome: it fails closed rather than prompting a human who is not
 	// there.
 	ActorSubagent ToolActor = "subagent"
+	// ActorUser is a human acting DIRECTLY through a host surface — clicking
+	// "Cancel timer" in Daintree's timer manager, not asking the model to do it.
+	//
+	// It exists because none of the actors above can tell that story. ActorMain is
+	// the interactive MODEL turn, so auditing a button press as `main` claims the
+	// assistant decided to do it; ActorSystem is the engine's own bookkeeping, which
+	// erases the person entirely. A reader of the audit log has to be able to tell
+	// "the model retired this timer" from "the user did", because only one of those
+	// is something the model should be asked to explain.
+	//
+	// It is deliberately NOT a dispatch actor. Nothing routes a tool call through the
+	// registry under this actor, and it must never be added to the interactive set in
+	// dispatch.go: an actor that both bypasses confirmation and is named "user" is a
+	// standing invitation to treat any host-originated call as pre-approved. Host
+	// surfaces call the shared operation in internal/timers directly and record the
+	// audit row themselves; confirmation is the HOST's job, in its own dialog, where
+	// the human it is asking is actually present.
+	ActorUser ToolActor = "user"
 )
 
 // WakeActorID is the well-known grant actor id every daemon wake turn

@@ -1,6 +1,9 @@
 package host
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestSeverityForResult(t *testing.T) {
 	cases := map[AuditResult]AuditSeverity{
@@ -27,20 +30,20 @@ func TestSeverityForResult(t *testing.T) {
 }
 
 func TestParseDescriptor(t *testing.T) {
-	good := `{"sessionId":"s1","windowId":7,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`
+	good := `{"sessionId":"s1","windowId":7,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":4}`
 	d, err := ParseDescriptor([]byte(good))
 	if err != nil {
 		t.Fatalf("good descriptor errored: %v", err)
 	}
-	if d.SessionID != "s1" || d.WindowID != 7 || d.ProtocolVersion != 3 {
+	if d.SessionID != "s1" || d.WindowID != 7 || d.ProtocolVersion != ProtocolVersion {
 		t.Fatalf("bad parse: %+v", d)
 	}
 
 	// Missing a required field → error.
 	bad := []string{
-		`{"windowId":7,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`,              // no sessionId
-		`{"sessionId":"s","projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`,           // no windowId
-		`{"sessionId":"s","windowId":"7","projectId":"p","cwd":"/x","tier":"s","protocolVersion":3}`, // windowId string
+		`{"windowId":7,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":4}`,              // no sessionId
+		`{"sessionId":"s","projectId":"p","cwd":"/x","tier":"system","protocolVersion":4}`,           // no windowId
+		`{"sessionId":"s","windowId":"7","projectId":"p","cwd":"/x","tier":"s","protocolVersion":4}`, // windowId string
 		`not json`,
 	}
 	for _, b := range bad {
@@ -50,7 +53,7 @@ func TestParseDescriptor(t *testing.T) {
 	}
 
 	// resumeSessionId optional + echoed.
-	r, err := ParseDescriptor([]byte(`{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3,"resumeSessionId":"old"}`))
+	r, err := ParseDescriptor([]byte(`{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":4,"resumeSessionId":"old"}`))
 	if err != nil || r.ResumeSessionID != "old" {
 		t.Fatalf("resume parse: %+v err=%v", r, err)
 	}
@@ -85,18 +88,24 @@ func TestParseCommand(t *testing.T) {
 	}
 }
 
-// Fix 5: a fractional protocolVersion (2.9) must NOT truncate to 2 and slip past
+// Fix 5: a fractional protocolVersion must NOT truncate to its floor and slip past
 // the == ProtocolVersion check — it is a real mismatch / malformed peer.
+//
+// Both fixtures are built from ProtocolVersion rather than written as literals, so
+// the next protocol bump cannot leave this test asserting against a version the
+// engine has stopped accepting (which is how it read after the v3 → v4 bump).
 func TestParseDescriptorRejectsFractionalProtocolVersion(t *testing.T) {
-	bad := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3.9}`
-	if _, err := ParseDescriptor([]byte(bad)); err == nil {
-		t.Fatal("fractional protocolVersion 3.9 must be rejected, not truncated to 3")
+	desc := func(v string) []byte {
+		return []byte(`{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":` + v + `}`)
 	}
-	// A whole float (3.0) is still accepted (equals its integer).
-	whole := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3.0}`
-	d, err := ParseDescriptor([]byte(whole))
-	if err != nil || d.ProtocolVersion != 3 {
-		t.Fatalf("3.0 should parse to 3: %+v err=%v", d, err)
+	fractional := fmt.Sprintf("%d.9", ProtocolVersion)
+	if _, err := ParseDescriptor(desc(fractional)); err == nil {
+		t.Fatalf("fractional protocolVersion %s must be rejected, not truncated", fractional)
+	}
+	// A whole float (N.0) is still accepted (equals its integer).
+	d, err := ParseDescriptor(desc(fmt.Sprintf("%d.0", ProtocolVersion)))
+	if err != nil || d.ProtocolVersion != ProtocolVersion {
+		t.Fatalf("%d.0 should parse to %d: %+v err=%v", ProtocolVersion, ProtocolVersion, d, err)
 	}
 }
 

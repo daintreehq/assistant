@@ -120,7 +120,7 @@ func TestAnUndeliverableControlFrameFailsTheSession(t *testing.T) {
 // mismatch turned a resume request into "" — indistinguishable from "start fresh" — so a
 // host that asked to resume got a blank session and no indication it had been discarded.
 func TestResumeSessionIDIsTyped(t *testing.T) {
-	base := `{"sessionId":"ses_1","windowId":7,"projectId":"proj_1","cwd":"/tmp","tier":"system","protocolVersion":3`
+	base := `{"sessionId":"ses_1","windowId":7,"projectId":"proj_1","cwd":"/tmp","tier":"system","protocolVersion":4`
 
 	d, err := ParseDescriptor([]byte(base + `,"resumeSessionId":"ses_prev"}`))
 	if err != nil || d.ResumeSessionID != "ses_prev" {
@@ -238,17 +238,17 @@ func TestNothingFollowsHostShutdown(t *testing.T) {
 // the field that check exists to compare.
 func TestBlankRequiredDescriptorFieldsAreRejected(t *testing.T) {
 	for _, body := range []string{
-		`{"sessionId":"","windowId":7,"projectId":"p","cwd":"/tmp","tier":"system","protocolVersion":3}`,
-		`{"sessionId":"s","windowId":7,"projectId":"   ","cwd":"/tmp","tier":"system","protocolVersion":3}`,
-		`{"sessionId":"s","windowId":7,"projectId":"p","cwd":"","tier":"system","protocolVersion":3}`,
-		`{"sessionId":"s","windowId":7,"projectId":"p","cwd":"/tmp","tier":"\t","protocolVersion":3}`,
+		`{"sessionId":"","windowId":7,"projectId":"p","cwd":"/tmp","tier":"system","protocolVersion":4}`,
+		`{"sessionId":"s","windowId":7,"projectId":"   ","cwd":"/tmp","tier":"system","protocolVersion":4}`,
+		`{"sessionId":"s","windowId":7,"projectId":"p","cwd":"","tier":"system","protocolVersion":4}`,
+		`{"sessionId":"s","windowId":7,"projectId":"p","cwd":"/tmp","tier":"\t","protocolVersion":4}`,
 	} {
 		if _, err := ParseDescriptor([]byte(body)); err == nil {
 			t.Errorf("a blank required field was accepted: %s", body)
 		}
 	}
 	// A fully-populated descriptor still parses.
-	ok := `{"sessionId":"s","windowId":7,"projectId":"p","cwd":"/tmp","tier":"system","protocolVersion":3}`
+	ok := `{"sessionId":"s","windowId":7,"projectId":"p","cwd":"/tmp","tier":"system","protocolVersion":4}`
 	if _, err := ParseDescriptor([]byte(ok)); err != nil {
 		t.Errorf("a valid descriptor was rejected: %v", err)
 	}

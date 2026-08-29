@@ -132,7 +132,7 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 		CheckConsistency: a.checkRunbookStepConsistency,
 	})...)
 	all = append(all, timer.Tools(timer.Deps{
-		Store: timerStoreAdapter{s: a.Store},
+		Store: timerStoreAdapter{Store: a.Store},
 	})...)
 	all = append(all, watcher.Tools(watcher.Deps{
 		Store: watcherStoreAdapter{s: a.Store},

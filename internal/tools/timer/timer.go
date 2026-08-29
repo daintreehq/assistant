@@ -8,11 +8,13 @@ package timer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/daintreehq/assistant/internal/domain"
+	"github.com/daintreehq/assistant/internal/timers"
 	"github.com/daintreehq/assistant/internal/tools"
 )
 
@@ -24,12 +26,15 @@ const (
 )
 
 // Store is the slice of storage the timer tools touch.
+//
+// It embeds timers.Store so this tool family and every host surface retire a
+// timer through the SAME operation (internal/timers.Cancel). Cancelling is two
+// writes — retire the schedule row, revoke the grants scoped to it — and a
+// second implementation of that pair is how a live grant ends up outliving the
+// timer it was minted for.
 type Store interface {
-	InsertTimer(ctx context.Context, rec domain.TimerRecord) (string, error)
-	ListTimers(ctx context.Context, status string) ([]domain.TimerRecord, error)
-	GetTimer(ctx context.Context, id string) (*domain.TimerRecord, error)
-	UpdateTimerStatus(ctx context.Context, id, status string) error
-	RevokeGrantsByActor(ctx context.Context, actorID string) (int, error)
+	timers.Store
+	InsertTimer(rec domain.TimerRecord) (string, error)
 }
 
 // Deps is the dependency set for the timer family.
@@ -248,7 +253,7 @@ func newScheduleTool(deps Deps) *tools.Tool {
 
 			id := rec.ID
 			if deps.Store != nil {
-				newID, err := deps.Store.InsertTimer(context.Background(), rec)
+				newID, err := deps.Store.InsertTimer(rec)
 				if err != nil {
 					return tools.Fail(domain.CodeInternal, "timer.schedule: "+err.Error())
 				}
@@ -280,7 +285,7 @@ func newListTool(deps Deps) *tools.Tool {
 			if deps.Store == nil {
 				return tools.Ok("No timers (storage unavailable).", map[string]any{"timers": []any{}})
 			}
-			rows, err := deps.Store.ListTimers(context.Background(), "scheduled")
+			rows, err := deps.Store.ListTimers(timers.StatusScheduled)
 			if err != nil {
 				return tools.Fail(domain.CodeInternal, "timer.list: "+err.Error())
 			}
@@ -338,23 +343,32 @@ func newCancelTool(deps Deps) *tools.Tool {
 			if deps.Store == nil {
 				return tools.Fail(codeTimerNotFound, "timer.cancel: no such timer: "+a.ID, tools.Unrecoverable())
 			}
-			existing, err := deps.Store.GetTimer(context.Background(), a.ID)
-			if err != nil || existing == nil {
+			// The retire-and-revoke pair lives in internal/timers so this tool and the
+			// host's own cancel surface cannot drift on it. A cascade that only one of
+			// them performed would leave standing unattended authority behind whichever
+			// route the user happened to take.
+			out, err := timers.Cancel(deps.Store, a.ID, domain.NowMS())
+			if errors.Is(err, timers.ErrNotFound) {
 				return tools.Fail(codeTimerNotFound, "timer.cancel: no such timer: "+a.ID, tools.Unrecoverable())
 			}
-			if err := deps.Store.UpdateTimerStatus(context.Background(), a.ID, "cancelled"); err != nil {
+			if err != nil {
 				return tools.Fail(domain.CodeInternal, "timer.cancel: "+err.Error())
 			}
-			// A cancelled timer keeps no grant — revoke any it held, and REPORT how many.
-			// The cascade used to be invisible (the count was dropped on the floor), so the
-			// model's only record of it was a sentence in this description; it would then
-			// revoke the grant itself and read the resulting error as a real fault.
-			revokedGrants, revokeErr := deps.Store.RevokeGrantsByActor(context.Background(), a.ID)
+			revokedGrants, revokeErr := out.RevokedGrants, out.GrantRevokeErr
 			result := map[string]any{
 				"timerId": a.ID, "status": "cancelled",
 				"revokedGrants": revokedGrants, "grantRevokeFailed": revokeErr != nil,
 			}
 			summary := "Cancelled timer " + a.ID + "."
+			if out.AlreadyInactive {
+				// Saying "cancelled" here would be a lie the model then repeats to the
+				// user: the timer had already run or been retired, so this call stopped
+				// nothing. The grant sweep above still ran, which is the part that can
+				// genuinely have work left to do.
+				result["status"] = out.PriorStatus
+				result["alreadyInactive"] = true
+				summary = "Timer " + a.ID + " was already " + out.PriorStatus + " — nothing to cancel."
+			}
 			if revokeErr != nil {
 				// The timer row is already cancelled, so failing the whole call would be the
 				// bigger lie. But a bare revokedGrants:0 reads as "nothing to clean up" when a

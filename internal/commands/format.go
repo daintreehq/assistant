@@ -225,10 +225,11 @@ func ParseAuditExportArgs(args []string) AuditExportResult {
 		case "actor":
 			act := domain.ToolActor(v)
 			switch act {
-			case domain.ActorMain, domain.ActorWatcher, domain.ActorTimer, domain.ActorWorkflow, domain.ActorSystem, domain.ActorWake:
+			case domain.ActorMain, domain.ActorWatcher, domain.ActorTimer, domain.ActorWorkflow,
+				domain.ActorSystem, domain.ActorWake, domain.ActorUser:
 				// Valid actor.
 			default:
-				res.Error = "Unknown audit actor '" + v + "'. Use main|watcher|timer|workflow|system|wake."
+				res.Error = "Unknown audit actor '" + v + "'. Use main|watcher|timer|workflow|system|wake|user."
 				return res
 			}
 			res.Filters.Actor = &act

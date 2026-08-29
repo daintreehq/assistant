@@ -65,7 +65,7 @@ func TestHostCarriesConversationClearedOntoTheWire(t *testing.T) {
 		factory := func(context.Context, AppParams) (App, error) {
 			return &fakeApp{command: CommandOutcome{Text: "x", ConversationCleared: cleared}}, nil
 		}
-		desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":3}`
+		desc := `{"sessionId":"s","windowId":1,"projectId":"p","cwd":"/x","tier":"system","protocolVersion":4}`
 		lines := driveHost(t, factory, []string{
 			desc,
 			`{"type":"command","sessionId":"s","line":"/clear"}`,

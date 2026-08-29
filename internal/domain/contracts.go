@@ -11,6 +11,15 @@ type EventTarget struct {
 	// AsyncInvocationID links a completion event back to its async_invocations
 	// ledger row (asy_…), so the wake reactor and async.list can cross-reference.
 	AsyncInvocationID string `json:"asyncInvocationId,omitempty"`
+	// TimerID links an event back to the timer that produced it (tmr_…), so a
+	// surface can join outcomes to the schedule row STRUCTURALLY instead of parsing
+	// the dedupe key. The key is not a substitute: it is "timer:<id>" for a fire but
+	// "denied:timer:<id>" for a blocked dispatch, and parsing either is a promise
+	// about a string nothing else guarantees.
+	//
+	// Rides in the existing targetJson blob, so it needs no schema migration — a row
+	// written before this field simply decodes with it empty.
+	TimerID string `json:"timerId,omitempty"`
 }
 
 // RecommendedAction is a suggested follow-up tool call surfaced on a queue event.

@@ -15,7 +15,7 @@ agent, or a person at a shell.
 | `--json <prompt>` | one | JSONL on stdout | scripting, CI gates, one-shot queries |
 | `--json --multi-turn` | many | JSONL on stdout | **testing a runbook that needs a short conversation** |
 | the line REPL | many | plain lines | a person at a shell or over SSH (`--classic` is a deprecated no-op) |
-| `host --stdio` | many | NDJSON, protocol v3 | you are Daintree, or reimplementing it |
+| `host --stdio` | many | NDJSON, protocol v4 | you are Daintree, or reimplementing it |
 
 If the caller is itself an agent — Claude Code, most immediately — reach for
 `mcp --stdio` first. `host --stdio` is Daintree's own contract — the first stdin line must be a valid
