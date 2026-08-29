@@ -224,6 +224,52 @@ func QueryStatus(ctx context.Context, stateDir string) (*ipc.StatusReply, error)
 	return &rep, nil
 }
 
+// QueryTimers asks the project's daemon what is scheduled and what recently fired.
+// (nil, ipc.ErrNoDaemon) when no daemon is running.
+//
+// This is the answer for a project whose assistant is NOT open. While a session is
+// attached it holds the owner lease and the daemon has no App to read from, so it
+// answers with an error naming that — a caller with both routes available should
+// prefer the attached session and fall back here.
+func QueryTimers(ctx context.Context, stateDir string) (*ipc.TimersReply, error) {
+	socketPath, err := ipc.SocketPathFor(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	client, err := ipc.Dial(socketPath, 2*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+	var rep ipc.TimersReply
+	if err := client.Call(ctx, ipc.ReqTimers, nil, &rep); err != nil {
+		return nil, err
+	}
+	return &rep, nil
+}
+
+// CancelTimer asks the project's daemon to retire one timer and revoke the
+// automation grants scoped to it. ipc.ErrNoDaemon when none is running.
+//
+// The CALLER is responsible for having confirmed it with a human: this is a D1
+// mutation and the socket carries no confirmation channel.
+func CancelTimer(ctx context.Context, stateDir, timerID string) (*ipc.TimerCancelReply, error) {
+	socketPath, err := ipc.SocketPathFor(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	client, err := ipc.Dial(socketPath, 2*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+	var rep ipc.TimerCancelReply
+	if err := client.Call(ctx, ipc.ReqTimerCancel, ipc.TimerCancelRequest{TimerID: timerID}, &rep); err != nil {
+		return nil, err
+	}
+	return &rep, nil
+}
+
 // RequestShutdown asks the project's daemon to exit. ipc.ErrNoDaemon when none
 // is running.
 func RequestShutdown(ctx context.Context, stateDir string) error {

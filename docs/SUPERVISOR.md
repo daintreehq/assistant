@@ -188,3 +188,30 @@ What it refuses is a session that ENDED, which is not the same as one that never
   `acquireOwnership` used by every App-creating path.
 - `internal/e2e/daemon_test.go` — the crash/restart matrix (kill -9, publish-retry,
   revocation, grants, attach conflicts, idle exit).
+
+## Timers over the control socket
+
+`timers` and `timer_cancel` let a caller read and retire a project's durable timers
+while **no assistant is attached** — the state the timer feature exists for and the
+one nothing else can reach. Once the panel is closed the daemon holds the project
+lease, so it is the only process that can answer "what is still going to happen".
+
+Both are served from the daemon's current `*app.App` through `internal/timers`, the
+same operation the model's `timer.cancel` tool and the embedded host use. That
+sharing is the point: cancelling is two writes — retire the schedule row, revoke the
+automation grants scoped to that timer — and a second implementation of the pair is
+how a live grant ends up outliving the actor it was minted for.
+
+A daemon that has **yielded** (an attached session took the lease) has no App and
+answers with an error naming that, rather than opening `state.db` behind the
+lock-holder's back. A caller with both routes should prefer the attached session and
+fall back to the socket.
+
+Neither request bumps `ProtocolVersion`, for the reason spelled out on
+`ReqAuthChanged`: the server rejects a version mismatch outright, so a bump would
+strand an upgraded CLI behind a still-running old daemon with no supported way out.
+An old daemon answers "unknown request type", which a caller reports as the feature
+being unavailable — honest, and recoverable.
+
+The reply carries the same safe view the host wire does: the tool's NAME and not its
+arguments, and the timer's title and not its reminder body.

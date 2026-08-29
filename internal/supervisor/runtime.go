@@ -22,6 +22,7 @@ package supervisor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,6 +38,7 @@ import (
 	"github.com/daintreehq/assistant/internal/ipc"
 	"github.com/daintreehq/assistant/internal/mcp"
 	"github.com/daintreehq/assistant/internal/redact"
+	"github.com/daintreehq/assistant/internal/timers"
 )
 
 // Timing defaults. Test seams override via Options.
@@ -654,6 +656,16 @@ func (r *Runtime) HandleRequest(ctx context.Context, req ipc.Request, conn *ipc.
 	case ipc.ReqStatus:
 		return okResponse(r.statusReply())
 
+	case ipc.ReqTimers:
+		return r.timersReply()
+
+	case ipc.ReqTimerCancel:
+		var c ipc.TimerCancelRequest
+		if err := json.Unmarshal(req.Payload, &c); err != nil {
+			return errResponse("malformed timer_cancel payload")
+		}
+		return r.cancelTimerReply(c.TimerID)
+
 	case ipc.ReqCredentials:
 		var c ipc.Credentials
 		if err := json.Unmarshal(req.Payload, &c); err != nil {
@@ -813,6 +825,96 @@ func (r *Runtime) ConnClosed(conn *ipc.ServerConn) {
 }
 
 // ---- helpers ----
+
+// timersReply answers ReqTimers from the App this daemon currently holds.
+//
+// A daemon with no App is one that has YIELDED — an attached session took the owner
+// lease and is now the process that can answer. Saying so is the whole point: the
+// alternative is opening state.db behind the lock-holder's back, which duplicates
+// the schema across a process boundary and races the writes the other process is
+// making. The caller is expected to route to the attached session instead.
+func (r *Runtime) timersReply() ipc.Response {
+	r.mu.Lock()
+	a := r.app
+	r.mu.Unlock()
+	if a == nil {
+		return errResponse("this daemon is not holding the project — ask the attached session")
+	}
+	views, err := timers.List(a.Store, domain.NowMS())
+	if err != nil {
+		return errResponse("could not read the timers: " + err.Error())
+	}
+	return okResponse(ipc.TimersReply{
+		Timers:   views,
+		Outcomes: timerOutcomes(a),
+		TakenAt:  domain.NowMS(),
+	})
+}
+
+// timerOutcomeLimit bounds the outcome list on this socket, matching the host's.
+const timerOutcomeLimit = 40
+
+// timerOutcomes reads what fired timers did off the attention queue, joined on the
+// timer id the scheduler stamps onto every event a fire publishes.
+func timerOutcomes(a *app.App) []ipc.TimerOutcome {
+	if a.Store == nil {
+		return nil
+	}
+	limit := timerOutcomeLimit
+	// Resolved rows included, and `info` included: a SUCCESSFUL timer publishes at
+	// info, so filtering to attention-and-above would report only the failures.
+	evs, err := a.Store.ListEvents(domain.QueueDigestOptions{MaxItems: &limit, IncludeResolved: true})
+	if err != nil {
+		return nil
+	}
+	out := make([]ipc.TimerOutcome, 0, len(evs))
+	for i := range evs {
+		e := &evs[i]
+		if e.Source != domain.SourceTimer || e.Target == nil || e.Target.TimerID == "" {
+			continue
+		}
+		row := ipc.TimerOutcome{
+			EventID: e.ID, TimerID: e.Target.TimerID, Severity: string(e.Severity),
+			Title: e.Title, Summary: e.Summary, CreatedAt: e.CreatedAt, Count: e.Count,
+		}
+		if e.UpdatedAt != nil {
+			row.UpdatedAt = *e.UpdatedAt
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// cancelTimerReply answers ReqTimerCancel through the SAME operation the model's
+// tool and the embedded host use, so a timer retired over this socket revokes its
+// grants exactly like one retired anywhere else.
+func (r *Runtime) cancelTimerReply(timerID string) ipc.Response {
+	if strings.TrimSpace(timerID) == "" {
+		return errResponse("timer_cancel needs a timerId")
+	}
+	r.mu.Lock()
+	a := r.app
+	r.mu.Unlock()
+	if a == nil {
+		return errResponse("this daemon is not holding the project — ask the attached session")
+	}
+	out, err := timers.Cancel(a.Store, timerID, domain.NowMS())
+	if errors.Is(err, timers.ErrNotFound) {
+		return errResponse("no timer with id " + timerID)
+	}
+	if err != nil {
+		return errResponse("could not cancel the timer: " + err.Error())
+	}
+	return okResponse(ipc.TimerCancelReply{
+		TimerID:           timerID,
+		Cancelled:         !out.AlreadyInactive && !out.Contended,
+		AlreadyInactive:   out.AlreadyInactive,
+		PriorStatus:       out.PriorStatus,
+		RevokedGrants:     out.RevokedGrants,
+		GrantRevokeFailed: out.GrantRevokeErr != nil,
+		Contended:         out.Contended,
+	})
+}
 
 func (r *Runtime) statusReply() ipc.StatusReply {
 	r.mu.Lock()

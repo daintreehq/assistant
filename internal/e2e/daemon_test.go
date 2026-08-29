@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/daintreehq/assistant/internal/ipc"
 	"github.com/daintreehq/assistant/internal/storage"
 	"github.com/daintreehq/assistant/internal/supervisor"
+	"github.com/daintreehq/assistant/internal/timers"
 )
 
 // daemonHarness runs the built binary's `daemon` subcommand as a real detached-
@@ -583,6 +585,108 @@ func TestDaemonTimerFiresDetached(t *testing.T) {
 			t.Fatalf("timer event missing from inbox: %+v", evs)
 		}
 	})
+}
+
+// TestDaemonServesAndCancelsTimersOverItsSocket: the detached case end to end.
+//
+// This is the state the whole timer feature exists for and the one Daintree cannot
+// reach any other way — the assistant is closed, the daemon holds the project lease,
+// and a durable timer is still counting down. Reading state.db from outside would
+// duplicate the schema across a process boundary and race the writes the daemon is
+// making, so the socket is the only honest route.
+func TestDaemonServesAndCancelsTimersOverItsSocket(t *testing.T) {
+	if raceEnabled {
+		t.Skip("subprocess test adds no race coverage")
+	}
+	bin := buildBinary(t)
+	backend := newFakeBackend(t, sseRound{contentTokens: []string{"ok"}})
+	dt := newScriptableMCP(t)
+	stateDir, env := newDaemonEnv(t, backend.baseURL(), dt.url(), "tok-1")
+
+	// Far future so it cannot fire mid-test, and a live grant so the cancel has a
+	// real cascade to perform rather than a no-op to report.
+	seedStore(t, stateDir, func(s *storage.Store) {
+		rec, err := s.InsertTimer(domain.TimerRecord{
+			ID: "tmr_socket", Title: "Nightly deploy check",
+			FireAt:      domain.NowMS() + 24*60*60*1000,
+			PayloadType: "call_safe_tool",
+			PayloadJson: `{"type":"call_safe_tool","toolCall":{"toolName":"terminal.sendCommand","args":{"secret":"NEVER_ON_THE_WIRE"}}}`,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.InsertGrant(domain.AutomationGrantRecord{
+			ActorID: rec.ID, ActorType: domain.GrantActorTimer,
+			AllowedToolNamesJson: strPtr(`["terminal.sendCommand"]`),
+			ExpiresAt:            domain.NowMS() + 24*60*60*1000,
+			MaxUses:              2, UsesRemaining: 2, Source: domain.GrantSourceLocal,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	h := startDaemon(t, bin, stateDir, env)
+	h.waitStatus("supervising", func(st ipc.StatusReply) bool { return st.State == ipc.StateSupervising })
+	defer h.stop()
+
+	ctx := context.Background()
+	listed, err := supervisor.QueryTimers(ctx, stateDir)
+	if err != nil {
+		t.Fatalf("QueryTimers: %v", err)
+	}
+	if len(listed.Timers) != 1 || listed.Timers[0].ID != "tmr_socket" {
+		t.Fatalf("want the scheduled timer, got %+v", listed.Timers)
+	}
+	view := listed.Timers[0]
+	if view.ToolName != "terminal.sendCommand" || view.PayloadKind != timers.KindToolCall {
+		t.Errorf("the row must describe what it will do, got %+v", view)
+	}
+	// The grant count is what a cancel confirmation quotes, so it has to survive the
+	// socket rather than being something only the embedded host can see.
+	if view.LiveGrants != 1 {
+		t.Errorf("liveGrants = %d, want 1", view.LiveGrants)
+	}
+	// The payload's ARGUMENTS never cross the boundary — same rule as the host wire.
+	if blob, _ := json.Marshal(listed); strings.Contains(string(blob), "NEVER_ON_THE_WIRE") {
+		t.Error("tool arguments must not travel on the control socket")
+	}
+
+	cancelled, err := supervisor.CancelTimer(ctx, stateDir, "tmr_socket")
+	if err != nil {
+		t.Fatalf("CancelTimer: %v", err)
+	}
+	if !cancelled.Cancelled || cancelled.RevokedGrants != 1 {
+		t.Fatalf("want a retired timer with its grant revoked, got %+v", cancelled)
+	}
+
+	// It really happened in the store, not just in the reply.
+	after, err := supervisor.QueryTimers(ctx, stateDir)
+	if err != nil {
+		t.Fatalf("QueryTimers after cancel: %v", err)
+	}
+	if len(after.Timers) != 0 {
+		t.Fatalf("the timer should be gone, got %+v", after.Timers)
+	}
+	seedStore(t, stateDir, func(s *storage.Store) {
+		rec, err := s.GetTimer("tmr_socket")
+		if err != nil || rec == nil || rec.Status != "cancelled" {
+			t.Fatalf("timer row: %+v err=%v", rec, err)
+		}
+		live, err := s.ListGrants("tmr_socket", domain.NowMS())
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The half that matters: a grant outliving the timer it was scoped to is
+		// standing unattended authority with no actor left to justify it.
+		if len(live) != 0 {
+			t.Fatalf("the cancel must revoke the timer's grants, %d still live", len(live))
+		}
+	})
+
+	// An id nothing holds is an error, not a silent success.
+	if _, err := supervisor.CancelTimer(ctx, stateDir, "tmr_nope"); err == nil {
+		t.Error("cancelling an unknown timer should fail")
+	}
 }
 
 // TestDaemonIdleExit: with nothing to supervise the daemon exits on its own

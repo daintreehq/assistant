@@ -1,6 +1,10 @@
 package ipc
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/daintreehq/assistant/internal/timers"
+)
 
 // ProtocolVersion versions the daemon control protocol. Separate from
 // host.ProtocolVersion (that one is byte-coupled to Daintree's embedded-host
@@ -32,6 +36,25 @@ const (
 	ReqCredentials = "credentials"
 	// ReqShutdown asks the daemon process to exit cleanly.
 	ReqShutdown = "shutdown"
+	// ReqTimers lists the project's scheduled timers and what recently-fired ones
+	// did. Never mutates.
+	//
+	// It is on this socket because a timer OUTLIVES the assistant: once the panel is
+	// gone the daemon is the only process holding the project lease, and it is the
+	// only thing that can answer "what is still going to happen". The alternative —
+	// a caller opening state.db behind the lock-holder's back — duplicates the schema
+	// across a process boundary and races the writes the daemon is making.
+	ReqTimers = "timers"
+	// ReqTimerCancel retires one timer on a human's behalf, revoking the automation
+	// grants scoped to it. The one MUTATION on this socket, and it is here for the
+	// same reason: the daemon owns the store, so it has to be the one to write.
+	//
+	// Neither request bumps ProtocolVersion, for the reason spelled out on
+	// ReqAuthChanged: the server rejects a version mismatch outright, so a bump would
+	// strand an upgraded CLI behind a still-running old daemon with no way out. An
+	// old daemon answers "unknown request type", which a caller reports as the
+	// feature being unavailable — the honest answer, and a recoverable one.
+	ReqTimerCancel = "timer_cancel"
 	// ReqAuthChanged tells the daemon the account credential changed, carrying only the
 	// new revision marker — NEVER a token.
 	//
@@ -135,6 +158,46 @@ type AttachReply struct {
 	OwnerBusy    bool `json:"ownerBusy"`
 	OwnerPid     int  `json:"ownerPid,omitempty"`
 	WakeInFlight bool `json:"wakeInFlight"`
+}
+
+// TimersReply is the ReqTimers payload: the same rows the embedded host serves, so
+// a caller that talks to both cannot be told two different things.
+type TimersReply struct {
+	Timers   []timers.View  `json:"timers"`
+	Outcomes []TimerOutcome `json:"outcomes"`
+	TakenAt  int64          `json:"takenAtMs"`
+}
+
+// TimerOutcome is what one fired timer did, read off the attention queue.
+type TimerOutcome struct {
+	EventID   string `json:"eventId"`
+	TimerID   string `json:"timerId"`
+	Severity  string `json:"severity"`
+	Title     string `json:"title"`
+	Summary   string `json:"summary"`
+	CreatedAt int64  `json:"createdAtMs"`
+	UpdatedAt int64  `json:"updatedAtMs"`
+	Count     int    `json:"count"`
+}
+
+// TimerCancelRequest is the ReqTimerCancel payload.
+type TimerCancelRequest struct {
+	TimerID string `json:"timerId"`
+}
+
+// TimerCancelReply reports what the cancel actually did. Mirrors the embedded host's
+// outcome field for field, because a caller should not have to care which transport
+// answered it.
+type TimerCancelReply struct {
+	TimerID           string `json:"timerId"`
+	Cancelled         bool   `json:"cancelled"`
+	AlreadyInactive   bool   `json:"alreadyInactive"`
+	PriorStatus       string `json:"priorStatus"`
+	RevokedGrants     int    `json:"revokedGrants"`
+	GrantRevokeFailed bool   `json:"grantRevokeFailed"`
+	// Contended means the scheduler fired it out from under the cancel and it is
+	// live again — nothing was retired, and the honest answer is "try again".
+	Contended bool `json:"contended"`
 }
 
 // Credentials is the ReqCredentials payload (also embedded in AttachRequest).
