@@ -498,9 +498,11 @@ func (h *Host) reactWake() {
 			if h.wakeRetries == nil {
 				h.wakeRetries = agent.RetryLedger{}
 			}
-			if h.wakeRetries.TakeRetry(events) {
-				// Requeue for ONE retry (unshift — preserve order ahead of new events).
-				h.pendingWake = append(append([]domain.QueueEvent{}, events...), h.pendingWake...)
+			// Requeue ONLY what still has a retry, so an exhausted event cannot ride
+			// back in on a neighbour's budget.
+			if retry := h.wakeRetries.TakeRetry(events); len(retry) > 0 {
+				// Unshift — preserve order ahead of new events.
+				h.pendingWake = append(retry, h.pendingWake...)
 			}
 			h.turnMu.Unlock()
 			return

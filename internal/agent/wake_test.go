@@ -753,29 +753,39 @@ func TestRetryLedgerIsPerEvent(t *testing.T) {
 	a := []domain.QueueEvent{{ID: "evt_a"}}
 	b := []domain.QueueEvent{{ID: "evt_b"}}
 
-	if !ledger.TakeRetry(a) {
+	if len(ledger.TakeRetry(a)) != 1 {
 		t.Fatal("evt_a should get its first retry")
 	}
-	if ledger.TakeRetry(a) {
+	if len(ledger.TakeRetry(a)) != 0 {
 		t.Fatal("evt_a must not get a second retry")
 	}
-	if !ledger.TakeRetry(b) {
+	if len(ledger.TakeRetry(b)) != 1 {
 		t.Fatal("evt_b's retry must survive evt_a exhausting its own")
+	}
+
+	// A mixed burst returns ONLY the fresh member. Returning a yes/no let the caller
+	// requeue everything, so an exhausted event rode back in on a neighbour's budget —
+	// and a steady arrival of new events could extend one failure indefinitely.
+	mixed := ledger.TakeRetry([]domain.QueueEvent{{ID: "evt_a"}, {ID: "evt_c"}})
+	if len(mixed) != 1 || mixed[0].ID != "evt_c" {
+		t.Fatalf("only the unspent event may be requeued, got %+v", mixed)
 	}
 
 	// A settled event forgets its attempt, so a later delivery of the same id starts
 	// fresh rather than inheriting a spent one.
 	ledger.Done(a)
-	if !ledger.TakeRetry(a) {
+	if len(ledger.TakeRetry(a)) != 1 {
 		t.Fatal("a settled event must start fresh on a later delivery")
 	}
 }
 
 // An event with no id cannot be tracked; it must not silently consume the whole burst's
 // retry on everyone else's behalf.
-func TestRetryLedgerIgnoresEventsWithNoID(t *testing.T) {
+func TestRetryLedgerRetriesEventsWithNoID(t *testing.T) {
 	ledger := RetryLedger{}
-	if ledger.TakeRetry([]domain.QueueEvent{{ID: ""}}) {
-		t.Fatal("an unidentifiable event cannot claim a retry")
+	// An event with no id cannot have its attempts counted, so it is retried once on
+	// the same terms as anything else — losing it for want of an id would be worse.
+	if len(ledger.TakeRetry([]domain.QueueEvent{{ID: ""}})) != 1 {
+		t.Fatal("an unidentifiable event should still get a retry")
 	}
 }

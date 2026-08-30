@@ -138,9 +138,11 @@ func (r *Runtime) reactWake(ctx context.Context) {
 			if r.wakeRetries == nil {
 				r.wakeRetries = agent.RetryLedger{}
 			}
-			if r.wakeRetries.TakeRetry(events) {
-				// Requeue for ONE retry, ahead of anything that arrived meanwhile.
-				r.pendingWake = append(append([]domain.QueueEvent{}, events...), r.pendingWake...)
+			// Requeue ONLY what still has a retry, so an exhausted event cannot ride
+			// back in on a neighbour's budget.
+			if retry := r.wakeRetries.TakeRetry(events); len(retry) > 0 {
+				// Ahead of anything that arrived meanwhile.
+				r.pendingWake = append(retry, r.pendingWake...)
 			}
 			r.mu.Unlock()
 			r.setError("wake turn failed: " + firstLine(reply))

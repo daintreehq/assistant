@@ -100,20 +100,30 @@ func DedupeWakeEvents(incoming, pending []domain.QueueEvent) []domain.QueueEvent
 // tracks live attempts rather than growing for the life of the process.
 type RetryLedger map[string]struct{}
 
-// TakeRetry reports whether these events may be retried, and records that they have
-// been. True only while at least one of them has a retry left.
-func (l RetryLedger) TakeRetry(events []domain.QueueEvent) bool {
-	any := false
+// TakeRetry returns the subset of events that still have a retry, recording that they
+// have now used it. Empty ⇒ nothing may be requeued.
+//
+// It returns the SUBSET rather than a yes/no because the caller requeues what it is
+// given. A boolean meant "at least one of these is fresh", and the caller then requeued
+// the whole burst — so an event that had already exhausted its retry rode along on a
+// neighbour's, and a steady arrival of new events could extend one failing event's
+// attempts indefinitely.
+func (l RetryLedger) TakeRetry(events []domain.QueueEvent) []domain.QueueEvent {
+	var fresh []domain.QueueEvent
 	for _, e := range events {
 		if e.ID == "" {
+			// Unidentifiable, so its attempts cannot be counted. Retried once on the
+			// same terms as anything else rather than dropped, since the alternative is
+			// losing an event for want of an id.
+			fresh = append(fresh, e)
 			continue
 		}
 		if _, used := l[e.ID]; !used {
 			l[e.ID] = struct{}{}
-			any = true
+			fresh = append(fresh, e)
 		}
 	}
-	return any
+	return fresh
 }
 
 // Done forgets these events, so a later delivery of the same id starts fresh.

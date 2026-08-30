@@ -97,13 +97,16 @@ func startRepl(ctx context.Context, a *app.App) int {
 
 	a.ConnectMcp(base)
 	st := a.MCP.Status()
+	// Declared before the scheduler starts and shared with the prompt loop below: it is
+	// what keeps a due message and a typed line from becoming two turns at once.
+	var wakeMu sync.Mutex
+
 	// A scheduled MESSAGE runs here too, rather than being printed and forgotten.
 	//
 	// This surface had no wake reactor at all: the scheduler marked the event delivered,
 	// the REPL printed it, and the instruction the user had scheduled was never carried
 	// out by anybody — the exact silent-loss failure the whole feature exists to end.
 	// Everything else still just prints; only an instruction earns a turn.
-	var wakeMu sync.Mutex
 	a.StartScheduler(base, func(events []domain.QueueEvent) {
 		messages, notices := splitTimerMessages(events)
 		if len(notices) > 0 {
@@ -168,7 +171,14 @@ func startRepl(ctx context.Context, a *app.App) int {
 		case <-sigCh:
 		default:
 		}
+		// The SAME lock the wake reactor takes. Holding it on only one side was not
+		// serialization: whichever started first won, and the loser was rejected with
+		// ErrTurnInProgress — for a scheduled message that meant the scheduler had
+		// already marked it delivered and nothing in this owner would try again, and
+		// for the user it meant their typed line bouncing off a turn they could not see.
+		wakeMu.Lock()
 		err := runReplTurn(base, a, sigCh, line)
+		wakeMu.Unlock()
 		if base.Err() != nil {
 			break
 		}
@@ -414,8 +424,18 @@ func runReplWake(ctx context.Context, a *app.App, r *render.Renderer, e domain.Q
 	r.Line("")
 	r.Line(r.Magenta("◆ scheduled message due") + " " + r.Bold(e.Title))
 	prompt := agent.BuildWakePrompt([]domain.QueueEvent{e}, nil)
-	if _, err := a.Send(ctx, prompt, agent.SendOptions{IsWake: true, FromTimerMessage: true}); err != nil {
+	reply, err := a.Send(ctx, prompt, agent.SendOptions{IsWake: true, FromTimerMessage: true})
+	if err != nil {
 		r.Line(r.Gray("  the scheduled message could not be carried out: " + err.Error()))
+		return
+	}
+	// A nil error is NOT success. Send reports a model failure, a tool failure and a
+	// cancellation as sentinel REPLIES rather than errors, so resolving on err==nil
+	// alone closed the errand for a turn that had done nothing — and a closed errand is
+	// invisible to the boot recovery that would otherwise have delivered it again. The
+	// other two reactors test the sentinel; this one has to as well.
+	if agent.IsWakeFailureReply(reply) {
+		r.Line(r.Gray("  the scheduled message did not complete — it stays in the inbox"))
 		return
 	}
 	// Close the errand, exactly as the other reactors do, so it stops counting as
