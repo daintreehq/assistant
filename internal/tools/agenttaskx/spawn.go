@@ -151,22 +151,43 @@ func newSpawnForEditsTool(deps Deps) tools.Tool {
 		// to infer from the turn it is running in. Omitting worktreeId is the NORMAL,
 		// documented way to say "here" — and "here" is exactly what a timer firing
 		// hours later does not have, so the same omission that is right in a turn is
-		// unrunnable in a schedule. Caught here, the model is told while it can still
-		// ask worktree.list and fix the call; caught at fire time it is a dead row in
-		// a queue. Deliberately does NOT read the pin: a pin is a live, turn-scoped
-		// binding, and resolving one into a schedule would freeze a value that has no
-		// reason to still be true when the timer comes due.
-		PreflightUnattended: func(raw json.RawMessage) string {
+		// unrunnable in a schedule.
+		//
+		// So SUBSTITUTE THE PIN rather than refusing over it. This runs on the schedule
+		// path, inside the turn that is asking, where the pin is bound and holds the
+		// worktree the user is looking at — the same value spawn() itself would have used
+		// had the call been dispatched now instead of later. Refusing it sent the model
+		// away to read worktree.list and pass back a path, which froze the same value one
+		// round trip later with a guess laid on top about which entry was meant. The one
+		// genuinely unknowable case, an unbound pin, is still a refusal.
+		//
+		// Reading the pin FREEZES it for the rest of the turn, exactly as a spawn's own
+		// read does, and that is right here too: a turn that has scheduled work into a
+		// worktree has chosen one, and a later sibling must not land somewhere else.
+		PrepareUnattended: func(raw json.RawMessage) (json.RawMessage, string, string) {
 			var a spawnArgs
 			if err := json.Unmarshal(raw, &a); err != nil {
-				return ""
+				return nil, "", ""
 			}
 			if strings.TrimSpace(a.WorktreeID) != "" {
-				return ""
+				return nil, "", ""
 			}
-			return "it names no worktreeId, and a spawn that runs outside a turn cannot " +
-				"infer one — it will fail when it fires. Read worktree.list and pass " +
-				"worktreeId explicitly"
+			pinned := strings.TrimSpace(deps.pinnedWorktreeID())
+			if pinned == "" {
+				return nil, "", "it names no worktreeId, this turn is not anchored to a " +
+					"worktree, and a spawn that runs outside a turn cannot infer one — it " +
+					"would fail when it fires. Read worktree.list and pass worktreeId explicitly"
+			}
+			a.WorktreeID = pinned
+			// Re-encode through spawnArgs, which is lossless here: the args arriving on
+			// this path have already been through StrictDecoder, so they ARE canonical
+			// spawnArgs JSON and nothing survives the round trip that did not survive it.
+			repaired, err := json.Marshal(&a)
+			if err != nil {
+				return nil, "", ""
+			}
+			return repaired, "worktree " + pinned + " (this turn's, resolved now because a " +
+				"spawn cannot read one at fire time)", ""
 		},
 		Decode: tools.StrictDecoder(func() any { return &spawnArgs{} }),
 		Handle: func(ctx context.Context, raw json.RawMessage, tc *tools.ToolContext) tools.ToolResult {

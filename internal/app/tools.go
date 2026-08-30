@@ -269,11 +269,12 @@ func (a *App) agentTaskDeps() agenttaskx.Deps {
 	}
 }
 
-// prepareScheduledCall resolves a scheduled tool call to the name fire-time dispatch
-// will look up, and asks the tool whether these arguments could ever work with nobody
-// present. Returns ("", reason) to refuse, or (canonicalName, "") to allow.
+// prepareScheduledCall makes a scheduled tool call storable: it resolves the name
+// fire-time dispatch will look up, canonicalizes the arguments, and asks the tool to
+// fill in whatever it would have inferred from the turn — refusing only what none of
+// that could rescue.
 //
-// It runs THREE checks, in the order the fire-time path runs them, because each one is
+// It runs THREE steps, in the order the fire-time path runs them, because each one is
 // a way the old single check let a doomed timer through:
 //
 //  1. The name resolves to a registered tool. Dispatch looks up the exact internal
@@ -282,16 +283,24 @@ func (a *App) agentTaskDeps() agenttaskx.Deps {
 //     since a tool nobody could find raised no objection.
 //  2. The tool's own decoder accepts the arguments. A spawn with no taskPrompt, or a
 //     bad mode enum, is refused at fire time by the same Decode; running it here moves
-//     that refusal to where it can be acted on.
-//  3. The tool's unattended preflight, on the DECODED args, so it sees defaults and
-//     coercions exactly as the handler will.
+//     that refusal to where it can be acted on. Its canonical re-encoding is also what
+//     step 3 reads and what gets stored, so the row holds one spelling throughout.
+//  3. The tool's unattended PREPARE, on the DECODED args, so it sees defaults and
+//     coercions exactly as the handler will. This is the step that repairs rather than
+//     complains: a scheduled call is written inside a turn and runs without one, so
+//     anything the tool would have taken from "here" is captured now or never.
+//
+// Returning the repaired args (not the ones written) is the point. Bouncing an
+// incomplete call back to the model spends a round trip to be told a value this
+// process already held, and the model's own recovery would freeze that same value a
+// moment later with a guess about which one was meant.
 //
 // Resolved through the registry at CALL time, not at construction: this closure is
 // handed to the timer family while the registry is still being filled with the very
 // tools it will later look up.
-func (a *App) prepareScheduledCall(toolName string, args json.RawMessage) (string, string) {
+func (a *App) prepareScheduledCall(toolName string, args json.RawMessage) timer.ScheduledCall {
 	if a == nil || a.Registry == nil {
-		return toolName, ""
+		return timer.ScheduledCall{ToolName: toolName}
 	}
 	name := strings.TrimSpace(toolName)
 	tool := a.Registry.Get(name)
@@ -305,7 +314,7 @@ func (a *App) prepareScheduledCall(toolName string, args json.RawMessage) (strin
 		}
 	}
 	if tool == nil {
-		return "", fmt.Sprintf("no tool named %q is registered, so nothing would run when it fires", toolName)
+		return timer.ScheduledCall{Refusal: fmt.Sprintf("no tool named %q is registered, so nothing would run when it fires", toolName)}
 	}
 	if len(args) == 0 {
 		args = json.RawMessage("{}")
@@ -313,14 +322,19 @@ func (a *App) prepareScheduledCall(toolName string, args json.RawMessage) (strin
 	if tool.Decode != nil {
 		parsed, err := tool.Decode(args)
 		if err != nil {
-			return "", fmt.Sprintf("its arguments are not valid for %s: %s", name, err.Error())
+			return timer.ScheduledCall{Refusal: fmt.Sprintf("its arguments are not valid for %s: %s", name, err.Error())}
 		}
 		args = parsed
 	}
-	if tool.PreflightUnattended != nil {
-		if why := tool.PreflightUnattended(args); why != "" {
-			return "", why
+	prepared := timer.ScheduledCall{ToolName: name, Args: args}
+	if tool.PrepareUnattended != nil {
+		repaired, note, refusal := tool.PrepareUnattended(args)
+		if refusal != "" {
+			return timer.ScheduledCall{Refusal: refusal}
+		}
+		if len(repaired) > 0 {
+			prepared.Args, prepared.Note = repaired, note
 		}
 	}
-	return name, ""
+	return prepared
 }

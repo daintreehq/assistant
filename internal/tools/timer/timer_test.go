@@ -185,19 +185,20 @@ func TestCancelReportsCascadeOutcomeHonestly(t *testing.T) {
 // A payload the registry says can never run at fire time is refused AT SCHEDULE TIME,
 // and nothing is stored.
 //
-// This is the bug the preflight seam exists for: a timer-dispatched spawn that named
-// no worktree was accepted, reported back as "Scheduled.", and then failed on its only
-// firing into a queue row nobody had open. Refusing here is what puts the error in
-// front of the model while it can still fix the call.
+// This is the bug the seam exists for: a timer-dispatched spawn that named no worktree
+// was accepted, reported back as "Scheduled.", and then failed on its only firing into
+// a queue row nobody had open. The seam now REPAIRS most of those (see
+// TestScheduleStoresRepairedArgs); what is left here is the residue it cannot fix, and
+// that has to reach the model rather than being stored anyway.
 func TestScheduleRefusesAnUnrunnablePayload(t *testing.T) {
 	st := &memStore{}
 	var sawTool string
 	var sawArgs string
 	tool := find(Tools(Deps{
 		Store: st,
-		PrepareScheduledCall: func(name string, args json.RawMessage) (string, string) {
+		PrepareScheduledCall: func(name string, args json.RawMessage) ScheduledCall {
 			sawTool, sawArgs = name, string(args)
-			return "", "it names no worktreeId"
+			return ScheduledCall{Refusal: "it names no worktreeId"}
 		},
 	}), "timer.schedule")
 
@@ -232,9 +233,9 @@ func TestScheduleSkipsPreflightForAReminder(t *testing.T) {
 	st := &memStore{}
 	tool := find(Tools(Deps{
 		Store: st,
-		PrepareScheduledCall: func(n string, _ json.RawMessage) (string, string) {
+		PrepareScheduledCall: func(n string, _ json.RawMessage) ScheduledCall {
 			called = true
-			return n, "no"
+			return ScheduledCall{Refusal: "no"}
 		},
 	}), "timer.schedule")
 	res := tool.Handle(context.Background(),
@@ -265,11 +266,11 @@ func TestScheduleStoresTheCanonicalToolName(t *testing.T) {
 	st := &memStore{}
 	tool := find(Tools(Deps{
 		Store: st,
-		PrepareScheduledCall: func(name string, _ json.RawMessage) (string, string) {
+		PrepareScheduledCall: func(name string, _ json.RawMessage) ScheduledCall {
 			if name == "agentTask__spawnForEdits" {
-				return "agentTask.spawnForEdits", ""
+				return ScheduledCall{ToolName: "agentTask.spawnForEdits"}
 			}
-			return name, ""
+			return ScheduledCall{ToolName: name}
 		},
 	}), "timer.schedule")
 
@@ -285,15 +286,99 @@ func TestScheduleStoresTheCanonicalToolName(t *testing.T) {
 	}
 }
 
+// The repaired args are what gets STORED. This is the half that turns the seam from a
+// veto into a fix: the schedule path runs inside a turn and can supply what the fired
+// call will need, so a payload the model wrote incompletely is completed rather than
+// bounced back for a round trip that would arrive at the same values.
+func TestScheduleStoresRepairedArgs(t *testing.T) {
+	st := &memStore{}
+	tool := find(Tools(Deps{
+		Store: st,
+		PrepareScheduledCall: func(name string, _ json.RawMessage) ScheduledCall {
+			return ScheduledCall{
+				ToolName: name,
+				Args:     json.RawMessage(`{"title":"go","worktreeId":"/repo/pinned"}`),
+				Note:     "worktree /repo/pinned (this turn's)",
+			}
+		},
+	}), "timer.schedule")
+
+	res := tool.Handle(context.Background(),
+		json.RawMessage(`{"title":"spawn","delayMs":1000,"payload":`+
+			`{"type":"call_safe_tool","toolCall":{"toolName":"agentTask.spawnForEdits","args":{"title":"go"}}}}`),
+		&tools.ToolContext{})
+	if !res.Ok || len(st.inserted) != 1 {
+		t.Fatalf("expected a stored timer, got ok=%v inserted=%+v", res.Ok, st.inserted)
+	}
+	if !strings.Contains(st.inserted[0].PayloadJson, `"worktreeId":"/repo/pinned"`) {
+		t.Fatalf("the stored payload should carry the repaired args, got %s", st.inserted[0].PayloadJson)
+	}
+	// Repairing silently would hide which worktree was chosen until the timer fired.
+	// Saying it in the summary is what makes a wrong guess cheap to correct.
+	if !strings.Contains(res.Summary, "/repo/pinned") {
+		t.Fatalf("the summary should disclose what was resolved, got %q", res.Summary)
+	}
+}
+
+// A repair that cannot be read back is DROPPED, not stored half-applied: the args the
+// model wrote are the ones the rest of the checks passed on.
+func TestScheduleIgnoresUnreadableRepairedArgs(t *testing.T) {
+	st := &memStore{}
+	tool := find(Tools(Deps{
+		Store: st,
+		PrepareScheduledCall: func(name string, _ json.RawMessage) ScheduledCall {
+			return ScheduledCall{ToolName: name, Args: json.RawMessage(`not json`), Note: "nope"}
+		},
+	}), "timer.schedule")
+
+	res := tool.Handle(context.Background(),
+		json.RawMessage(`{"title":"spawn","delayMs":1000,"payload":`+
+			`{"type":"call_safe_tool","toolCall":{"toolName":"agentTask.spawnForEdits","args":{"title":"go"}}}}`),
+		&tools.ToolContext{})
+	if !res.Ok || len(st.inserted) != 1 {
+		t.Fatalf("expected a stored timer, got ok=%v inserted=%+v", res.Ok, st.inserted)
+	}
+	if !strings.Contains(st.inserted[0].PayloadJson, `"title":"go"`) {
+		t.Fatalf("the original args should survive an unusable repair, got %s", st.inserted[0].PayloadJson)
+	}
+	// Nothing was resolved, so nothing is claimed.
+	if strings.Contains(res.Summary, "Resolved for you") {
+		t.Fatalf("a dropped repair must not be announced, got %q", res.Summary)
+	}
+}
+
+// Nothing repaired ⇒ nothing announced. The clause is for a value the caller supplied
+// on the model's behalf, and a summary that says "Resolved for you:" after resolving
+// nothing trains the reader to skip the line that matters.
+func TestScheduleSaysNothingWhenNothingWasResolved(t *testing.T) {
+	tool := find(Tools(Deps{
+		Store: &memStore{},
+		PrepareScheduledCall: func(name string, args json.RawMessage) ScheduledCall {
+			return ScheduledCall{ToolName: name, Args: args}
+		},
+	}), "timer.schedule")
+
+	res := tool.Handle(context.Background(),
+		json.RawMessage(`{"title":"spawn","delayMs":1000,"payload":`+
+			`{"type":"call_safe_tool","toolCall":{"toolName":"agentTask.spawnForEdits","args":{"worktreeId":"/w"}}}}`),
+		&tools.ToolContext{})
+	if !res.Ok {
+		t.Fatalf("expected a stored timer, got %+v", res)
+	}
+	if strings.Contains(res.Summary, "Resolved for you") {
+		t.Fatalf("no repair should mean no disclosure clause, got %q", res.Summary)
+	}
+}
+
 // Absent args reach the check as `{}` — what dispatch will hand the handler — rather
 // than as the `null` a nil map marshals to, which no decoder accepts.
 func TestSchedulePassesAbsentArgsAsAnEmptyObject(t *testing.T) {
 	var saw string
 	tool := find(Tools(Deps{
 		Store: &memStore{},
-		PrepareScheduledCall: func(n string, args json.RawMessage) (string, string) {
+		PrepareScheduledCall: func(n string, args json.RawMessage) ScheduledCall {
 			saw = string(args)
-			return n, ""
+			return ScheduledCall{ToolName: n}
 		},
 	}), "timer.schedule")
 

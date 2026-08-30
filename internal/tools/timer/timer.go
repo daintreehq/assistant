@@ -66,25 +66,46 @@ type Store interface {
 	InsertTimer(rec domain.TimerRecord) (string, error)
 }
 
+// ScheduledCall is what a scheduling surface needs in order to store a tool call
+// that will run with nobody present: the name dispatch will resolve, the arguments
+// to persist in place of the ones written, a one-line note naming anything that was
+// filled in on the caller's behalf (empty when nothing was), and a refusal that is
+// non-empty only when the call could not be made runnable at all.
+type ScheduledCall struct {
+	ToolName string
+	Args     json.RawMessage
+	Note     string
+	Refusal  string
+}
+
 // Deps is the dependency set for the timer family.
 type Deps struct {
 	Store Store
-	// PrepareScheduledCall resolves a scheduled tool call to the name DISPATCH will
-	// actually look up, and reports why it could never run — "" meaning it is fine.
-	// Backed by the registry; nil ⇒ both checks are skipped and the name is stored as
-	// written, so a stripped test context schedules exactly as before.
+	// PrepareScheduledCall makes a scheduled tool call storable: it resolves the name
+	// DISPATCH will actually look up, fills in what the call needs and only this turn
+	// can supply, and refuses what it could not repair. Backed by the registry; nil ⇒
+	// every step is skipped and the call is stored exactly as written, so a stripped
+	// test context schedules as it always did.
 	//
-	// Canonicalizing is half the job and not an afterthought. Fire-time dispatch looks
-	// a tool up by its exact internal name and resolves nothing, so a payload written
-	// in the wire spelling — or with stray whitespace — is stored happily and dies with
-	// UNKNOWN_TOOL hours later. A check that could FIND the tool while dispatch could
-	// not would be the worst of both: it would pass judgement on a call that was never
-	// going to run under that name anyway.
+	// Canonicalizing is a third of the job and not an afterthought. Fire-time dispatch
+	// looks a tool up by its exact internal name and resolves nothing, so a payload
+	// written in the wire spelling — or with stray whitespace — is stored happily and
+	// dies with UNKNOWN_TOOL hours later. A check that could FIND the tool while
+	// dispatch could not would be the worst of both: it would pass judgement on a call
+	// that was never going to run under that name anyway.
+	//
+	// REPAIRING is the other two thirds, and it is why this returns args at all. A
+	// scheduled call is written inside a turn and runs without one, so the fields a
+	// tool would have inferred from "here" have to be captured while "here" still
+	// exists. Storing the repaired args — not the ones the model typed — is what makes
+	// the row runnable; see tools.Tool.PrepareUnattended for why the alternative,
+	// bouncing the call back for the model to complete, freezes the same values one
+	// round trip later and adds a guess.
 	//
 	// A seam rather than a *tools.Registry because the registry does not exist yet when
 	// this family is constructed — the tools are what is being built. The closure
 	// resolves at SCHEDULE time, by which point it does.
-	PrepareScheduledCall func(toolName string, args json.RawMessage) (canonical string, refusal string)
+	PrepareScheduledCall func(toolName string, args json.RawMessage) ScheduledCall
 }
 
 // Tools returns the timer tool family.
@@ -111,6 +132,16 @@ func lifecycleNote(active bool) string {
 		return " NOTE: this timer persists and keeps firing after the assistant closes — the background supervisor owns the schedule; missed occurrences catch up on the next tick."
 	}
 	return " NOTE: no scheduler is running in this one-shot invocation; the timer persists and fires once the assistant (or its background supervisor) next runs."
+}
+
+// resolvedFor renders what the schedule path filled in for the model, or "" when it
+// filled in nothing. It reads as a clause of the summary sentence rather than a
+// separate line, because a repair is part of what was scheduled and not an aside.
+func resolvedFor(note string) string {
+	if strings.TrimSpace(note) == "" {
+		return ""
+	}
+	return " Resolved for you: " + note + "."
 }
 
 // --- timer.schedule ---
@@ -268,6 +299,11 @@ func newScheduleTool(deps Deps) *tools.Tool {
 				return tools.Fail(codeInvalidArgs,
 					"timer.schedule: a \"message\" payload requires payload.message — the instruction to carry out when it fires")
 			}
+			// Anything PrepareScheduledCall filled in on the model's behalf, phrased for
+			// the summary. Disclosure is the other half of repairing silently: a value
+			// resolved from the turn is a value the user can see is wrong NOW, while the
+			// timer is still trivially cancellable, rather than at fire time.
+			resolvedNote := ""
 			if a.Payload.Type == "call_safe_tool" {
 				if a.Payload.ToolCall == nil || strings.TrimSpace(a.Payload.ToolCall.ToolName) == "" {
 					return tools.Fail(codeInvalidArgs, "timer.schedule: call_safe_tool payload requires toolCall.toolName")
@@ -301,17 +337,28 @@ func newScheduleTool(deps Deps) *tools.Tool {
 							argsJSON = raw
 						}
 					}
-					canonical, refusal := deps.PrepareScheduledCall(name, argsJSON)
-					if refusal != "" {
+					prepared := deps.PrepareScheduledCall(name, argsJSON)
+					if prepared.Refusal != "" {
 						return tools.Fail(codeTimerUnrunnable,
-							fmt.Sprintf("timer.schedule: this %s call cannot be scheduled because %s.", name, refusal),
+							fmt.Sprintf("timer.schedule: this %s call cannot be scheduled because %s.", name, prepared.Refusal),
 							tools.Unrecoverable())
 					}
 					// Persist the name dispatch will resolve, not the one that was
 					// typed. Storing the wire spelling is how a payload that passed
 					// every check still fails at fire time with UNKNOWN_TOOL.
-					if canonical != "" {
-						a.Payload.ToolCall.ToolName = canonical
+					if prepared.ToolName != "" {
+						a.Payload.ToolCall.ToolName = prepared.ToolName
+					}
+					// Persist the REPAIRED args for the same reason: what runs at fire
+					// time is this row, so a value the turn supplied has to be in it.
+					// A repair that cannot be read back is dropped rather than stored
+					// half-applied — the unrepaired call is the one that was graded.
+					if len(prepared.Args) > 0 {
+						var merged map[string]any
+						if err := json.Unmarshal(prepared.Args, &merged); err == nil {
+							a.Payload.ToolCall.Args = merged
+							resolvedNote = prepared.Note
+						}
 					}
 				}
 			}
@@ -452,8 +499,8 @@ func newScheduleTool(deps Deps) *tools.Tool {
 			active := daemonActive(tctx)
 			fireISO := time.UnixMilli(fireAt).UTC().Format(time.RFC3339)
 			return tools.Ok(
-				fmt.Sprintf("Scheduled timer %q for %s.%s", a.Title, fireISO, lifecycleNote(active)),
-				map[string]any{"timerId": id, "fireAt": fireISO, "daemonActive": active},
+				fmt.Sprintf("Scheduled timer %q for %s.%s%s", a.Title, fireISO, resolvedFor(resolvedNote), lifecycleNote(active)),
+				map[string]any{"timerId": id, "fireAt": fireISO, "daemonActive": active, "resolved": resolvedNote},
 			)
 		},
 	}
