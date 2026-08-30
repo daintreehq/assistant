@@ -22,6 +22,7 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -465,6 +466,13 @@ type OwnershipSummary struct {
 	UnpublishedAsyncCount int
 	// OpenAttentionCount is the unresolved inbox carried over.
 	OpenAttentionCount int
+	// RearmedMessageCount is how many scheduled MESSAGES were delivered by a previous
+	// owner but never resolved, and have been re-armed for delivery again.
+	RearmedMessageCount int
+	// RecoveredMessageCount is how many fired occurrences had no event at all — the
+	// previous owner claimed the timer and died before publishing — and were rebuilt
+	// from the schedule row.
+	RecoveredMessageCount int
 }
 
 // BeginOwnership is the owner-boot reconciliation, run ONCE by the process that
@@ -502,6 +510,72 @@ func (s *Store) BeginOwnership(now int64) (OwnershipSummary, error) {
 		return sum, fmt.Errorf("ownership boot: list open events: %w", err)
 	}
 	sum.OpenAttentionCount = len(open)
+
+	// Re-arm scheduled messages the previous owner was handed but never finished.
+	//
+	// This is the durability floor for the one queue item that is a user INSTRUCTION
+	// rather than a report. The notifier hands a burst to its callback and marks it
+	// delivered immediately afterwards, and the reactors hold it only in memory — so a
+	// crash, a kill, or an ownership handover between those two moments loses the
+	// instruction outright, with the timer already marked fired and nothing left to
+	// retry it. "Run the migration in an hour" silently never happening is the worst
+	// failure this feature can have.
+	//
+	// Boot is the one place this is safe to do: no turn is in flight, so clearing the
+	// delivered flag cannot race the notifier that sets it.
+	//
+	// Unresolved is the test, and it is deliberately at-least-once. A message is
+	// resolved only after a turn has actually carried it out, so a row still open means
+	// nobody is known to have done it — and for an instruction the user is waiting on,
+	// running it again is a better failure than never running it at all. The wake
+	// framing tells the model the message may have been delivered before, so a
+	// destructive step can be checked rather than blindly repeated.
+	// Recover occurrences the previous owner claimed but never published, BEFORE the
+	// re-arm below, so a recovered row is also armed for delivery in this same boot.
+	recovered, err := s.RecoverUnpublishedTimerMessages()
+	if err != nil {
+		return sum, fmt.Errorf("ownership boot: recover unpublished timer messages: %w", err)
+	}
+	if recovered > 0 {
+		// Re-read: the recovery just inserted rows the snapshot above predates.
+		open, err = s.ListEvents(domain.QueueDigestOptions{})
+		if err != nil {
+			return sum, fmt.Errorf("ownership boot: re-list open events: %w", err)
+		}
+		sum.OpenAttentionCount = len(open)
+	}
+
+	var rearm []string
+	for _, e := range open {
+		// Unresolved AND still fresh. Unresolved is what says nobody is known to have
+		// carried it out; freshness is what stops an instruction from a week ago
+		// executing now, which is the same rule the fire path and the recovery above
+		// apply — an unresolved event was the one path that had no age bound at all, so
+		// a message could sit through days of downtime and then run.
+		//
+		// A stale one is deliberately LEFT OPEN rather than resolved: it did not happen,
+		// and the honest outcome is that the user still sees it waiting rather than
+		// having it quietly marked done or quietly executed.
+		if e.Source == domain.SourceTimer && e.Target != nil && e.Target.TimerMessage {
+			// A row with no recorded due time is treated as FRESH, matching the gate in
+			// internal/agent: refusing on a missing field would strand instructions
+			// written before the field existed, which is the failure being prevented
+			// rather than a way to prevent it. Where a due time IS recorded, the gate
+			// will judge it exactly, so this prefilter only has to avoid arming rows so
+			// old they can never pass — and publication time is a fine proxy for that.
+			stale := e.Target.TimerDueAt > 0 && s.now()-e.CreatedAt > recoverTimerMessageWindowMs
+			if !stale {
+				rearm = append(rearm, e.ID)
+			}
+		}
+	}
+	if len(rearm) > 0 {
+		if err := s.ClearNotified(rearm); err != nil {
+			return sum, fmt.Errorf("ownership boot: re-arm scheduled messages: %w", err)
+		}
+		sum.RearmedMessageCount = len(rearm)
+	}
+	sum.RecoveredMessageCount = recovered
 	return sum, nil
 }
 
@@ -520,4 +594,174 @@ func (s *Store) AppendAudit(_ context.Context, rec domain.AuditRecord) (string, 
 		return "", err
 	}
 	return out.ID, nil
+}
+
+// RecoverUnpublishedTimerMessages republishes a scheduled message whose timer fired but
+// whose event never reached the queue.
+//
+// fireTimer CLAIMS a timer before it publishes — it has to, or an overrunning tick would
+// fire the same row twice. That leaves a window: a kill, a crash or a lost lease between
+// the claim and the insert advances the schedule and produces nothing, so the occurrence
+// is gone with the timer already marked fired and no row anywhere to notice. For a
+// reminder that is a missed note. For a MESSAGE it is the user's instruction silently
+// never happening, which is the failure this whole feature exists to end.
+//
+// The dedupe key is the outbox record. Every fire publishes under `timer:<id>:fire:<n>`
+// and `runCount` says which n was last claimed, so "did occurrence n land?" is a lookup
+// rather than a guess — no new table, no second write on the hot path.
+//
+// Run at ownership boot only, where nothing is in flight. Delivery is at-least-once by
+// design: a re-published occurrence may be one the previous owner had already delivered
+// but not resolved, and the wake framing tells the model to check before repeating
+// anything destructive.
+// recoverTimerMessageWindowMs bounds how stale a lost occurrence may be and still be
+// worth delivering. One hour: long enough to cover a crash, a restart and an ownership
+// handover, far shorter than the seven-day retention that would otherwise make a
+// deleted event look like a lost one, and short enough that a recovered instruction is
+// still about the world it was written for.
+const recoverTimerMessageWindowMs int64 = 60 * 60 * 1000
+
+// clockRollbackToleranceMs is how far into the future a recovered occurrence's due time
+// may sit and still be believed. Five minutes: comfortably more than an NTP correction
+// or a VM resume.
+//
+// It is NOT what makes a stale advanced fireAt safe — a one-minute repeat sits well
+// inside this window. The status allow-list is what does that: only `fired` and `done`
+// reach here, and neither ever advances fireAt. This bound exists solely so a backward
+// clock step cannot discard a genuine occurrence, and it is load-bearing for nothing
+// else.
+const clockRollbackToleranceMs int64 = 5 * 60 * 1000
+
+func (s *Store) RecoverUnpublishedTimerMessages() (int, error) {
+	// Bounded to occurrences that fired RECENTLY, and both halves of that matter.
+	//
+	// Correctness first: the dedupe row is not a permanent record. Retention GC deletes
+	// resolved events after a week, so an unbounded scan would find the event missing
+	// for a message that was delivered and carried out months ago, decide it was lost,
+	// and republish it — then do the same again every retention cycle. The window is far
+	// shorter than retention, so a handled occurrence is never mistaken for a lost one.
+	//
+	// And meaning second: an instruction is tied to a moment. "Run the migration in an
+	// hour" recovered three days later is not a late delivery, it is the wrong action —
+	// the world it was written for has gone. A crash-and-restart is minutes; anything
+	// older than this is not a delivery worth making.
+	rows, err := s.db.Query(`
+		SELECT id, title, payloadJson, targetJson, runCount, fireAt, repeatEveryMs, status
+		  FROM timers
+		 WHERE payloadType = 'message' AND runCount > 0`)
+	if err != nil {
+		return 0, fmt.Errorf("recover timer messages: %w", err)
+	}
+	type pending struct {
+		id, title, payloadJSON string
+		targetJSON             sql.NullString
+		runCount               int
+		fireAt                 int64
+		repeatEveryMs          sql.NullInt64
+		status                 string
+	}
+	var candidates []pending
+	for rows.Next() {
+		var p pending
+		if err := rows.Scan(&p.id, &p.title, &p.payloadJSON, &p.targetJSON, &p.runCount,
+			&p.fireAt, &p.repeatEveryMs, &p.status); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("scan timer message: %w", err)
+		}
+		candidates = append(candidates, p)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, fmt.Errorf("iterate timer messages: %w", err)
+	}
+	_ = rows.Close()
+
+	recovered := 0
+	now := s.now()
+	for _, c := range candidates {
+		// Bounded on the occurrence's own DUE time, not on when it was claimed.
+		//
+		// Claim time drifts: a message claimed 59 minutes late and then recovered 59
+		// minutes after that would execute nearly two hours past the moment it was
+		// written for, which is exactly the staleness the window exists to prevent —
+		// the bound has to be anchored where the user put it.
+		//
+		// The due time is recoverable from the row: a one-shot never advances `fireAt`,
+		// so it still holds the original; a repeat advanced by exactly one interval, so
+		// the missed occurrence was due one interval back.
+		// ALLOW-LIST the two statuses a claim actually produces, rather than excluding
+		// the shapes noticed so far.
+		//
+		// "fired" is a settled one-shot and "done" a repeat that reached its bound; both
+		// leave fireAt holding the due time of the occurrence that ended them, which is
+		// the only reason recovery can judge age at all. Every other status fails that
+		// in its own way: a "scheduled" repeat has already advanced fireAt past the
+		// occurrence in question, and a "cancelled" one carries that advanced value
+		// FOREVER — so an exclusion list that named only the continuing case would let a
+		// cancelled instruction through on a future fireAt and execute something the
+		// user had explicitly stopped. An allow-list cannot be wrong by omission.
+		if c.status != "fired" && c.status != "done" {
+			continue
+		}
+		due := c.fireAt
+		// TWO-SIDED, with room for the clock to move backwards.
+		//
+		// A due time far in the future is not a fresh occurrence, it is a row whose
+		// fireAt does not describe the occurrence being recovered — a cancelled repeat
+		// keeps the advanced value from its last fire forever — and a one-sided "is it
+		// too old" test reads that as perfectly fresh and delivers it.
+		//
+		// But the allow-list above has already narrowed this to fired/done rows, whose
+		// fireAt IS the true due time, so the only way one of those lands in the future
+		// is the wall clock moving BACKWARDS: an NTP correction, a reboot, a VM resume.
+		// A strict comparison would discard a real instruction for good, because
+		// recovery runs once per ownership and the row is already terminal — nothing
+		// would ever retry it. The tolerance is far smaller than the freshness window
+		// and far smaller than the day-scale overshoot a cancelled repeat carries, so it
+		// separates the two cleanly.
+		if now-due > recoverTimerMessageWindowMs || due > now+clockRollbackToleranceMs {
+			continue
+		}
+		key := fmt.Sprintf("timer:%s:fire:%d", c.id, c.runCount)
+		var exists int
+		err := s.db.QueryRow(`SELECT 1 FROM events WHERE dedupeKey = ? LIMIT 1`, key).Scan(&exists)
+		if err == nil {
+			continue // the occurrence landed
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return recovered, fmt.Errorf("look up occurrence %s: %w", key, err)
+		}
+
+		var payload struct {
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal([]byte(c.payloadJSON), &payload)
+		msg := strings.TrimSpace(payload.Message)
+		if msg == "" {
+			// No instruction to deliver. Republishing the title alone would invent a
+			// task out of a label; better to leave the occurrence lost than to make one up.
+			continue
+		}
+		target := &domain.EventTarget{}
+		if c.targetJSON.Valid && c.targetJSON.String != "" {
+			_ = json.Unmarshal([]byte(c.targetJSON.String), target)
+		}
+		target.TimerID = c.id
+		target.TimerMessage = true
+		target.TimerOccurrence = c.runCount
+		// Carried so the delivery gate can judge this rebuilt occurrence on the same
+		// basis as a freshly fired one. The derivation below is exact for a one-shot
+		// and approximate for a repeat, which is precisely why the authoritative check
+		// is the one at delivery rather than the window here.
+		target.TimerDueAt = due
+
+		if _, err := s.UpsertEvent(domain.QueuePublishArgs{
+			Source: domain.SourceTimer, Severity: domain.SeverityAttention,
+			Title: c.title, Summary: msg, Target: target, DedupeKey: key,
+		}); err != nil {
+			return recovered, fmt.Errorf("republish occurrence %s: %w", key, err)
+		}
+		recovered++
+	}
+	return recovered, nil
 }

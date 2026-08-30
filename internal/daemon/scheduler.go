@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -596,7 +597,14 @@ func (s *Scheduler) notify() {
 			defer func() { _ = recover() }()
 			cb(fresh)
 		}()
-		_ = s.deps.Queue.MarkNotified(fresh)
+		// A failed acknowledgement leaves this page NotifiedIsNull, so the very next
+		// notify pass hands the same events over again — for a scheduled message, the
+		// same instruction. The reactors dedupe what is still queued, but that only
+		// covers the window before a turn starts, so stop paging rather than spinning
+		// the same burst around the loop.
+		if err := s.deps.Queue.MarkNotified(fresh); err != nil {
+			return
+		}
 		if len(fresh) < maxItems {
 			return // short page: the digest is drained
 		}
@@ -715,10 +723,62 @@ func (s *Scheduler) fireTimer(ctx context.Context, rec domain.TimerRecord, now i
 	// Stable across every firing (NOT keyed by runCount) so a repeating timer
 	// updates one live inbox item in place. Shared by success and error paths.
 	dedupeKey := "timer:" + rec.ID
+	// Which firing this is, read BEFORE the claim below advances RunCount. A message
+	// needs a per-fire identity; everything else keeps the aggregating key above.
+	occurrence := rec.RunCount + 1
 	// Dispatch on the JSON's type, falling back to the typed DB column.
 	payloadType := payload.Type
 	if payloadType == "" {
 		payloadType = rec.PayloadType
+	}
+
+	// A MESSAGE that is long overdue is dropped, not delivered late.
+	//
+	// One contract, applied on both sides of the claim. Recovery already refuses to
+	// republish an occurrence older than this window, and without the same rule here an
+	// identical outage would produce opposite outcomes purely by where the crash landed:
+	// a machine off for three days would silently execute an instruction if it died
+	// BEFORE the claim, and silently drop it if it died just after.
+	//
+	// Freshness rather than catch-up, because a message is not a reminder. "Run the
+	// migration in an hour" delivered three days later is not a late delivery; it is the
+	// wrong action, against a world that has moved on. The user is told it was missed
+	// instead — which they can act on — rather than having it happen underneath them.
+	//
+	// enqueue and call_safe_tool keep catch-up unchanged: a note is still worth reading
+	// late, and a fixed tool call was chosen with its own arguments frozen.
+	if payloadType == "message" && now-rec.FireAt > staleMessageWindowMs {
+		// The ORDINARY post-fire patch, unmodified. This skips one occurrence; it does
+		// not cancel a schedule. A nightly message whose machine was off for a night
+		// must run tomorrow — forcing the row terminal here would kill the whole
+		// standing instruction because a single delivery was missed, which is a much
+		// larger loss than the one being avoided. A one-shot is already terminal in
+		// this patch, so it needs no special case.
+		patch, terminal := rescheduleePatch(rec, now)
+		if claimed, _ := s.deps.Store.ClaimDueTimer(rec.ID, rec.FireAt, patch); claimed {
+			_ = s.deps.Queue.Publish(domain.QueuePublishArgs{
+				Source: domain.SourceTimer, Severity: domain.SeverityAttention,
+				Title: rec.Title,
+				Summary: fmt.Sprintf(
+					"This scheduled message came due %s ago and was not delivered — the assistant was not running. "+
+						"It has NOT been carried out, because acting on it this late could be wrong. Ask again if you still want it.",
+					overdueFor(now-rec.FireAt)),
+				Target: failureTarget(target),
+				// The PER-FIRE key, not the aggregating one. This row is the record that
+				// occurrence N was accounted for: recovery looks for exactly this key to
+				// decide whether a fire went missing, so publishing the skip under the
+				// generic "timer:<id>" left the occurrence looking unpublished — and the
+				// next restart within the window rebuilt and delivered the very
+				// instruction this branch had just decided was too stale to run.
+				DedupeKey: fmt.Sprintf("timer:%s:fire:%d", rec.ID, occurrence),
+			})
+			// Only on the LAST fire, matching the normal path: a repeat that continues
+			// still needs its authority for the occurrences ahead of it.
+			if terminal {
+				_, _ = s.deps.Store.RevokeGrantsByActor(rec.ID, now)
+			}
+		}
+		return
 	}
 
 	// CLAIM the timer BEFORE firing: atomically advance it to its post-fire state, but only
@@ -757,14 +817,64 @@ func (s *Scheduler) fireTimer(ctx context.Context, rec domain.TimerRecord, now i
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
+				// The message branch may already have stamped the marker onto the
+				// SHARED target before panicking. Publishing a failure through it would
+				// hand the model "Timer check failed: …" framed as the user's own
+				// instruction — an error impersonating a request. Failures are never
+				// messages, so clear it rather than trusting how far the branch got.
+				failTarget := failureTarget(target)
 				_ = s.deps.Queue.Publish(domain.QueuePublishArgs{
 					Source: domain.SourceTimer, Severity: domain.SeverityError,
 					Title: rec.Title, Summary: fmt.Sprintf("Timer check failed: %v", r),
-					Target: target, DedupeKey: dedupeKey,
+					Target: failTarget, DedupeKey: dedupeKey,
 				})
 			}
 		}()
 		switch payloadType {
+		case "message":
+			// A timed MESSAGE. Published under its own source so the wake filters can
+			// tell it from the reminder below — same table, same fire, opposite
+			// contract: this one is meant to start a turn.
+			//
+			// Attention severity, not urgent: a message coming due on time is the
+			// system working, not a problem. It has to clear the surfacing threshold
+			// (info does not) or the wake would depend on an event nobody delivers.
+			msg := strings.TrimSpace(payload.Message)
+			if msg == "" {
+				msg = rec.Title
+			}
+			// Marked HERE, on this branch alone: an enqueue reminder, a tool-call
+			// outcome and an error all share `target` and none of them may wake.
+			target.TimerMessage = true
+			target.TimerOccurrence = occurrence
+			// The due time the USER chose, carried so the delivery gate can be exact.
+			target.TimerDueAt = rec.FireAt
+			err := s.deps.Queue.Publish(domain.QueuePublishArgs{
+				Source: domain.SourceTimer, Severity: domain.SeverityAttention,
+				Title: rec.Title, Summary: msg, Target: target,
+				// PER-FIRE key. The stable "timer:<id>" the other branches share folds
+				// every occurrence into one row whose notifiedAt is already set, so a
+				// repeating message would wake once and then be silently swallowed
+				// forever after. Aggregation is right for a reminder and wrong for an
+				// instruction: each delivery is its own errand.
+				DedupeKey: fmt.Sprintf("timer:%s:fire:%d", rec.ID, occurrence),
+			})
+			// The claim above already advanced the timer, so this occurrence is spent
+			// whether or not the event landed. Swallowing the error here is precisely
+			// the shape of the bug this feature exists to end: the schedule says fired,
+			// and nothing whatsoever happens. If the message cannot be delivered, say so
+			// where the user will see it — a visible failure is recoverable, silence is
+			// not. Published through failureTarget so the error cannot itself be
+			// mistaken for the instruction.
+			if err != nil {
+				_ = s.deps.Queue.Publish(domain.QueuePublishArgs{
+					Source: domain.SourceTimer, Severity: domain.SeverityError,
+					Title: rec.Title,
+					Summary: fmt.Sprintf(
+						"The scheduled message came due but could not be delivered: %v. It has not been carried out.", err),
+					Target: failureTarget(target), DedupeKey: dedupeKey,
+				})
+			}
 		case "enqueue":
 			// A scheduled enqueue is a user reminder — publish at attention so it
 			// reaches the inbox (info sits below the surfacing threshold).
@@ -797,6 +907,27 @@ func (s *Scheduler) fireTimer(ctx context.Context, rec domain.TimerRecord, now i
 				argsJSON = "{}"
 			}
 			// Thread rec.ID as the actorId so a timer-scoped grant can be consumed.
+			// A stored payload may not schedule another timer, even if it was written
+			// before timer.schedule refused it. Validation guards what is CREATED; the
+			// rows already on disk were created under the old rules, and a migration
+			// cannot reach a project that is offline right now. This is the same rule
+			// enforced where it can never be out of date.
+			if isTimerScheduleTool(payload.ToolCall.ToolName) {
+				_ = s.deps.Queue.Publish(domain.QueuePublishArgs{
+					Source: domain.SourceTimer, Severity: domain.SeverityError,
+					Title: rec.Title,
+					Summary: "This timer tried to schedule another timer, which is not allowed. " +
+						"It has been retired without running. Schedule the work itself instead.",
+					Target: failureTarget(target), DedupeKey: dedupeKey,
+				})
+				// RETIRED, not merely skipped. The claim above has already rescheduled a
+				// repeating row, so leaving it scheduled would republish this same
+				// refusal on every interval for ever — a row that can never run and
+				// never stops complaining. It is forbidden, so it is over.
+				_ = s.deps.Store.UpdateTimer(rec.ID, map[string]any{"status": "error", "lastFiredAt": now})
+				_, _ = s.deps.Store.RevokeGrantsByActor(rec.ID, now)
+				break
+			}
 			res, err := s.deps.Registry.Dispatch(ctx, domain.ActorTimer, rec.ID, payload.ToolCall.ToolName, argsJSON)
 			if err != nil {
 				_ = s.deps.Queue.Publish(domain.QueuePublishArgs{
@@ -870,8 +1001,109 @@ func rescheduleePatch(rec domain.TimerRecord, now int64) (patch map[string]any, 
 	}
 	// Catch-up: schedule next fire relative to NOW, not the missed deadline, so a
 	// long sleep produces a single catch-up fire rather than a storm.
+	//
+	// The addition is overflow-checked because a row stored before the interval was
+	// bounded can still carry one near MaxInt64. Wrapping produces a NEGATIVE fireAt,
+	// which every due check reads as permanently overdue — so the timer that asked to
+	// run once in ten thousand years instead runs on every three-second tick, for ever.
+	// Retired rather than clamped: the schedule is nonsense, and inventing a plausible
+	// one for it would be guessing at an intent nobody expressed.
+	// A row that costs a model call per fire must be BOUNDED and SLOW, enforced here as
+	// well as at schedule time. Validation guards what is created; these rows were
+	// written under the old rules, and no migration reaches a project that is offline
+	// right now. An unbounded `everyMs:1` call_safe_tool row would otherwise dispatch on
+	// every three-second tick for the life of the project, which is the runaway the
+	// schedule-time bounds exist to prevent.
+	// Scoped to the RUNAWAY, not to everything the schedule-time rules now refuse.
+	//
+	// The pathological row is one that costs a model call and repeats FASTER than the
+	// scheduler's own tick: it fires on every pass, for the life of the project, and no
+	// bound it carries is reached in any useful time. That is the case worth retiring a
+	// stored row over.
+	//
+	// An unbounded but SLOW legacy repeat is left alone deliberately. It is long-standing
+	// behaviour with tests that encode it, newly created ones are already refused at
+	// schedule time, and silently retiring a minute-by-minute job somebody is relying on
+	// would be a worse surprise than the one being prevented.
+	// Retire a stored paid repeat that is UNBOUNDED — no maxRuns, no until. That is the
+	// row that never stops on its own, whatever its interval: at a minute apart it is
+	// 1,440 paid fires a day, for the life of the project, from a schedule nobody can
+	// see the end of.
+	//
+	// A BOUNDED row is left alone even if it is faster than the current floor. It stops
+	// by itself, the user chose the count, and retiring it would break a schedule that
+	// is already running — the surprise would be larger than the spend.
+	// Scoped to "message", the payload this feature introduced, and enforced here as
+	// well as at schedule time so a row that reached the store by any other route still
+	// stops. A message repeat must be bounded and no faster than the floor; one that is
+	// neither would start a paid TURN on every fire with nobody watching.
+	//
+	// Deliberately NOT applied to call_safe_tool. An unbounded repeating tool call is
+	// long-standing behaviour with tests that encode it (TestScheduler_RepeatingFireKeepsItsGrants,
+	// the catch-up tests), and there are real schedules relying on it. Retiring those
+	// retroactively is a product decision about an EXISTING feature, not something this
+	// one gets to make on its way past — so it is reported rather than done.
+	if rec.PayloadType == "message" &&
+		((rec.MaxRuns == nil && rec.RepeatUntil == nil) || *rec.RepeatEveryMs < minPaidRepeatMs) {
+		return map[string]any{"status": "done", "runCount": runCount, "lastFiredAt": now}, true
+	}
+	next := now + *rec.RepeatEveryMs
+	if next < now {
+		return map[string]any{"status": "done", "runCount": runCount, "lastFiredAt": now}, true
+	}
 	return map[string]any{
-		"fireAt": now + *rec.RepeatEveryMs, "runCount": runCount,
+		"fireAt": next, "runCount": runCount,
 		"lastFiredAt": now, "status": "scheduled",
 	}, false
+}
+
+// failureTarget copies a fire's target with the scheduled-message marker cleared.
+//
+// Every failure path in fireTimer shares one `target` with the success paths, and the
+// message branch mutates it. A failure that inherited the marker would satisfy
+// IsTimerMessageWake and be delivered to the model as an instruction the user never
+// wrote. Copying rather than mutating keeps the success path's target intact.
+func failureTarget(t *domain.EventTarget) *domain.EventTarget {
+	if t == nil {
+		return nil
+	}
+	out := *t
+	out.TimerMessage = false
+	out.TimerOccurrence = 0
+	return &out
+}
+
+// isTimerScheduleTool reports whether a stored payload names the timer scheduler, in
+// either spelling. Mirrors the schedule-time refusal in internal/tools/timer; both
+// exist because they catch different rows — one what is being written, the other what
+// was written before the rule.
+func isTimerScheduleTool(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	return strings.ReplaceAll(n, "__", ".") == "timer.schedule"
+}
+
+// The fire-time mirrors of the schedule-time limits in internal/tools/timer. Duplicated
+// deliberately rather than shared: the two run in different processes at different
+// times, and the whole point of this pair is that a row can reach the second without
+// ever having passed the first.
+const minPaidRepeatMs int64 = 60_000
+
+// staleMessageWindowMs is how long after its due time a scheduled message may still be
+// delivered. Deliberately the same window storage uses to recover a lost occurrence, so
+// the two halves of "was it delivered?" cannot disagree: one hour covers a crash, a
+// restart and a handover, and stops short of the point where acting on the instruction
+// would be acting on a stale reading of the world.
+const staleMessageWindowMs int64 = 60 * 60 * 1000
+
+// overdueFor renders a lateness for a human, coarsely — the exact milliseconds are
+// noise next to "this did not happen".
+func overdueFor(ms int64) string {
+	switch {
+	case ms < 2*60*60*1000:
+		return fmt.Sprintf("%d minutes", ms/60_000)
+	case ms < 48*60*60*1000:
+		return fmt.Sprintf("%d hours", ms/(60*60*1000))
+	default:
+		return fmt.Sprintf("%d days", ms/(24*60*60*1000))
+	}
 }

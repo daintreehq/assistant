@@ -25,7 +25,34 @@ const (
 	codeTimerNotFound  = "TIMER_NOT_FOUND"
 	// The payload is well-formed but could never run at fire time.
 	codeTimerUnrunnable = "TIMER_PAYLOAD_UNRUNNABLE"
+	// A scheduled message tried to schedule another one.
+	codeTimerMessageRecursion = "TIMER_MESSAGE_RECURSION"
 )
+
+// minMessageRepeatMs is the floor between two firings of a repeating message. One
+// minute, because the scheduler ticks every three seconds and each fire costs a model
+// turn — anything faster is a spend loop wearing a schedule's clothing.
+const minMessageRepeatMs = 60_000
+
+// maxRepeatEveryMs caps a repeat interval at roughly a year. The point is not the
+// calendar, it is that `now + everyMs` must not overflow int64: a wrapped next-fire is
+// stored as a negative timestamp, which every due check reads as "overdue for ever".
+const maxRepeatEveryMs int64 = 366 * 24 * 60 * 60 * 1000
+
+// maxMessageRuns caps how many times a repeating message may run. Each run is a full
+// paid turn, so this is a spending limit, not a scheduling one — a nightly check for a
+// year is well inside it, and anything past it is a number nobody chose deliberately.
+const maxMessageRuns = 500
+
+// isTimerToolName reports whether a name refers to the timer family's own scheduler,
+// in either spelling the model might write.
+func isTimerToolName(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	n = strings.ReplaceAll(n, "__", ".")
+	return n == "timer.schedule"
+}
+
+const ()
 
 // Store is the slice of storage the timer tools touch.
 //
@@ -150,17 +177,17 @@ var scheduleSchema = json.RawMessage(`{
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["enqueue", "call_safe_tool"],
-          "description": "\"enqueue\" posts an inbox item and runs nothing; \"call_safe_tool\" dispatches toolCall.toolName. A timer's own event never wakes you. Success files info (below the deck's attention filter), an ordinary failure error, a confirmation-required denial blocked."
+          "enum": ["enqueue", "message", "call_safe_tool"],
+          "description": "\"message\" delivers payload.message to YOU at fire time and you act on it then — the choice for any deferred instruction. \"enqueue\" posts an inbox note for the human and runs nothing, waking nobody. \"call_safe_tool\" dispatches one fixed toolCall.toolName."
         },
-        "message": { "type": "string", "description": "Reminder text for \"enqueue\" (defaults to the timer title). Ignored by \"call_safe_tool\"." },
+        "message": { "type": "string", "description": "For \"message\", the instruction delivered to you at fire time — write it as the user would, e.g. \"Send npm test to the build terminal and report the result\"; REQUIRED. For \"enqueue\", the human-facing reminder text (defaults to the title). Ignored by \"call_safe_tool\"." },
         "toolCall": {
           "type": "object",
           "additionalProperties": false,
           "required": ["toolName"],
           "description": "Required by \"call_safe_tool\", ignored by \"enqueue\".",
           "properties": {
-            "toolName": { "type": "string", "minLength": 1, "description": "Exact registered tool name — any tool in your inventory, not a restricted subset. Use \"agentTask.spawnForEdits\" to spawn a terminal at fire time." },
+            "toolName": { "type": "string", "minLength": 1, "description": "Exact registered tool name — almost any tool in your inventory, not a restricted subset, but NOT \"timer.schedule\" (a timer cannot schedule a timer). Use \"agentTask.spawnForEdits\" to spawn a terminal at fire time." },
             "args": { "type": "object", "additionalProperties": true, "description": "Arguments passed to toolName; omitted becomes {}." }
           }
         }
@@ -196,7 +223,7 @@ func newScheduleTool(deps Deps) *tools.Tool {
 		// is scoped on purpose too — a dispatched tool may create a watcher or async
 		// operation whose later event does wake, so the flat "timers never wake you"
 		// would be false. 580 runes, inside toolbudget_test's 600 ordinary budget.
-		Description: "Schedule a durable timer that fires once (fireAt ISO-8601 or delayMs) or repeats (repeat.everyMs plus maxRuns/until). payload.type \"call_safe_tool\" runs toolCall.toolName — ANY registered tool, not a safe subset (tier/confirm gates still apply): use agentTask.spawnForEdits to spawn AT fire time, then grant.create (actorType \"timer\", actorId = the returned timerId) for a grantable confirm-required target. \"enqueue\" only posts message and runs nothing. A timer's own event never wakes you. Timers persist after the assistant closes; missed occurrences catch up. Returns timerId.",
+		Description: "Schedule a durable timer that fires once (delayMs) or repeats (repeat.everyMs plus maxRuns/until). To do something LATER — \"in 25 minutes send npm test to the build terminal\", \"start a timer then spawn an agent\" — use payload.type \"message\" with the instruction in payload.message: it reaches you at fire time and you act on it THEN, so do not also do it now. \"enqueue\" posts a note for the human, runs nothing, and catches up if missed. \"call_safe_tool\" runs one named tool with fixed args. A \"message\" over an hour overdue is reported missed, not run late. Prefer delayMs. Returns timerId.",
 		Risk:        domain.RiskLocal,
 		Schema:      scheduleSchema,
 		Decode:      tools.StrictDecoder(func() any { return &scheduleArgs{} }),
@@ -208,8 +235,38 @@ func newScheduleTool(deps Deps) *tools.Tool {
 			if strings.TrimSpace(a.Title) == "" {
 				return tools.Fail(codeInvalidArgs, "timer.schedule: title is required")
 			}
-			if a.Payload.Type != "enqueue" && a.Payload.Type != "call_safe_tool" {
-				return tools.Fail(codeInvalidArgs, "timer.schedule: payload.type must be enqueue|call_safe_tool")
+			if a.Payload.Type != "enqueue" && a.Payload.Type != "call_safe_tool" && a.Payload.Type != "message" {
+				return tools.Fail(codeInvalidArgs, "timer.schedule: payload.type must be enqueue|message|call_safe_tool")
+			}
+			// THE LOOP CUT, and it covers every payload type rather than just "message".
+			//
+			// Narrowing it to messages left the cycle open through a longer route: a
+			// message turn could schedule a repeating call_safe_tool whose target is
+			// timer.schedule itself, and each firing would mint the next message. The
+			// outer call was not a message, so it passed; the inner one runs under the
+			// daemon's own context, which carries no turn flag at all. A timed message
+			// therefore schedules NOTHING — do the work now, or say what is blocked.
+			if tctx != nil && (tctx.FromWake || tctx.FromTimerMessage) {
+				// Gated on ANY autonomous turn, not just a scheduled message.
+				//
+				// Lineage does not survive a hop: a timed message that starts an async
+				// wait sheds its own marker at the completion wake, and that turn was
+				// then free to schedule again — a cycle with one extra step in it. Every
+				// descendant of an autonomous turn is itself autonomous, so gating on
+				// that closes the whole class instead of chasing a tag through async
+				// completions, watcher digests, and whatever is added next.
+				//
+				// The user is never affected: they are interactive by definition, and
+				// they are the only one who ever asks for a timer.
+				return tools.Fail(codeTimerMessageRecursion,
+					"timer.schedule: this turn is running autonomously (a scheduled message, a watcher, or an async "+
+						"completion), and an autonomous turn cannot schedule a timer. Do the work now, or say what is "+
+						"blocked and leave it for the user.",
+					tools.Unrecoverable())
+			}
+			if a.Payload.Type == "message" && strings.TrimSpace(a.Payload.Message) == "" {
+				return tools.Fail(codeInvalidArgs,
+					"timer.schedule: a \"message\" payload requires payload.message — the instruction to carry out when it fires")
 			}
 			if a.Payload.Type == "call_safe_tool" {
 				if a.Payload.ToolCall == nil || strings.TrimSpace(a.Payload.ToolCall.ToolName) == "" {
@@ -222,6 +279,18 @@ func newScheduleTool(deps Deps) *tools.Tool {
 				// guards: a timer-dispatched spawn that named no worktree reported
 				// success at schedule time and died on its only firing.
 				name := strings.TrimSpace(a.Payload.ToolCall.ToolName)
+				// A timer that schedules a timer is a machine for spending money, and no
+				// real request needs it: "do X later" is one timer, not a chain. Blocked
+				// by NAME here as well as by the turn flag above, because the two guards
+				// fail in different places — the flag cannot reach a payload dispatched
+				// later by the daemon, and the name cannot catch a turn that calls
+				// timer.schedule directly.
+				if isTimerToolName(name) {
+					return tools.Fail(codeTimerMessageRecursion,
+						"timer.schedule: a timer cannot schedule another timer. Put the work itself in the payload, "+
+							"or use payload.type \"message\" and decide what to do when it fires.",
+						tools.Unrecoverable())
+				}
 				if deps.PrepareScheduledCall != nil {
 					// nil/absent args are `{}` here for the same reason dispatch treats
 					// them as `{}`: the check has to see what the handler will see, and
@@ -261,6 +330,14 @@ func newScheduleTool(deps Deps) *tools.Tool {
 				if *a.DelayMs <= 0 {
 					return tools.Fail(codeInvalidArgs, "timer.schedule: delayMs must be a positive integer")
 				}
+				// Same wrap hazard as a repeat interval: a delay near MaxInt64 makes
+				// now+delayMs negative, and a negative fireAt reads as permanently
+				// overdue — the timer fires immediately and on every tick after.
+				if *a.DelayMs > maxRepeatEveryMs {
+					return tools.Fail(codeInvalidArgs, fmt.Sprintf(
+						"timer.schedule: delayMs must be at most %d ms (about a year); got %d",
+						maxRepeatEveryMs, *a.DelayMs), tools.Unrecoverable())
+				}
 				fireAt = now + *a.DelayMs
 			default:
 				return tools.Fail(codeTimerFireAt, "timer.schedule: provide fireAt or delayMs", tools.Unrecoverable())
@@ -280,6 +357,68 @@ func newScheduleTool(deps Deps) *tools.Tool {
 			if a.Repeat != nil {
 				if a.Repeat.EveryMs <= 0 {
 					return tools.Fail(codeInvalidArgs, "timer.schedule: repeat.everyMs must be a positive integer")
+				}
+				// A repeating MESSAGE starts a paid model turn on every fire, which the
+				// other two payloads do not: an enqueue posts a row and a call_safe_tool
+				// runs one local dispatch. Unbounded, `everyMs:1` would wake the model on
+				// every three-second scheduler tick, for as long as the project exists,
+				// with nobody watching. Both bounds are required because either alone
+				// still permits that: a fast repeat with a cap burns the cap in seconds,
+				// and a slow repeat without one never stops.
+				// A repeat far enough in the future is indistinguishable from no repeat,
+				// and one large enough to overflow is WORSE than no repeat: now+everyMs
+				// wraps negative, the row reads as permanently overdue, and it fires on
+				// every three-second tick for ever — the exact opposite of what the
+				// number asked for.
+				if a.Repeat.EveryMs > maxRepeatEveryMs {
+					return tools.Fail(codeInvalidArgs, fmt.Sprintf(
+						"timer.schedule: repeat.everyMs must be at most %d ms (about a year); got %d",
+						maxRepeatEveryMs, a.Repeat.EveryMs), tools.Unrecoverable())
+				}
+				// The limits below apply to every payload that COSTS something per fire,
+				// which is both "message" and "call_safe_tool" — not messages alone.
+				//
+				// Scoping them to messages left the same spend loop one step away: a
+				// call_safe_tool repeating every millisecond can target a tool that calls
+				// the model itself (an instructed terminal.extract), or register an async
+				// wait whose completion is a full paid wake. "enqueue" is deliberately
+				// exempt: it writes one inbox row and runs nothing, so a fast unbounded
+				// reminder costs nothing but the row.
+				if a.Payload.Type == "message" || a.Payload.Type == "call_safe_tool" {
+					if a.Repeat.EveryMs < minMessageRepeatMs {
+						return tools.Fail(codeInvalidArgs, fmt.Sprintf(
+							"timer.schedule: a repeating %q must be at least %ds apart (each fire can cost a model call); got %dms",
+							a.Payload.Type, minMessageRepeatMs/1000, a.Repeat.EveryMs), tools.Unrecoverable())
+					}
+					if a.Repeat.MaxRuns == nil && a.Repeat.Until == "" {
+						return tools.Fail(codeInvalidArgs,
+							"timer.schedule: a repeating "+a.Payload.Type+" must be bounded — set repeat.maxRuns or repeat.until, "+
+								"or it keeps running forever.", tools.Unrecoverable())
+					}
+					// A bound has to BIND. "maxRuns: 4000000000" and
+					// "until: 9999-12-31" both satisfy the rule above while describing
+					// billions of paid turns, which is the thing the rule exists to
+					// prevent — a limit nobody would ever reach is not a limit.
+					if a.Repeat.MaxRuns != nil && *a.Repeat.MaxRuns > maxMessageRuns {
+						return tools.Fail(codeInvalidArgs, fmt.Sprintf(
+							"timer.schedule: a repeating %q may run at most %d times (each run can cost a model call); got %d",
+							a.Payload.Type, maxMessageRuns, *a.Repeat.MaxRuns), tools.Unrecoverable())
+					}
+					if a.Repeat.MaxRuns == nil && a.Repeat.Until != "" {
+						until, err := parseISO(a.Repeat.Until)
+						if err == nil {
+							// Ceiling, not floor: a fire is allowed to land exactly ON
+							// `until`, so integer division admitted one more run than it
+							// counted at the boundary.
+							span := until.UnixMilli() - now
+							if runs := (span + a.Repeat.EveryMs) / a.Repeat.EveryMs; runs > int64(maxMessageRuns) {
+								return tools.Fail(codeInvalidArgs, fmt.Sprintf(
+									"timer.schedule: that repeat.until spans more than %d firings at %dms apart. "+
+										"Shorten the window, slow the repeat, or set repeat.maxRuns.",
+									maxMessageRuns, a.Repeat.EveryMs), tools.Unrecoverable())
+							}
+						}
+					}
 				}
 				every := a.Repeat.EveryMs
 				rec.RepeatEveryMs = &every

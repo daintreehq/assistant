@@ -357,6 +357,11 @@ func (t *toolRunner) Dispatch(ctx context.Context, name, argsJSON string, turn a
 	tctx := t.app.buildContext(actor, actorID)
 	tctx.RunID = turn.RunID
 	tctx.ActiveToolNames = turn.ActiveToolNames
+	// Carried per TURN, not per session: the dispatch actor above is fixed for the
+	// life of the process and cannot say whether THIS turn was started by a scheduled
+	// message.
+	tctx.FromTimerMessage = turn.FromTimerMessage
+	tctx.FromWake = turn.FromWake
 	// Liveness: forward the registry's in-tool progress beats out to the session's
 	// sink, tagged with this call's id so the UI maps them to the right activity row.
 	// The registry emits the standard

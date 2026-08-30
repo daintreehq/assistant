@@ -20,6 +20,31 @@ type EventTarget struct {
 	// Rides in the existing targetJson blob, so it needs no schema migration — a row
 	// written before this field simply decodes with it empty.
 	TimerID string `json:"timerId,omitempty"`
+	// TimerMessage marks the one timer event that is an INSTRUCTION rather than a
+	// report: a message the user asked to be delivered to the assistant later. It is
+	// the only timer event that starts a turn.
+	//
+	// A marker on the target rather than a separate EventSource, because every filter,
+	// digest and sweep in the codebase groups timer events by `source = 'timer'`. A new
+	// source would have quietly dropped these events out of all of them, and the bug
+	// would have looked like "the timer fired and nothing happened" — which is exactly
+	// the failure this whole feature exists to end.
+	TimerMessage bool `json:"timerMessage,omitempty"`
+	// TimerOccurrence is which firing this is (1-based), so a repeating message has a
+	// distinct identity per fire. Without it the stable "timer:<id>" dedupe key folds
+	// every occurrence into one row whose notifiedAt is already set, and a repeating
+	// message wakes exactly once and then goes silent forever.
+	TimerOccurrence int `json:"timerOccurrence,omitempty"`
+	// TimerDueAt is when this occurrence was DUE — the moment the user chose, not when
+	// it was claimed, published, recovered or delivered.
+	//
+	// It rides on the event because freshness has exactly one honest anchor, and every
+	// other timestamp available at delivery is a proxy that drifts: claim time is late
+	// by however long the process was down, publication time is late by however long
+	// the claim took, and a repeat's next fireAt has already moved on. Carrying the
+	// real one means the single gate before a turn starts can be exact no matter which
+	// path the event arrived by.
+	TimerDueAt int64 `json:"timerDueAt,omitempty"`
 }
 
 // RecommendedAction is a suggested follow-up tool call surfaced on a queue event.

@@ -449,6 +449,17 @@ type ToolContext struct {
 	Queue       Queue            // attention queue; registry publishes denial events
 	ProjectPath string           // project root (fs path containment)
 	Actor       domain.ToolActor // gates the confirmation branch
+	// FromTimerMessage marks a turn started by a scheduled message (see
+	// agent.TurnContext.FromTimerMessage). Tools that must not recurse read this
+	// rather than Actor, which is process-wide and cannot distinguish the two.
+	FromTimerMessage bool
+	// FromWake marks ANY autonomous turn — a scheduled message, a watcher digest, an
+	// async completion. Broader than FromTimerMessage on purpose: lineage is not
+	// transitive, so a timed message that starts an async wait sheds its own marker at
+	// the completion wake, and that turn could schedule again. Every descendant of an
+	// autonomous turn is itself autonomous, so this flag is the one that closes the
+	// cycle rather than following it.
+	FromWake bool
 	// Confirm approves a mutating action. A returned error is treated as a
 	// DECLINE (never an approval).
 	Confirm func(ctx context.Context, req ConfirmRequest) (bool, error)

@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/app"
@@ -96,7 +97,27 @@ func startRepl(ctx context.Context, a *app.App) int {
 
 	a.ConnectMcp(base)
 	st := a.MCP.Status()
-	a.StartScheduler(base, func(events []domain.QueueEvent) { printAttention(r, events) }, nil)
+	// A scheduled MESSAGE runs here too, rather than being printed and forgotten.
+	//
+	// This surface had no wake reactor at all: the scheduler marked the event delivered,
+	// the REPL printed it, and the instruction the user had scheduled was never carried
+	// out by anybody — the exact silent-loss failure the whole feature exists to end.
+	// Everything else still just prints; only an instruction earns a turn.
+	var wakeMu sync.Mutex
+	a.StartScheduler(base, func(events []domain.QueueEvent) {
+		messages, notices := splitTimerMessages(events)
+		if len(notices) > 0 {
+			printAttention(r, notices)
+		}
+		for _, e := range messages {
+			// Serialized, and never concurrently with a user turn: the REPL is one line
+			// at a time, and two turns sharing this session would interleave their
+			// output into the same terminal.
+			wakeMu.Lock()
+			runReplWake(base, a, r, e)
+			wakeMu.Unlock()
+		}
+	}, nil)
 
 	printBanner(r, a, st.Connected, st.Transport)
 	// One-time "while you were away" notice (consumed on read): the supervisor
@@ -338,6 +359,20 @@ func printAttention(r *render.Renderer, events []domain.QueueEvent) {
 	}
 	for _, e := range events {
 		r.Line("")
+		// A scheduled MESSAGE is an instruction, not a notice, and this surface has no
+		// wake reactor to carry it out — the panel and the background supervisor do.
+		// Printing it under the same "inbox" heading as a reminder would let the user's
+		// own instruction scroll past looking like something already handled, which is
+		// the failure this whole feature exists to end. Say plainly that it is due and
+		// that nothing here will run it, so the person sitting at this prompt can.
+		// Defensive only: printAttention is now handed the NOTICES half of a burst, so
+		// a message should never reach here. If one does, say what it is rather than
+		// filing an instruction under the same heading as a reminder.
+		if agent.IsTimerMessageEvent(e) {
+			r.Line(r.Magenta("◆ scheduled message") + " " + r.Bold(e.Title))
+			r.Line("  " + e.Summary)
+			continue
+		}
 		r.Line(r.Magenta("◆ inbox") + " " + r.Bold(e.Title) + " " + r.Gray("("+string(e.Severity)+")"))
 		r.Line("  " + e.Summary)
 		if len(e.Evidence) > 0 {
@@ -345,4 +380,45 @@ func printAttention(r *render.Renderer, events []domain.QueueEvent) {
 		}
 	}
 	r.Out(r.Cyan("\ndaintree ❯ "))
+}
+
+// splitTimerMessages separates scheduled instructions from everything else in a burst.
+//
+// By SHAPE, matching every other surface: a stale message is still a message, and the
+// eligibility gate below decides whether it runs.
+func splitTimerMessages(events []domain.QueueEvent) (messages, notices []domain.QueueEvent) {
+	for _, e := range events {
+		if agent.IsTimerMessageEvent(e) {
+			messages = append(messages, e)
+			continue
+		}
+		notices = append(notices, e)
+	}
+	return messages, notices
+}
+
+// runReplWake carries out one due scheduled message as an ordinary turn.
+//
+// Announced before and after, because a turn nobody asked for appearing at a prompt is
+// alarming unless it says why it is there.
+func runReplWake(ctx context.Context, a *app.App, r *render.Renderer, e domain.QueueEvent) {
+	if !agent.IsActionableWake(e) {
+		// Past its freshness window. Say so — the user set this and is standing right
+		// here; silently dropping it would be the same failure in a quieter voice.
+		r.Line("")
+		r.Line(r.Magenta("◆ scheduled message missed") + " " + r.Bold(e.Title))
+		r.Line("  " + e.Summary)
+		r.Line(r.Gray("  it came due too long ago to act on safely, so it was not carried out"))
+		return
+	}
+	r.Line("")
+	r.Line(r.Magenta("◆ scheduled message due") + " " + r.Bold(e.Title))
+	prompt := agent.BuildWakePrompt([]domain.QueueEvent{e}, nil)
+	if _, err := a.Send(ctx, prompt, agent.SendOptions{IsWake: true, FromTimerMessage: true}); err != nil {
+		r.Line(r.Gray("  the scheduled message could not be carried out: " + err.Error()))
+		return
+	}
+	// Close the errand, exactly as the other reactors do, so it stops counting as
+	// something still waiting on the user.
+	a.ResolveAttention(agent.TimerMessageEventIDs([]domain.QueueEvent{e}))
 }

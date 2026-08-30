@@ -58,7 +58,7 @@ type Host struct {
 
 	// turnMu guards every field touched by BOTH the command loop AND a worker
 	// goroutine (prompt/wake run Send off-loop and finish off-loop): busy, closing,
-	// turnCancel, wakeCancel, turnGen, pendingWake, wakeRetried, wakeSweepDone,
+	// turnCancel, wakeCancel, turnGen, pendingWake, wakeRetries, wakeSweepDone,
 	// summarizedTerminals, and the turnWG.Add gate. The command loop must stay
 	// non-blocking, so it only ever takes this short lock.
 	turnMu     sync.Mutex
@@ -105,7 +105,7 @@ type Host struct {
 	deferredPrompts     []string
 	turnGen             uint64
 	pendingWake         []domain.QueueEvent
-	wakeRetried         bool
+	wakeRetries         agent.RetryLedger
 	wakeSweepDone       bool // teardown's durable re-arm sweep ran; late requeues go straight to rearmWakeEvents
 	summarizedTerminals map[string]struct{}
 
@@ -450,9 +450,13 @@ func (h *Host) boot(desc SessionDescriptor) {
 			return
 		}
 		if len(h.pendingWake) == 0 {
-			h.wakeRetried = false
+			clear(h.wakeRetries)
 		}
-		h.pendingWake = append(h.pendingWake, actionable...)
+		// The scheduler marks a burst notified only AFTER this callback returns, and
+		// discards the error if that fails — so the same event can arrive twice while
+		// the first copy is still queued or in flight. A duplicated scheduled message
+		// is the instruction carried out twice.
+		h.pendingWake = append(h.pendingWake, agent.DedupeWakeEvents(actionable, h.pendingWake)...)
 		h.turnMu.Unlock()
 		go h.reactWake()
 	}, func(timerID string) {

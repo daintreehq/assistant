@@ -402,6 +402,36 @@ func (a *App) RearmAttention(ids []string) error {
 	return a.Store.ClearNotified(ids)
 }
 
+// ResolveAttention closes inbox items a turn has finished acting on.
+//
+// A scheduled message is an ERRAND, not a report: once the turn has carried it out
+// there is nothing left for the user to do about it, and leaving it open is not a
+// harmless untidiness. Open attention keeps the supervisor from ever reaching idle
+// exit, and a repeating message accumulates one permanent row per firing — so a
+// nightly instruction quietly grows an inbox nobody can clear.
+//
+// Best-effort per id: one bad id must not strand the rest.
+func (a *App) ResolveAttention(ids []string) []string {
+	var failed []string
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		// Traced, not swallowed. A failed resolve leaves the errand open AND notified:
+		// no later pass re-delivers it, and the open row keeps the supervisor from ever
+		// reaching idle exit. Nothing retries it, so the log is the only place the
+		// condition can surface at all.
+		if _, err := a.Store.ResolveEvent(id); err != nil {
+			debuglog.LogDebug(debuglog.Config{DebugLog: a.Config.DebugLog, LogDir: a.Config.LogDir}, "attention.resolve.error",
+				map[string]any{"eventId": id, "error": err.Error()})
+			failed = append(failed, id)
+		}
+	}
+	// Returned rather than logged-and-forgotten: debug logging is off in normal use, so
+	// the caller is the only place this can become visible to anyone.
+	return failed
+}
+
 // daemonRegistryAdapter runs a call_safe_tool timer payload through the registry as
 // the given non-interactive actor, building a per-actor ToolContext.
 type daemonRegistryAdapter struct{ app *App }

@@ -515,6 +515,21 @@ func (s *Session) foldInInjections() int {
 	return len(drained)
 }
 
+// clearAutonomyOnFold stops a turn counting as autonomous once the human has typed into
+// it.
+//
+// A prompt typed while a wake is running is FOLDED into that turn rather than starting
+// a new one, so the user's own request inherits the turn's wake flags — and the tools
+// that refuse autonomous work (timer.schedule) would refuse the person sitting there
+// asking for it. The turn is no longer unattended the moment a human speaks into it,
+// and the flags have to say so.
+func clearAutonomyOnFold(turn *TurnContext, folded int) {
+	if folded > 0 {
+		turn.FromWake = false
+		turn.FromTimerMessage = false
+	}
+}
+
 // Clear empties the visible history and persists a CLEAR breadcrumb. Returns
 // ErrTurnInProgress when a turn is in flight (a mid-turn clear would corrupt the
 // streaming snapshot) or while an endpoint reservation is outstanding — do NOT mutate
@@ -748,6 +763,11 @@ type SendOptions struct {
 	// signal set by the wake caller — never inferred from the prompt text — so a user who
 	// happens to type the wake prefix still gets their own goal anchored.
 	IsWake bool
+	// FromTimerMessage narrows IsWake: this wake was started by a SCHEDULED MESSAGE
+	// rather than by a watcher or an async completion. It rides to the tools so the
+	// ones that must not recurse (timer.schedule) can refuse, which is the only
+	// structural guard against a message that schedules the message that schedules it.
+	FromTimerMessage bool
 }
 
 // Send mints a run id, runs one turn, and clears the run ref in finally. It is
@@ -964,7 +984,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	// 4. Push the user message.
 	s.pushMessage(models.TextMessage("user", userInput))
 
-	turn := TurnContext{RunID: runID}
+	turn := TurnContext{RunID: runID, FromTimerMessage: opts.FromTimerMessage, FromWake: opts.IsWake}
 
 	// One backend turn_id spans the whole tool-call loop (every round shares it so the
 	// backend keeps the same runbook state and does not re-run selection on a plain
@@ -1018,7 +1038,8 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 
 		// 10a′. Fold in any message typed during the previous round's stream/tools so
 		//       THIS round's snapshot carries it. A fresh instruction resets the breaker.
-		if s.foldInInjections() > 0 {
+		if folded := s.foldInInjections(); folded > 0 {
+			clearAutonomyOnFold(&turn, folded)
 			resetForInjection()
 		}
 
@@ -1347,9 +1368,16 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			// yielding to an injection there is exactly how a caller with inject access
 			// would keep one turn running forever; the message stays buffered and the
 			// next turn picks it up.
-			if !stall.budgetClosed && s.foldInInjections() > 0 {
-				resetForInjection()
-				continue
+			// The guard is checked BEFORE the fold, not alongside it: folding DRAINS the
+			// buffer, so evaluating it first would consume the human's message on a
+			// branch that then declines to use it — losing the text the comment above
+			// promises stays buffered for the next turn.
+			if !stall.budgetClosed {
+				if folded := s.foldInInjections(); folded > 0 {
+					clearAutonomyOnFold(&turn, folded)
+					resetForInjection()
+					continue
+				}
 			}
 			s.events.Phase(domain.PhaseComplete)
 			s.events.AssistantEnd(content, "")
@@ -1363,7 +1391,8 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		//      just-streamed content stays an unsealed intermediate round (exactly like
 		//      prose that precedes a tool batch), so no AssistantEnd fires yet.
 		if len(calls) == 0 {
-			if s.foldInInjections() > 0 {
+			if folded := s.foldInInjections(); folded > 0 {
+				clearAutonomyOnFold(&turn, folded)
 				resetForInjection()
 				continue
 			}
@@ -1380,9 +1409,14 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 			// A cancel always ends the turn. A circuit-breaker abort instead yields to a
 			// fresh user instruction if one arrived mid-batch (fold it in + continue, so
 			// the model gets the new steer); otherwise the abort stands.
-			if reply != domain.CancelledReply && ctx.Err() == nil && s.foldInInjections() > 0 {
-				resetForInjection()
-				continue
+			// Same ordering rule as above: check the guards first, because the fold is
+			// destructive. A cancelled turn must leave the message buffered.
+			if reply != domain.CancelledReply && ctx.Err() == nil {
+				if folded := s.foldInInjections(); folded > 0 {
+					clearAutonomyOnFold(&turn, folded)
+					resetForInjection()
+					continue
+				}
 			}
 			return reply
 		}

@@ -592,6 +592,14 @@ func (h *hostAppAdapter) RearmAttention(ids []string) error {
 	return h.app.RearmAttention(ids)
 }
 
+// ResolveAttention closes inbox items a wake turn finished acting on.
+func (h *hostAppAdapter) ResolveAttention(ids []string) []string {
+	if h.app == nil {
+		return nil
+	}
+	return h.app.ResolveAttention(ids)
+}
+
 func (h *hostAppAdapter) Session() *agent.Session { return h.app.Session }
 
 func (h *hostAppAdapter) RiskOf(toolName string) (domain.RiskClass, bool) {

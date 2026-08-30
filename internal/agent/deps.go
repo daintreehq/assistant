@@ -85,6 +85,19 @@ type parallelMutationRunner interface {
 type TurnContext struct {
 	RunID           string
 	ActiveToolNames []string
+	// FromTimerMessage marks a turn that a SCHEDULED MESSAGE started, so a tool can
+	// refuse work that must not recurse.
+	//
+	// It has to be per-TURN, and that is the whole reason it exists rather than the
+	// dispatch actor being consulted. The actor is fixed when the App is built and is
+	// immutable after (app.go CreateOptions.DispatchActor): the supervisor daemon is
+	// ActorWake for its entire life, and the ATTACHED host is ActorMain for its entire
+	// life — including while it runs a wake turn. An actor check therefore cannot tell
+	// a timer-started turn from the user typing, in the one configuration where the
+	// user actually watches it happen.
+	FromTimerMessage bool
+	// FromWake marks any autonomous turn — see tools.ToolContext.FromWake.
+	FromWake bool
 	// CallID identifies the call currently being dispatched (the live footer row).
 	CallID string
 	// Progress forwards an in-tool substep message for CallID. Nil-safe.

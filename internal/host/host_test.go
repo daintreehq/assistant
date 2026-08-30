@@ -29,8 +29,9 @@ type fakeApp struct {
 	// host carries an engine outcome onto the wire rather than inventing one.
 	command CommandOutcome
 
-	mu      sync.Mutex
-	rearmed []string
+	mu       sync.Mutex
+	rearmed  []string
+	resolved []string
 	// timerRows is what Timers() returns; cancelOutcome is what CancelTimer()
 	// returns, and cancelled records the ids it was asked for.
 	timerRows     []TimerRow
@@ -80,6 +81,19 @@ func (f *fakeApp) RearmAttention(ids []string) error {
 	defer f.mu.Unlock()
 	f.rearmed = append(f.rearmed, ids...)
 	return nil
+}
+
+func (f *fakeApp) ResolveAttention(ids []string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resolved = append(f.resolved, ids...)
+	return nil
+}
+
+func (f *fakeApp) resolvedIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.resolved...)
 }
 
 func (f *fakeApp) rearmedIDs() []string {

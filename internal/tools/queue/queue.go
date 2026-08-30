@@ -61,7 +61,7 @@ var publishSchema = json.RawMessage(`{
   "additionalProperties": false,
   "required": ["source", "severity", "title", "summary"],
   "properties": {
-    "source": { "type": "string", "enum": ["timer","terminal_watcher","worktree_watcher","pr_watcher","workflow","model_worker","system","user"] },
+    "source": { "type": "string", "enum": ["worktree_watcher","pr_watcher","workflow","model_worker","system","user"], "description": "Who is reporting. A note to the human — it never starts a turn. \"timer\" and \"terminal_watcher\" are reserved for the engine's own fires and checks." },
     "severity": { "type": "string", "enum": ["debug","info","attention","urgent","blocked","done","error"] },
     "title": { "type": "string" },
     "summary": { "type": "string" },
@@ -113,6 +113,36 @@ func newPublishTool(deps Deps) *tools.Tool {
 			}
 			if a.Title == "" || a.Summary == "" {
 				return tools.Fail(codeInvalidArgs, "queue.publish: title and summary are required")
+			}
+			// REFUSE a source that would make this event start a turn.
+			//
+			// Two sources are actionable wakes — a terminal_watcher event carrying a
+			// terminalId, and async_tool — and this tool decodes the same struct the
+			// engine publishes with, so the model could name one and have its own text
+			// delivered as a machine observation that costs a paid turn. Worse, that
+			// turn is not a timer-message turn, so it carries none of the recursion
+			// lineage: a timed message could publish itself a watcher wake and start the
+			// cycle again through the side door. Reporting is what this tool is for;
+			// manufacturing the engine's own signals is not.
+			if isWakeActionableSource(a.Source) {
+				return tools.Fail(codeInvalidArgs, fmt.Sprintf(
+					"queue.publish: source %q is reserved for the engine's own fires and checks, because events from it can "+
+						"start an autonomous turn. Publish as \"system\" (or \"user\") to leave a note, or do the work now.", a.Source),
+					tools.Unrecoverable())
+			}
+			// STRIP the scheduled-message provenance. It is not part of this tool's
+			// advertised schema, but strict decoding rejects fields unknown to the Go
+			// STRUCT, not fields hidden from the model — and the struct is the same one
+			// the scheduler publishes with. Left readable, any local tool call could
+			// stamp timerMessage on an event it wrote itself and have the wake reactor
+			// deliver its text as the user's own instruction, in a paid turn, with no
+			// timer behind it. Only fireTimer may confer that meaning, so it is cleared
+			// here rather than validated: there is no legitimate caller to accommodate.
+			if a.Target != nil && (a.Target.TimerMessage || a.Target.TimerOccurrence != 0) {
+				stripped := *a.Target
+				stripped.TimerMessage = false
+				stripped.TimerOccurrence = 0
+				a.Target = &stripped
 			}
 			q := deps.queue()
 			if q == nil {
@@ -238,4 +268,12 @@ func newResolveTool(deps Deps) *tools.Tool {
 			return tools.Ok("Resolved "+a.ID+".", map[string]any{"id": a.ID, "resolved": resolved})
 		},
 	}
+}
+
+// isWakeActionableSource reports whether a source can produce an event the wake
+// reactors will act on (see agent.IsActionableWake). Kept as a small named list rather
+// than importing the agent package, which would be a dependency cycle — the pairing is
+// asserted by a test in internal/agent that fails if the two ever disagree.
+func isWakeActionableSource(s domain.EventSource) bool {
+	return s == domain.SourceTerminalWatcher || s == domain.SourceAsyncTool || s == domain.SourceTimer
 }

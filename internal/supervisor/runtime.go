@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/daintreehq/assistant/internal/agent"
 	"github.com/daintreehq/assistant/internal/app"
 	"github.com/daintreehq/assistant/internal/auth"
 	"github.com/daintreehq/assistant/internal/config"
@@ -148,7 +149,7 @@ type Runtime struct {
 	// teardown Waits (both sides serialize through mu — see the supervise defer).
 	closing     bool
 	wakeBusy    bool
-	wakeRetried bool
+	wakeRetries agent.RetryLedger
 	pendingWake []domain.QueueEvent
 	summarized  map[string]struct{}
 	wakeWG      sync.WaitGroup
@@ -510,7 +511,11 @@ func (r *Runtime) onAttention(ctx context.Context, events []domain.QueueEvent) {
 		return
 	}
 	r.mu.Lock()
-	r.pendingWake = append(r.pendingWake, actionable...)
+	// Deduped for the same reason as the attached host: the scheduler acknowledges a
+	// burst after this callback returns, so a slow or failed mark can hand the same
+	// event over twice — and a duplicated scheduled message is the instruction carried
+	// out twice.
+	r.pendingWake = append(r.pendingWake, agent.DedupeWakeEvents(actionable, r.pendingWake)...)
 	r.mu.Unlock()
 	go r.reactWake(ctx)
 }

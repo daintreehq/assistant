@@ -220,7 +220,7 @@ already drifted out of agreement with each other and with the binary.
 
 | Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
 |---|---|---|---|---|---|---|---|---|
-| `timer.schedule` | local | supervisor | — | not needed | — | serial | — | Schedule a durable timer that fires once (fireAt ISO-8601 or delayMs) or repeats (repeat.everyMs plus maxRuns/until) |
+| `timer.schedule` | local | supervisor | — | not needed | — | serial | — | Schedule a durable timer that fires once (delayMs) or repeats (repeat.everyMs plus maxRuns/until) |
 | `timer.list` | read | supervisor | — | not needed | — | serial | — | List the timers still SCHEDULED (not yet fired, not cancelled): id, title, fireAt (RFC3339 UTC), payloadType, runCoun… |
 | `timer.cancel` | local | supervisor | — | not needed | — | serial | — | Cancel a scheduled timer by its tmr_… id (from timer.list): it never fires again and any automation grant held by tha… |
 

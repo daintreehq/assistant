@@ -57,6 +57,10 @@ const (
 	KindReminder PayloadKind = "reminder"
 	// KindToolCall dispatches one registered tool at fire time.
 	KindToolCall PayloadKind = "tool_call"
+	// KindMessage is a timer that delivers an INSTRUCTION to the assistant at fire
+	// time, which it then carries out in an ordinary turn. Distinct from KindReminder
+	// because the difference is the whole point: one of them does the work.
+	KindMessage PayloadKind = "message"
 	// KindLegacy is a row written by a retired payload type (run_check). It still
 	// fires, as a plain reminder, so it is still worth showing — but it cannot be
 	// described in terms of either shape above without lying about one of them.
@@ -129,6 +133,8 @@ func describePayload(rec domain.TimerRecord) (PayloadKind, string) {
 	switch typ {
 	case "enqueue":
 		return KindReminder, ""
+	case "message":
+		return KindMessage, ""
 	case "call_safe_tool":
 		name := ""
 		if p.ToolCall != nil {

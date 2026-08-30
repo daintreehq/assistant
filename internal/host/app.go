@@ -102,6 +102,12 @@ type App interface {
 	// be silently lost across the restart. Best-effort (the host only logs a
 	// failure).
 	RearmAttention(ids []string) error
+	// ResolveAttention closes inbox items this turn has finished acting on — the
+	// scheduled messages it carried out. Best-effort by contract: a failure to tidy
+	// the inbox must never look like a failure to do the work.
+	// Returns the ids it could NOT close. Debug logging is off in normal use, so the
+	// caller is the only place a failure can become visible.
+	ResolveAttention(ids []string) []string
 
 	// Session is the turn engine driven by prompt/wake.
 	Session() *agent.Session

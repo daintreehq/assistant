@@ -387,7 +387,7 @@ func (h *Host) reactWake() {
 	// — `/backend` with no argument does, while its picker is open — so a wake admitted
 	// here would reach Session.Send and be refused. The burst has ALREADY been marked
 	// notified by the scheduler and has already been drained from pendingWake by the
-	// time that happens, and the retry path requeues only once (wakeRetried): a second
+	// time that happens, and the retry path requeues only once per event (wakeRetries): a second
 	// refusal drops the events for good, in this process and across a restart.
 	//
 	// Deferring instead costs nothing. The events stay queued, and the command's own
@@ -432,10 +432,36 @@ func (h *Host) reactWake() {
 				h.report("wake-failed", fmt.Sprintf("wake panicked: %v", r))
 			}
 		}()
+		// Judged HERE, not when the burst was queued: a message can sit behind another
+		// turn for as long as that turn takes, and one that went stale meanwhile must
+		// not spend a turn being mistaken for observed activity.
+		if events = agent.DropStaleTimerMessages(events); len(events) == 0 {
+			return
+		}
+		// A scheduled message runs alone; anything else in this burst goes back on the
+		// queue rather than being folded into someone else's errand.
+		// Deferred back onto the IN-MEMORY queue, not re-armed durably.
+		//
+		// The scheduler calls its attention callback and only THEN marks the burst
+		// notified (Scheduler.notify), so a ClearNotified from in here races that mark
+		// and usually loses: the events come back notified and are never delivered
+		// again. Re-queuing sidesteps the race entirely and is what both reactors
+		// already do for a retry — reactWake chains while anything remains, so the
+		// deferred events get their own turn immediately after this one.
+		var deferred []domain.QueueEvent
+		events, deferred = agent.SplitWakeBatch(events)
+		if len(deferred) > 0 {
+			h.turnMu.Lock()
+			h.pendingWake = append(append([]domain.QueueEvent{}, deferred...), h.pendingWake...)
+			h.turnMu.Unlock()
+		}
 		prompt := agent.BuildWakePrompt(events, already)
 		// IsWake: autonomous watcher-wake turn (not user-typed) → the footer anchors on the
 		// active workflow objective instead of echoing the verbose wake blob.
-		reply, err := h.session.Send(ctx, prompt, agent.SendOptions{IsWake: true})
+		reply, err := h.session.Send(ctx, prompt, agent.SendOptions{
+			IsWake:           true,
+			FromTimerMessage: agent.BurstHasTimerMessage(events),
+		})
 		if ctx.Err() != nil && (err != nil || reply == domain.CancelledReply) {
 			// Shutdown/hibernate cancelled the wake mid-turn. Detect it via ctx —
 			// NOT via err: the real Session reports cooperative cancellation as
@@ -466,8 +492,13 @@ func (h *Host) reactWake() {
 		if err != nil {
 			h.report("wake-failed", fmt.Sprintf("wake send failed: %v", err))
 			h.turnMu.Lock()
-			if !h.wakeRetried {
-				h.wakeRetried = true
+			// PER EVENT. A shared flag meant one event's failure could spend the
+			// retry belonging to an unrelated one — and since a message now takes its
+			// turn alone, that unrelated one is routinely the user's own instruction.
+			if h.wakeRetries == nil {
+				h.wakeRetries = agent.RetryLedger{}
+			}
+			if h.wakeRetries.TakeRetry(events) {
 				// Requeue for ONE retry (unshift — preserve order ahead of new events).
 				h.pendingWake = append(append([]domain.QueueEvent{}, events...), h.pendingWake...)
 			}
@@ -475,7 +506,9 @@ func (h *Host) reactWake() {
 			return
 		}
 		h.turnMu.Lock()
-		h.wakeRetried = false
+		if h.wakeRetries != nil {
+			h.wakeRetries.Done(events)
+		}
 		// Only record terminals as summarized on a REAL reply — Send returns a
 		// sentinel string on model failure (never throws), so a transient outage
 		// must not permanently downgrade later events to one-line acks. WATCHER
@@ -489,7 +522,28 @@ func (h *Host) reactWake() {
 				}
 			}
 		}
+		// Collected under the lock, RESOLVED outside it. Closing an errand is a SQLite
+		// write, and a busy database would otherwise hold turnMu for the whole busy
+		// timeout — blocking the finalisation of a turn that has already succeeded.
+		var toResolve []string
+		if !agent.IsWakeFailureReply(reply) {
+			// Only on a REAL reply: a model failure means the instruction was not
+			// carried out, and resolving it then would bury work nobody did.
+			toResolve = agent.TimerMessageEventIDs(events)
+		}
 		h.turnMu.Unlock()
+		// The errand is done, so close it. Left open it keeps the supervisor from ever
+		// reaching idle exit, and a repeating message grows one permanent inbox row per
+		// firing.
+		if len(toResolve) > 0 && h.app != nil {
+			if failed := h.app.ResolveAttention(toResolve); len(failed) > 0 {
+				// NOT debug-only: debug logging is off in normal use, and a failed
+				// resolve leaves the errand open AND notified, which nothing retries.
+				h.report("attention-resolve-failed", fmt.Sprintf(
+					"carried out %d scheduled message(s) but could not close %d inbox item(s); they will look unhandled",
+					len(toResolve), len(failed)))
+			}
+		}
 	}()
 
 	// Wake turns spend money too — often the utility calls a user has no other way to

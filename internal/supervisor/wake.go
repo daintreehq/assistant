@@ -91,8 +91,33 @@ func (r *Runtime) reactWake(ctx context.Context) {
 				r.setError(fmt.Sprintf("wake panicked: %v", rec))
 			}
 		}()
+		// Judged HERE, not when the burst was queued: a message can sit behind another
+		// turn for as long as that turn takes, and one that went stale meanwhile must
+		// not spend a turn being mistaken for observed activity.
+		if events = agent.DropStaleTimerMessages(events); len(events) == 0 {
+			return
+		}
+		// Same rule as the attached host: one scheduled message per turn.
+		// Deferred back onto the IN-MEMORY queue, not re-armed durably.
+		//
+		// The scheduler calls its attention callback and only THEN marks the burst
+		// notified (Scheduler.notify), so a ClearNotified from in here races that mark
+		// and usually loses: the events come back notified and are never delivered
+		// again. Re-queuing sidesteps the race entirely and is what both reactors
+		// already do for a retry — reactWake chains while anything remains, so the
+		// deferred events get their own turn immediately after this one.
+		var deferred []domain.QueueEvent
+		events, deferred = agent.SplitWakeBatch(events)
+		if len(deferred) > 0 {
+			r.mu.Lock()
+			r.pendingWake = append(append([]domain.QueueEvent{}, deferred...), r.pendingWake...)
+			r.mu.Unlock()
+		}
 		prompt := agent.BuildWakePrompt(events, already) + unattendedWakeNote
-		reply, err := a.Session.Send(ctx, prompt, agent.SendOptions{IsWake: true})
+		reply, err := a.Session.Send(ctx, prompt, agent.SendOptions{
+			IsWake:           true,
+			FromTimerMessage: agent.BurstHasTimerMessage(events),
+		})
 		if err != nil {
 			// Send only errors on the single-flight guard; treat as a failed wake.
 			reply = "Model error: " + err.Error()
@@ -107,8 +132,13 @@ func (r *Runtime) reactWake(ctx context.Context) {
 			r.mu.Unlock()
 			return
 		case agent.IsWakeFailureReply(reply):
-			if !r.wakeRetried {
-				r.wakeRetried = true
+			// PER EVENT, for the same reason as the attached host: a message takes its
+			// turn alone and defers its neighbours, so a shared flag let one event's
+			// failure spend the retry belonging to an unrelated instruction.
+			if r.wakeRetries == nil {
+				r.wakeRetries = agent.RetryLedger{}
+			}
+			if r.wakeRetries.TakeRetry(events) {
 				// Requeue for ONE retry, ahead of anything that arrived meanwhile.
 				r.pendingWake = append(append([]domain.QueueEvent{}, events...), r.pendingWake...)
 			}
@@ -116,7 +146,9 @@ func (r *Runtime) reactWake(ctx context.Context) {
 			r.setError("wake turn failed: " + firstLine(reply))
 			return
 		}
-		r.wakeRetried = false
+		if r.wakeRetries != nil {
+			r.wakeRetries.Done(events)
+		}
 		r.wakeTurns++
 		r.lastWakeAt = domain.NowMS()
 		r.lastError = ""
@@ -127,7 +159,26 @@ func (r *Runtime) reactWake(ctx context.Context) {
 				r.summarized[e.Target.TerminalID] = struct{}{}
 			}
 		}
+		// Close the errands this turn carried out. Reached only past the failure and
+		// cancellation branches above, so an instruction that was NOT done stays open.
+		// Unattended this matters more than it does attached: open attention is what
+		// keeps the supervisor from ever reaching idle exit, so an unresolved message
+		// would hold the daemon awake for the life of the project.
+		toResolve := agent.TimerMessageEventIDs(events)
 		r.mu.Unlock()
+		// Resolved OUTSIDE r.mu: closing an errand is a SQLite write, and a busy
+		// database would otherwise hold the runtime lock — and with it the control
+		// socket — for the whole busy timeout.
+		if len(toResolve) > 0 {
+			if failed := a.ResolveAttention(toResolve); len(failed) > 0 {
+				// Not debug-only: debug logging is off in normal use, and an unresolved
+				// errand stays open AND notified, which nothing retries — and which is
+				// exactly what keeps this daemon from ever reaching idle exit.
+				r.setError(fmt.Sprintf(
+					"carried out %d scheduled message(s) but could not close %d inbox item(s)",
+					len(toResolve), len(failed)))
+			}
+		}
 		// Durable "while you were away" record for the next attach.
 		a.RecordDetachedWake(reply)
 		r.logf("daemon: wake turn completed (" + firstLine(reply) + ")")

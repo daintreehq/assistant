@@ -364,3 +364,32 @@ func TestConsoleSinkPhase_NonTTYStaysQuiet(t *testing.T) {
 		t.Fatalf("phase cues must be suppressed on non-TTY (piped) output, got:\n%q", buf.String())
 	}
 }
+
+// A burst is split so an instruction earns a turn and a notice only prints.
+//
+// This surface used to have no wake reactor at all: the scheduler marked the event
+// delivered, the REPL printed it, and the instruction the user had scheduled was carried
+// out by nobody.
+func TestSplitTimerMessagesSeparatesInstructionsFromNotices(t *testing.T) {
+	msg := domain.QueueEvent{
+		ID: "evt_1", Source: domain.SourceTimer, Summary: "run the tests",
+		Target: &domain.EventTarget{TimerID: "tmr_1", TimerMessage: true, TimerOccurrence: 1},
+	}
+	reminder := domain.QueueEvent{
+		ID: "evt_2", Source: domain.SourceTimer, Summary: "stand-up in 5",
+		Target: &domain.EventTarget{TimerID: "tmr_2"},
+	}
+	watcher := domain.QueueEvent{
+		ID: "evt_3", Source: domain.SourceTerminalWatcher, Summary: "agent finished",
+		Target: &domain.EventTarget{TerminalID: "term-1"},
+	}
+
+	messages, notices := splitTimerMessages([]domain.QueueEvent{msg, reminder, watcher})
+
+	if len(messages) != 1 || messages[0].ID != "evt_1" {
+		t.Fatalf("only the instruction should earn a turn, got %+v", messages)
+	}
+	if len(notices) != 2 {
+		t.Fatalf("a reminder and a watcher digest only print, got %+v", notices)
+	}
+}

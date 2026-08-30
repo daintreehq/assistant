@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -713,4 +714,154 @@ func TestDaemonIdleExit(t *testing.T) {
 	if _, err := h.status(); err == nil {
 		t.Fatal("socket should be gone after idle exit")
 	}
+}
+
+// TestDaemonTimedMessageRunsOrdinaryTurnAndCallsMCP is the whole feature, end to end,
+// with nothing faked between the timer and the tool call.
+//
+// This is the test the timer work actually needed. Everything before it proved a piece:
+// that a timer fires, that a grant is consumed, that the panel renders a countdown.
+// None of them proved the thing the user asked for — that "in N, do X" results in X
+// being DONE. Here a scheduled MESSAGE fires, the engine turns it into an ordinary
+// turn, the model answers that turn with a tool call, and the call arrives at Daintree.
+// Every hop is the real one: the real binary, the real scheduler, the real wake
+// reactor, the real dispatcher, a real MCP transport. Only the model is scripted, and
+// only because a model that chose differently each run could not prove a mechanism.
+func TestDaemonTimedMessageRunsOrdinaryTurnAndCallsMCP(t *testing.T) {
+	if raceEnabled {
+		t.Skip("subprocess test adds no race coverage")
+	}
+	bin := buildBinary(t)
+	// Two rounds: the wake turn answers with a tool call, then settles. That shape is
+	// itself an assertion — an engine that merely POSTED the message somewhere would
+	// never reach a second round.
+	backend := newFakeBackend(t,
+		sseRound{toolName: "terminal.sendCommand", toolArgs: `{"terminalId":"term-1","command":"npm test"}`},
+		sseRound{contentTokens: []string{"Sent npm test to the build terminal."}},
+	)
+	dt := newScriptableMCP(t)
+	dt.setTerminal("term-1", "waiting", "", nil)
+
+	stateDir, env := newDaemonEnv(t, backend.baseURL(), dt.url(), "tok-1")
+	const scheduled = "Send npm test to the build terminal and report the result."
+	seedStore(t, stateDir, func(s *storage.Store) {
+		// Due already: the point is the delivery path, not the ability to wait.
+		if _, err := s.InsertTimer(domain.TimerRecord{
+			Title: "run the tests", FireAt: domain.NowMS() - 1000,
+			PayloadType: "message",
+			PayloadJson: `{"type":"message","message":"` + scheduled + `"}`,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// The detached path dispatches as the wake actor, so a mutation needs standing
+		// authority exactly as it would in production. Without this the turn still
+		// runs — and is blocked at the gate, which is a different (also correct)
+		// outcome that would not prove the call can land.
+		toolNames := `["terminal.sendCommand"]`
+		if _, err := s.InsertGrant(domain.AutomationGrantRecord{
+			ActorID: domain.WakeActorID, ActorType: domain.GrantActorWake,
+			AllowedToolNamesJson: &toolNames, ExpiresAt: domain.NowMS() + 60*60_000, MaxUses: 2,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	h := startDaemon(t, bin, stateDir, env)
+	waitFor(t, 30*time.Second, "the scheduled message to reach Daintree as a real tool call",
+		func() bool { return len(dt.sentCommands()) >= 1 })
+	waitFor(t, 30*time.Second, "the turn to settle", func() bool { return backend.wakeCalls() >= 2 })
+	h.stop()
+
+	// 1. The instruction was CARRIED OUT, not reported.
+	if got := dt.sentCommands(); len(got) != 1 || !strings.Contains(got[0], "npm test") {
+		t.Fatalf("the scheduled message should have produced exactly one tool call at Daintree, got %v", got)
+	}
+
+	// 2. The model was handed the user's own words. A wake that reached the backend
+	//    without the message would have run a turn about nothing.
+	var sawMessage bool
+	for i := 0; i < backend.callCount(); i++ {
+		if strings.Contains(fmt.Sprint(backend.request(i)), scheduled) {
+			sawMessage = true
+			break
+		}
+	}
+	if !sawMessage {
+		t.Fatal("the scheduled message never reached the backend — the turn ran without its instruction")
+	}
+
+	// 3. The fire is marked as a message and carries its occurrence, which is what
+	//    separates it from a reminder and what gives a repeat a per-fire identity.
+	seedStore(t, stateDir, func(s *storage.Store) {
+		evs, _ := s.ListEvents(domain.QueueDigestOptions{IncludeResolved: true})
+		var marked *domain.QueueEvent
+		for i := range evs {
+			if evs[i].Source == domain.SourceTimer && evs[i].Target != nil && evs[i].Target.TimerMessage {
+				marked = &evs[i]
+			}
+		}
+		if marked == nil {
+			t.Fatal("no timer event was marked as a message")
+		}
+		if marked.Target.TimerOccurrence != 1 {
+			t.Errorf("first firing should be occurrence 1, got %d", marked.Target.TimerOccurrence)
+		}
+		if !strings.Contains(marked.Summary, scheduled) {
+			t.Errorf("the event should carry the user's message verbatim, got %q", marked.Summary)
+		}
+		// 4. The errand was CLOSED once carried out. Left open it would keep the
+		//    supervisor from ever reaching idle exit, and a repeating message would
+		//    grow one permanent inbox row per firing.
+		if marked.ResolvedAt == nil {
+			t.Error("a carried-out message must be resolved, not left waiting on the user")
+		}
+	})
+}
+
+// TestDaemonEnqueueTimerDoesNotWake is the negative half, and it matters as much as the
+// positive one.
+//
+// `enqueue` is a note addressed to a human. If it ever started a turn, every reminder a
+// user ever set would silently begin spending money while they were away — the exact
+// failure the marker exists to make impossible. The assertion is not "it behaved
+// differently", it is "no turn ran at all".
+func TestDaemonEnqueueTimerDoesNotWake(t *testing.T) {
+	if raceEnabled {
+		t.Skip("subprocess test adds no race coverage")
+	}
+	bin := buildBinary(t)
+	backend := newFakeBackend(t, sseRound{contentTokens: []string{"ok"}})
+	dt := newScriptableMCP(t)
+	stateDir, env := newDaemonEnv(t, backend.baseURL(), dt.url(), "tok-1")
+	seedStore(t, stateDir, func(s *storage.Store) {
+		if _, err := s.InsertTimer(domain.TimerRecord{
+			Title: "detached reminder", FireAt: domain.NowMS() - 1000,
+			PayloadType: "enqueue",
+			PayloadJson: `{"type":"enqueue","message":"the detached timer fired"}`,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	h := startDaemon(t, bin, stateDir, env)
+	h.waitStatus("timer fired into the inbox", func(st ipc.StatusReply) bool { return st.OpenAttention >= 1 })
+	// Give a wake that should never come every chance to happen: the scheduler ticks
+	// every 3s, so a single tick's grace would prove very little.
+	time.Sleep(4 * time.Second)
+	h.stop()
+
+	if n := backend.wakeCalls(); n != 0 {
+		t.Fatalf("a reminder must wake nobody, but the backend served %d wake call(s)", n)
+	}
+	if got := dt.sentCommands(); len(got) != 0 {
+		t.Fatalf("a reminder must run no tools, got %v", got)
+	}
+	seedStore(t, stateDir, func(s *storage.Store) {
+		evs, _ := s.ListEvents(domain.QueueDigestOptions{})
+		for _, e := range evs {
+			if e.Source == domain.SourceTimer && e.Target != nil && e.Target.TimerMessage {
+				t.Fatal("a reminder must never be marked as a message")
+			}
+		}
+	})
 }
