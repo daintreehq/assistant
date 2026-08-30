@@ -310,3 +310,219 @@ func TestParseTerminalIDsUnparseableNotSeen(t *testing.T) {
 		t.Error("JSON without a terminals key should not be seen as a terminals array")
 	}
 }
+
+// --- adopted watchers -------------------------------------------------------
+
+func insertWatcher(t *testing.T, s *storage.Store, id, kind, targets string) {
+	t.Helper()
+	if _, err := s.InsertWatcher(domain.WatcherRecord{
+		ID: id, Kind: kind, Title: "fix: minor audit issues",
+		TargetsJson: targets, Status: "active", CadenceMs: 3000, NextCheckAt: 1,
+	}); err != nil {
+		t.Fatalf("insert watcher: %v", err)
+	}
+}
+
+func watcherStatus(t *testing.T, s *storage.Store, id string) (string, string) {
+	t.Helper()
+	w, err := s.GetWatcher(id)
+	if err != nil || w == nil {
+		t.Fatalf("get watcher %s: w=%v err=%v", id, w, err)
+	}
+	reason := ""
+	if w.EndedReason != nil {
+		reason = *w.EndedReason
+	}
+	return w.Status, reason
+}
+
+// The restart case. A watcher adopted from a previous owner whose terminal died with
+// the app is retired here — BEFORE the scheduler can tick it, classify the absence as
+// `terminal_exited` at SeverityUrgent, and spend an autonomous model turn reporting an
+// exit the restart itself caused.
+func TestReconcileRetiresWatcherWhoseTerminalIsGone(t *testing.T) {
+	s := reconcileTestStore(t)
+	insertWatcher(t, s, "wch_gone", "terminal", `["term-dead"]`)
+	mcpC := &fakeReconcileMCP{result: terminalListText("term-other")}
+
+	ReconcileLedger(context.Background(), s, mcpC, debuglog.Config{})
+
+	status, reason := watcherStatus(t, s, "wch_gone")
+	if status != "cancelled" || reason != storage.ReasonWatcherTerminalGoneOnResume {
+		t.Fatalf("expected a retired watcher, got status=%q reason=%q", status, reason)
+	}
+}
+
+// ...and its authority goes with it. A grant scoped to a watcher that no longer exists
+// is standing unattended authority nobody can see.
+func TestReconcileRevokesTheRetiredWatchersGrants(t *testing.T) {
+	s := reconcileTestStore(t)
+	insertWatcher(t, s, "wch_gone", "terminal", `["term-dead"]`)
+	if _, err := s.InsertGrant(domain.AutomationGrantRecord{
+		ActorType: "watcher", ActorID: "wch_gone",
+		MaxUses: 1, UsesRemaining: 1, CreatedAt: 1,
+		ExpiresAt: domain.NowMS() + 3_600_000,
+	}); err != nil {
+		t.Fatalf("insert grant: %v", err)
+	}
+
+	ReconcileLedger(context.Background(), s, &fakeReconcileMCP{result: terminalListText()}, debuglog.Config{})
+
+	live, err := s.ListGrants("wch_gone", domain.NowMS())
+	if err != nil {
+		t.Fatalf("list grants: %v", err)
+	}
+	if len(live) != 0 {
+		t.Fatalf("a retired watcher must hold no live grants, got %d", len(live))
+	}
+}
+
+// A watcher whose terminal is still there is untouched — that is a live supervision
+// the restart had no business ending.
+func TestReconcileKeepsWatcherWhoseTerminalSurvived(t *testing.T) {
+	s := reconcileTestStore(t)
+	insertWatcher(t, s, "wch_live", "terminal", `["term-alive"]`)
+
+	ReconcileLedger(context.Background(), s, &fakeReconcileMCP{result: terminalListText("term-alive")}, debuglog.Config{})
+
+	if status, _ := watcherStatus(t, s, "wch_live"); status != "active" {
+		t.Fatalf("a live watcher must survive the boot reconcile, got %q", status)
+	}
+}
+
+// A pr_state watcher observes a forge, not a process. It has no terminal to lose and
+// must survive any number of restarts.
+func TestReconcileLeavesNonTerminalWatchersAlone(t *testing.T) {
+	s := reconcileTestStore(t)
+	insertWatcher(t, s, "wch_pr", "pr_state", `["owner/repo#7"]`)
+
+	ReconcileLedger(context.Background(), s, &fakeReconcileMCP{result: terminalListText()}, debuglog.Config{})
+
+	if status, _ := watcherStatus(t, s, "wch_pr"); status != "active" {
+		t.Fatalf("a pr watcher must survive the boot reconcile, got %q", status)
+	}
+}
+
+// A failed terminal read is not evidence that every terminal is gone. It must not mass
+// retire the supervision the user still has running.
+func TestReconcileRetiresNothingOnAFailedRead(t *testing.T) {
+	s := reconcileTestStore(t)
+	insertWatcher(t, s, "wch_gone", "terminal", `["term-dead"]`)
+
+	ReconcileLedger(context.Background(), s,
+		&fakeReconcileMCP{err: context.DeadlineExceeded}, debuglog.Config{})
+
+	if status, _ := watcherStatus(t, s, "wch_gone"); status != "active" {
+		t.Fatalf("a failed read must change nothing, got %q", status)
+	}
+}
+
+// A watcher carrying no targets is left alone: there is nothing to check, and an empty
+// list is not the same claim as "its targets are gone".
+func TestReconcileLeavesTargetlessWatchersAlone(t *testing.T) {
+	s := reconcileTestStore(t)
+	insertWatcher(t, s, "wch_bare", "terminal", `[]`)
+
+	ReconcileLedger(context.Background(), s, &fakeReconcileMCP{result: terminalListText()}, debuglog.Config{})
+
+	if status, _ := watcherStatus(t, s, "wch_bare"); status != "active" {
+		t.Fatalf("a targetless watcher must survive, got %q", status)
+	}
+}
+
+// The half that decides whether the fix works at all.
+//
+// A watcher can publish an urgent `terminal_exited` and then die with its process
+// before that event is ever delivered — the row outlives it, unresolved. Cancelling
+// the watcher without resolving what it raised leaves the exact item the retire exists
+// to prevent sitting in the queue, where the next tick digests it and spends the
+// autonomous wake anyway.
+func TestReconcileResolvesTheRetiredWatchersOwnEvents(t *testing.T) {
+	s := reconcileTestStore(t)
+	insertWatcher(t, s, "wch_gone", "terminal", `["term-dead"]`)
+	if _, err := s.UpsertEvent(domain.QueuePublishArgs{
+		Source:    domain.SourceTerminalWatcher,
+		Severity:  domain.SeverityUrgent,
+		Title:     "fix: minor audit issues: terminal exited",
+		Summary:   "Terminal exited.",
+		Target:    &domain.EventTarget{TerminalID: "term-dead"},
+		DedupeKey: "watcher:wch_gone:term-dead",
+	}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	ReconcileLedger(context.Background(), s, &fakeReconcileMCP{result: terminalListText()}, debuglog.Config{})
+
+	open, err := s.ListEvents(domain.QueueDigestOptions{})
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	for _, e := range open {
+		if e.DedupeKey == "watcher:wch_gone:term-dead" {
+			t.Fatal("the retired watcher's own event is still open — the wake it would " +
+				"cause is exactly what retiring the watcher was meant to prevent")
+		}
+	}
+}
+
+// ...and only its own. A wholesale source-scoped resolve is /clear's semantics, and
+// would silently clear supervision this reconcile has no quarrel with.
+func TestReconcileLeavesOtherWatchersEventsAlone(t *testing.T) {
+	s := reconcileTestStore(t)
+	insertWatcher(t, s, "wch_gone", "terminal", `["term-dead"]`)
+	insertWatcher(t, s, "wch_live", "terminal", `["term-alive"]`)
+	for _, k := range []struct{ key, term string }{
+		{"watcher:wch_gone:term-dead", "term-dead"},
+		{"watcher:wch_live:term-alive", "term-alive"},
+	} {
+		if _, err := s.UpsertEvent(domain.QueuePublishArgs{
+			Source: domain.SourceTerminalWatcher, Severity: domain.SeverityAttention,
+			Title: "waiting", Summary: "waiting on you",
+			Target: &domain.EventTarget{TerminalID: k.term}, DedupeKey: k.key,
+		}); err != nil {
+			t.Fatalf("publish %s: %v", k.key, err)
+		}
+	}
+
+	ReconcileLedger(context.Background(), s,
+		&fakeReconcileMCP{result: terminalListText("term-alive")}, debuglog.Config{})
+
+	open, err := s.ListEvents(domain.QueueDigestOptions{})
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	var kept bool
+	for _, e := range open {
+		if e.DedupeKey == "watcher:wch_gone:term-dead" {
+			t.Fatal("the dead watcher's event should have been resolved")
+		}
+		if e.DedupeKey == "watcher:wch_live:term-alive" {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Fatal("a live watcher's open event must survive the boot reconcile")
+	}
+}
+
+// The scheduler in this same process can be mid-check on the very row being retired,
+// about to finalize it with a real verdict. Losing that race must mean leaving its
+// answer alone, not overwriting a genuine outcome with `cancelled`.
+func TestRetireWatcherOnResumeYieldsToASettledWatcher(t *testing.T) {
+	s := reconcileTestStore(t)
+	insertWatcher(t, s, "wch_done", "terminal", `["term-dead"]`)
+	if err := s.UpdateWatcher("wch_done", map[string]any{"status": "condition_met"}); err != nil {
+		t.Fatalf("settle watcher: %v", err)
+	}
+
+	won, err := s.RetireWatcherOnResume("wch_done", domain.NowMS())
+	if err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+	if won {
+		t.Fatal("retiring an already-settled watcher must not win")
+	}
+	if status, _ := watcherStatus(t, s, "wch_done"); status != "condition_met" {
+		t.Fatalf("the settled verdict must survive, got %q", status)
+	}
+}

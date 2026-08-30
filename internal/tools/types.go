@@ -405,6 +405,29 @@ type Tool struct {
 	// the tool is treated as independent.
 	ParallelConflictKey func(args json.RawMessage) (keys []string, ok bool)
 
+	// PreflightUnattended, when set, reports why these ARGUMENTS could never work if
+	// this tool were dispatched by a non-interactive actor — a timer or a watcher —
+	// returning "" when they are fine. It is consulted when such a call is SCHEDULED,
+	// not when it runs.
+	//
+	// It exists because the two moments are hours apart and only the first one has a
+	// human in it. A tool that infers something from the turn it is running inside —
+	// the active worktree being the case that prompted this — has nothing to infer
+	// from at fire time, so a call that reads as complete when the model writes it is
+	// already doomed when it is stored. What the user saw was the whole feature
+	// failing silently: "Scheduled. Timer tmr_ddd94718 fires in 10 seconds", then ten
+	// seconds later a queue row nobody was looking at saying it could not run.
+	//
+	// The check belongs HERE, on the tool, rather than in a table the scheduler keeps:
+	// the fire-time requirement is the tool's own rule, and a copy of it somewhere
+	// else is a copy that goes stale the first time the rule changes. Keep this a pure
+	// function of the args — it runs at schedule time, where there is no MCP round trip
+	// to spend and no live state that will still be true when the timer fires.
+	//
+	// Advisory for the SCHEDULING surfaces only; dispatch does not consult it, so the
+	// handler's own fire-time guard stays the thing that actually refuses to run.
+	PreflightUnattended func(args json.RawMessage) string
+
 	// projectionParams is the canonical compact JSON the projection emits as the
 	// tool's `parameters`, computed ONCE from Schema at Register (the cold path) so
 	// OpenAITools never re-unmarshals the schema on the hot projection path (rebuilt

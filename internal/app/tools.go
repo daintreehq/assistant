@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -132,7 +133,8 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 		CheckConsistency: a.checkRunbookStepConsistency,
 	})...)
 	all = append(all, timer.Tools(timer.Deps{
-		Store: timerStoreAdapter{Store: a.Store},
+		Store:                timerStoreAdapter{Store: a.Store},
+		PrepareScheduledCall: a.prepareScheduledCall,
 	})...)
 	all = append(all, watcher.Tools(watcher.Deps{
 		Store: watcherStoreAdapter{s: a.Store},
@@ -265,4 +267,60 @@ func (a *App) agentTaskDeps() agenttaskx.Deps {
 		// "now" is an exact lower bound for this session's launches.
 		SessionStartedAt: domain.NowMS(),
 	}
+}
+
+// prepareScheduledCall resolves a scheduled tool call to the name fire-time dispatch
+// will look up, and asks the tool whether these arguments could ever work with nobody
+// present. Returns ("", reason) to refuse, or (canonicalName, "") to allow.
+//
+// It runs THREE checks, in the order the fire-time path runs them, because each one is
+// a way the old single check let a doomed timer through:
+//
+//  1. The name resolves to a registered tool. Dispatch looks up the exact internal
+//     name and resolves nothing, so a wire spelling or a stray space is a stored timer
+//     that dies with UNKNOWN_TOOL — and an unknown name used to schedule cleanly,
+//     since a tool nobody could find raised no objection.
+//  2. The tool's own decoder accepts the arguments. A spawn with no taskPrompt, or a
+//     bad mode enum, is refused at fire time by the same Decode; running it here moves
+//     that refusal to where it can be acted on.
+//  3. The tool's unattended preflight, on the DECODED args, so it sees defaults and
+//     coercions exactly as the handler will.
+//
+// Resolved through the registry at CALL time, not at construction: this closure is
+// handed to the timer family while the registry is still being filled with the very
+// tools it will later look up.
+func (a *App) prepareScheduledCall(toolName string, args json.RawMessage) (string, string) {
+	if a == nil || a.Registry == nil {
+		return toolName, ""
+	}
+	name := strings.TrimSpace(toolName)
+	tool := a.Registry.Get(name)
+	if tool == nil {
+		// The model may have written the WIRE spelling. Resolving it here is not
+		// leniency — the resolved name is what gets STORED, so the payload dispatch
+		// later looks up is the one that exists.
+		if resolved := a.Registry.ResolveWireName(name); resolved != "" {
+			name = resolved
+			tool = a.Registry.Get(name)
+		}
+	}
+	if tool == nil {
+		return "", fmt.Sprintf("no tool named %q is registered, so nothing would run when it fires", toolName)
+	}
+	if len(args) == 0 {
+		args = json.RawMessage("{}")
+	}
+	if tool.Decode != nil {
+		parsed, err := tool.Decode(args)
+		if err != nil {
+			return "", fmt.Sprintf("its arguments are not valid for %s: %s", name, err.Error())
+		}
+		args = parsed
+	}
+	if tool.PreflightUnattended != nil {
+		if why := tool.PreflightUnattended(args); why != "" {
+			return "", why
+		}
+	}
+	return name, ""
 }

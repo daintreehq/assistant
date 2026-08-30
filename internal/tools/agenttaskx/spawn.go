@@ -147,6 +147,27 @@ func newSpawnForEditsTool(deps Deps) tools.Tool {
 		ParallelConflictKey: func(raw json.RawMessage) ([]string, bool) {
 			return spawnParallelConflictKeys(raw, deps.pinnedWorktreeID(), deps.defaultAgentID())
 		},
+		// A spawn is the tool most often handed to a timer, and the one with the most
+		// to infer from the turn it is running in. Omitting worktreeId is the NORMAL,
+		// documented way to say "here" — and "here" is exactly what a timer firing
+		// hours later does not have, so the same omission that is right in a turn is
+		// unrunnable in a schedule. Caught here, the model is told while it can still
+		// ask worktree.list and fix the call; caught at fire time it is a dead row in
+		// a queue. Deliberately does NOT read the pin: a pin is a live, turn-scoped
+		// binding, and resolving one into a schedule would freeze a value that has no
+		// reason to still be true when the timer comes due.
+		PreflightUnattended: func(raw json.RawMessage) string {
+			var a spawnArgs
+			if err := json.Unmarshal(raw, &a); err != nil {
+				return ""
+			}
+			if strings.TrimSpace(a.WorktreeID) != "" {
+				return ""
+			}
+			return "it names no worktreeId, and a spawn that runs outside a turn cannot " +
+				"infer one — it will fail when it fires. Read worktree.list and pass " +
+				"worktreeId explicitly"
+		},
 		Decode: tools.StrictDecoder(func() any { return &spawnArgs{} }),
 		Handle: func(ctx context.Context, raw json.RawMessage, tc *tools.ToolContext) tools.ToolResult {
 			var a spawnArgs

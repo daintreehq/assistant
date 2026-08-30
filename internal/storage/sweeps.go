@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -292,4 +294,93 @@ func (s *Store) pruneOldRuns(cutoff int64, keepRuns int) error {
 		return fmt.Errorf("commit prune tx: %w", err)
 	}
 	return nil
+}
+
+// ReasonWatcherTerminalGoneOnResume is stamped on a watcher the boot reconcile retires
+// because every terminal it watched is gone from the live inventory.
+//
+// A distinct reason, not 'user_cancelled' or 'session_cleared', because nobody
+// cancelled it and nothing was cleared: it was adopted into a world its target had
+// already left. The audit trail should be able to tell "the restart ended this" apart
+// from "someone ended this".
+const ReasonWatcherTerminalGoneOnResume = "terminal_gone_on_resume"
+
+// RetireWatcherOnResume retires ONE adopted watcher whose targets are gone, doing the
+// full teardown CancelLiveWatchers does — revoke its grants, flip the row, resolve the
+// events it raised — in ONE transaction, and only while the row is still live.
+//
+// All three steps matter, and the middle one alone is not enough. A watcher can have
+// published an urgent `terminal_exited` event and then died with its process before
+// that event was ever delivered; the event outlives it, unresolved and unnotified.
+// Cancelling the watcher without resolving that row leaves the exact thing the retire
+// exists to prevent sitting in the queue, where the next scheduler tick digests it and
+// spends the autonomous wake anyway. Retiring a watcher and leaving its events open is
+// not a smaller fix, it is a fix that does not work.
+//
+// Scoped to the watcher's OWN events by dedupe-key prefix (`watcher:<id>:…`, the key
+// the daemon publishes under) rather than by source, because the wholesale
+// source-scoped resolve is /clear's semantics and would silently clear live
+// supervision that this reconcile has no quarrel with.
+//
+// STATUS-GUARDED, and that guard is a race not a formality: the scheduler in this same
+// process may be mid-check on this very row and about to finalize it with a real
+// outcome. Losing that race must mean leaving its verdict alone, not overwriting a
+// genuine `condition_met` with `cancelled`. Reports whether it won.
+func (s *Store) RetireWatcherOnResume(id string, now int64) (bool, error) {
+	const liveStatuses = "('active','created','paused')"
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, fmt.Errorf("begin retire watcher: %w", err)
+	}
+
+	// (0) Claim. SELECT inside the transaction, on the single writer that already
+	// serializes, so the row cannot change under the three writes below.
+	var status string
+	if err := tx.QueryRow(
+		`SELECT status FROM watchers WHERE id = ? AND status IN `+liveStatuses, id,
+	).Scan(&status); err != nil {
+		_ = tx.Rollback()
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil // already settled by someone with a better answer
+		}
+		return false, fmt.Errorf("claim watcher %s: %w", id, err)
+	}
+
+	// (1) Revoke BEFORE the flip, the order CancelLiveWatchers documents: a grant must
+	// never be live for a watcher that has already been cancelled.
+	if _, err := tx.Exec(`
+		UPDATE automation_grants
+		   SET revokedAt = ?
+		 WHERE actorType = 'watcher' AND actorId = ? AND revokedAt IS NULL`,
+		now, id); err != nil {
+		_ = tx.Rollback()
+		return false, fmt.Errorf("revoke grants for watcher %s: %w", id, err)
+	}
+
+	// (2) Flip.
+	if _, err := tx.Exec(
+		`UPDATE watchers SET status = 'cancelled', endedReason = ?, endedAt = ?
+		  WHERE id = ? AND status IN `+liveStatuses,
+		ReasonWatcherTerminalGoneOnResume, now, id); err != nil {
+		_ = tx.Rollback()
+		return false, fmt.Errorf("retire watcher %s: %w", id, err)
+	}
+
+	// (3) Resolve what it already raised, including anything a dead prior owner
+	// published but never delivered.
+	if _, err := tx.Exec(`
+		UPDATE events
+		   SET resolvedAt = ?
+		 WHERE resolvedAt IS NULL AND dedupeKey LIKE ?`,
+		now, "watcher:"+id+":%"); err != nil {
+		_ = tx.Rollback()
+		return false, fmt.Errorf("resolve events for watcher %s: %w", id, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		_ = tx.Rollback()
+		return false, fmt.Errorf("commit retire watcher %s: %w", id, err)
+	}
+	return true, nil
 }

@@ -180,3 +180,127 @@ func TestCancelReportsCascadeOutcomeHonestly(t *testing.T) {
 		}
 	})
 }
+
+// A payload the registry says can never run at fire time is refused AT SCHEDULE TIME,
+// and nothing is stored.
+//
+// This is the bug the preflight seam exists for: a timer-dispatched spawn that named
+// no worktree was accepted, reported back as "Scheduled.", and then failed on its only
+// firing into a queue row nobody had open. Refusing here is what puts the error in
+// front of the model while it can still fix the call.
+func TestScheduleRefusesAnUnrunnablePayload(t *testing.T) {
+	st := &memStore{}
+	var sawTool string
+	var sawArgs string
+	tool := find(Tools(Deps{
+		Store: st,
+		PrepareScheduledCall: func(name string, args json.RawMessage) (string, string) {
+			sawTool, sawArgs = name, string(args)
+			return "", "it names no worktreeId"
+		},
+	}), "timer.schedule")
+
+	args := json.RawMessage(`{"title":"spawn","delayMs":10000,"payload":` +
+		`{"type":"call_safe_tool","toolCall":{"toolName":"agentTask.spawnForEdits","args":{"title":"go"}}}}`)
+	res := tool.Handle(context.Background(), args, &tools.ToolContext{})
+
+	if res.Ok || res.Error.Code != codeTimerUnrunnable {
+		t.Fatalf("expected %s, got %+v", codeTimerUnrunnable, res)
+	}
+	// Retrying the identical call cannot help — only a different call can.
+	if res.Error.Recoverable {
+		t.Fatal("an unrunnable payload is not recoverable by retrying it")
+	}
+	// The reason has to reach the model, not just a code: the code says "no" and the
+	// reason is the only part that says what to write instead.
+	if !strings.Contains(res.Error.Message, "names no worktreeId") {
+		t.Fatalf("failure should carry the tool's own reason, got %q", res.Error.Message)
+	}
+	if len(st.inserted) != 0 {
+		t.Fatalf("a refused schedule must persist nothing, got %+v", st.inserted)
+	}
+	// The tool is asked about ITS OWN arguments, not the timer's.
+	if sawTool != "agentTask.spawnForEdits" || !strings.Contains(sawArgs, `"title":"go"`) {
+		t.Fatalf("preflight got (%q, %q)", sawTool, sawArgs)
+	}
+}
+
+// The preflight is consulted for the tool payload only — a reminder has no tool to ask.
+func TestScheduleSkipsPreflightForAReminder(t *testing.T) {
+	called := false
+	st := &memStore{}
+	tool := find(Tools(Deps{
+		Store: st,
+		PrepareScheduledCall: func(n string, _ json.RawMessage) (string, string) {
+			called = true
+			return n, "no"
+		},
+	}), "timer.schedule")
+	res := tool.Handle(context.Background(),
+		json.RawMessage(`{"title":"x","delayMs":1000,"payload":{"type":"enqueue","message":"hi"}}`),
+		&tools.ToolContext{})
+	if !res.Ok || called {
+		t.Fatalf("a reminder should schedule without a preflight; ok=%v called=%v", res.Ok, called)
+	}
+}
+
+// No preflight wired ⇒ scheduling behaves exactly as it did before the seam existed.
+func TestScheduleWithoutPreflightIsUnchanged(t *testing.T) {
+	st := &memStore{}
+	tool := find(Tools(Deps{Store: st}), "timer.schedule")
+	res := tool.Handle(context.Background(),
+		json.RawMessage(`{"title":"spawn","delayMs":1000,"payload":`+
+			`{"type":"call_safe_tool","toolCall":{"toolName":"agentTask.spawnForEdits"}}}`),
+		&tools.ToolContext{})
+	if !res.Ok || len(st.inserted) != 1 {
+		t.Fatalf("expected a stored timer, got ok=%v inserted=%+v", res.Ok, st.inserted)
+	}
+}
+
+// The name that gets STORED is the one dispatch will look up, not the one that was
+// typed. Fire-time dispatch resolves nothing, so persisting a wire spelling is how a
+// payload that passed every check still dies with UNKNOWN_TOOL on its only firing.
+func TestScheduleStoresTheCanonicalToolName(t *testing.T) {
+	st := &memStore{}
+	tool := find(Tools(Deps{
+		Store: st,
+		PrepareScheduledCall: func(name string, _ json.RawMessage) (string, string) {
+			if name == "agentTask__spawnForEdits" {
+				return "agentTask.spawnForEdits", ""
+			}
+			return name, ""
+		},
+	}), "timer.schedule")
+
+	res := tool.Handle(context.Background(),
+		json.RawMessage(`{"title":"spawn","delayMs":1000,"payload":`+
+			`{"type":"call_safe_tool","toolCall":{"toolName":"agentTask__spawnForEdits","args":{"worktreeId":"/w"}}}}`),
+		&tools.ToolContext{})
+	if !res.Ok || len(st.inserted) != 1 {
+		t.Fatalf("expected a stored timer, got ok=%v inserted=%+v", res.Ok, st.inserted)
+	}
+	if !strings.Contains(st.inserted[0].PayloadJson, `"toolName":"agentTask.spawnForEdits"`) {
+		t.Fatalf("the stored payload should carry the resolved name, got %s", st.inserted[0].PayloadJson)
+	}
+}
+
+// Absent args reach the check as `{}` — what dispatch will hand the handler — rather
+// than as the `null` a nil map marshals to, which no decoder accepts.
+func TestSchedulePassesAbsentArgsAsAnEmptyObject(t *testing.T) {
+	var saw string
+	tool := find(Tools(Deps{
+		Store: &memStore{},
+		PrepareScheduledCall: func(n string, args json.RawMessage) (string, string) {
+			saw = string(args)
+			return n, ""
+		},
+	}), "timer.schedule")
+
+	tool.Handle(context.Background(),
+		json.RawMessage(`{"title":"x","delayMs":1000,"payload":`+
+			`{"type":"call_safe_tool","toolCall":{"toolName":"fs.read"}}}`),
+		&tools.ToolContext{})
+	if saw != "{}" {
+		t.Fatalf("absent args should arrive as {}, got %q", saw)
+	}
+}

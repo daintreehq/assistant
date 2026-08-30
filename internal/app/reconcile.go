@@ -38,6 +38,12 @@ type ledgerReconcileStore interface {
 	ListConfirmedAgentLaunchesWithTerminal(limit int) ([]domain.AgentLaunchRecord, error)
 	GetWorkflowRun(id string) (*domain.WorkflowRunRecord, error)
 	UpdateWorkflowRun(id string, patch map[string]any) error
+	// The adopted-watcher pass. Retirement is ONE transactional, status-guarded store
+	// operation rather than a revoke plus an update from here: the teardown is three
+	// writes that have to land together (grants, the row, and the events the watcher
+	// already raised), and a half-applied one is worse than none.
+	ListLiveWatchers() ([]domain.WatcherRecord, error)
+	RetireWatcherOnResume(id string, now int64) (bool, error)
 }
 
 // ReconcileLedger cross-checks the assistant's own durable ledger against the live
@@ -45,10 +51,22 @@ type ledgerReconcileStore interface {
 // behind. A workflow run that bound one or more terminals but whose terminals are ALL
 // gone from terminal.list is no longer live, so it is cancelled; likewise a confirmed
 // agent-launch saga whose terminal vanished has its backing ledger run cancelled. It
-// NEVER re-arms watchers, touches live terminals, or promotes agents/worktrees to
-// local entities — it only reconciles the assistant's own bookkeeping, honouring the
-// fresh-start invariant (watchers stay cancelled, the inbox stays wiped; only timers
-// and the durable ledger resume).
+// also RETIRES a terminal watcher whose every target is gone from that same inventory.
+//
+// That pass exists because supervision is durable now: BeginOwnership adopts every live
+// watcher from the previous owner and checks nothing about the terminals they point at,
+// which is right when only the assistant restarted (Daintree still owns those
+// terminals) and wrong when DAINTREE restarted, because the terminals died with it. An
+// adopted watcher then ticked, found its target absent, and classified that as
+// `terminal_exited` — SeverityUrgent, publishable, and an autonomous wake — so
+// restarting the app spent a model turn reporting the exit that the restart itself had
+// caused, on a terminal it could no longer read. Retiring the row here, before the
+// scheduler ever sees it, is the difference between stale bookkeeping and an event. The
+// distinction it draws is whether the watcher was ever running while its terminal was
+// alive: a terminal that dies under a live watcher is real news and still publishes.
+//
+// It NEVER re-arms watchers, touches live terminals, or promotes agents/worktrees to
+// local entities — it only reconciles the assistant's own bookkeeping.
 //
 // Best-effort and bounded: a terminal.list failure or error result skips reconciliation
 // entirely (it never aborts a connect or guesses an empty inventory from a failed read),
@@ -144,8 +162,45 @@ func reconcileLedger(ctx context.Context, store ledgerReconcileStore, client led
 		}
 	}
 
-	if cancelled > 0 {
-		debuglog.LogDebug(dbg, "reconcile.summary", map[string]any{"cancelled": cancelled, "liveTerminals": len(live)})
+	// Pass 3: adopted terminal watchers with nothing left to watch.
+	//
+	// Scoped to kind "terminal": a pr_state watcher observes a forge, not a process,
+	// and survives any number of Daintree restarts. A watcher carrying NO targets is
+	// left alone too — there is nothing to check, and guessing would retire a row on
+	// the strength of an empty list.
+	retired := 0
+	if watchers, err := store.ListLiveWatchers(); err != nil {
+		debuglog.LogDebug(dbg, "reconcile.list.watchers.error", map[string]any{"error": err.Error()})
+	} else {
+		for _, w := range watchers {
+			if w.Kind != "terminal" {
+				continue
+			}
+			targets := parseIDList(&w.TargetsJson)
+			if len(targets) == 0 || anyLive(targets, live) {
+				continue
+			}
+			// One transaction, all three writes, and only while the row is still live.
+			// A false here is the scheduler having finalized the same watcher with a
+			// real verdict first — its answer is the better one, so leave it.
+			won, err := store.RetireWatcherOnResume(w.ID, domain.NowMS())
+			if err != nil {
+				debuglog.LogDebug(dbg, "reconcile.watcher.retire.error",
+					map[string]any{"watcherId": w.ID, "error": err.Error()})
+				continue
+			}
+			if !won {
+				continue
+			}
+			retired++
+			debuglog.LogDebug(dbg, "reconcile.watcher.retired",
+				map[string]any{"watcherId": w.ID, "title": w.Title, "targets": targets})
+		}
+	}
+
+	if cancelled > 0 || retired > 0 {
+		debuglog.LogDebug(dbg, "reconcile.summary", map[string]any{
+			"cancelled": cancelled, "watchersRetired": retired, "liveTerminals": len(live)})
 	}
 	return cancelled, true
 }

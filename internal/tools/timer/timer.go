@@ -23,6 +23,8 @@ const (
 	codeTimerFireAt    = "TIMER_FIRE_AT"
 	codeTimerRepeatEnd = "TIMER_REPEAT_UNTIL"
 	codeTimerNotFound  = "TIMER_NOT_FOUND"
+	// The payload is well-formed but could never run at fire time.
+	codeTimerUnrunnable = "TIMER_PAYLOAD_UNRUNNABLE"
 )
 
 // Store is the slice of storage the timer tools touch.
@@ -40,6 +42,22 @@ type Store interface {
 // Deps is the dependency set for the timer family.
 type Deps struct {
 	Store Store
+	// PrepareScheduledCall resolves a scheduled tool call to the name DISPATCH will
+	// actually look up, and reports why it could never run — "" meaning it is fine.
+	// Backed by the registry; nil ⇒ both checks are skipped and the name is stored as
+	// written, so a stripped test context schedules exactly as before.
+	//
+	// Canonicalizing is half the job and not an afterthought. Fire-time dispatch looks
+	// a tool up by its exact internal name and resolves nothing, so a payload written
+	// in the wire spelling — or with stray whitespace — is stored happily and dies with
+	// UNKNOWN_TOOL hours later. A check that could FIND the tool while dispatch could
+	// not would be the worst of both: it would pass judgement on a call that was never
+	// going to run under that name anyway.
+	//
+	// A seam rather than a *tools.Registry because the registry does not exist yet when
+	// this family is constructed — the tools are what is being built. The closure
+	// resolves at SCHEDULE time, by which point it does.
+	PrepareScheduledCall func(toolName string, args json.RawMessage) (canonical string, refusal string)
 }
 
 // Tools returns the timer tool family.
@@ -196,6 +214,36 @@ func newScheduleTool(deps Deps) *tools.Tool {
 			if a.Payload.Type == "call_safe_tool" {
 				if a.Payload.ToolCall == nil || strings.TrimSpace(a.Payload.ToolCall.ToolName) == "" {
 					return tools.Fail(codeInvalidArgs, "timer.schedule: call_safe_tool payload requires toolCall.toolName")
+				}
+				// Refuse a payload that is already known to be unrunnable, HERE, where
+				// the model can still fix it and a human is still watching. Scheduling
+				// it instead buys a confident "Scheduled." now and a failure hours later
+				// in a queue row nobody has open — the exact shape of the bug this
+				// guards: a timer-dispatched spawn that named no worktree reported
+				// success at schedule time and died on its only firing.
+				name := strings.TrimSpace(a.Payload.ToolCall.ToolName)
+				if deps.PrepareScheduledCall != nil {
+					// nil/absent args are `{}` here for the same reason dispatch treats
+					// them as `{}`: the check has to see what the handler will see, and
+					// a nil map marshals to `null`, which no decoder accepts.
+					argsJSON := []byte("{}")
+					if a.Payload.ToolCall.Args != nil {
+						if raw, err := json.Marshal(a.Payload.ToolCall.Args); err == nil && len(raw) > 0 {
+							argsJSON = raw
+						}
+					}
+					canonical, refusal := deps.PrepareScheduledCall(name, argsJSON)
+					if refusal != "" {
+						return tools.Fail(codeTimerUnrunnable,
+							fmt.Sprintf("timer.schedule: this %s call cannot be scheduled because %s.", name, refusal),
+							tools.Unrecoverable())
+					}
+					// Persist the name dispatch will resolve, not the one that was
+					// typed. Storing the wire spelling is how a payload that passed
+					// every check still fails at fire time with UNKNOWN_TOOL.
+					if canonical != "" {
+						a.Payload.ToolCall.ToolName = canonical
+					}
 				}
 			}
 
