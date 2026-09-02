@@ -244,7 +244,25 @@ func TestToolProjectionTotalIsBounded(t *testing.T) {
 		// the paragraph became a pointer. The new schema also states the three worktree
 		// locators tersely rather than restating forgeGetPRSchema's full prose — the
 		// same duplication argument daintree.invoke's entry above makes.
-		{"default", ToolInventoryOptions{}, 91_500},
+		//
+		// Raised to 93 KB ON THE MERGE, measuring 92,042, and the reason is worth more
+		// than the number. forge.getPRs and the timer message payload were developed on
+		// separate branches in the same window. Each measured green against this ceiling
+		// alone, because each was sized against a develop that did not yet contain the
+		// other; together they cleared it by 542 bytes. So the gate went red for the
+		// first time at the MERGE, on a diff where neither side had touched this file's
+		// number and neither author had done anything wrong.
+		//
+		// That is the aggregate budget doing its actual job rather than failing at it:
+		// a per-tool budget cannot see a collision that only exists once both tools are
+		// registered, and this is the only check positioned to. Worth remembering the
+		// next time two surface-adding branches are open at once — the second one to
+		// merge inherits the bill, whichever it happens to be.
+		//
+		// 958 bytes of headroom, the same deliberately-small slack the entries above
+		// keep, for the same reason: slack that is topped back up on every raise stops
+		// being a signal.
+		{"default", ToolInventoryOptions{}, 93_000},
 		// The flag adds seven execution-graph tools. It is off by default and off in
 		// production, so it gets its own ceiling rather than eating the default's
 		// headroom — but it is still bounded, because a rollout flag is not an excuse.
