@@ -26,6 +26,7 @@ func TestWrapperRiskClassesAndConsequences(t *testing.T) {
 		"forge.getIssue":               domain.RiskRead,
 		"forge.listPRs":                domain.RiskRead,
 		"forge.getPR":                  domain.RiskRead,
+		"forge.getPRs":                 domain.RiskRead,
 		"git.getProjectPulse":          domain.RiskRead,
 		"workflow.startWorkOnIssue":    domain.RiskExternal,
 		"workflow.prepBranchForReview": domain.RiskRead, // read-only readiness verdict; no commit/push/PR

@@ -217,6 +217,12 @@ func presentToolVerb(name string) (label string, keys []string) {
 		return "Listed PRs", nil
 	case "forge.getPR":
 		return "Read PR", []string{"prNumber"}
+	case "forge.getPRs":
+		// ":ids" joins the array. The bare key would fall through to strArg, which
+		// handles only strings and numbers, so a list argument resolves to "" and the
+		// row shows no target at all — the same silent gap the terminalIds entries
+		// above use this mode to avoid.
+		return "Read PRs", []string{"prNumbers:ids"}
 	case "forge.getChecks":
 		return "Read CI", []string{"prNumber"}
 	case "forge.listIssueComments":

@@ -114,7 +114,7 @@ func newForgeGetPRTool() *tools.Tool {
 	return &tools.Tool{
 		Name: "forge.getPR",
 		Description: "Get a single forge (GitHub) pull request by number. " +
-			"PARALLEL: forge.getPR calls batched in ONE reply run concurrently — to check several PRs, emit one call each in one batch.",
+			"For several known numbers use forge.getPRs — one call, with a per-number status.",
 		Risk: domain.RiskRead,
 		// Independent per-PR read over the forge MCP, no ordering dependency on siblings:
 		// checking several PRs at once overlaps their round-trips. See terminal.extract.
@@ -132,6 +132,123 @@ func newForgeGetPRTool() *tools.Tool {
 			fwd := map[string]any{"prNumber": a.PRNumber}
 			a.forwardLocation(fwd)
 			return passthrough(ctx, tctx, "forge.getPR", fwd, "")
+		},
+	}
+}
+
+// forgeGetPRsArgs is the batch by-number read: 2-20 DISTINCT positive numbers plus
+// the same optional worktree locator the singular read takes.
+//
+// The bounds are the forge action's own, restated here because StrictDecoder runs no
+// schema engine — the declared minItems/maxItems would otherwise be advisory, and a
+// 200-number call would be refused by Daintree after the round trip instead of before.
+type forgeGetPRsArgs struct {
+	CWD          string `json:"cwd,omitempty"`
+	WorktreeID   string `json:"worktreeId,omitempty"`
+	WorktreePath string `json:"worktreePath,omitempty"`
+	PRNumbers    []int  `json:"prNumbers"`
+}
+
+// forgeGetPRsMin/Max are the batch bounds Daintree enforces. One number is excluded at
+// the bottom deliberately: a singleton batch is forge.getPR with a worse result shape,
+// and admitting it here would split one question across two tools for no gain.
+const (
+	forgeGetPRsMin = 2
+	forgeGetPRsMax = 20
+)
+
+func (a forgeGetPRsArgs) forwardLocation(fwd map[string]any) {
+	forgeGetPRArgs{CWD: a.CWD, WorktreeID: a.WorktreeID, WorktreePath: a.WorktreePath}.forwardLocation(fwd)
+}
+
+// The locator descriptions are terser than forgeGetPRSchema's on purpose. Every schema
+// is re-sent on every model round (internal/app/toolbudget_test.go), the three fields
+// are documented in full one tool away, and the meaning a batch adds is entirely in
+// prNumbers — so that is where the bytes go.
+var forgeGetPRsSchema = json.RawMessage(`{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["prNumbers"],
+  "properties": {
+    "cwd": { "type": "string", "description": "Legacy alias for worktreePath." },
+    "worktreeId": { "type": "string", "description": "Worktree id; beats a path." },
+    "worktreePath": { "type": "string", "description": "Absolute worktree path." },
+    "prNumbers": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": { "type": "integer", "minimum": 1 },
+      "description": "2-20 DISTINCT numbers you already know, from a listing or the user."
+    }
+  }
+}`)
+
+// newForgeGetPRsTool is the batch by-number read.
+//
+// It exists because the singular tool's own description used to teach the workaround:
+// "to check several PRs, emit one call each in one batch". That was the best available
+// answer while the forge exposed no plural lookup, and it cost one forge round trip per
+// number — a ten-PR review spent ten of them, which is what daintreehq/daintree#12157
+// was opened about.
+//
+// The per-number STATUS is the reason this is not just a speed-up, and why the
+// description spends its bytes on it. The forge distinguishes three outcomes and the
+// old IPC handler collapsed two of them by dropping the entry: `not_found` means the
+// forge was asked and said the PR is not there, while `unresolved` means nothing was
+// learned (rate limit, transport failure, a repo it could not reach). Reading the
+// second as the first is how an agent closes work that exists, so the wrapper refuses
+// to let the distinction stay implicit.
+func newForgeGetPRsTool() *tools.Tool {
+	return &tools.Tool{
+		Name: "forge.getPRs",
+		Description: "Get 2-20 known forge (GitHub) pull requests in ONE call, instead of repeating forge.getPR. " +
+			"Each number carries a status: `found`, `not_found` (asked; not there) or `unresolved` (nothing learned — rate limit or transport). " +
+			"NEVER read `unresolved` as `not_found` — it is not evidence a PR is gone, and acting on it closes live work; re-read those numbers. " +
+			"Not a search; discover with forge.listPRs.",
+		Risk: domain.RiskRead,
+		// One bounded MCP snapshot read like its siblings, so a batch of forge reads
+		// still overlaps round-trips up to the governor's in-flight cap.
+		Parallelizable: true,
+		Schema:         forgeGetPRsSchema,
+		Decode:         tools.StrictDecoder(func() any { return &forgeGetPRsArgs{} }),
+		Handle: func(ctx context.Context, args json.RawMessage, tctx *tools.ToolContext) tools.ToolResult {
+			var a forgeGetPRsArgs
+			if res, ok := strictDecode(args, "forge.getPRs", &a); !ok {
+				return res
+			}
+			if len(a.PRNumbers) < forgeGetPRsMin {
+				// Name the singular tool rather than just the bound: a one-number call
+				// is a real question with a real answer, and the recovery is a
+				// different tool, not a longer list.
+				return tools.Fail(codeInvalidArgs, fmt.Sprintf(
+					"forge.getPRs: needs at least %d PR numbers (got %d). For a single PR call forge.getPR with its prNumber.",
+					forgeGetPRsMin, len(a.PRNumbers)))
+			}
+			if len(a.PRNumbers) > forgeGetPRsMax {
+				return tools.Fail(codeInvalidArgs, fmt.Sprintf(
+					"forge.getPRs: at most %d PR numbers per call (got %d). Split them across calls — several forge reads in ONE batch run concurrently.",
+					forgeGetPRsMax, len(a.PRNumbers)))
+			}
+			// Duplicates are rejected rather than deduplicated. Silently collapsing
+			// [9,9,9] would let a three-number call clear the floor and return one
+			// result, so the caller's list and the reply's would disagree about how
+			// many PRs were asked about.
+			seen := make(map[int]bool, len(a.PRNumbers))
+			for _, n := range a.PRNumbers {
+				if n <= 0 {
+					return tools.Fail(codeInvalidArgs, fmt.Sprintf(
+						"forge.getPRs: prNumbers must all be positive integers (got %d).", n))
+				}
+				if seen[n] {
+					return tools.Fail(codeInvalidArgs, fmt.Sprintf(
+						"forge.getPRs: prNumbers must be distinct; %d appears more than once.", n))
+				}
+				seen[n] = true
+			}
+			fwd := map[string]any{"prNumbers": a.PRNumbers}
+			a.forwardLocation(fwd)
+			return passthrough(ctx, tctx, "forge.getPRs", fwd, "")
 		},
 	}
 }

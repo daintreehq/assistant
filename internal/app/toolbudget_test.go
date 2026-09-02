@@ -231,6 +231,19 @@ func TestToolProjectionTotalIsBounded(t *testing.T) {
 		// make the next addition argue for itself, and halving the slack without
 		// raising the ceiling is that job being done. The next tool to land here should
 		// expect to raise the number, deliberately, with its own paragraph.
+		//
+		// UNCHANGED at 91.5 KB for forge.getPRs (daintreehq/daintree#12157), which fits
+		// in what is left. It is the cheapest kind of addition to argue for: the tool
+		// it replaces was being called once per PR number because forge.getPR's own
+		// description said to, so a five-PR review paid five projections' worth of
+		// call-and-result traffic to ask one question. One call now costs ~590 bytes a
+		// round and saves multiples of that on any turn that uses it.
+		//
+		// Paid for partly by the tool it supersedes: forge.getPR's PARALLEL paragraph
+		// existed to teach the batch workaround, and the workaround now has a tool, so
+		// the paragraph became a pointer. The new schema also states the three worktree
+		// locators tersely rather than restating forgeGetPRSchema's full prose — the
+		// same duplication argument daintree.invoke's entry above makes.
 		{"default", ToolInventoryOptions{}, 91_500},
 		// The flag adds seven execution-graph tools. It is off by default and off in
 		// production, so it gets its own ceiling rather than eating the default's
@@ -244,7 +257,18 @@ func TestToolProjectionTotalIsBounded(t *testing.T) {
 		// is left with ~0.8 KB. Same reasoning as above — the shrinking headroom is the
 		// signal, and hiding it behind a raise nobody argued for is what the budget
 		// exists to prevent.
-		{"workflow-intelligence", ToolInventoryOptions{WorkflowIntelligence: true}, 98_000},
+		//
+		// Raised to 99 KB for forge.getPRs (measuring 98,128). The default absorbed the
+		// same tool without moving; this ceiling could not, because it was already the
+		// tighter of the two — ~0.8 KB against ~1.0 KB — after two additions in a row
+		// were deliberately paid out of headroom here. So this raise is settling that
+		// running tab rather than pricing one tool: the flagged set carries everything
+		// the default carries plus seven execution-graph tools, and three consecutive
+		// "absorbed it" entries above are what left it with nothing to absorb.
+		//
+		// 872 bytes of headroom, kept deliberately small for the same reason the entries
+		// above give: slack that is topped back up on every raise stops being a signal.
+		{"workflow-intelligence", ToolInventoryOptions{WorkflowIntelligence: true}, 99_000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv, err := BuildToolInventory(tc.opts)

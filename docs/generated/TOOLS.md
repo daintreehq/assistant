@@ -30,7 +30,7 @@ already drifted out of agreement with each other and with the binary.
 > minting would cover mutating work. And `user.askMultipleChoice` needs a human at a
 > TTY: every unattended actor has no question surface and gets `QUESTION_NOT_INTERACTIVE`.
 
-## Inventory — 96 tools in 29 groups
+## Inventory — 97 tools in 29 groups
 
 ### `agentSessionHistory.*`
 
@@ -109,6 +109,7 @@ already drifted out of agreement with each other and with the binary.
 | `forge.getIssue` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Fetch ONE GitHub issue's detail through Daintree's forge integration |
 | `forge.listPRs` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | List the project's GitHub pull requests through Daintree's forge integration |
 | `forge.getPR` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Get a single forge (GitHub) pull request by number |
+| `forge.getPRs` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Get 2-20 known forge (GitHub) pull requests in ONE call, instead of repeating forge.getPR |
 | `forge.getChecks` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Read a pull request's CI check state by PR number |
 | `forge.listIssueComments` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Read ONE page of a GitHub issue's comment thread |
 
