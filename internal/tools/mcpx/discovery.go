@@ -291,6 +291,7 @@ var wrappedMCPTools = map[string]string{
 	"workflow.startWorkOnIssue":    "workflow.startWorkOnIssue (typed wrapper — pass arguments; it also attaches a supervisor watcher)",
 	"workflow.prepBranchForReview": "workflow.prepBranchForReview (typed wrapper — pass arguments)",
 	"forge.getPR":                  "forge.getPR (typed wrapper — pass arguments)",
+	"forge.getPRs":                 "forge.getPRs (typed wrapper — pass 2-20 distinct prNumbers; it also keeps the not_found vs unresolved distinction the raw result drops)",
 	// The other three forge READS are wrapped in internal/tools/mcpwrap too, and were
 	// never denylisted — the raw forward stayed open beside each typed wrapper.
 	"forge.listIssues": "forge.listIssues (typed read wrapper — pass an optional arguments object; read tier, parallelizable)",

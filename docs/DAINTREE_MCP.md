@@ -45,7 +45,19 @@ falls back to the legacy SSE transport on failure.
 
 `workbench` (read/safe) ⊂ `action` (+mutations) ⊂ `system` (+dangerous). External API-key
 clients get an `external` tier (~70 read-safe + creation tools, no dangerous mutators like
-`worktree.delete`). The CLI treats the tier as advisory and adds its OWN safety layer on top.
+`git.push`). The CLI treats the tier as advisory and adds its OWN safety layer on top.
+
+As of daintreehq/daintree#12140, `worktree.delete`, `worktree.deleteOwned` and
+`worktree.resource.teardown` sit at the **action** tier, not `system` — cleaning up a
+worktree it just finished with is ordinary orchestration for an in-app assistant. That
+moved the boundary from "irreversible or not" to "is the tier the only gate this tool
+has": all three are `danger: "confirm"`, so admission still ends at a confirmation —
+pre-authorized by a native automation grant, or else a dialog — whereas `git.commit` and
+`forge.assignIssue` are `danger: "safe"` and the tier is all they have.
+**None of this changes the CLI**, which classifies independently and deliberately more
+narrowly: `worktree.delete` is in `neverDynamic` (internal/tools/mcpx/policy.go) and
+stays behind `daintree.call`'s system-tier typed confirmation whatever tier Daintree
+puts it at. Read that as the two layers agreeing to disagree, not as drift to fix.
 
 ## Representative action / tool ids (RAW names — prefer the typed wrapper where one exists)
 
@@ -55,8 +67,16 @@ wrapper — the raw forward would skip its validation.
 
 Terminals: `terminal.list`, `terminal.new`, `terminal.getOutput`, `terminal.getStatus`,
 `terminal.sendCommand`, `terminal.inject`, `terminal.waitUntilIdle`, `terminal.rename`,
-`terminal.close`, `terminal.kill`, `terminal.moveToWorktree`, `terminal.arm` /
-`terminal.disarm` / `terminal.disarmAll`.
+`terminal.close`, `terminal.kill`, `terminal.killBatch`, `terminal.moveToWorktree`,
+`terminal.arm` / `terminal.disarm` / `terminal.disarmAll`.
+
+> `terminal.killBatch` (daintreehq/daintree#12141) takes an explicit id list (≤32,
+> distinct) and raises ONE confirmation with a checkbox per row, reporting five
+> per-target buckets: `killedIds`, `excludedIds` (a human unticked it — never retry
+> those), `notFoundIds`, `skippedIds` and `failedIds`. It is agent-only and has no
+> CLI wrapper, because the cleanup path deliberately prefers `terminal.close` — kill
+> deletes permanently where close trashes. Reach for it only when the user asked to
+> kill rather than close.
 
 > `terminal.moveToWorktree` files a pane under another OPEN worktree; `worktreeId` is
 > matched exactly (a branch name is never accepted) and a pane sharing a tab group takes
@@ -77,12 +97,26 @@ not MCP-callable; see the arming note below.)
 > themselves — so treat it as background-only and don't reach for it.
 
 Worktrees: `worktree.list`, `worktree.getCurrent`, `worktree.createWithRecipe`,
-`worktree.delete`, `worktree.setActive`, `worktree.refresh`, `worktree.listBranches`,
+`worktree.waitUntilReady`, `worktree.delete`, `worktree.setActive`, `worktree.refresh`,
+`worktree.listBranches`,
 `worktree.compareDiff` (read-only: the files that differ between two worktrees' branches).
 Resource lifecycle: `worktree.resource.provision`, `worktree.resource.teardown`,
 `worktree.resource.pause`, `worktree.resource.resume`, `worktree.resource.status`.
 (`worktree.resource.connect` is **renderer-only** — no MCP surface, despite earlier
 docs listing it here.)
+
+> **Shapes changed in daintreehq/daintree#12157.** `worktree.createWithRecipe` now takes
+> a discriminated `source` union (`newBranch` | `existingBranch` | `pullRequest`) in
+> place of five conditionally-optional top-level fields whose legal combinations were
+> only enforced inside `run()`. `worktree.create` returns `{ worktreeId, branch }` and
+> `forge.getPR` returns `{ pr }`, both previously bare values that could advertise no
+> output schema. The CLI absorbs all three without code: its `createWithRecipe` wrapper
+> forwards an opaque `arguments` record, so the model reads the live shape from
+> `tool.schema`; and `extractPrFields` already unwraps a `pr` envelope
+> (internal/daemon/prwatcher.go `candidateObjects`). Creation also now reports
+> `setupStatus` separately from `lifecycleStatus`, because git returning is not the same
+> as config copy, submodule init and the setup script having finished — three failure
+> paths there used to report as ready.
 
 Git: `git.getProjectPulse` (HISTORICAL activity/pulse), `git.getStagingStatus` (live
 working-tree state), `git.commit`, `git.push`, `git.stageAll`, `git.stageFile`,
@@ -92,7 +126,13 @@ working-tree state), `git.commit`, `git.push`, `git.stageAll`, `git.stageFile`,
 former `git.snapshot*` family was removed from Daintree as part of a feature cleanup;
 the CLI dropped its `git.snapshotRevert`/`git.snapshotDelete` wrappers in lockstep.)
 
-Forge (reads): `forge.listIssues`, `forge.listPRs`, `forge.getIssue`, `forge.getPR`.
+Forge (reads): `forge.listIssues`, `forge.listPRs`, `forge.getIssue`, `forge.getPR`,
+`forge.getPRs` (batch: 2-20 distinct known numbers in one round trip, added in
+daintreehq/daintree#12157). `forge.getPRs` reports a per-number status — `found`,
+`not_found` (asked, and it is not there) or `unresolved` (nothing was learned). The old
+IPC handler collapsed the last two by dropping the entry, which made a rate-limited
+lookup indistinguishable from a deleted PR; the typed wrapper keeps them apart because
+acting on that confusion closes work that exists.
 Forge (issue writes): `forge.createIssue`, `forge.closeIssue`, `forge.reopenIssue`,
 `forge.editIssue`, `forge.addIssueComment`, `forge.addIssueLabel`,
 `forge.removeIssueLabel`, `forge.assignIssue`, `forge.unassignIssue`.
@@ -100,9 +140,16 @@ Forge (PR writes): `forge.createPR`, `forge.closePR`, `forge.reopenPR`, `forge.m
 `forge.convertPRToDraft`, `forge.markPRReadyForReview`, `forge.commentOnPR`, `forge.editPR`.
 Forge (review writes): `forge.approvePR`, `forge.requestChanges`, `forge.dismissReview`,
 `forge.requestReviewers`. All forge writes are `external`-risk and the CLI always confirms
-them (its own safety layer — note that on the Daintree side several issue writes are
-`danger:safe`, but the CLI confirms regardless). **Only the four forge READS
-(`listIssues`/`getIssue`/`listPRs`/`getPR`) have typed CLI wrappers** — every forge
+them (its own safety layer). On the Daintree side the issue writes split two ways since
+daintreehq/daintree#12143: `forge.createIssue`, `forge.addIssueComment` and
+`forge.reopenIssue` were raised to `danger: "confirm"` — each publishes a durable public
+record this capability cannot retract, and closing an issue removes neither the issue nor
+its watcher notifications — while `forge.assignIssue`/`unassignIssue` and the label pair
+stay `danger: "safe"` as idempotent state-sets with exact inverses. The CLI confirmed all
+of them before and still does, so this changes nothing here; it is recorded because
+`localTargetPolicies` derives its `Danger` strings from this file. **The forge READS have
+typed CLI wrappers** (`listIssues`/`getIssue`/`listPRs`/`getPR`/`getPRs`, plus
+`forge.getChecks` over `forge.getCIStatus` and `forge.listIssueComments`) — every forge
 WRITE is reached via `daintree.call`. Most PR/review writes return `void`; only
 `forge.createPR`/`forge.editPR` return the PR object (re-read with `forge.getPR` after
 other writes).
@@ -175,6 +222,26 @@ Code/Files (Daintree-side): `copyTree.generate`, `copyTree.injectToTerminal`,
 `files.search`, `file.view`, `file.openInEditor`.
 
 Meta: `actions.list`, `actions.getContext`, `actions.search`, `actions.getSchema`.
+
+> **First-party existence catalog (daintreehq/daintree#12139).** Tools above the
+> session's tier used to be invisible, not merely refused: they were absent from
+> `tools/list` AND from `actions.list`/`search`, and an out-of-tier `actions.getSchema`
+> returned a `NOT_FOUND` deliberately identical to an unknown id's. So an assistant asked
+> to clean up worktrees reported that Daintree exposes no worktree-delete action. For
+> renderer-owned sessions `actions.list` and `actions.search` now carry an
+> `unavailable[]` array (paginated independently, with its own `unavailableHasMore`), and
+> `actions.getSchema` answers `TIER_NOT_PERMITTED` with a stub — exactly
+> `{id, title, band, minimumTier, callable: false}`, no description and no schemas.
+> **Consult it before reporting a capability as missing**, and name the required tier
+> rather than denying the action exists. Nothing in the catalog is dispatchable, and
+> external/api-key clients get the previous payload field for field. The CLI needs no
+> decoder change: nothing here parses MCP results strictly. A SUCCESSFUL action result
+> keeps both `text` and `structuredContent` through `passthrough` (passthrough.go:56),
+> `daintree.invoke` (invoke.go:203) and raw `daintree.call` (discovery.go:452); the error
+> paths repackage them into a failure envelope, and the local discovery tools build their
+> own catalog results from `ListTools` rather than forwarding a call result at all. No
+> path decodes a denial into a typed struct, so the widened shape reaches the model
+> instead of a decoder that would reject it.
 
 Projects: `project.getCurrent` returns `{ project }` for the active window (or null).
 The assistant keeps only id/name/path/status and the two repository-config booleans from
@@ -267,6 +334,24 @@ never trips schema checks.
 `danger: "confirm"` tools may trigger an MCP elicitation. The CLI confirms with the user
 locally BEFORE calling such tools (see safety/policy). `git.commit`, `git.push`, and
 `worktree.delete` **always** require explicit confirmation.
+
+A forced `worktree.delete` is stronger than that. Since daintreehq/daintree#12131 an
+MCP-dispatched `force: true` whose live target resolves to a protected branch, the main
+worktree, tracked changes or at-risk submodule content escalates to the TYPED-NAME
+confirmation — the user types the branch or worktree name — and the gate is re-derived
+immediately before dispatch, so a worktree that turned dirty after approval is refused
+with `CONFIRMATION_REQUIRED` rather than deleted. **A Daintree automation grant does not
+waive this**: since #12131 a grant pre-authorizes only the standard confirmation tier, and
+a granted force delete whose live tier is escalated gives up its pre-authorization and
+raises the dialog anyway. Note the refusal arrives marked `retriable: false`, so treat it
+as "the context changed, re-decide" rather than "retry the identical call".
+
+Separately, `terminal.killAll` and `terminal.closeAll` are barred from native automation
+grants entirely (daintreehq/daintree#12128): they resolve their targets from live renderer
+state inside `run()`, so a `maxUses: 10` grant read as ten careful approvals while
+actually authorizing ten unbounded sweeps. They still run — they just always face the
+confirm dialog and never spend a grant use. `terminal.killBatch` (daintreehq/daintree#12141)
+declares itself `per-resolved-target` in that same policy, so it is bounded the same way.
 
 If a call fails with `SESSION_BINDING_GONE` or `BINDING_STALE`, the bound Daintree window
 is gone — stop retrying that session and tell the user.

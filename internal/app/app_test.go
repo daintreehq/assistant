@@ -131,13 +131,18 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 	// stops costing an approval and a mutation is confirmed, granted and audited as
 	// itself. tool.schema is its precondition — invoke validates against the schema
 	// that lookup returns.
-	if got != 89 {
-		t.Errorf("registered tools = %d, want 89", got)
+	//
+	// 90 with forge.getPRs (daintreehq/daintree#12157), the same argument once more:
+	// the plural forge lookup existed provider-side and was never on the surface, so
+	// the singular tool's own description taught a call per number. One tool replaces
+	// N round trips and carries the per-number status the raw result drops.
+	if got != 90 {
+		t.Errorf("registered tools = %d, want 90", got)
 	}
 	// Name every new tool as well as counting: the count alone stays green when one
 	// addition is dropped and another appears.
 	for _, name := range []string{
-		"tool.schema", "daintree.invoke",
+		"tool.schema", "daintree.invoke", "forge.getPRs",
 		"project.detectRunners", "project.runCheck", "forge.listIssueComments",
 		"agentSessionHistory.list", "browser.getConsoleMessages", "errors.recent",
 		"notifications.recent", "worktree.resource.status",
