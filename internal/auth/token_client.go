@@ -175,8 +175,13 @@ func (c *tokenClient) post(ctx context.Context, endpoint string, form url.Values
 		// means "this session is gone" rather than "this call did not work". The caller
 		// deletes the stored credential on that and only that.
 		code := failCode
-		if tr.Error == "invalid_grant" {
+		if resp.StatusCode == http.StatusBadRequest && tr.Error == "invalid_grant" {
 			code = CodeGrantRejected
+		}
+		// A proxy or provider outage can carry a stale OAuth error body. Only
+		// the protocol's 400 rejection authorizes deleting a rotating credential.
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			return TokenSet{}, newError(code, tokenErrorMessage(resp.StatusCode, ""))
 		}
 		return TokenSet{}, newError(code, tokenErrorMessage(resp.StatusCode, tr.Error)).
 			withHint(tokenErrorHint(tr.Error))
@@ -191,6 +196,11 @@ func (c *tokenClient) post(ctx context.Context, endpoint string, form url.Values
 		return TokenSet{}, newError(failCode, fmt.Sprintf("the identity provider issued an unsupported %q token", safeEcho(tt)))
 	}
 
+	// Check seconds before converting: multiplication can wrap a centuries-long
+	// expires_in into an ordinary positive duration and bypass the lifetime cap.
+	if tr.ExpiresIn > int64(maxTokenLifetime/time.Second) {
+		return TokenSet{}, newError(failCode, "the identity provider claimed an implausibly long token lifetime")
+	}
 	lifetime := time.Duration(tr.ExpiresIn) * time.Second
 	switch {
 	case tr.ExpiresIn <= 0:
@@ -200,8 +210,6 @@ func (c *tokenClient) post(ctx context.Context, endpoint string, form url.Values
 		lifetime = 0
 	case lifetime < minTokenLifetime:
 		return TokenSet{}, newError(failCode, "the identity provider issued a token that expires immediately")
-	case lifetime > maxTokenLifetime:
-		return TokenSet{}, newError(failCode, "the identity provider claimed an implausibly long token lifetime")
 	}
 
 	set := TokenSet{
