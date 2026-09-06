@@ -22,6 +22,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/daintreehq/assistant/internal/prompts"
 )
 
 // PROTOCOL_VERSION is the wire-format version. MUST equal Daintree's
@@ -388,7 +390,8 @@ type HostCommand struct {
 	Type      HostCommandType
 	SessionID string
 	// prompt
-	Text string
+	Text     string
+	Worktree *prompts.WorktreeContext
 	// approval:decide
 	ApprovalID string
 	Decision   string
@@ -446,6 +449,21 @@ func ParseCommand(line []byte) (HostCommand, error) {
 	case CmdPrompt:
 		if err := wantString(raw, "text", &cmd.Text); err != nil {
 			return HostCommand{}, errNotCommand
+		}
+		if value, present := raw["worktree"]; present {
+			cmd.Worktree = &prompts.WorktreeContext{}
+			if !bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				var fields map[string]json.RawMessage
+				if json.Unmarshal(value, &fields) != nil || fields == nil {
+					return HostCommand{}, errNotCommand
+				}
+				if wantIdentityString(fields, "id", &cmd.Worktree.ID) != nil ||
+					wantIdentityString(fields, "path", &cmd.Worktree.Path) != nil ||
+					wantString(fields, "branch", &cmd.Worktree.Branch) != nil {
+					return HostCommand{}, errNotCommand
+				}
+				cmd.Worktree.Present = true
+			}
 		}
 	case CmdApprovalDecide:
 		if err := wantString(raw, "approvalId", &cmd.ApprovalID); err != nil {

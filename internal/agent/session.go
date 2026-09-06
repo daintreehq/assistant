@@ -234,7 +234,9 @@ type Session struct {
 	// "between tasks" — part of the RUNNING turn, not deferred to a fresh one. The UI
 	// shows a pending cue while buffered and an inline step once folded in; the
 	// daemon's InjectNote uses the same iteration-boundary mechanism for its own notes.
-	pendingInjections []string
+	pendingInjections []UserPrompt
+	// Latest submitted location for new work; updated only at message boundaries.
+	messageWorktree *prompts.WorktreeContext
 
 	// rosterMu guards the cached open-terminal roster below. A DEDICATED mutex, not
 	// s.mu: the detached refresher writes the cache while a turn holds s.mu across a long
@@ -442,9 +444,13 @@ func (s *Session) InjectNote(note string) {
 // (not pushed immediately) so the UI can still retract it before the model consumes
 // it. Safe to call from any goroutine.
 func (s *Session) InjectPrompt(text string) {
+	s.InjectUserPrompt(UserPrompt{Text: text})
+}
+
+func (s *Session) InjectUserPrompt(prompt UserPrompt) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.pendingInjections = append(s.pendingInjections, text)
+	s.pendingInjections = append(s.pendingInjections, prompt)
 }
 
 // HasPendingInjections reports whether the human has typed a message that is
@@ -464,11 +470,16 @@ func (s *Session) HasPendingInjections() bool {
 // typed follow-up). ok is false when nothing is buffered (already folded in, or none
 // typed), in which case the caller leaves the running turn alone.
 func (s *Session) RetractPendingInjection() (string, bool) {
+	prompt, ok := s.RetractUserPrompt()
+	return prompt.Text, ok
+}
+
+func (s *Session) RetractUserPrompt() (UserPrompt, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := len(s.pendingInjections)
 	if n == 0 {
-		return "", false
+		return UserPrompt{}, false
 	}
 	text := s.pendingInjections[n-1]
 	s.pendingInjections = s.pendingInjections[:n-1]
@@ -496,10 +507,20 @@ func (s *Session) drainPendingInjections() []string {
 	}
 	drained := s.pendingInjections
 	s.pendingInjections = nil
-	for _, text := range drained {
-		s.pushMessageLocked(models.TextMessage("user", userInterjectPrefix+text))
+	texts := make([]string, 0, len(drained))
+	for _, prompt := range drained {
+		if prompt.Worktree != nil {
+			s.messageWorktree = prompt.Worktree
+			// The preceding tool batch has completed. New requests can use this
+			// message's selection without moving any already-launched job.
+			if s.deps.WorktreePin != nil {
+				s.deps.WorktreePin.BeginTurn()
+			}
+		}
+		s.pushMessageLocked(models.TextMessage("user", userInterjectPrefix+prompt.ContextualText()))
+		texts = append(texts, prompt.Text)
 	}
-	return drained
+	return texts
 }
 
 // foldInInjections drains any buffered injections into history and emits an
@@ -750,13 +771,19 @@ func (s *Session) compactLocked(summary string) {
 	s.persistMessageLocked(note)
 }
 
-// SendOptions tunes a turn. Reserved for future per-turn options; currently empty.
+// SendOptions carries per-turn origin and send-time worktree context.
 // Every turn — user-driven OR an autonomous watcher wake — runs with the SAME full
 // tool capability. (Wake turns were once narrowed to read-only inspection; that
 // extra layer is gone — the per-call confirmation/tier gate in Dispatch is the one
 // authority on what may mutate, so a wake turn can relay between agents, send
 // terminal input, spawn, etc., exactly like a user turn.)
 type SendOptions struct {
+	// Worktree is captured by the host when the user submits, never at dispatch time.
+	// nil means an older/non-host caller; Present=false explicitly means no selection.
+	Worktree *prompts.WorktreeContext
+	// HistoryText is the host's context-preserving rendering of reclaimed messages.
+	HistoryText string
+
 	// IsWake marks an autonomous watcher-wake turn (the input is a BuildWakePrompt blob,
 	// NOT typed by the user). The footer's goal anchor reads it to substitute the active
 	// workflow objective for the verbose wake blob (goalAnchorSection). It is a CHANNEL
@@ -823,6 +850,9 @@ func (s *Session) recallMemories(userInput string) []domain.MemoryRecord {
 
 // runTurn is the core loop (ordering is load-bearing).
 func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts SendOptions) (reply string) {
+	s.mu.Lock()
+	s.messageWorktree = opts.Worktree
+	s.mu.Unlock()
 	// The per-turn cumulative foreground-wait budget (reset per USER TURN, not per
 	// model round) rides the turn context into every tool dispatch (values only —
 	// cancellation semantics are untouched). Blocking waits inside tools — today
@@ -982,7 +1012,7 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 	isWake := opts.IsWake
 
 	// 4. Push the user message.
-	s.pushMessage(models.TextMessage("user", userInput))
+	s.pushMessage(models.TextMessage("user", (UserPrompt{Text: userInput, Worktree: opts.Worktree, HistoryText: opts.HistoryText}).ContextualText()))
 
 	turn := TurnContext{RunID: runID, FromTimerMessage: opts.FromTimerMessage, FromWake: opts.IsWake}
 
@@ -1131,7 +1161,12 @@ func (s *Session) runTurn(ctx context.Context, runID, userInput string, opts Sen
 		}
 
 		promptContext := s.promptContext()
-		if s.deps.CurrentWorktreeFetcher != nil {
+		if messageWorktree := s.currentMessageWorktree(); messageWorktree != nil {
+			promptContext.Worktree = messageWorktree
+			if w := messageWorktree; w.Present && s.deps.WorktreePin != nil {
+				s.deps.WorktreePin.Offer(w.ID, w.Path, w.Branch, true)
+			}
+		} else if s.deps.CurrentWorktreeFetcher != nil {
 			// Served from the cross-turn cache (assign nil too: a failed cached read
 			// means "unknown this round", not "reuse the splash/reconnect selection as
 			// if it were still current"). The fetch itself runs DETACHED — kicked here

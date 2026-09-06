@@ -193,7 +193,7 @@ Every command is an object with a string `sessionId` and a string `type`.
 
 | `type` | Extra fields | Meaning |
 | --- | --- | --- |
-| `prompt` | `text` | Start a user turn. Sent while a turn is running, it is **folded into** the in-flight turn as an interjection rather than rejected. |
+| `prompt` | `text`, optional `worktree` | Start a user turn. Sent while a turn is running, it is **folded into** the in-flight turn as an interjection rather than rejected. |
 | `approval:decide` | `approvalId`, `decision` | Answer a parked confirmation. |
 | `question:answer` | `questionId`, `choiceIndex` | Answer a multiple-choice question. `choiceIndex` is 0-based; **negative means dismissed**, which fails the tool call as declined rather than answering it — distinct from the turn being cancelled underneath it, see §8. Required and must be a number — a missing one would default to 0 and silently answer "the first option" for a user who never chose. |
 | `command` | `line` | Run a slash command the host's own composer resolved — the raw line, e.g. `"/account"`. An accepted command produces exactly one `command:result`; a REFUSED one produces a `host:error` and no result (see below). Commands are not conversation: sending `/status` as a `prompt` produces an answer about the *word* status, spends a turn doing it, and leaves the user believing they ran something. |
@@ -622,3 +622,7 @@ go test ./internal/app -run TestGeneratedDocsAreCurrent -update
 Protocol behaviour is tested by driving NDJSON frames through `internal/host` and asserting on
 the emitted event stream — see `host_test.go`, `wire_test.go`, `transport_test.go`,
 `bridge_test.go`, `interrupt_test.go`, `wake_shutdown_test.go`.
+
+### Worktree at message submission
+
+A native host sends `worktree: {"id":"...","path":"...","branch":"..."}` on each prompt, captured synchronously when the user submits. `worktree: null` explicitly means no selection; omission retains the MCP-discovery path for other callers. The captured worktree overrides startup and cached/live selections for new work and its default agent launches. A contextual interjection updates that default at the next completed tool-batch boundary; it cannot split an in-flight cohort. Explicit tool targets still override that default. The location is recorded with the message in model history and retained through interjection queues, retraction, and strand recovery. Feedback for an existing job stays with that job's recorded terminals and worktree; sending feedback from another worktree does not move the running job.

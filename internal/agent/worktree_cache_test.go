@@ -182,14 +182,23 @@ func TestWorktree_TTLExpiryKicksDetachedRefresh(t *testing.T) {
 	}
 }
 
-// A cache YOUNGER than the TTL kicks nothing: the turn-start warm and the per-round
-// consult is TTL-gated, so a multi-round turn pays at most the turn's own single read.
+// A young cache still serves a caller without message metadata while its forced
+// turn-start refresh is in flight; per-round reads remain TTL-gated.
 func TestWorktree_YoungCacheStillServesTheRoundWhileTheTurnRereads(t *testing.T) {
 	var calls atomic.Int32
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
 	r := &fakeRouter{results: []models.ChatResult{{Content: "ok"}}}
 	deps, be := recordingDeps(r, &fakeTools{})
 	deps.CurrentWorktreeFetcher = func(context.Context) *prompts.WorktreeContext {
 		calls.Add(1)
+		<-release // Hold the refresh so this test measures a genuinely cached round.
 		return &prompts.WorktreeContext{Present: true, Branch: "feature/should-not-fetch"}
 	}
 	s := NewSession(deps)
@@ -202,6 +211,7 @@ func TestWorktree_YoungCacheStillServesTheRoundWhileTheTurnRereads(t *testing.T)
 	if _, err := s.Send(context.Background(), "work", SendOptions{}); err != nil {
 		t.Fatal(err)
 	}
+	close(release)
 	s.DrainBackgroundWork()
 	// The turn asks despite the young cache — that read is what makes the worktree
 	// binding trustworthy — but it is DETACHED, so the round is served from the cache

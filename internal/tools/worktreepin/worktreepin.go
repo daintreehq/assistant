@@ -1,6 +1,8 @@
 // Package worktreepin holds the ONE worktree a turn is bound to, so every agent
-// this turn spawns lands where the turn started rather than wherever the human
-// happens to be looking when each launch reaches Daintree.
+// a tool batch spawns lands in the submitting message's worktree rather than
+// wherever the human is looking when each launch reaches Daintree. A new message
+// can reset the default only after the preceding tool batch completes; existing
+// jobs retain their recorded targets. UI selection changes alone never reset it.
 //
 // Daintree resolves an omitted `worktreeId` on `agent.launch` against its LIVE
 // active-worktree selection, read at the instant the call lands. That is right
@@ -11,7 +13,8 @@
 // asked for. Neither is recoverable by re-reading, because by then the terminals
 // exist in the wrong place.
 //
-// Binding has three states, and the middle one is the whole design:
+// Native host messages offer their captured selection as fresh. Callers without
+// message metadata use MCP discovery, whose binding has three states:
 //
 //   - UNBOUND. Nothing has been offered yet.
 //   - PROVISIONAL. A STALE snapshot has been offered — one the session served from
