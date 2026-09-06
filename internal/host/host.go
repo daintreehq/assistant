@@ -102,7 +102,7 @@ type Host struct {
 	// deferredPrompts holds prompts that were ALREADY ACCEPTED and could not be
 	// dispatched because a session-owning command had the session — see
 	// dispatchReclaimedPrompt. Drained when that command releases it.
-	deferredPrompts     []string
+	deferredPrompts     []agent.UserPrompt
 	turnGen             uint64
 	pendingWake         []domain.QueueEvent
 	wakeRetries         agent.RetryLedger

@@ -136,11 +136,11 @@ type App interface {
 // discards them when the turn was aborted. See finishPromptTurn/handlePrompt.
 type turnSession interface {
 	Send(ctx context.Context, text string, opts agent.SendOptions) (string, error)
-	InjectPrompt(text string)
+	InjectUserPrompt(prompt agent.UserPrompt)
 	// RetractPendingInjection removes and returns the most recently buffered
 	// injection that has NOT yet been folded into the running turn (LIFO); ok is
 	// false when nothing is buffered.
-	RetractPendingInjection() (string, bool)
+	RetractUserPrompt() (agent.UserPrompt, bool)
 	// DiscardPendingInjections drops every buffered-but-unfolded injection.
 	DiscardPendingInjections()
 }

@@ -56,7 +56,7 @@ func (h *Host) handleCommand(cmd HostCommand) {
 
 	switch cmd.Type {
 	case CmdPrompt:
-		h.handlePrompt(cmd.Text)
+		h.admitPrompt(agent.UserPrompt{Text: cmd.Text, Worktree: cmd.Worktree}, false)
 	case CmdApprovalDecide:
 		// Resolving an approval unblocks a parked dispatch goroutine. Off-loop-safe:
 		// the bridge guards its own state, so call directly (no blocking).
@@ -104,7 +104,7 @@ func (h *Host) handleCommand(cmd HostCommand) {
 // next tool-iteration boundary ("between tasks"), matching the host composer — rather
 // than rejected. The send runs on a worker goroutine so the command loop keeps servicing
 // interrupt/decide.
-func (h *Host) handlePrompt(text string) { h.admitPrompt(text, false) }
+func (h *Host) handlePrompt(text string) { h.admitPrompt(agent.UserPrompt{Text: text}, false) }
 
 // admitPrompt is handlePrompt with the caller saying whether the prompt was RECLAIMED —
 // already accepted by the engine and already removed from the injection queue.
@@ -117,7 +117,8 @@ func (h *Host) handlePrompt(text string) { h.admitPrompt(text, false) }
 // A separate guard was a TOCTOU: it read the flag, released the lock and then called in,
 // and a `/backend` claiming exclusivity in that gap meant the reclaimed prompt was
 // admitted anyway and lost to the reservation it had just been protected from.
-func (h *Host) admitPrompt(text string, reclaimed bool) {
+func (h *Host) admitPrompt(prompt agent.UserPrompt, reclaimed bool) {
+	text := prompt.Text
 	// Mint the aborter + claim busy under one lock so a worker's finally can't race
 	// the busy check. interrupt cancels turnCancel. The generation counter is the
 	// identity guard: a stale finally must not null a newer turn's cancel (Go funcs
@@ -131,7 +132,7 @@ func (h *Host) admitPrompt(text string, reclaimed bool) {
 			// unwind can clear exclusivity and drain an empty queue in that gap, and the
 			// append then lands behind a drain that will never run again — the prompt
 			// stranded for the life of the session.
-			h.deferredPrompts = append(h.deferredPrompts, text)
+			h.deferredPrompts = append(h.deferredPrompts, prompt)
 			h.turnMu.Unlock()
 			cancel()
 			return
@@ -156,7 +157,7 @@ func (h *Host) admitPrompt(text string, reclaimed bool) {
 		// Fold it into the in-flight turn instead of rejecting. Daintree's parent already
 		// holds the text it sent, so there's no echo — just a status so it knows the prompt
 		// joined the running turn rather than starting a new one.
-		h.session.InjectPrompt(text)
+		h.session.InjectUserPrompt(prompt)
 		// RACE CLOSE: the running turn may have passed its FINAL injection-fold
 		// check and completed before the injection above landed — the prompt would
 		// then sit buffered forever while we report it folded. Re-check under the
@@ -168,8 +169,8 @@ func (h *Host) admitPrompt(text string, reclaimed bool) {
 		stillBusy := h.busy
 		h.turnMu.Unlock()
 		if !stillBusy {
-			if stranded := h.reclaimStrandedInjections(); stranded != "" {
-				h.dispatchReclaimedPrompt(stranded)
+			if stranded := h.reclaimStrandedInjections(); stranded != nil {
+				h.admitPrompt(*stranded, true)
 				return
 			}
 		}
@@ -197,7 +198,7 @@ func (h *Host) admitPrompt(text string, reclaimed bool) {
 			}
 			h.finishPromptTurn(gen, ctx)
 		}()
-		if _, err := h.session.Send(ctx, text, agent.SendOptions{}); err != nil {
+		if _, err := h.session.Send(ctx, text, agent.SendOptions{Worktree: prompt.Worktree, HistoryText: prompt.HistoryText}); err != nil {
 			h.report("turn-failed", fmt.Sprintf("send failed: %v", err))
 		}
 		// The one-time session-ended-watchers note is owned by the Session now (it surfaces
@@ -239,17 +240,17 @@ func (h *Host) finishPromptTurn(gen uint64, ctx context.Context) {
 	// everything folded into the abandoned work, so an injection still buffered
 	// HERE provably arrived after that discard — a new prompt typed while the
 	// turn unwound. It must become a fresh turn, not vanish with the old one.
-	stranded := ""
+	var stranded *agent.UserPrompt
 	if !h.closing {
 		stranded = h.reclaimStrandedInjections()
 	}
 	h.busy = false
 	more := len(h.pendingWake) > 0
 	h.turnMu.Unlock()
-	if stranded != "" {
+	if stranded != nil {
 		// Dispatch the stranded prompt as a fresh command turn. Deferred wakes
 		// stay queued — that turn's own finally drains them.
-		h.dispatchReclaimedPrompt(stranded)
+		h.admitPrompt(*stranded, true)
 		return
 	}
 	if more {
@@ -259,24 +260,31 @@ func (h *Host) finishPromptTurn(gen uint64, ctx context.Context) {
 
 // reclaimStrandedInjections drains every buffered-but-unfolded injection from
 // the session (retraction is LIFO; arrival order is restored) and returns them
-// joined as one prompt text — "" when none. Used by the strand-race closes in
+// joined as one prompt with per-message locations — nil when none. Used by the strand-race closes in
 // handlePrompt/finishPromptTurn/reactWake.
-func (h *Host) reclaimStrandedInjections() string {
-	var texts []string
+func (h *Host) reclaimStrandedInjections() *agent.UserPrompt {
+	var pending []agent.UserPrompt
 	for {
-		text, ok := h.session.RetractPendingInjection()
+		prompt, ok := h.session.RetractUserPrompt()
 		if !ok {
 			break
 		}
-		texts = append(texts, text)
+		pending = append(pending, prompt)
 	}
-	if len(texts) == 0 {
-		return ""
+	if len(pending) == 0 {
+		return nil
 	}
-	for i, j := 0, len(texts)-1; i < j; i, j = i+1, j-1 {
-		texts[i], texts[j] = texts[j], texts[i]
+	if len(pending) == 1 {
+		return &pending[0]
 	}
-	return strings.Join(texts, "\n\n")
+	// Retraction is LIFO. Preserve every message's context in arrival order and
+	// bind the recovered turn to the latest submission, not today's UI selection.
+	var texts, history []string
+	for i := len(pending) - 1; i >= 0; i-- {
+		texts = append(texts, pending[i].Text)
+		history = append(history, pending[i].ContextualText())
+	}
+	return &agent.UserPrompt{Text: strings.Join(texts, "\n\n"), HistoryText: strings.Join(history, "\n\n"), Worktree: pending[0].Worktree}
 }
 
 // handleInterrupt is the three coordinated actions. Order
@@ -560,7 +568,7 @@ func (h *Host) reactWake() {
 	// its end may never have been consumed — reclaim it (before releasing busy)
 	// and dispatch it as a fresh command turn. A cancelled wake skips this: the
 	// shutdown paths latch closing first, so nothing new may start.
-	stranded := ""
+	var stranded *agent.UserPrompt
 	if ctx.Err() == nil && !h.closing {
 		stranded = h.reclaimStrandedInjections()
 	}
@@ -568,9 +576,9 @@ func (h *Host) reactWake() {
 	more := len(h.pendingWake) > 0 && !h.closing
 	h.turnMu.Unlock()
 	cancel() // release the child context's resources
-	if stranded != "" {
+	if stranded != nil {
 		// Deferred wakes stay queued — the dispatched turn's finally drains them.
-		h.dispatchReclaimedPrompt(stranded)
+		h.admitPrompt(*stranded, true)
 		return
 	}
 	if more {
@@ -782,7 +790,9 @@ func flushExit(code int) {
 // command on h.busy). It is the sliver AFTER the finishing turn clears busy and BEFORE
 // it has re-dispatched what it reclaimed: the loop is free, an exclusive command can be
 // admitted, and the reclaimed prompt then arrives into a session somebody else owns.
-func (h *Host) dispatchReclaimedPrompt(text string) { h.admitPrompt(text, true) }
+func (h *Host) dispatchReclaimedPrompt(text string) {
+	h.admitPrompt(agent.UserPrompt{Text: text}, true)
+}
 
 // drainDeferredPrompts dispatches everything dispatchReclaimedPrompt held back. Called
 // from the unwind of the command that was holding the session; nothing else will, since
@@ -810,7 +820,7 @@ func (h *Host) drainDeferredPrompts() {
 		// more than one that is correct only from the caller it was written for.
 		// admitPrompt re-checks under the lock that claims busy, so a prompt lands or is
 		// held again, never in between.
-		h.dispatchReclaimedPrompt(text)
+		h.admitPrompt(text, true)
 	}
 }
 
@@ -1093,6 +1103,6 @@ func (h *Host) cancelTimer(timerID string) {
 // nothing to reclaim — which is what `retracted: false` says, so the host can leave the
 // draft alone instead of blanking it over a retract that did not happen.
 func (h *Host) retractInjection() {
-	text, ok := h.session.RetractPendingInjection()
-	h.bridge.PostInterjectRetracted(ok, text)
+	text, ok := h.session.RetractUserPrompt()
+	h.bridge.PostInterjectRetracted(ok, text.Text)
 }

@@ -117,3 +117,9 @@ func TestRetractInjectionForwardsBothAnswers(t *testing.T) {
 		t.Fatalf("second answer = %+v, want retracted=false", posted[1])
 	}
 }
+
+func (s *scriptedSession) InjectUserPrompt(prompt agent.UserPrompt) { s.InjectPrompt(prompt.Text) }
+func (s *scriptedSession) RetractUserPrompt() (agent.UserPrompt, bool) {
+	text, ok := s.RetractPendingInjection()
+	return agent.UserPrompt{Text: text}, ok
+}
