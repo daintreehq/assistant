@@ -171,8 +171,8 @@ already drifted out of agreement with each other and with the binary.
 
 | Tool | Risk | Min tier | Confirm | Grant | Needs | Parallel | Flag | Description |
 |---|---|---|---|---|---|---|---|---|
-| `recipe.list` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | List the Daintree recipes available in this project — the worktree/operation templates that recipe.run and worktree.c… |
-| `recipe.run` | project | operator | yes | grantable | `daintree-mcp` | serial | — | Run a Daintree recipe by recipeId, forwarding the recipe-defined `arguments` record verbatim |
+| `recipe.list` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | List saved workspace recipes when the user requests one |
+| `recipe.run` | project | operator | yes | grantable | `daintree-mcp` | serial | — | Run a requested saved recipe in an existing worktree, immediately launching its terminals and startup prompts |
 
 ### `runbook.*`
 
@@ -271,7 +271,7 @@ already drifted out of agreement with each other and with the binary.
 |---|---|---|---|---|---|---|---|---|
 | `worktree.list` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | List Daintree's worktrees for this project — each entry's id, path, branch, and whether it is active/main |
 | `worktree.getCurrent` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Get the Daintree worktree the user is currently in — its exact id, path, branch and bound issue/PR |
-| `worktree.createWithRecipe` | project | operator | yes | grantable | `daintree-mcp` | serial | — | Create a NEW git worktree from a Daintree recipe, forwarding the recipe-defined `arguments` record verbatim (Daintree… |
+| `worktree.createWithRecipe` | project | operator | yes | grantable | `daintree-mcp` | serial | — | Create a git worktree |
 | `worktree.resource.status` | project | operator | yes | grantable | `daintree-mcp` | serial | — | Run a worktree's configured remote-resource status command (e.g |
 
 ## Invariants this inventory is subject to
