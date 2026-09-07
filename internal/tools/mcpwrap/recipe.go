@@ -24,7 +24,7 @@ var recipeListSchema = json.RawMessage(`{
 func newRecipeListTool() *tools.Tool {
 	return &tools.Tool{
 		Name:        "recipe.list",
-		Description: "List the Daintree recipes available in this project — the worktree/operation templates that recipe.run and worktree.createWithRecipe execute — with their ids and recipe-defined argument shapes. Read-only passthrough to Daintree. Call it BEFORE recipe.run so you pass a real recipeId and real argument keys instead of guessing. MCP_UNAVAILABLE when Daintree is disconnected.",
+		Description: "List saved workspace recipes when the user requests one. Returns ids, names and terminal counts, NOT startup prompts or argument schemas. A matching name does not prove launch behavior. Skip recipe discovery for plain worktrees or custom agent tasks. Use tool.schema for action arguments. Read-only passthrough; MCP_UNAVAILABLE when disconnected.",
 		Risk:        domain.RiskRead,
 		Schema:      recipeListSchema,
 		Decode:      tools.StrictDecoder(func() any { return &recipeListArgs{} }),
@@ -61,9 +61,9 @@ var recipeRunSchema = json.RawMessage(`{
 func newRecipeRunTool() *tools.Tool {
 	return &tools.Tool{
 		Name:        "recipe.run",
-		Description: "Run a Daintree recipe by recipeId, forwarding the recipe-defined `arguments` record verbatim. MUTATING (always confirms): a recipe can create worktrees, branches and terminals. Read recipe.list first for the real recipeId and argument keys — never invent either. Pass requestKey to make a retry idempotent. Returns Daintree's raw result; a refusal comes back as MCP_TOOL_ERROR.",
+		Description: "Run a requested saved recipe in an existing worktree, immediately launching its terminals and startup prompts. Read recipe.list for recipeId and tool.schema for fields nested inside arguments. For a custom task use agentTask.spawnForEdits with the full taskPrompt. Mutates project state under the active confirmation policy. Pass requestKey for an idempotent retry; returns Daintree's raw result.",
 		Risk:        domain.RiskProject,
-		Consequence: "Runs a Daintree recipe that can create worktrees and mutate project state.",
+		Consequence: "Launches a saved recipe's terminals and configured startup prompts in a worktree.",
 		Schema:      recipeRunSchema,
 		Decode:      tools.StrictDecoder(func() any { return &recipeRunArgs{} }),
 		Handle: func(ctx context.Context, args json.RawMessage, tctx *tools.ToolContext) tools.ToolResult {
@@ -85,8 +85,8 @@ func newRecipeRunTool() *tools.Tool {
 	}
 }
 
-// worktreeCreateWithRecipeArgs forwards an opaque arguments record (the recipe
-// fields are recipe-defined, so the keys are not modelled).
+// worktreeCreateWithRecipeArgs forwards Daintree's worktree-creation arguments.
+// The host owns the source union; recipeId is an optional startup addition.
 type worktreeCreateWithRecipeArgs struct {
 	Arguments  map[string]any `json:"arguments"`
 	RequestKey string         `json:"requestKey,omitempty"`
@@ -105,9 +105,9 @@ var worktreeCreateWithRecipeSchema = json.RawMessage(`{
 func newWorktreeCreateWithRecipeTool() *tools.Tool {
 	return &tools.Tool{
 		Name:        "worktree.createWithRecipe",
-		Description: "Create a NEW git worktree from a Daintree recipe, forwarding the recipe-defined `arguments` record verbatim (Daintree owns the keys — read recipe.list for the real ones, do not invent them). MUTATING project state, so it always confirms. Prefer agentTask.spawnForEdits when what you actually want is a worktree WITH a supervised agent in it. Pass requestKey so a retry is idempotent.",
+		Description: "Create a git worktree. Recipes are OPTIONAL: default to omitting recipeId unless the user requests a saved setup. Project setup still starts. Read tool.schema for worktree.createWithRecipe; nest source and other host fields inside arguments. No recipe.list needed for plain creation. For custom agent work, create the worktree first, then agentTask.spawnForEdits with its returned worktreeId and full taskPrompt. Supplying recipeId starts saved terminals/prompts immediately. Mutates project state; pass requestKey for an idempotent retry.",
 		Risk:        domain.RiskProject,
-		Consequence: "Creates a new git worktree from a recipe template.",
+		Consequence: "Creates a git worktree and starts project setup; launches recipe terminals only if recipeId is supplied.",
 		Schema:      worktreeCreateWithRecipeSchema,
 		Decode:      tools.StrictDecoder(func() any { return &worktreeCreateWithRecipeArgs{} }),
 		Handle: func(ctx context.Context, args json.RawMessage, tctx *tools.ToolContext) tools.ToolResult {
