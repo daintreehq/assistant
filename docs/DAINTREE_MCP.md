@@ -286,13 +286,11 @@ The reduced response declares `source: "pty"` and `unavailableFields: ["armed", 
 
 - `terminal.getStatus({ terminalIds: string[] (1–256), includeOutput?: { lines 1–50, stripAnsi } })`
   → `{ source, unavailableFields, terminals: [{ terminalId, agentId, agentState, waitingReason?, exitCode?, spawnedAt?, lastTransitionAt?, lastCheckResult?, recentOutput?, armed?, error? }] }`.
-  There is **no** flat `agentState` and **no** `runtimeStatus`. `exitCode` is tri-state —
-  a **number** on a clean exit, **null** on a signal kill, **absent** while running — so
-  The PTY fallback cannot report it at all; consult `source` and `unavailableFields` before interpreting absence. The renderer currently also emits null for some running terminals, so use agent state and numeric codes rather than null presence as exit evidence. `spawnedAt` / `lastTransitionAt` are
+  There is **no** flat `agentState` and **no** `runtimeStatus`. A numeric `exitCode` reports the process exit code, including zero for success. The PTY fallback cannot report it; consult `source` and `unavailableFields` before interpreting absence. Renderer results can contain null for a signal kill or a running terminal, so use agent state and numeric codes rather than null presence as exit evidence. `spawnedAt` / `lastTransitionAt` are
   epoch-ms timestamps (`lastTransitionAt` = when the agent entered its CURRENT state, not
   when it last produced output). `lastCheckResult` (when present) is a best-effort parse
   of the agent's last test/lint/build summary — useful evidence, **not** authoritative.
-  A per-entry `error` appears for an unknown/dead id. All are read defensively.
+  A per-entry `error` can mean a missing panel, unreadable status, or an output-read failure; interpret it with `source` and the available state. All are read defensively.
 - `terminal.getOutput({ terminalId, maxLines 1–1000 })` → `{ terminalId, content, lineCount, truncated }`.
   Scrollback is in `content`.
 - `agent.launch({ agentId, name?, worktreeId?, model?, prompt, requestKey })` →
