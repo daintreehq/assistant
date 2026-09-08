@@ -26,6 +26,14 @@ func readCtx(m MCP) *CheckContext {
 	return ctxFor(newFakeStore(), newFakeQueue(), m, &progModel{})
 }
 
+func TestReadStatuses_ViewlessLookupFailureIsAnOutage(t *testing.T) {
+	body := `{"source":"pty","terminals":[{"terminalId":"t1","agentState":null,"error":"Terminal not found or status unavailable"}]}`
+	batch := readStatuses(readCtx(rawMCP{byName: map[string]MCPResult{"terminal.getStatus": {Text: body}}}), []string{"t1"}, false)
+	if batch.Ok || len(batch.ByID) != 0 {
+		t.Fatalf("unreadable PTY is not a missing terminal: %+v", batch)
+	}
+}
+
 func TestReadStatuses_PreservesNumericExitMetadata(t *testing.T) {
 	body := `{"terminals":[
 		{"terminalId":"t1","agentState":"exited","exitCode":0,"spawnedAt":1700000000000,"lastTransitionAt":1700000001000},

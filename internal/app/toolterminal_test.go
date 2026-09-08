@@ -64,6 +64,21 @@ func newFetchAdapter(f *fakeTerminalMCP) terminalReaderAdapter {
 	return terminalReaderAdapter{c: f}
 }
 
+func TestViewlessStatusUnavailableDoesNotBecomeGone(t *testing.T) {
+	f := &fakeTerminalMCP{connected: true, results: map[string]mcp.CallResult{
+		"terminal.getStatus": {Text: `{"source":"pty","unavailableFields":["exitCode","armed","lastCheckResult"],"terminals":[{"terminalId":"t1","agentState":"working"},{"terminalId":"t2","agentState":null,"error":"Terminal not found or status unavailable"}]}`},
+	}}
+	r := newFetchAdapter(f)
+	got := r.ReadStatuses(context.Background(), []string{"t1", "t2"}, false)
+	if got.OK || len(got.ByID) != 0 {
+		t.Fatalf("ambiguous PTY batch must use read-outage handling, not an exit: %+v", got)
+	}
+	async := (asyncStatusReaderAdapter{r: r}).ReadStatuses(context.Background(), []string{"t1", "t2"})
+	if async.OK || len(async.ByID) != 0 {
+		t.Fatalf("async deadlines must pause on an unreadable PTY batch: %+v", async)
+	}
+}
+
 // Disconnected MCP ⇒ no inventory and not a single MCP call — the turn must never pay for a
 // terminal read when there is no connection.
 func TestFetchOpenTerminals_DisconnectedReturnsNil(t *testing.T) {

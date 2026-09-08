@@ -75,6 +75,9 @@ func (r terminalReaderAdapter) ReadStatuses(ctx context.Context, terminalIDs []s
 	if err != nil || res.IsError {
 		return extractionx.StatusReadResult{OK: false, ByID: byID}
 	}
+	if mcp.TerminalStatusReadUnavailable(res.StructuredContent, res.Text) {
+		return extractionx.StatusReadResult{OK: false, ByID: byID}
+	}
 	for _, t := range parseMCPArray(res, "terminals") {
 		e, ok := t.(map[string]any)
 		if !ok {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+
+	mcpclient "github.com/daintreehq/assistant/internal/mcp"
 )
 
 // Pure MCP result parsers. Daintree's terminal tools return their payload only in
@@ -124,6 +126,9 @@ func readStatusesWith(ctx context.Context, mcp MCP, terminalIDs []string, includ
 	}
 	res, err := mcp.CallRead(ctx, "terminal.getStatus", args)
 	if err != nil || res.IsError {
+		return StatusBatch{Ok: false, ByID: byID}
+	}
+	if mcpclient.TerminalStatusReadUnavailable(res.StructuredContent, res.Text) {
 		return StatusBatch{Ok: false, ByID: byID}
 	}
 	// Daintree returns the terminals array in the text content blocks, not
