@@ -100,6 +100,8 @@ func presentToolVerb(name string) (label string, keys []string) {
 		return "Cancelled timer", []string{"id"}
 	case "terminal.focus":
 		return "Focused", []string{"terminalId"}
+	case "terminal.revealOwned":
+		return "Requested navigation", []string{"terminalId"}
 	case "terminal.read":
 		return "Read", []string{"terminalId"}
 	case "terminal.extract":

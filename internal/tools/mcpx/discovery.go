@@ -268,6 +268,7 @@ var wrappedMCPTools = map[string]string{
 	"agent.launch":            `agentTask.spawnForEdits (set mode:"explore" for a read-only investigation, mode:"edit" to change files)`,
 	"terminal.getOutput":      "terminal.summarize (model gist of the tail — DEFAULT for relaying what an agent said), terminal.read (raw scrollback VERBATIM — only when the exact literal text is needed), terminal.extract (pull a specific value as plain text, optionally waiting for a condition), or terminal.extract.json (structured fields — requires instruction + jsonSchema)",
 	"panel.focus":             "terminal.focus",
+	"terminal.revealOwned":    "terminal.revealOwned",
 	"terminal.rename":         "terminal.rename (typed wrapper — pass terminalId and a non-empty name; UI-only, no confirmation)",
 	"terminal.sendCommand":    "terminal.sendCommand (typed wrapper — pass terminalId and command)",
 	"terminal.close":          `terminal.close (typed wrapper — pass terminalId, or terminalIds:["...","..."] to close several in one call; ONLY at the user's explicit request, never your own cleanup/recovery)`,

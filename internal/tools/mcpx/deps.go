@@ -125,6 +125,7 @@ func Tools(deps Deps) []tools.Tool {
 		newCallTool(deps),
 		newInvokeTool(deps),
 		newTerminalFocusTool(deps),
+		newTerminalRevealOwnedTool(deps),
 		newTerminalRenameTool(deps),
 		newCopyTreeGenerateTool(deps),
 		newTerminalSendCommandTool(deps),

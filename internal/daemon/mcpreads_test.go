@@ -26,6 +26,25 @@ func readCtx(m MCP) *CheckContext {
 	return ctxFor(newFakeStore(), newFakeQueue(), m, &progModel{})
 }
 
+// A view-less (source:"pty") lookup failure stays a PER-ENTRY fact. Collapsing it
+// into Ok=false would hide the row from the absent ladder's terminal.list
+// cross-check — and since a closed terminal repeats the row on every read, that
+// hiding would never end: the watcher would feed resolvePresent an empty
+// agentState (a deep getOutput plus a model call) on every tick, forever.
+func TestReadStatuses_ViewlessLookupFailureStaysPerEntry(t *testing.T) {
+	body := `{"source":"pty","terminals":[{"terminalId":"t1","agentState":"working"},{"terminalId":"t2","agentState":null,"error":"Terminal not found or status unavailable"}]}`
+	batch := readStatuses(readCtx(rawMCP{byName: map[string]MCPResult{"terminal.getStatus": {Text: body}}}), []string{"t1", "t2"}, false)
+	if !batch.Ok {
+		t.Fatalf("an ambiguous row must not fail the batch: %+v", batch)
+	}
+	if batch.ByID["t1"].AgentState != "working" {
+		t.Errorf("the healthy sibling must survive: %+v", batch.ByID["t1"])
+	}
+	if !batch.ByID["t2"].NotFound() {
+		t.Errorf("the ambiguous row must reach the absent ladder: %+v", batch.ByID["t2"])
+	}
+}
+
 func TestReadStatuses_PreservesNumericExitMetadata(t *testing.T) {
 	body := `{"terminals":[
 		{"terminalId":"t1","agentState":"exited","exitCode":0,"spawnedAt":1700000000000,"lastTransitionAt":1700000001000},

@@ -79,6 +79,16 @@ type TerminalStatusEntry struct {
 // output-IPC failure onto entries whose status fields are intact), so gone
 // requires the error AND the absent agentState together. Callers must route a
 // NotFound entry through the same path as an id missing from the batch.
+//
+// That routing is also what keeps Daintree's REDUCED view-less status projection
+// (`source:"pty"`, PR #12318) safe. There the same shape is genuinely ambiguous —
+// the host may have no view of a terminal that is still alive — so it must not be
+// condemned on the status read alone. It never is: the absent ladder condemns only
+// when a SUCCESSFUL terminal.list also fails to list the id (see resolveAbsent),
+// and terminal.list is unavailable to a view-less session, so the ladder stalls at
+// its "cannot prove exit — stay alive" branch. Failing the whole BATCH instead
+// would be strictly worse: it hides the ambiguous row from that ladder, and since a
+// closed terminal repeats the row on every read the condition would never clear.
 func (e TerminalStatusEntry) NotFound() bool {
 	return e.Error != "" && e.AgentState == ""
 }

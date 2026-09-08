@@ -1015,3 +1015,81 @@ func TestActiveCountForSessionDropsToZeroOnlyAfterPublish(t *testing.T) {
 		t.Errorf("count after publish = %d, want 0", got)
 	}
 }
+
+// A PERSISTENTLY ambiguous terminal must still settle. Daintree's view-less status
+// projection answers a terminal it cannot see with the same row it uses for one
+// that is gone, and a closed terminal repeats that row on EVERY read — so nothing
+// about the condition is transient. The adapter routes it to the coordinator as an
+// absence, the roster is unreadable to a view-less session so the absence stays
+// unproven, and the DEADLINE is what ends the invocation. That only works while the
+// batch still counts as a successful read: reporting the ambiguity as a read failure
+// would pin readsHealthy false forever and freeze the deadline of every live
+// A PERSISTENTLY ambiguous terminal must still settle. Daintree's view-less status
+// projection answers a terminal it cannot see with the same row it uses for one
+// that is gone, and a closed terminal repeats that row on EVERY read — so nothing
+// about the condition is transient. The adapter routes it to the coordinator as an
+// absence, the roster is unreadable to a view-less session so the absence stays
+// unproven, and the DEADLINE is what ends the invocation. That only works while the
+// batch still counts as a successful read: reporting the ambiguity as a read failure
+// would pin readsHealthy false forever and freeze the deadline of every live
+// invocation globally, since the status read is batched across all of them.
+func TestCoordinatorPersistentlyAmbiguousTerminalStillExpires(t *testing.T) {
+	h := newHarness([]StatusReadResult{
+		// Every tick: a clean read that simply never mentions term-1.
+		frame(true, map[string]TerminalStatus{"term-other": {AgentState: "working"}}),
+	})
+	h.reader.rosterOK = false // a view-less session cannot read terminal.list
+	rec := inv("asy_amb", "run_amb", 1_000, 5_000)
+	if err := h.c.Register(rec, []string{"term-1"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, now := range []int64{2_000, 3_000, 4_000} {
+		h.c.Tick(ctx, now)
+		if got := h.store.lastStatus("asy_amb"); got != "" {
+			t.Fatalf("condemned an unproven absence at %d: %q", now, got)
+		}
+	}
+	// Past expiresAt AND past rosterCheckMinIntervalMS: the roster read is actually
+	// attempted, fails, leaves the absence unproven — and the deadline enforces.
+	h.c.Tick(ctx, 12_000)
+	h.c.Tick(ctx, 15_000) // grace elapsed → publish
+	if got := h.store.lastStatus("asy_amb"); got != string(domain.AsyncExpired) {
+		t.Fatalf("final status = %q, want expired — an ambiguous read must not stall the deadline", got)
+	}
+	events := h.queue.all()
+	if len(events) != 1 || !strings.Contains(events[0].args.Summary, "still working") {
+		t.Fatalf("want one honest timed-out event, got %+v", events)
+	}
+}
+
+// The sibling half of the same guarantee: one ambiguous id must not take the
+// invocations that share the batch down with it. A read failure would, because
+// readsHealthy is coordinator-wide, not per-invocation.
+func TestCoordinatorAmbiguousTerminalDoesNotFreezeSiblingInvocations(t *testing.T) {
+	h := newHarness([]StatusReadResult{
+		frame(true, map[string]TerminalStatus{"term-2": {AgentState: "working"}}),
+		frame(true, map[string]TerminalStatus{"term-2": {AgentState: "waiting"}}),
+	})
+	h.reader.rosterOK = false
+	amb := inv("asy_stuck", "run_stuck", 1_000, 900_000)
+	amb.TerminalIdsJson = `["term-1"]`
+	live := inv("asy_live", "run_live", 1_000, 900_000)
+	live.TerminalIdsJson = `["term-2"]`
+	if err := h.c.Register(amb, []string{"term-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.c.Register(live, []string{"term-2"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	h.c.Tick(ctx, 2_000) // working (latches seenWorking)
+	h.c.Tick(ctx, 3_000) // waiting-after-working → settles
+	h.c.Tick(ctx, 10_000)
+	if got := h.store.lastStatus("asy_live"); got != string(domain.AsyncSucceeded) {
+		t.Fatalf("sibling status = %q, want succeeded — an ambiguous id must not block it", got)
+	}
+	if got := h.store.lastStatus("asy_stuck"); got != "" {
+		t.Errorf("the unproven terminal must keep polling, got %q", got)
+	}
+}

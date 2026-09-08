@@ -136,12 +136,14 @@ func TestCreateRegistersFullToolSet(t *testing.T) {
 	// the plural forge lookup existed provider-side and was never on the surface, so
 	// the singular tool's own description taught a call per number. One tool replaces
 	// N round trips and carries the per-number status the raw result drops.
-	if got != 90 {
-		t.Errorf("registered tools = %d, want 90", got)
+	// 91 adds ownership-checked workspace reveal (Daintree #12319).
+	if got != 91 {
+		t.Errorf("registered tools = %d, want 91", got)
 	}
 	// Name every new tool as well as counting: the count alone stays green when one
 	// addition is dropped and another appears.
 	for _, name := range []string{
+		"terminal.revealOwned",
 		"tool.schema", "daintree.invoke", "forge.getPRs",
 		"project.detectRunners", "project.runCheck", "forge.listIssueComments",
 		"agentSessionHistory.list", "browser.getConsoleMessages", "errors.recent",

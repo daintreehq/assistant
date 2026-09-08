@@ -262,7 +262,25 @@ func TestToolProjectionTotalIsBounded(t *testing.T) {
 		// 958 bytes of headroom, the same deliberately-small slack the entries above
 		// keep, for the same reason: slack that is topped back up on every raise stops
 		// being a signal.
-		{"default", ToolInventoryOptions{}, 93_000},
+		//
+		// Raised to 93.5 KB for terminal.revealOwned, measuring 92,800 — and the shape
+		// of the bill matters more than the number. The tool arrived paying for itself
+		// out of terminal.focus: focus's description was cut from ~430 bytes to ~90 and
+		// the shared focusSchema's terminalId description was deleted outright, which
+		// balanced the ledger and lost the one rule neither tool can be used without —
+		// pass the FULL terminal-<uuid> id, never a truncated prefix. This repo has an
+		// incident where the model truncated exactly that id and stranded a wait, and
+		// neither focus nor revealOwned runs the terminalid resolver, so the rule has
+		// nowhere else to live.
+		//
+		// So the rule is back on the SHARED schema, where one copy now teaches both
+		// tools (the duplication argument the entries above make, applied in reverse),
+		// and each description says only what is true of its own tool. That is a real
+		// addition and it is priced as one instead of being funded by a silent deletion:
+		// a per-tool budget cannot see a rule leaving the projection, and this check can
+		// only see the total, so nothing but review catches that trade. 700 bytes of
+		// headroom, the same deliberately-small slack as above.
+		{"default", ToolInventoryOptions{}, 93_500},
 		// The flag adds seven execution-graph tools. It is off by default and off in
 		// production, so it gets its own ceiling rather than eating the default's
 		// headroom — but it is still bounded, because a rollout flag is not an excuse.
@@ -286,7 +304,12 @@ func TestToolProjectionTotalIsBounded(t *testing.T) {
 		//
 		// 872 bytes of headroom, kept deliberately small for the same reason the entries
 		// above give: slack that is topped back up on every raise stops being a signal.
-		{"workflow-intelligence", ToolInventoryOptions{WorkflowIntelligence: true}, 99_000},
+		//
+		// Raised to 100.5 KB in lockstep with the default for terminal.revealOwned
+		// (measuring 99,531). Unlike the last three additions this one could not be
+		// absorbed: develop already left this ceiling 87 bytes, so there was nothing to
+		// absorb it with. 969 bytes of headroom.
+		{"workflow-intelligence", ToolInventoryOptions{WorkflowIntelligence: true}, 100_500},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv, err := BuildToolInventory(tc.opts)

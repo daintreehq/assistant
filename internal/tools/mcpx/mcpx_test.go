@@ -356,6 +356,42 @@ func TestTerminalFocusMapsToPanelFocus(t *testing.T) {
 	}
 }
 
+func TestTerminalRevealOwnedPreservesOwnershipRefusal(t *testing.T) {
+	for _, refused := range []bool{false, true} {
+		client := &fakeMCP{connected: true, result: MCPCallResult{IsError: refused, Text: "ownership result"}}
+		tool := newTerminalRevealOwnedTool(Deps{MCP: client})
+		if tool.Risk != domain.RiskUI {
+			t.Fatalf("reveal risk = %s", tool.Risk)
+		}
+		decoded, err := tool.Decode(json.RawMessage(`{"terminalId":"terminal-owned"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := tool.Handle(context.Background(), decoded, &tools.ToolContext{})
+		if result.Ok == refused {
+			t.Fatalf("refused=%v: %+v", refused, result)
+		}
+		if client.callCount != 1 || client.lastName != "terminal.revealOwned" || client.lastArgs["terminalId"] != "terminal-owned" || len(client.lastArgs) != 1 {
+			t.Fatalf("reveal must make one owned call with no focus fallback: %+v", client.calls)
+		}
+	}
+}
+
+func TestTerminalRevealOwnedRejectsEmptyTargetAndExtraArguments(t *testing.T) {
+	client := &fakeMCP{connected: true}
+	tool := newTerminalRevealOwnedTool(Deps{MCP: client})
+	if _, err := tool.Decode(json.RawMessage(`{"terminalId":"t1","workspaceId":"foreign"}`)); err == nil {
+		t.Fatal("caller must not supply the ownership workspace")
+	}
+	decoded, err := tool.Decode(json.RawMessage(`{"terminalId":"  "}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := tool.Handle(context.Background(), decoded, &tools.ToolContext{}); result.Ok || client.callCount != 0 {
+		t.Fatalf("empty reveal reached MCP: %+v", result)
+	}
+}
+
 func TestTruncateCommand(t *testing.T) {
 	// Under the cap is returned verbatim.
 	if got := truncateCommand("git status", 80); got != "git status" {

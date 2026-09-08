@@ -679,3 +679,47 @@ func hasAttentionFor(q *fakeQueue, terminalID string) bool {
 	}
 	return false
 }
+
+// Daintree's REDUCED view-less status projection (source:"pty", PR #12318) answers a
+// terminal it cannot see with the SAME row it uses for one that is gone. That row is
+// permanent for a closed terminal — it comes back on every read — so the watcher must
+// keep it on the roster-arbitrated absent ladder rather than treat the batch as a
+// failed read. Failing the batch would send the terminal down the present path with an
+// empty agentState, buying a deep getOutput plus a model call on every tick, forever.
+func TestWatcher_ViewlessNotFoundStaysOnTheAbsentLadder(t *testing.T) {
+	t.Run("roster unreadable → cannot prove exit, stays alive and cheap", func(t *testing.T) {
+		store := newFakeStore()
+		queue := newFakeQueue()
+		// term-x is not in perTerminal ⇒ the fake returns the not-found entry shape.
+		mcp := newProgMCP(map[string]termCfg{})
+		mcp.statusSource = "pty"
+		mcp.listResult = &MCPResult{IsError: true} // no renderer ⇒ no terminal.list
+		model := &progModel{}
+		rec := aged(watcherWith("wch_vl", []string{"term-x"},
+			withOptions(watcherOptions{PerTerminal: map[string]TerminalState{"term-x": {Seen: true}}})))
+		store.watchers = []domain.WatcherRecord{rec}
+
+		out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, model), rec)
+		if out.Classification != domain.ClassNoChange || out.Stop {
+			t.Fatalf("an unprovable absence must keep watching, got %s stop=%v", out.Classification, out.Stop)
+		}
+		if n := len(mcp.callsFor("terminal.getOutput")); n != 0 {
+			t.Errorf("the absent ladder must not pay a deep output read: %d calls", n)
+		}
+	})
+	t.Run("roster readable and disowns it → still condemned", func(t *testing.T) {
+		store := newFakeStore()
+		queue := newFakeQueue()
+		mcp := newProgMCP(map[string]termCfg{})
+		mcp.statusSource = "pty"
+		mcp.list = []map[string]any{} // roster answers, and does not list it
+		rec := aged(watcherWith("wch_vl2", []string{"term-x"},
+			withOptions(watcherOptions{PerTerminal: map[string]TerminalState{"term-x": {Seen: true}}})))
+		store.watchers = []domain.WatcherRecord{rec}
+
+		out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{}), rec)
+		if out.Classification != domain.ClassTerminalExited || !out.Stop {
+			t.Fatalf("roster-confirmed absence must still exit+stop, got %s stop=%v", out.Classification, out.Stop)
+		}
+	})
+}

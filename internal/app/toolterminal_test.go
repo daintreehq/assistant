@@ -64,6 +64,53 @@ func newFetchAdapter(f *fakeTerminalMCP) terminalReaderAdapter {
 	return terminalReaderAdapter{c: f}
 }
 
+// A view-less (source:"pty") batch carries the ambiguity PER ENTRY. Failing the
+// whole batch instead would be permanent — a closed terminal repeats the same row
+// on every read — and it would take the healthy siblings, the async coordinator's
+// readsHealthy gate, and the roster arbitration down with it.
+func TestViewlessStatusIsPerEntryAmbiguityNotABatchOutage(t *testing.T) {
+	f := &fakeTerminalMCP{connected: true, results: map[string]mcp.CallResult{
+		"terminal.getStatus": {Text: `{"source":"pty","unavailableFields":["exitCode","armed","lastCheckResult"],"terminals":[{"terminalId":"t1","agentState":"working"},{"terminalId":"t2","agentState":null,"error":"Terminal not found or status unavailable"}]}`},
+	}}
+	r := newFetchAdapter(f)
+	got := r.ReadStatuses(context.Background(), []string{"t1", "t2"}, false)
+	if !got.OK {
+		t.Fatalf("an ambiguous row must not be reported as a failed read: %+v", got)
+	}
+	if got.ByID["t1"].AgentState != "working" || got.ByID["t1"].AbsenceUnproven {
+		t.Errorf("the healthy sibling must survive the batch: %+v", got.ByID["t1"])
+	}
+	if !got.ByID["t2"].NotFound || !got.ByID["t2"].AbsenceUnproven {
+		t.Errorf("the view-less row must be marked unproven, not proven gone: %+v", got.ByID["t2"])
+	}
+
+	// The renderer's identical row shape IS proof, and must stay so.
+	f.results["terminal.getStatus"] = mcp.CallResult{Text: `{"source":"renderer","terminals":[{"terminalId":"t2","agentState":null,"error":"Terminal not found"}]}`}
+	rend := r.ReadStatuses(context.Background(), []string{"t2"}, false)
+	if !rend.ByID["t2"].NotFound || rend.ByID["t2"].AbsenceUnproven {
+		t.Errorf("a renderer not-found is authoritative: %+v", rend.ByID["t2"])
+	}
+}
+
+// The async coordinator sees an unproven absence as ABSENCE (its roster read is the
+// only authority that may condemn), while the healthy sibling still reports state —
+// so the batch keeps counting as a successful read and the deadline stays reachable.
+func TestAsyncAdapterRoutesUnprovenAbsenceToTheRoster(t *testing.T) {
+	f := &fakeTerminalMCP{connected: true, results: map[string]mcp.CallResult{
+		"terminal.getStatus": {Text: `{"source":"pty","terminals":[{"terminalId":"t1","agentState":"working"},{"terminalId":"t2","agentState":null,"error":"Terminal not found or status unavailable"}]}`},
+	}}
+	async := (asyncStatusReaderAdapter{r: newFetchAdapter(f)}).ReadStatuses(context.Background(), []string{"t1", "t2"})
+	if !async.OK {
+		t.Fatalf("a view-less row must not stall readsHealthy for every live invocation: %+v", async)
+	}
+	if async.ByID["t1"].AgentState != "working" {
+		t.Errorf("healthy sibling lost: %+v", async.ByID)
+	}
+	if _, present := async.ByID["t2"]; present {
+		t.Errorf("an unproven absence must reach confirmGone as absence, not as an empty state: %+v", async.ByID)
+	}
+}
+
 // Disconnected MCP ⇒ no inventory and not a single MCP call — the turn must never pay for a
 // terminal read when there is no connection.
 func TestFetchOpenTerminals_DisconnectedReturnsNil(t *testing.T) {

@@ -32,7 +32,7 @@ var focusSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "terminalId": { "type": "string", "description": "Daintree terminal id to focus in the UI." }
+    "terminalId": { "type": "string", "description": "Full Daintree terminal id (terminal-<uuid>), never a prefix." }
   },
   "required": ["terminalId"]
 }`)
@@ -40,7 +40,7 @@ var focusSchema = json.RawMessage(`{
 func newTerminalFocusTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name:        "terminal.focus",
-		Description: "Bring ONE Daintree terminal to the front in the UI (forwards to Daintree's panel.focus with the terminal id as the panelId). Pure UI: no confirmation, no state change — it does not read, send to, or close anything. Use it when the user asks to see or switch to a terminal, or to point them at a tab you just spawned. Pass the full terminal-<uuid> id.",
+		Description: "Bring ONE Daintree terminal to the front of THIS session's view — forwards to Daintree's panel.focus with the terminal id as the panelId. Pure UI: no confirmation, no state change; it does not read, send to, or close anything. It cannot switch workspace or raise a hidden window — terminal.revealOwned does that. Use it to point the user at a tab you spawned.",
 		Risk:        domain.RiskUI,
 		Schema:      focusSchema,
 		Decode:      tools.StrictDecoder(func() any { return &focusArgs{} }),
@@ -50,6 +50,26 @@ func newTerminalFocusTool(deps Deps) tools.Tool {
 			// Daintree has no `terminal.focus` MCP tool — terminals are panels, so the
 			// correct call is `panel.focus` with the terminal id as the panelId.
 			return passthrough(ctx, deps.MCP, mcpPanelFocus, map[string]any{"panelId": a.TerminalID}, "")
+		},
+	}
+}
+
+func newTerminalRevealOwnedTool(deps Deps) tools.Tool {
+	return tools.Tool{
+		Name:        "terminal.revealOwned",
+		Description: "Reveal a terminal THIS connection created, only when the user asks: Daintree switches to the owning workspace and raises its window. Daintree enforces ownership — a refusal is final, never retry it through terminal.focus. Success means navigation was accepted, not that focus finished.",
+		Risk:        domain.RiskUI,
+		Schema:      focusSchema,
+		Decode:      tools.StrictDecoder(func() any { return &focusArgs{} }),
+		Handle: func(ctx context.Context, raw json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
+			var a focusArgs
+			_ = json.Unmarshal(raw, &a)
+			if strings.TrimSpace(a.TerminalID) == "" {
+				return tools.Fail("INVALID_ARGS", "terminalId must name the terminal this connection created.")
+			}
+			// Keep the ownership check in Daintree. A refusal must never fall back
+			// to focusing a different panel or bypassing the ownership boundary.
+			return passthrough(ctx, deps.MCP, "terminal.revealOwned", map[string]any{"terminalId": a.TerminalID}, "")
 		},
 	}
 }

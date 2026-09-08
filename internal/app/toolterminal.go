@@ -75,6 +75,14 @@ func (r terminalReaderAdapter) ReadStatuses(ctx context.Context, terminalIDs []s
 	if err != nil || res.IsError {
 		return extractionx.StatusReadResult{OK: false, ByID: byID}
 	}
+	// Daintree's REDUCED view-less projection (source:"pty", PR #12318) answers a
+	// terminal it cannot see with the SAME shape it uses for an id that no longer
+	// resolves. Recorded per ENTRY, never as a batch outage: the healthy siblings in
+	// the response are real, and a closed terminal repeats the ambiguous row forever,
+	// so a batch-level failure would be permanent — it would suppress the roster
+	// arbitration that is the only thing able to settle the question, and (in the
+	// async coordinator) freeze readsHealthy for every live invocation at once.
+	viewless := mcp.TerminalStatusViewless(res.StructuredContent, res.Text)
 	for _, t := range parseMCPArray(res, "terminals") {
 		e, ok := t.(map[string]any)
 		if !ok {
@@ -96,6 +104,9 @@ func (r terminalReaderAdapter) ReadStatuses(ctx context.Context, terminalIDs []s
 			// an output-IPC failure onto entries whose status fields are intact —
 			// so "gone" requires the error AND the absent agentState together.
 			NotFound: mcpString(e["error"]) != "" && agentState == "",
+			// From the renderer that shape is proof; from the PTY fallback it is only a
+			// suspicion, and the roster (never the status read) has to settle it.
+			AbsenceUnproven: viewless && mcpString(e["error"]) != "" && agentState == "",
 		}
 	}
 	return extractionx.StatusReadResult{OK: true, ByID: byID}
@@ -204,6 +215,15 @@ func (a asyncStatusReaderAdapter) ReadStatuses(ctx context.Context, terminalIDs 
 		// roster-confirmed gone path (confirmGone) settles it; passing it through
 		// with an empty agentState would poll forever and strand every sibling in
 		// the invocation behind the one dead terminal.
+		//
+		// A view-less (AbsenceUnproven) row takes the SAME route on purpose. It is
+		// not a claim that the terminal is gone — confirmGone still refuses to
+		// condemn anything the roster has not disowned — and a view-less session
+		// cannot read terminal.list at all, so the absence simply stays unproven and
+		// the invocation's deadline enforces with reads healthy. That bounded,
+		// honest "still working when the deadline passed" is the escape hatch;
+		// reporting the batch as a read FAILURE would remove it, because the row
+		// repeats on every read and readsHealthy would never recover.
 		if e.NotFound {
 			continue
 		}

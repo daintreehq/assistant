@@ -56,8 +56,11 @@ type progMCP struct {
 	// listResult is set it overrides list (for error/unparseable cases).
 	list       []map[string]any
 	listResult *MCPResult
-	pulse      *MCPResult // git.getProjectPulse override (default clean)
-	calls      []mcpCall
+	// statusSource, when set, stamps `source` on the terminal.getStatus body —
+	// "pty" models Daintree's reduced view-less projection (PR #12318).
+	statusSource string
+	pulse        *MCPResult // git.getProjectPulse override (default clean)
+	calls        []mcpCall
 
 	// resource-subscription seam
 	supportsSub  bool
@@ -162,7 +165,11 @@ func (m *progMCP) CallRead(_ context.Context, name string, args map[string]any) 
 			}
 			terminals = append(terminals, e)
 		}
-		body, _ := json.Marshal(map[string]any{"terminals": terminals})
+		payload := map[string]any{"terminals": terminals}
+		if m.statusSource != "" {
+			payload["source"] = m.statusSource
+		}
+		body, _ := json.Marshal(payload)
 		return MCPResult{Text: string(body)}, nil
 
 	case "terminal.getOutput":

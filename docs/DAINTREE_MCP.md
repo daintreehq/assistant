@@ -272,17 +272,25 @@ and sent as typed `request.runtime.worktree`: omission means the read was unavai
 `{current:null}` is a definitive no-current-worktree result, and a current object carries
 the useful id/path/branch/issue/PR/status/last-commit metadata.
 
+### Workspace reachability and navigation
+
+`terminal.revealOwned({ terminalId })` (Daintree PR #12319) is exposed through the CLI's typed tool of the same name. It asks Daintree to switch to the owning workspace and raise its window. Call it only for user-requested navigation to a panel this MCP connection created. A terminal id from a listing or restored conversation does not establish connection ownership. A refusal stays a refusal; there is no fallback that bypasses ownership. Success establishes that navigation was accepted and a window raised, not that asynchronous panel focus has finished.
+
+`terminal.focus` still wraps `panel.focus` for local navigation, including a user-selected panel the connection does not own. It selects a panel inside the session's view; it cannot promise to reveal a cached workspace or raise a hidden window. Both tools are UI-risk, not reads.
+
+Daintree PR #12318 makes a reduced status read available to **external workspace-bound** sessions without a live view, provided they pass explicit terminal ids. This does not change the embedded assistant's WebContents pin or revive a destroyed pin. It also does not make terminal listing, launching, closing, or deep output reads available without a renderer. Existing credential-revocation handling remains appropriate for the embedded assistant.
+
+The reduced response declares `source: "pty"` and `unavailableFields: ["armed", "lastCheckResult", "exitCode"]`; renderer responses declare `source: "renderer"` and an empty unavailable list. Missing fields in that list mean unknown, never false or still running. The CLI keeps numeric exit codes optional and settles from observed agent state when no code is available. A PTY row with an error and no agent state can mean an unreadable process, not a closed terminal. Both status adapters record that ambiguity **per entry**, never as a failed batch — a closed terminal repeats the row on every read, so a batch-level failure would be permanent rather than transient, and it would take the healthy siblings, the async coordinator's read-health gate, and the roster arbitration down with it. Instead the row keeps its existing route to whatever authority can actually settle it: `terminal.list`. The watcher's absent ladder and the async coordinator's `confirmGone` both condemn a terminal only when a SUCCESSFUL roster read fails to list it, and a view-less session cannot read the roster at all — so the absence simply stays unproven, the watcher re-checks without paying a deep read or a model call, and the async invocation ends at its own deadline as "still working". In-turn waits, which have no roster to consult, decline to call such a terminal gone and settle out at their attempt cap. The trade is deliberate: never a false exit, and never an unbounded one either.
+
 ### Verified call/response shapes
 
 - `terminal.getStatus({ terminalIds: string[] (1–256), includeOutput?: { lines 1–50, stripAnsi } })`
-  → `{ terminals: [{ terminalId, agentId, agentState, waitingReason?, exitCode?, spawnedAt?, lastTransitionAt?, lastCheckResult?, recentOutput?, armed?, error? }] }`.
-  There is **no** flat `agentState` and **no** `runtimeStatus`. `exitCode` is tri-state —
-  a **number** on a clean exit, **null** on a signal kill, **absent** while running — so
-  its *presence* (not value) signals the exit. `spawnedAt` / `lastTransitionAt` are
+  → `{ source, unavailableFields, terminals: [{ terminalId, agentId, agentState, waitingReason?, exitCode?, spawnedAt?, lastTransitionAt?, lastCheckResult?, recentOutput?, armed?, error? }] }`.
+  There is **no** flat `agentState` and **no** `runtimeStatus`. A numeric `exitCode` reports the process exit code, including zero for success. The PTY fallback cannot report it; consult `source` and `unavailableFields` before interpreting absence. Renderer results can contain null for a signal kill or a running terminal, so use agent state and numeric codes rather than null presence as exit evidence. `spawnedAt` / `lastTransitionAt` are
   epoch-ms timestamps (`lastTransitionAt` = when the agent entered its CURRENT state, not
   when it last produced output). `lastCheckResult` (when present) is a best-effort parse
   of the agent's last test/lint/build summary — useful evidence, **not** authoritative.
-  A per-entry `error` appears for an unknown/dead id. All are read defensively.
+  A per-entry `error` can mean a missing panel, unreadable status, or an output-read failure; interpret it with `source` and the available state. All are read defensively.
 - `terminal.getOutput({ terminalId, maxLines 1–1000 })` → `{ terminalId, content, lineCount, truncated }`.
   Scrollback is in `content`.
 - `agent.launch({ agentId, name?, worktreeId?, model?, prompt, requestKey })` →
