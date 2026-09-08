@@ -58,7 +58,10 @@ func readSignals(ctx context.Context, deps Deps, terminalIDs []string, tailBytes
 		// miss is the #108 symptom, NOT a clean exit) — or when Daintree marked the
 		// entry NotFound per-entry (its shape for a dropped id; the batch never omits
 		// unknown ids, so absence alone would never fire for a closed terminal).
-		absent := statuses.OK && ((!present && len(statuses.ByID) > 0) || (present && entry.NotFound))
+		// AbsenceUnproven excepted: the view-less PTY projection reuses that shape for
+		// a terminal it merely cannot SEE, and the status read cannot tell the two
+		// apart — see extractionx.TerminalStatusEntry.
+		absent := statuses.OK && ((!present && len(statuses.ByID) > 0) || (present && entry.NotFound && !entry.AbsenceUnproven))
 		agentState := ""
 		waitingReason := ""
 		if present && !entry.NotFound {

@@ -2,34 +2,22 @@ package mcp
 
 import "encoding/json"
 
-// TerminalStatusReadUnavailable recognizes the reduced PTY response's ambiguous
-// lookup failures. Unlike a renderer's missing panel, these rows can mean an RPC
-// failed while the terminal is still alive. Fail the whole polling batch so waits
-// and async deadlines use their existing read-outage path, never a false exit.
-// Healthy siblings are sampled again on the next successful batch.
-func TerminalStatusReadUnavailable(structured any, text string) bool {
-	unavailable := func(body map[string]any) bool {
-		if body["source"] != "pty" {
-			return false
-		}
-		entries, _ := body["terminals"].([]any)
-		for _, raw := range entries {
-			entry, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			errText, _ := entry["error"].(string)
-			state, _ := entry["agentState"].(string)
-			if errText != "" && state == "" {
-				return true
-			}
-		}
-		return false
-	}
-	structuredBody, _ := structured.(map[string]any)
-	if unavailable(structuredBody) {
+// TerminalStatusViewless reports whether a terminal.getStatus response came back
+// through Daintree's REDUCED, view-less projection (`source:"pty"`, Daintree
+// PR #12318) rather than the renderer's authoritative one.
+//
+// It matters for exactly one row shape: a per-entry error with a null agentState.
+// From the RENDERER that shape is proof the id no longer resolves. From the PTY
+// fallback it is ambiguous — the host may simply have no view of a terminal that
+// is still alive — so such a row must never be condemned on the status read
+// alone. It is NOT a batch-level outage: the healthy siblings in the same
+// response are real, and treating the whole batch as failed would suppress the
+// roster arbitration (terminal.list) that is the only thing able to RESOLVE the
+// ambiguity, turning a permanently-repeating row into a permanent stall.
+func TerminalStatusViewless(structured any, text string) bool {
+	if body, ok := structured.(map[string]any); ok && body["source"] == "pty" {
 		return true
 	}
 	var body map[string]any
-	return json.Unmarshal([]byte(text), &body) == nil && unavailable(body)
+	return json.Unmarshal([]byte(text), &body) == nil && body["source"] == "pty"
 }

@@ -208,8 +208,8 @@ already drifted out of agreement with each other and with the binary.
 | `terminal.extract` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Over MULTIPLE terminalIds, MERGES bounded tails via the small model into ONE plain-TEXT answer — never one per terminal |
 | `terminal.extract.json` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Extract STRUCTURED JSON from one or more Daintree terminal tails with the small model |
 | `terminal.awaitAll` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | Wait for a COHORT of agent terminals to reach an idle prompt |
-| `terminal.focus` | ui | supervisor | — | not needed | `daintree-mcp` | serial | — | Select a terminal in this session's view |
-| `terminal.revealOwned` | ui | supervisor | — | not needed | `daintree-mcp` | serial | — | Reveal a terminal this connection created only when the user asks: switch workspace and raise its window |
+| `terminal.focus` | ui | supervisor | — | not needed | `daintree-mcp` | serial | — | Bring ONE Daintree terminal to the front of THIS session's view — forwards to Daintree's panel.focus with the termina… |
+| `terminal.revealOwned` | ui | supervisor | — | not needed | `daintree-mcp` | serial | — | Reveal a terminal THIS connection created, only when the user asks: Daintree switches to the owning workspace and rai… |
 | `terminal.rename` | ui | supervisor | — | not needed | `daintree-mcp` | serial | — | Set a terminal/agent tab's title |
 | `terminal.sendCommand` | terminal | operator | yes | grantable | `daintree-mcp` | serial | — | Send a command line to a Daintree terminal — types it into the terminal's input and runs it |
 | `terminal.close` | terminal | operator | yes | grantable | `daintree-mcp` | serial | — | Close Daintree terminal(s) — moves each to the trash and ends the agent or process running in it |

@@ -253,7 +253,13 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 			// when the wait started, so a mid-wait NotFound is a genuine close — without
 			// this the FSM never settles on the entry's empty agentState and the one dead
 			// terminal strands the whole cohort until the attempt cap.
-			absent := statuses.OK && ((!present && len(statuses.ByID) > 0) || (present && entry.NotFound))
+			//
+			// AbsenceUnproven is the one NotFound we do NOT trust: the view-less PTY
+			// projection answers a terminal it cannot see with that same shape, so
+			// condemning it here would report a live agent as closed. Such an entry
+			// simply never settles and the attempt cap ends the wait — the bounded
+			// cost of not fabricating an exit.
+			absent := statuses.OK && ((!present && len(statuses.ByID) > 0) || (present && entry.NotFound && !entry.AbsenceUnproven))
 			agentState, waitingReason := "", ""
 			var exitCode *int
 			if present && !entry.NotFound {

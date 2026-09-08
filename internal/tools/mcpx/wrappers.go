@@ -32,7 +32,7 @@ var focusSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "terminalId": { "type": "string" }
+    "terminalId": { "type": "string", "description": "Full Daintree terminal id (terminal-<uuid>), never a prefix." }
   },
   "required": ["terminalId"]
 }`)
@@ -40,7 +40,7 @@ var focusSchema = json.RawMessage(`{
 func newTerminalFocusTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name:        "terminal.focus",
-		Description: "Select a terminal in this session's view. Does not switch workspaces or raise a window.",
+		Description: "Bring ONE Daintree terminal to the front of THIS session's view — forwards to Daintree's panel.focus with the terminal id as the panelId. Pure UI: no confirmation, no state change; it does not read, send to, or close anything. It cannot switch workspace or raise a hidden window — terminal.revealOwned does that. Use it to point the user at a tab you spawned.",
 		Risk:        domain.RiskUI,
 		Schema:      focusSchema,
 		Decode:      tools.StrictDecoder(func() any { return &focusArgs{} }),
@@ -57,7 +57,7 @@ func newTerminalFocusTool(deps Deps) tools.Tool {
 func newTerminalRevealOwnedTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name:        "terminal.revealOwned",
-		Description: "Reveal a terminal this connection created only when the user asks: switch workspace and raise its window. Success accepts navigation; focus may still be pending.",
+		Description: "Reveal a terminal THIS connection created, only when the user asks: Daintree switches to the owning workspace and raises its window. Daintree enforces ownership — a refusal is final, never retry it through terminal.focus. Success means navigation was accepted, not that focus finished.",
 		Risk:        domain.RiskUI,
 		Schema:      focusSchema,
 		Decode:      tools.StrictDecoder(func() any { return &focusArgs{} }),

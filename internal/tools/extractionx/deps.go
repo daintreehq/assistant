@@ -44,6 +44,14 @@ type TerminalStatusEntry struct {
 	// like a roster-confirmed absence; matching on the empty AgentState alone would
 	// instead poll forever (the FSM never settles on "") and strand the cohort.
 	NotFound bool
+	// AbsenceUnproven marks a NotFound-shaped row that arrived through Daintree's
+	// REDUCED view-less projection (source:"pty", PR #12318), where the host may
+	// have no view of a terminal that is nonetheless still alive. The shape is the
+	// same, the proof is not: an in-turn wait must NOT report such a terminal as
+	// "gone (closed or exited)" on the strength of the status read. It keeps polling
+	// instead — bounded by the wait's own attempt cap, which is the escape hatch,
+	// since a view-less session cannot read terminal.list to arbitrate.
+	AbsenceUnproven bool
 }
 
 // StatusReadResult is the outcome of one readStatuses across the target terminals.
