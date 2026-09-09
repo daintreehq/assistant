@@ -9,10 +9,7 @@
         "kinds": {
           "maxItems": 4,
           "type": "array",
-          "items": {
-            "type": "string",
-            "enum": ["command", "skill", "plugin", "app"]
-          }
+          "items": { "type": "string", "enum": ["command", "skill", "plugin", "app"] }
         },
         "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
         "cursor": { "type": "string", "maxLength": 512 },
@@ -42,11 +39,7 @@
           "type": "object",
           "properties": {
             "agentId": { "type": "string", "minLength": 1, "maxLength": 128 },
-            "worktreePath": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 4096
-            }
+            "worktreePath": { "type": "string", "minLength": 1, "maxLength": 4096 }
           },
           "required": ["agentId", "worktreePath"],
           "additionalProperties": false
@@ -65,10 +58,7 @@
               "scope": { "type": "string" },
               "agentId": { "type": "string" },
               "sourcePath": { "type": "string" },
-              "kind": {
-                "type": "string",
-                "enum": ["command", "skill", "plugin", "app"]
-              },
+              "kind": { "type": "string", "enum": ["command", "skill", "plugin", "app"] },
               "insertText": { "type": "string" },
               "trigger": { "type": "string", "enum": ["/", "$", "@"] },
               "aliases": { "type": "array", "items": { "type": "string" } }
@@ -86,21 +76,10 @@
             "additionalProperties": false
           }
         },
-        "total": {
-          "type": "integer",
-          "minimum": -9007199254740991,
-          "maximum": 9007199254740991
-        },
+        "total": { "type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991 },
         "nextCursor": { "type": "string" }
       },
-      "required": [
-        "context",
-        "catalogRevision",
-        "coverage",
-        "warnings",
-        "items",
-        "total"
-      ],
+      "required": ["context", "catalogRevision", "coverage", "warnings", "items", "total"],
       "additionalProperties": false
     }
   },
@@ -111,17 +90,9 @@
       "type": "object",
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "catalogRevision": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
+        "catalogRevision": { "type": "string", "minLength": 1, "maxLength": 128 },
         "offset": { "type": "integer", "minimum": 0, "maximum": 262144 },
-        "sourceRevision": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
+        "sourceRevision": { "type": "string", "minLength": 1, "maxLength": 128 },
         "terminalId": {
           "description": "Existing agent terminal. Use this alone to resolve its agent and directory.",
           "type": "string",
@@ -147,11 +118,7 @@
           "type": "object",
           "properties": {
             "agentId": { "type": "string", "minLength": 1, "maxLength": 128 },
-            "worktreePath": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 4096
-            }
+            "worktreePath": { "type": "string", "minLength": 1, "maxLength": 4096 }
           },
           "required": ["agentId", "worktreePath"],
           "additionalProperties": false
@@ -168,10 +135,7 @@
             "scope": { "type": "string" },
             "agentId": { "type": "string" },
             "sourcePath": { "type": "string" },
-            "kind": {
-              "type": "string",
-              "enum": ["command", "skill", "plugin", "app"]
-            },
+            "kind": { "type": "string", "enum": ["command", "skill", "plugin", "app"] },
             "insertText": { "type": "string" },
             "trigger": { "type": "string", "enum": ["/", "$", "@"] },
             "aliases": { "type": "array", "items": { "type": "string" } }
@@ -192,10 +156,7 @@
           "type": "object",
           "properties": {
             "token": { "type": "string" },
-            "channel": {
-              "type": "string",
-              "enum": ["interactive-command", "prompt-reference"]
-            },
+            "channel": { "type": "string", "enum": ["interactive-command", "prompt-reference"] },
             "argumentHint": { "type": "string" },
             "startupSupport": { "type": "string", "const": "unverified" },
             "requiresTask": { "type": "boolean" }
