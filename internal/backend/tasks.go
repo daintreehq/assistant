@@ -374,9 +374,9 @@ func runTypedValidated(ctx context.Context, r TaskRunner, task string, input any
 		return fmt.Errorf("backend: decode %s output: %w", task, err)
 	}
 	if text, ok := out.(*TextOutput); ok {
-		text.Truncated = res.FinishReason == "length"
+		text.Truncated = res.FinishReason == FinishReasonLength
 	}
-	if task == TaskTerminalExtractJSON && res.FinishReason == "length" {
+	if task == TaskTerminalExtractJSON && res.FinishReason == FinishReasonLength {
 		return &TaskOutputError{Task: task, Reason: "extraction hit its output token limit; request fewer fields or one terminal per call, raise maxTokens, or use terminal.read for complete text"}
 	}
 	if validate != nil {
