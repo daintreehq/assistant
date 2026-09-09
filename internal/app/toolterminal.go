@@ -239,14 +239,16 @@ func (a asyncStatusReaderAdapter) ReadStatuses(ctx context.Context, terminalIDs 
 	return out
 }
 
-// ReadSubmission issues one bounded, token-specific read. The status returned
-// alongside the receipt is the only snapshot eligible for the first feed.
+// ReadSubmission issues one token-specific read. The status returned alongside
+// the receipt is the only snapshot eligible for the first feed.
+//
+// The BOUND belongs to the caller, not to this call: the coordinator issues up
+// to four of these SEQUENTIALLY inside one 1s pass, so a per-probe deadline
+// would let a stalled host hold the pass for the sum of them. It hands us one
+// shared, already-bounded context per pass (asyncwork's probeBudget) and we
+// simply honour it.
 func (a asyncStatusReaderAdapter) ReadSubmission(ctx context.Context, terminalID, token string) (domain.TerminalSubmission, asyncwork.StatusReadResult, bool) {
-	cctx, cancel := context.WithCancel(ctx)
-	timer := time.AfterFunc(2*time.Second, cancel)
-	defer timer.Stop()
-	defer cancel()
-	res, err := a.r.c.CallTool(cctx, "terminal.getStatus", map[string]any{"terminalIds": []string{terminalID}, "submissionToken": token}, mcp.CallOptions{})
+	res, err := a.r.c.CallTool(ctx, "terminal.getStatus", map[string]any{"terminalIds": []string{terminalID}, "submissionToken": token}, mcp.CallOptions{})
 	if err != nil || res.IsError {
 		return domain.TerminalSubmission{}, asyncwork.StatusReadResult{}, false
 	}

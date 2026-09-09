@@ -54,9 +54,25 @@ func (c *fakeCoordinator) Register(rec domain.AsyncInvocationRecord, _ []string)
 func (c *fakeCoordinator) Deregister(id string) { c.deregistered = append(c.deregistered, id) }
 
 type fakeStore struct {
-	rows    map[string]*domain.AsyncInvocationRecord
-	nextID  int
-	liveCap int // CountLive returns this when >= 0 (else the real live count)
+	rows      map[string]*domain.AsyncInvocationRecord
+	nextID    int
+	liveCap   int // CountLive returns this when >= 0 (else the real live count)
+	activated []domain.SubmissionReceipt
+}
+
+// ActivateAsyncSubmission mirrors the real atomic activation: only a STARTING
+// row goes live, and it does so carrying its receipt.
+func (s *fakeStore) ActivateAsyncSubmission(id string, receipt domain.SubmissionReceipt, now int64) (bool, error) {
+	r, ok := s.rows[id]
+	if !ok || r.Status != domain.AsyncStarting {
+		return false, nil
+	}
+	r.Status = domain.AsyncRunning
+	r.StartedAt = &now
+	cp := receipt
+	r.Submission = &cp
+	s.activated = append(s.activated, receipt)
+	return true, nil
 }
 
 func newFakeStore() *fakeStore {
@@ -388,5 +404,131 @@ func TestRunAsyncMarksCommandSentOnAttempt(t *testing.T) {
 	}
 	if len(obs2.marked) != 1 || obs2.marked[0] != "terminal-aaaa1111" {
 		t.Fatalf("an ambiguous failed send must still mark the terminal, got %v", obs2.marked)
+	}
+}
+
+/* ----------------------------- receipt sends ------------------------------ */
+
+// fakeReceiptSender is the shape of a host that has shipped submission
+// receipts: the same single send, plus the correlation record. It implements
+// BOTH interfaces, so the handler's ReceiptSender assertion is what selects the
+// receipt path.
+type fakeReceiptSender struct {
+	fakeSender
+	receipt domain.SubmissionReceipt
+}
+
+func (s *fakeReceiptSender) SendCommandWithReceipt(ctx context.Context, terminalID, command string) (domain.SubmissionReceipt, error) {
+	if err := s.SendCommand(ctx, terminalID, command); err != nil {
+		return domain.SubmissionReceipt{}, err
+	}
+	return s.receipt, nil
+}
+
+// legacyOnlyStore hides ActivateAsyncSubmission behind the plain Store
+// interface — a runtime wired without receipt persistence.
+type legacyOnlyStore struct{ Store }
+
+func receiptDeps(receipt domain.SubmissionReceipt) (Deps, *fakeReceiptSender, *fakeStore) {
+	deps, _, _, _, store := testDeps()
+	sender := &fakeReceiptSender{receipt: receipt}
+	deps.Sender = sender
+	return deps, sender, store
+}
+
+// The receipt path must activate the row THROUGH the receipt write, so the
+// running status and the correlation land together — and the accepted result
+// must carry the receipt so the model sees queue acceptance, not execution.
+func TestRunAsyncPersistsHostReceipt(t *testing.T) {
+	receipt := domain.SubmissionReceipt{Version: 1, Acceptance: "tracked", Token: "tok-1", Phase: "queued"}
+	deps, sender, store := receiptDeps(receipt)
+	tool := toolByName(t, deps, "terminal.run.async")
+
+	res := handle(t, tool, `{"terminalId":"terminal-aaaa1111","command":"npm test"}`, &tools.ToolContext{RunID: "run_r"})
+	if !res.Ok {
+		t.Fatalf("run.async failed: %+v", res)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("send calls = %v, want exactly one", sender.sent)
+	}
+	rec := store.rows[res.Async.ID]
+	if rec == nil || rec.Status != domain.AsyncRunning {
+		t.Fatalf("ledger row = %+v, want running", rec)
+	}
+	if len(store.activated) != 1 || store.activated[0] != receipt {
+		t.Fatalf("activation receipts = %+v, want %+v", store.activated, receipt)
+	}
+	if rec.Submission == nil || *rec.Submission != receipt {
+		t.Fatalf("persisted receipt = %+v, want %+v", rec.Submission, receipt)
+	}
+	body, _ := res.Result.(map[string]any)
+	got, _ := body["submission"].(*domain.SubmissionReceipt)
+	if got == nil || *got != receipt {
+		t.Fatalf("result submission = %+v, want %+v", body["submission"], receipt)
+	}
+	if body["state"] != "accepted" {
+		t.Errorf("result state = %v, want accepted", body["state"])
+	}
+	// The wording is load-bearing: an ack is queue acceptance, never proof the
+	// agent consumed the input.
+	if !strings.Contains(res.Summary, "Queued asynchronously") {
+		t.Errorf("summary %q should report queue acceptance", res.Summary)
+	}
+}
+
+// A legacy host answers with no receipt at all. That is the shape every
+// un-upgraded Daintree returns, so it must still be a successful send — just
+// one that is explicitly unknown.
+func TestRunAsyncAcceptsLegacyUnknownReceipt(t *testing.T) {
+	receipt := domain.SubmissionReceipt{Version: 1, Acceptance: "legacy_unknown"}
+	deps, _, store := receiptDeps(receipt)
+	tool := toolByName(t, deps, "terminal.run.async")
+
+	res := handle(t, tool, `{"terminalId":"terminal-aaaa1111","command":"npm test"}`, &tools.ToolContext{})
+	if !res.Ok {
+		t.Fatalf("a receipt-less ack must not fail the send: %+v", res)
+	}
+	rec := store.rows[res.Async.ID]
+	if rec == nil || rec.Submission == nil || rec.Submission.Acceptance != "legacy_unknown" {
+		t.Fatalf("persisted receipt = %+v, want legacy_unknown", rec)
+	}
+}
+
+// A failed receipt read is a failed SEND from the handler's point of view, and
+// the failure text must forbid a blind re-send — the command may already be
+// queued.
+func TestRunAsyncReceiptFailureFinalizesRowWithoutResend(t *testing.T) {
+	deps, sender, store := receiptDeps(domain.SubmissionReceipt{})
+	sender.err = context.DeadlineExceeded
+	tool := toolByName(t, deps, "terminal.run.async")
+
+	res := handle(t, tool, `{"terminalId":"terminal-aaaa1111","command":"npm test"}`, &tools.ToolContext{})
+	if res.Ok {
+		t.Fatal("an unreadable acknowledgement must fail the call")
+	}
+	if len(store.activated) != 0 {
+		t.Errorf("a failed send must never activate: %+v", store.activated)
+	}
+	for _, r := range store.rows {
+		if r.Status != domain.AsyncFailed {
+			t.Errorf("ledger row = %q, want failed", r.Status)
+		}
+	}
+}
+
+// Wiring a receipt-capable sender to a store that cannot persist the receipt
+// would supervise the send with no correlation at all. Fail BEFORE the send
+// rather than after it.
+func TestRunAsyncRefusesReceiptSenderWithoutReceiptStore(t *testing.T) {
+	deps, sender, store := receiptDeps(domain.SubmissionReceipt{Version: 1, Acceptance: "legacy_unknown"})
+	deps.Store = legacyOnlyStore{Store: store}
+	tool := toolByName(t, deps, "terminal.run.async")
+
+	res := handle(t, tool, `{"terminalId":"terminal-aaaa1111","command":"npm test"}`, &tools.ToolContext{})
+	if res.Ok {
+		t.Fatal("a receipt sender without receipt storage must fail")
+	}
+	if len(sender.sent) != 0 {
+		t.Errorf("the refusal must precede the send, got %v", sender.sent)
 	}
 }

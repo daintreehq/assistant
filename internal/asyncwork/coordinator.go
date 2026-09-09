@@ -66,6 +66,23 @@ const (
 	// roster confirms it (the authoritative inventory), and that second read runs
 	// at most this often — never every tick.
 	rosterCheckMinIntervalMS int64 = 10_000
+
+	// maxSubmissionProbesPerPass caps the token-specific terminal.getStatus reads
+	// one pass may issue, and submissionProbeBudgetMS bounds ALL of them TOGETHER.
+	// The budget is shared, not per-probe, on purpose: the probes run
+	// SEQUENTIALLY inside a 1s tick, so four independent 2s bounds let one stalled
+	// host hold the whole pass for ~8s — delaying every other invocation's settle,
+	// its publish and the wake nudge. One deadline for the batch means a stalled
+	// host costs the pass 2s once and the remaining invocations simply retry next
+	// tick. It is enforced by CANCELLING, never by a context deadline: the MCP
+	// client DEGRADES a connection on DeadlineExceeded, and these are best-effort
+	// reads.
+	maxSubmissionProbesPerPass       = 4
+	submissionProbeBudgetMS    int64 = 2000
+
+	// submissionReadMinIntervalMS keeps one invocation from re-probing its own
+	// token every tick while it waits for the host to reach pty_written.
+	submissionReadMinIntervalMS int64 = 5000
 )
 
 // TerminalStatus is one watched terminal's FSM snapshot for one poll.
@@ -682,13 +699,21 @@ func (c *Coordinator) runPass(ctx context.Context, now int64) {
 			gone := c.confirmGone(ctx, now, ids, res)
 			// Oldest probe first: bounded work without starving later operations.
 			sort.SliceStable(polling, func(i, j int) bool { return polling[i].lastSubmissionReadAt < polling[j].lastSubmissionReadAt })
-			probes := 0
+			budget := &probeBudget{parent: ctx}
 			for _, t := range polling {
-				snapshot, ready := c.submissionReady(ctx, t, res, now, &probes)
-				if ready {
-					c.feedStatuses(t, snapshot, gone, now)
+				snapshot, ready := c.submissionReady(t, res, now, budget)
+				if !ready {
+					// The receipt has not proven a PTY write for this send yet, so
+					// the terminal's idle/working phase still describes the state
+					// BEFORE it. That withholds the COMPLETION verdict only — the
+					// batched read is still valid evidence for lifecycle facts, and
+					// skipping the invocation outright meant a terminal closed inside
+					// the pre-write window could not end before the hard deadline.
+					snapshot = res
 				}
+				c.feedStatuses(t, snapshot, gone, now, ready)
 			}
+			budget.release()
 		}
 	}
 
@@ -826,7 +851,14 @@ func (c *Coordinator) noteReadSuccess() {
 // from the batched response shape; and a terminal missing without roster proof
 // simply skips the tick. A finished verdict that never observed a working
 // phase is annotated so the wake nudges verification instead of blind trust.
-func (c *Coordinator) feedStatuses(t *tracked, res StatusReadResult, gone map[string]bool, now int64) {
+//
+// completionAllowed is the submission gate (see submissionReady): false while
+// this send has not been observed reaching the PTY. It suppresses ONLY the
+// idle/seenWorking completion verdict, which would otherwise score the
+// terminal's PRE-submission state as this command finishing. Lifecycle facts —
+// a roster-confirmed closure, a PTY that ended — are decisive regardless of
+// where the submission got to, and stay live either way.
+func (c *Coordinator) feedStatuses(t *tracked, res StatusReadResult, gone map[string]bool, now int64, completionAllowed bool) {
 	for _, id := range t.terminalIDs {
 		st := t.perTerminal[id]
 		if st == nil || st.outcome != nil {
@@ -843,13 +875,19 @@ func (c *Coordinator) feedStatuses(t *tracked, res StatusReadResult, gone map[st
 		default:
 			continue // missing without roster proof — a partial read, not an exit
 		}
+		ptyEnded := present && domain.PtyEndedWithoutOutcome(entry.HasPty, agentState, entry.ExitCode)
+		if !completionAllowed && !gone[id] && !ptyEnded {
+			// Pre-PTY-write: neither the phase nor a "working" sighting belongs to
+			// this send, so record nothing from it. Everything else in this pass —
+			// gone, ptyEnded — already ran above.
+			continue
+		}
 		if agentState == string(domain.AgentWorking) {
 			st.seenWorking = true
 		}
 
 		v := domain.SettleAgentFSM(agentState, waitingReason, exitCode, st.seenWorking,
 			now-submissionGraceStart(t), t.graceMS)
-		ptyEnded := present && domain.PtyEndedWithoutOutcome(entry.HasPty, agentState, entry.ExitCode)
 		if ptyEnded {
 			v = domain.AgentSettleVerdict{Settled: true, Status: domain.SettleStatusFailed, Finished: true}
 		}

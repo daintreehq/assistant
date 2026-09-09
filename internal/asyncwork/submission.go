@@ -3,9 +3,52 @@ package asyncwork
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/daintreehq/assistant/internal/domain"
 )
+
+// probeBudget is ONE pass's whole allowance for submission probes: at most
+// maxSubmissionProbesPerPass reads, all of them sharing a single
+// submissionProbeBudgetMS deadline. Built lazily so a pass that probes nothing
+// allocates nothing, and bounded by CANCELLING rather than by a context
+// deadline (the MCP client degrades a connection on DeadlineExceeded, and these
+// are best-effort reads). release() must run once the pass is done with it.
+type probeBudget struct {
+	parent context.Context
+	ctx    context.Context
+	cancel context.CancelFunc
+	timer  *time.Timer
+	used   int
+}
+
+// take reserves one probe and hands back the SHARED bounded context. ok=false
+// once the allowance is spent or the shared deadline has already elapsed — the
+// remaining invocations simply retry on the next tick instead of extending the
+// pass.
+func (b *probeBudget) take() (context.Context, bool) {
+	if b.used >= maxSubmissionProbesPerPass {
+		return nil, false
+	}
+	if b.ctx == nil {
+		b.ctx, b.cancel = context.WithCancel(b.parent)
+		b.timer = time.AfterFunc(time.Duration(submissionProbeBudgetMS)*time.Millisecond, b.cancel)
+	}
+	if b.ctx.Err() != nil {
+		return nil, false
+	}
+	b.used++
+	return b.ctx, true
+}
+
+func (b *probeBudget) release() {
+	if b.timer != nil {
+		b.timer.Stop()
+	}
+	if b.cancel != nil {
+		b.cancel()
+	}
+}
 
 func submissionGraceStart(t *tracked) int64 {
 	if r := t.rec.Submission; r != nil && r.Acceptance == "tracked" && r.Phase == "pty_written" {
@@ -21,9 +64,12 @@ func submissionDeadlineReason(t *tracked) string {
 	return "still working when the deadline passed"
 }
 
-// submissionReady gates both seenWorking and idle detection until this exact
-// send reached the PTY. That is transport evidence, not agent consumption.
-func (c *Coordinator) submissionReady(ctx context.Context, t *tracked, batch StatusReadResult, now int64, probes *int) (StatusReadResult, bool) {
+// submissionReady gates the seenWorking/idle COMPLETION verdict until this
+// exact send reached the PTY. That is transport evidence, not agent
+// consumption. A false verdict withholds only that verdict: the caller still
+// feeds the batched read so closure and PTY-loss detection keep running (see
+// feedStatuses' completionAllowed).
+func (c *Coordinator) submissionReady(t *tracked, batch StatusReadResult, now int64, budget *probeBudget) (StatusReadResult, bool) {
 	receipt := t.rec.Submission
 	if receipt == nil || receipt.Acceptance == "legacy_unknown" {
 		return batch, true
@@ -38,7 +84,7 @@ func (c *Coordinator) submissionReady(ctx context.Context, t *tracked, batch Sta
 		c.failSubmission(t, receipt.Phase)
 		return StatusReadResult{}, false
 	}
-	if *probes >= 4 || (t.lastSubmissionReadAt != 0 && now-t.lastSubmissionReadAt < 5000) {
+	if t.lastSubmissionReadAt != 0 && now-t.lastSubmissionReadAt < submissionReadMinIntervalMS {
 		return StatusReadResult{}, false
 	}
 	reader, canRead := c.deps.Reader.(SubmissionReader)
@@ -46,9 +92,12 @@ func (c *Coordinator) submissionReady(ctx context.Context, t *tracked, batch Sta
 	if !canRead || !canSave || len(t.terminalIDs) != 1 {
 		return StatusReadResult{}, false
 	}
-	*probes++
+	probeCtx, granted := budget.take()
+	if !granted {
+		return StatusReadResult{}, false
+	}
 	t.lastSubmissionReadAt = now
-	observation, snapshot, ok := reader.ReadSubmission(ctx, t.terminalIDs[0], receipt.Token)
+	observation, snapshot, ok := reader.ReadSubmission(probeCtx, t.terminalIDs[0], receipt.Token)
 	if !ok || observation.Token != receipt.Token || !domain.ValidSubmissionPhase(observation.Phase) {
 		return StatusReadResult{}, false
 	}
