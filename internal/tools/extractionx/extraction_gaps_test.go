@@ -22,11 +22,11 @@ type routeRouter struct {
 	judgeCalls    int
 }
 
-func (r *routeRouter) ExtractText(_ context.Context, _ string, _ []string, _ string) (string, bool, error) {
+func (r *routeRouter) ExtractText(_ context.Context, _ string, _ []string, _ string, _ int) (string, bool, error) {
 	r.textCalled = true
 	return r.textRes, r.textTruncated, nil
 }
-func (r *routeRouter) ExtractJSON(_ context.Context, _ string, _ []string, _ string, _ map[string]any) (any, error) {
+func (r *routeRouter) ExtractJSON(_ context.Context, _ string, _ []string, _ string, _ map[string]any, _ int) (any, error) {
 	r.jsonCalled = true
 	return r.jsonRes, nil
 }

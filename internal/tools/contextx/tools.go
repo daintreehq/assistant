@@ -157,8 +157,8 @@ var summarizeSchema = json.RawMessage(`{
 func newSummarizeTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.summarize",
-		Description: "Read a bounded tail of a Daintree terminal and summarize it with the small model. The DEFAULT way to relay what an agent said: raw scrollback is garbled, repainted TUI output, so summarizing gives clean prose and keeps it out of your context. " +
-			"Prefer it over terminal.read unless the user needs the exact literal text. " +
+		Description: "Read a bounded terminal tail and produce a brief overview with the small model. For complete drafts, wording comparisons, or checking that a required statement is absent, use terminal.read and page any returned artifact. " +
+			"A summary can omit details even when not truncated; truncated:true means the summary itself was cut off, not that the source agent stopped. " +
 			"PARALLEL: summarize/extract calls batched in ONE reply run CONCURRENTLY — relay a whole cohort as one batch, not one per turn. Read-only; needs Daintree MCP.",
 		Risk: domain.RiskRead,
 		// Independent per-call snapshot read + small-model call, the same cost profile
@@ -205,7 +205,7 @@ func newSummarizeTool(deps Deps) tools.Tool {
 			// the purpose + bounded tail, prefixed with a small provenance header (whose
 			// terminal this is + chronological order — see summarizeHeader), and relays
 			// the returned summary.
-			summaryText, cerr := deps.Router.Summarize(ctx, purpose, summarizeHeader(ctx, deps.MCP, a.TerminalID)+tail)
+			summaryText, truncated, cerr := deps.Router.Summarize(ctx, purpose, summarizeHeader(ctx, deps.MCP, a.TerminalID)+tail)
 			if cerr != nil {
 				if ctx.Err() != nil {
 					return tools.Fail(codeCancelled, "Turn cancelled while summarizing terminal.", tools.Unrecoverable())
@@ -217,14 +217,16 @@ func newSummarizeTool(deps Deps) tools.Tool {
 				body = "(no summary produced)"
 			}
 			summary := body
-			// Result carries ONLY what the model can't already know: the canonical id
-			// (it may have called with a prefix) and the summary. The old purpose echo
-			// and the hardcoded truncated=false (the CLI can no longer detect a
-			// token-cap truncation — the backend owns the summarizer) were pure noise
-			// repeated into the context on every call.
-			return tools.Ok(summary, map[string]any{
+			result := map[string]any{
 				"terminalId": a.TerminalID, "summary": summary,
-			})
+			}
+			if truncated {
+				// The task envelope carries finish_reason; ignoring it once made a
+				// cut-off draft read as proof that its ownership line was missing.
+				result["truncated"] = true
+				summary = "Summary cut off at the model's output limit. Omitted details are unknown, not absent. Use terminal.read and page any artifact for complete wording.\n\n" + body
+			}
+			return tools.Ok(summary, result)
 		},
 	}
 }
@@ -268,10 +270,9 @@ var readSchema = json.RawMessage(`{
 func newReadTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.read",
-		Description: "Read a terminal's raw scrollback tail VERBATIM — no model, no summarization, no token cap. Use this ONLY when you need " +
-			"the exact literal text (the user asked for a precise quote, or you must inspect exact output). For the common 'tell me what the " +
-			"agent said' case, prefer terminal.summarize: a coding agent's raw scrollback is garbled, repainted TUI output that bloats context " +
-			"and reads as broken when pasted back. Request a bounded tail and never echo the whole frame to the user. Read-only; requires Daintree MCP.",
+		Description: "Read a terminal's bounded raw scrollback VERBATIM, without a model. Use for exact quotes, complete draft review, and verifying whether required wording is present. " +
+			"Large results return an artifact preview: page artifact.read before treating omitted text as absent. The preview is not the whole tail. " +
+			"Use terminal.summarize for a brief overview; never echo a whole repainted TUI frame to the user. Read-only; requires Daintree MCP.",
 		Risk:   domain.RiskRead,
 		Schema: readSchema,
 		Decode: tools.StrictDecoder(func() any { return &readArgs{} }),

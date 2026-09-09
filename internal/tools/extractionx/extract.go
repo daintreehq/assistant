@@ -18,12 +18,10 @@ type extractResult struct {
 }
 
 // runExtract runs the server-owned extraction task against the gathered tail. The
-// backend owns the prompt and the token cap, so the CLI passes only structured
+// backend owns the prompt and bounds the requested token cap; the CLI passes structured
 // data: the JSON path forwards the (best-effort parsed) schema and carries the
 // returned `result` value; the text path carries the returned text + its truncated
-// flag. The JSON path can't report extractor truncation today (a far smaller risk —
-// JSON extracts pull small fields and a length-truncated object usually fails to
-// parse and is retried).
+// flag. JSON cut off at the token limit is an error, even if the prefix parses.
 func runExtract(ctx context.Context, deps Deps, a *extractCore, tail string) (extractResult, error) {
 	if a.format == "json" {
 		// The backend's terminal_extract_json task takes an optional JSON-schema
@@ -33,13 +31,13 @@ func runExtract(ctx context.Context, deps Deps, a *extractCore, tail string) (ex
 		if strings.TrimSpace(a.jsonSchema) != "" {
 			_ = json.Unmarshal([]byte(a.jsonSchema), &schema)
 		}
-		out, err := deps.Router.ExtractJSON(ctx, a.instruction, a.terminalIDs, tail, schema)
+		out, err := deps.Router.ExtractJSON(ctx, a.instruction, a.terminalIDs, tail, schema, a.maxTokens)
 		if err != nil {
 			return extractResult{}, err
 		}
 		return extractResult{json: out, truncated: false}, nil
 	}
-	text, truncated, err := deps.Router.ExtractText(ctx, a.instruction, a.terminalIDs, tail)
+	text, truncated, err := deps.Router.ExtractText(ctx, a.instruction, a.terminalIDs, tail, a.maxTokens)
 	if err != nil {
 		return extractResult{}, err
 	}

@@ -32,8 +32,8 @@ func (f *fakeMCP) CallTool(_ context.Context, name string, _ map[string]any) (MC
 
 type fakeRouter struct{ summary string }
 
-func (f fakeRouter) Summarize(_ context.Context, _ string, _ string) (string, error) {
-	return f.summary, nil
+func (f fakeRouter) Summarize(_ context.Context, _ string, _ string) (string, bool, error) {
+	return f.summary, false, nil
 }
 
 // capturingRouter records what the CLI actually sends to the backend summarize
@@ -44,9 +44,9 @@ type capturingRouter struct {
 	tail    string
 }
 
-func (c *capturingRouter) Summarize(_ context.Context, purpose, tail string) (string, error) {
+func (c *capturingRouter) Summarize(_ context.Context, purpose, tail string) (string, bool, error) {
 	c.purpose, c.tail = purpose, tail
-	return c.summary, nil
+	return c.summary, false, nil
 }
 
 type fakeQueue struct{}
@@ -67,10 +67,8 @@ func TestSnapshotNeverThrowsWhenDisconnected(t *testing.T) {
 	}
 }
 
-// The backend now owns the summarizer prompt and any token cap, returning only the
-// summary string. The CLI relays that body verbatim, and the result carries ONLY
-// the canonical id + summary — the old purpose echo and the hardcoded
-// truncated=false were noise repeated into the model's context on every call.
+// A clean summary carries the canonical id and body without redundant metadata.
+// Actual truncation must be surfaced; summary_truncation_test.go covers that path.
 func TestSummarizeRelaysModelBody(t *testing.T) {
 	deps := Deps{
 		MCP: &fakeMCP{connected: true, results: map[string]MCPCallResult{

@@ -273,7 +273,7 @@ func newTerminalSendCommandTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.sendCommand",
 		Description: "Send a command line to a Daintree terminal — types it into the terminal's input and runs it. Mutating, so it " +
-			"always confirms. Typed wrapper around the Daintree terminal.sendCommand MCP tool.",
+			"always confirms. If the command is scheduled for later, send it when that timer fires; a request to clean up afterwards does not authorize sending early. Typed wrapper around the Daintree terminal.sendCommand MCP tool.",
 		Consequence: "Runs a shell command in the named terminal as if you typed it. Effects depend on the command and may not be reversible.",
 		Risk:        domain.RiskTerminal,
 		Schema:      sendCommandSchema,

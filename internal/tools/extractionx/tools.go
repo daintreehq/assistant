@@ -283,7 +283,7 @@ func sharedBaseProps(leafDocs bool) string {
     "pollIntervalMs": { "type": "integer", "minimum": 0, "maximum": 60000, "default": 2000, "description": "Delay between polls in wait mode, in ms." },
     "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 120, "default": 30, "description": "Hard cap on poll attempts in wait mode." },
     "tailBytes": { "type": "integer", "minimum": 1, "maximum": 100000, "default": 12000, "description": "Max characters of each terminal's tail fed to the model." },
-    "maxTokens": { "type": "integer", "minimum": 1, "maximum": 2000, "default": 1024, "description": "Max tokens the extraction model may produce. For a verbatim/full-reproduction instruction prefer terminal.read (raw scrollback, no model, no cap)." }`
+    "maxTokens": { "type": "integer", "minimum": 1, "maximum": 2000, "default": 1024, "description": "Output budget shared by ALL requested terminals (backend may add a small reasoning allowance). For complete drafts use terminal.read and page any artifact; extraction is for compact facts." }`
 }
 
 var extractSchema = json.RawMessage(`{
@@ -375,7 +375,7 @@ func newExtractTool(deps Deps) tools.Tool {
 		Name: "terminal.extract",
 		Description: "Over MULTIPLE terminalIds, MERGES bounded tails via the small model into ONE plain-TEXT answer — never one per terminal. " +
 			"For a distinct answer per agent, or several named fields, use terminal.extract.json with an array schema keyed by terminalId. " +
-			"On a SINGLE terminalId it is the default way to read what an agent said. " +
+			"Use for compact facts; complete drafts and checks for absent wording need terminal.read plus artifact pages. " +
 			"PARALLEL: no-wait extract/.json calls batched in ONE reply run CONCURRENTLY — emit several independent extractions as one batch, not one per turn; the wait is roughly the slowest single call. A wait-bearing call is a barrier and runs serially. " +
 			"Omit `instruction` to use it as a finished/condition gate (booleans only, no extraction model call). " +
 			"A wait that observes the agent FINISH auto-retires that terminal's spawn-attached watcher (watchersRetired) — the completion is in your hands, so no notification follows. " +
@@ -517,10 +517,9 @@ var extractJSONSchema = json.RawMessage(`{
 func newExtractJSONTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.extract.json",
-		Description: "Extract STRUCTURED JSON from one or more Daintree terminal tails with the small model. Use it for several NAMED fields at once, or one entry PER terminal across a cohort: the multi-terminal tail is labelled by terminalId, so an array schema keyed by terminalId attributes each agent's answer in ONE call. " +
-			"Both `instruction` and `jsonSchema` are required. " +
-			"Same wait, watcher-retirement and PARALLEL batching rules as terminal.extract — use that one for a single value or plain text to relay. " +
-			"Read-only; needs Daintree MCP.",
+		Description: "Extract compact named fields as JSON from terminal tails. instruction and jsonSchema are required. For a cohort use an array keyed by terminalId; maxTokens is shared across ALL entries. " +
+			"For lengthy answers batch one call per terminal; for complete drafts or checking absent wording use terminal.read and page any artifact. " +
+			"Same wait, watcher-retirement and PARALLEL batching rules as terminal.extract (the plain-text alternative). Read-only; needs Daintree MCP.",
 		Risk: domain.RiskRead,
 		// Independent per-call snapshot read — see terminal.extract: a cohort of these can
 		// run concurrently, no ordering dependency between calls.
@@ -589,7 +588,7 @@ func newExtractJSONTool(deps Deps) tools.Tool {
 // maxTokens cap. A function rather than an inline literal so the merge note's length
 // budget (below) can measure the real string instead of a copy that silently goes stale.
 func textTruncationNote(maxTokens int) string {
-	return fmt.Sprintf("⚠ This result is cut off: the extraction model hit its maxTokens cap (currently %d) — the SOURCE agent's output is not necessarily incomplete. Do NOT re-extract with the same arguments; either raise maxTokens, or to relay text verbatim use terminal.read (raw scrollback, no model, no token cap).\n\n", maxTokens)
+	return fmt.Sprintf("⚠ Extraction cut off at its output budget (%d tokens). Missing details are unknown, not absent from the SOURCE. Do NOT retry unchanged: request fewer fields, raise maxTokens, or use terminal.read and page any artifact for complete text.\n\n", maxTokens)
 }
 
 // The remedy clause each extraction tool appends to the shared merge warning. They
