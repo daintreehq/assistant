@@ -427,7 +427,10 @@ func TestTruncateCommand(t *testing.T) {
 
 func TestTerminalSendCommandSummary(t *testing.T) {
 	// Success: the generic "Called terminal.sendCommand." is replaced with a
-	// concrete summary echoing the terminalId + command.
+	// concrete summary echoing the terminalId + command. It says QUEUED, not
+	// sent: the host's ack is queue acceptance (`sent:true`), never proof the
+	// command reached the shell, so a summary claiming delivery would have the
+	// model treat an unverified submission as done.
 	mcp := &fakeMCP{connected: true, result: MCPCallResult{Text: "ok", StructuredContent: map[string]any{"k": "v"}}}
 	tool := newTerminalSendCommandTool(Deps{MCP: mcp})
 	decoded, err := tool.Decode(json.RawMessage(`{"terminalId":"t7","command":"go test ./..."}`))
@@ -438,7 +441,7 @@ func TestTerminalSendCommandSummary(t *testing.T) {
 	if !res.Ok {
 		t.Fatalf("expected ok, got %+v", res.Error)
 	}
-	if res.Summary != "Sent to terminal t7: go test ./...." {
+	if res.Summary != "Queued for terminal t7: go test ./...." {
 		t.Errorf("summary not self-describing: %q", res.Summary)
 	}
 	if mcp.lastName != "terminal.sendCommand" {
@@ -463,7 +466,7 @@ func TestTerminalSendCommandSummary(t *testing.T) {
 	long := strings.Repeat("x", 200)
 	d2, _ := tool.Decode(json.RawMessage(`{"terminalId":"t7","command":"` + long + `"}`))
 	r2 := tool.Handle(context.Background(), d2, &tools.ToolContext{})
-	if !strings.HasPrefix(r2.Summary, "Sent to terminal t7: "+strings.Repeat("x", 80)+"...") {
+	if !strings.HasPrefix(r2.Summary, "Queued for terminal t7: "+strings.Repeat("x", 80)+"...") {
 		t.Errorf("long command not clipped: %q", r2.Summary)
 	}
 
