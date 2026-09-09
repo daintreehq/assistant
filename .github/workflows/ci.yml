@@ -171,14 +171,13 @@ jobs:
             --exit-code 1 \
             --config .gitleaks.toml
 
+      # v1.8 requires Go 1.26; keep analysis on the same Go version as the
+      # build. Pin the scanner, while its vulnerability database stays current.
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+
       - name: Known vulnerabilities (govulncheck)
-        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1
-        with:
-          go-version-input: ${{ env.GO_VERSION }}
-          # This action checks the repo out AGAIN by default, at default depth — which
-          # would discard the full history the secret scan above depends on. Hence both
-          # the flag and the ordering.
-          repo-checkout: false
+        run: govulncheck ./...
 
       # This project's own redactor knows the shapes it promises to remove. Turning it on
       # the working tree catches the failure the redactor exists to prevent, one layer

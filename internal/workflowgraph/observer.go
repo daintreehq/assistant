@@ -285,7 +285,13 @@ func (s *Service) NoteAsyncSettled(asyncID, finalStatus, summary, queueEventID s
 			}
 			if linkNode != "" && nodeStatus != "" {
 				if n := g.NodeByID(linkNode); n != nil && NodeTransitionLegal(n.Status, nodeStatus) && n.Status != nodeStatus {
+					// Agent settlement is a wake signal, not acceptance evidence. A
+					// command node with explicit criteria must await reconciliation;
+					// otherwise a false idle observation unlocks its next command.
 					st := nodeStatus
+					if st == NodeDone && n.Kind != KindWait && len(n.ExpectedEvidence) > 0 {
+						st = NodeWaiting
+					}
 					np := NodePatch{ID: linkNode, Status: &st}
 					if nodeStatus == NodeFailed {
 						msg := clampRunes(flattenLine(summary), MaxSummaryRunes)

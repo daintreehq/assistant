@@ -216,3 +216,71 @@ func TestNoteAsyncSettledUnknownAsyncIsNoOp(t *testing.T) {
 		t.Fatal("an unlinked async settle must record nothing")
 	}
 }
+
+// Three issue chains share the same runtime, but settlement is never acceptance.
+func TestCommandChainsWaitForVerificationAndSurviveServiceRecreation(t *testing.T) {
+	store := newMemGraphStore()
+	svc := newTestService(t, store, nil)
+	for i, id := range []string{"wfg_issue001", "wfg_issue002", "wfg_issue003"} {
+		g := twoNodeGraph()
+		g.ID = id
+		g.Nodes[0].Kind = KindDelegate
+		g.Nodes[0].Status = NodeWaiting
+		g.Nodes[0].ToolName = "terminal.run.async"
+		g.Nodes[0].ToolArgs = map[string]any{"terminalId": id + "-terminal", "command": "$work-issue " + id}
+		g.Nodes[0].ExpectedEvidence = []string{"The issue implementation and its tests passed"}
+		g.Nodes[1].Kind = KindDelegate
+		g.Nodes[1].ToolName = "terminal.run.async"
+		g.Nodes[1].ToolArgs = map[string]any{"terminalId": id + "-terminal", "command": "$review"}
+		g.Nodes[1].ExpectedEvidence = []string{"Review finished and findings addressed"}
+		g.Nodes = append(g.Nodes, Node{ID: "n_pr", Title: "Prepare PR", Kind: KindDelegate, Status: NodePending, DependsOn: []string{g.Nodes[1].ID}, ToolName: "terminal.run.async", ToolArgs: map[string]any{"terminalId": id + "-terminal", "command": "$prepare-pr"}, ExpectedEvidence: []string{"PR created with passing checks"}})
+		seedGraph(t, svc, g)
+		nodeID := g.Nodes[0].ID
+		asyncID := "asy_" + id
+		if err := store.UpsertWorkflowResourceLink(domain.WorkflowResourceLinkRecord{WorkflowID: id, ResourceType: "async", ResourceRef: asyncID, NodeID: &nodeID}); err != nil {
+			t.Fatal(err)
+		}
+		status := string(domain.AsyncSucceeded)
+		if i == 1 {
+			status = string(domain.AsyncFailed)
+		}
+		svc.NoteAsyncSettled(asyncID, status, "observed terminal settlement", "evt_"+id)
+	}
+	// A new owner uses persisted graph data, not a lost scratch map.
+	resumed := newTestService(t, store, nil)
+	for i, id := range []string{"wfg_issue001", "wfg_issue002", "wfg_issue003"} {
+		g, _, err := resumed.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := NodeWaiting
+		if i == 1 {
+			want = NodeFailed
+		}
+		if g.Nodes[0].Status != want {
+			t.Fatalf("%s: got %s, want %s", id, g.Nodes[0].Status, want)
+		}
+		if len(ReadyNodes(g)) != 0 {
+			t.Fatalf("%s unlocked its next command without acceptance evidence", id)
+		}
+		if g.Nodes[0].ToolArgs["command"] != "$work-issue "+id {
+			t.Fatalf("%s lost the exact skill command", id)
+		}
+	}
+	// Verification of one issue advances only that issue's chain.
+	_, _, err := resumed.mutate("wfg_issue001", "verified", func(g *Graph, rev int64) (*Patch, string, error) {
+		done := NodeDone
+		return &Patch{WorkflowID: g.ID, BaseRevision: rev, NodeUpdates: []NodePatch{{ID: g.Nodes[0].ID, Status: &done}}, AddEvidence: []EvidenceRef{{NodeID: g.Nodes[0].ID, Kind: "manual_note", Summary: "Tests passed and issue changes inspected"}}}, "verified", nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := resumed.Next("wfg_issue001")
+	if err != nil || len(next.ReadyNodes) != 1 || next.ReadyNodes[0].ID != "n_verify" {
+		t.Fatalf("verified issue did not advance: %+v %v", next, err)
+	}
+	other, _ := resumed.Next("wfg_issue002")
+	if len(other.ReadyNodes) != 0 {
+		t.Fatal("failed issue advanced when its sibling was verified")
+	}
+}

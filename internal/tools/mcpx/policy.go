@@ -171,6 +171,9 @@ func ResolveTargetPolicy(src TargetPolicySource, action string) TargetPolicy {
 // reviewed change. Do not add one because an action "looks harmless" — read what
 // Daintree does with it first.
 var localTargetPolicies = map[string]TargetPolicy{
+	"slashCommands.list":       {Risk: domain.RiskRead, Danger: "safe", Summary: "Locally discovered agent commands, skills and plugins."},
+	"agentCapabilities.search": {Risk: domain.RiskRead, Danger: "safe", Summary: "Bounded command, skill and plugin lookup for an explicit agent/worktree."},
+	"agentCapabilities.get":    {Risk: domain.RiskRead, Danger: "safe", Summary: "Selected capability invocation syntax and bounded source instructions."},
 	// --- workbench-tier reads. No confirmation; these are the whole reason the
 	// target-aware path exists, since daintree.call charges a typed system-tier
 	// approval for each of them today.
