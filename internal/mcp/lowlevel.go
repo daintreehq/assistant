@@ -11,9 +11,10 @@ import (
 // *mcp.Tool reduced to what we consume). InputSchema stays `any` (verbatim) so the
 // default-substitution decision lives in the high-level mapper.
 type rawTool struct {
-	Name        string
-	Description string
-	InputSchema any // nil when the live tool advertised none
+	Name         string
+	Description  string
+	OutputSchema any
+	InputSchema  any // nil when the live tool advertised none
 }
 
 // rawResult is the minimal callTool response shape (the SDK's *mcp.CallToolResult
@@ -64,9 +65,10 @@ func (s *sdkLowLevel) ListTools(ctx context.Context) ([]rawTool, error) {
 			continue
 		}
 		out = append(out, rawTool{
-			Name:        t.Name,
-			Description: t.Description,
-			InputSchema: t.InputSchema, // may be nil → high-level mapper substitutes the default
+			Name:         t.Name,
+			Description:  t.Description,
+			OutputSchema: t.OutputSchema,
+			InputSchema:  t.InputSchema, // may be nil → high-level mapper substitutes the default
 		})
 	}
 	return out, nil

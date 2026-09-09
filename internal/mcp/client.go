@@ -553,6 +553,7 @@ func (c *Client) listTools(ctx context.Context, force, degradeOnErr bool) ([]Too
 	tools := make([]ToolInfo, 0, len(rawTools))
 	for _, rt := range rawTools {
 		ti := ToolInfo{Name: rt.Name, Description: rt.Description}
+		ti.OutputSchema, _ = rt.OutputSchema.(map[string]any)
 		if schema, ok := rt.InputSchema.(map[string]any); ok && schema != nil {
 			ti.InputSchema, ti.InputSchemaProvided = schema, true
 		} else {

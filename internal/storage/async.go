@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -45,17 +46,18 @@ func (s *Store) InsertAsyncInvocation(rec domain.AsyncInvocationRecord) (domain.
 	return rec, nil
 }
 
-const asyncCols = `id,toolName,title,groupId,sessionId,terminalIdsJson,command,status,outcomesJson,lastError,queueEventId,endedReason,createdAt,startedAt,expiresAt,finishedAt`
+const asyncCols = `id,toolName,title,groupId,sessionId,terminalIdsJson,command,status,outcomesJson,lastError,queueEventId,endedReason,createdAt,startedAt,expiresAt,finishedAt,(SELECT value FROM runtime_state WHERE key = 'async_submission:' || async_invocations.id)`
 
 func scanAsyncInvocation(sc scanner) (domain.AsyncInvocationRecord, error) {
 	var a domain.AsyncInvocationRecord
 	var command, outcomes, lastErr, queueEventID, endedReason sql.NullString
 	var startedAt, finishedAt sql.NullInt64
 	var status string
+	var submission sql.NullString
 	if err := sc.Scan(&a.ID, &a.ToolName, &a.Title, &a.GroupID, &a.SessionID,
 		&a.TerminalIdsJson, &command, &status, &outcomes, &lastErr,
 		&queueEventID, &endedReason, &a.CreatedAt, &startedAt, &a.ExpiresAt,
-		&finishedAt); err != nil {
+		&finishedAt, &submission); err != nil {
 		return domain.AsyncInvocationRecord{}, err
 	}
 	a.Command = strFromNull(command)
@@ -66,6 +68,13 @@ func scanAsyncInvocation(sc scanner) (domain.AsyncInvocationRecord, error) {
 	a.EndedReason = strFromNull(endedReason)
 	a.StartedAt = i64FromNull(startedAt)
 	a.FinishedAt = i64FromNull(finishedAt)
+	if submission.Valid {
+		var receipt domain.SubmissionReceipt
+		if json.Unmarshal([]byte(submission.String), &receipt) != nil || !receipt.Valid() {
+			receipt = domain.SubmissionReceipt{Version: 1, Acceptance: "unreadable"}
+		}
+		a.Submission = &receipt
+	}
 	return a, nil
 }
 

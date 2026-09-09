@@ -137,8 +137,14 @@ func registerAndAccept(deps Deps, rec domain.AsyncInvocationRecord, terminalIDs 
 		"terminalIds": terminalIDs,
 		"title":       rec.Title,
 		"expiresAt":   rec.ExpiresAt,
+		"submission":  rec.Submission,
 		"note":        "Asynchronous: the runtime is watching this and KEEPS watching after the assistant closes (async work is project-scoped; the background supervisor adopts it and integrates the completion). Do NOT poll, await, or re-run it — the completion arrives through the attention queue and will wake you, or greet the user on their next attach.",
 	})
+	if rec.ToolName == "terminal.run.async" {
+		result := res.Result.(map[string]any)
+		result["state"] = "accepted"
+		result["note"] = "Input was accepted for queueing; the runtime is supervising. A running ledger status describes supervision, not proof of command execution. Do not poll or resend; inspect task evidence when the attention-queue wake arrives."
+	}
 	res.Async = &domain.AsyncHandle{
 		ID:          rec.ID,
 		ToolName:    rec.ToolName,
@@ -212,9 +218,9 @@ func newRunAsyncTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.run.async",
 		Description: "Send a command (or an agent prompt) to ONE Daintree terminal and watch it to completion ASYNCHRONOUSLY. " +
-			"Types and runs it exactly like terminal.sendCommand, then returns IMMEDIATELY with an async handle (asy_…); the runtime polls agent state every second (no model cost, no output reads) until the terminal settles, then WAKES you through the attention queue. " +
+			"Queues it through terminal.sendCommand, then returns IMMEDIATELY with an async handle (asy_…); the runtime polls agent state every second (no model cost, no output reads) until the terminal settles, then WAKES you through the attention queue. " +
 			"Use it instead of terminal.sendCommand + terminal.awaitAll whenever the work will take more than a minute or two, or the user should get your reply now. " +
-			"AFTER calling it, say what is running and END the turn: do NOT awaitAll or extract-wait the same terminal, do NOT poll async.list for it, do NOT re-send. Read the output when the wake arrives. " +
+			"AFTER calling it, report queue acceptance and END the turn: do NOT awaitAll or extract-wait the same terminal, do NOT poll async.list for it, do NOT re-send. Read the output when the wake arrives. " +
 			"Finish detection tracks agent state, so it is built for agent terminals. " +
 			"DURABLE and project-scoped: the watch survives the assistant closing — the supervisor adopts it — so you MAY promise an after-close or overnight result. It pauses only if Daintree itself closes, and resumes next launch. " +
 			"Mutating (it runs a command), so it confirms like terminal.sendCommand.",
@@ -233,6 +239,11 @@ func newRunAsyncTool(deps Deps) tools.Tool {
 				return *fail
 			}
 			terminalID := ids[0]
+			receiptSender, withReceipt := deps.Sender.(ReceiptSender)
+			receiptStore, canPersistReceipt := deps.Store.(SubmissionStore)
+			if withReceipt && !canPersistReceipt {
+				return tools.Fail(domain.CodeInternal, "Submission receipt storage is unavailable; no command was sent.")
+			}
 			timeout, _ := validateTimeout(a.TimeoutMs)
 			title := deriveTitle(a.Title, a.Command)
 			now := deps.now()
@@ -270,7 +281,14 @@ func newRunAsyncTool(deps Deps) tools.Tool {
 			// transport/timeout error is AMBIGUOUS — Daintree may have accepted the
 			// command before the connection dropped — so a blind re-send could
 			// execute it twice.
-			if err := deps.Sender.SendCommand(ctx, terminalID, a.Command); err != nil {
+			var receipt domain.SubmissionReceipt
+			var sendErr error
+			if withReceipt {
+				receipt, sendErr = receiptSender.SendCommandWithReceipt(ctx, terminalID, a.Command)
+			} else {
+				sendErr = deps.Sender.SendCommand(ctx, terminalID, a.Command)
+			}
+			if err := sendErr; err != nil {
 				_, _ = deps.Store.ClaimLiveAsyncInvocation(rec.ID, map[string]any{
 					"status": string(domain.AsyncFailed), "finishedAt": deps.now(),
 					"lastError": err.Error(),
@@ -285,13 +303,19 @@ func newRunAsyncTool(deps Deps) tools.Tool {
 					"Sending the command to "+terminalID+" failed with a transport error, so its outcome is UNKNOWN — the command MAY already be running in the terminal. Do NOT blindly re-send it; read the terminal first (terminal.read/terminal.summarize) to see whether it started. Underlying error: "+err.Error())
 			}
 
-			// The command IS running now. Activate the row; from here every failure
+			// The input was accepted for queueing. Activate the row; from here every failure
 			// message must carry the do-NOT-re-send warning — a generic failure would
 			// invite the model to run the (already executing) command twice.
-			const alreadySentNote = " IMPORTANT: the command WAS already sent and is running in the terminal — do NOT re-send it; read the terminal later (terminal.summarize/read) to see its result."
-			if ok, aerr := deps.Store.ClaimLiveAsyncInvocation(rec.ID, map[string]any{
-				"status": string(domain.AsyncRunning), "startedAt": deps.now(),
-			}); aerr != nil || !ok {
+			const alreadySentNote = " IMPORTANT: the command WAS already submitted for queueing; execution is not yet verified — do NOT re-send it; read the terminal later (terminal.summarize/read) to see its result."
+			var ok bool
+			var aerr error
+			if withReceipt {
+				ok, aerr = receiptStore.ActivateAsyncSubmission(rec.ID, receipt, deps.now())
+				rec.Submission = &receipt
+			} else {
+				ok, aerr = deps.Store.ClaimLiveAsyncInvocation(rec.ID, map[string]any{"status": string(domain.AsyncRunning), "startedAt": deps.now()})
+			}
+			if aerr != nil || !ok {
 				_, _ = deps.Store.ClaimLiveAsyncInvocation(rec.ID, map[string]any{
 					"status": string(domain.AsyncAbandoned), "finishedAt": deps.now(),
 					"lastError": "failed to activate the ledger row after the send",
@@ -302,7 +326,7 @@ func newRunAsyncTool(deps Deps) tools.Tool {
 			rec.Status = domain.AsyncRunning
 
 			return registerAndAccept(deps, rec, []string{terminalID}, fmt.Sprintf(
-				"Started asynchronously: %q is running in %s (async id %s). The completion arrives through the attention queue — even after the assistant closes, the background supervisor keeps watching. Do not wait for it in this turn.",
+				"Queued asynchronously: %q was accepted for %s (async id %s); agent consumption is not yet verified. The completion arrives through the attention queue — even after the assistant closes, the background supervisor keeps watching. Do not wait for it in this turn.",
 				title, terminalID, rec.ID), alreadySentNote)
 		},
 	}

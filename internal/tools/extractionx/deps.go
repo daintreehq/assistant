@@ -37,6 +37,7 @@ type TerminalStatusEntry struct {
 	// to name only question/prompt, and the two it omitted were both scored as finished.
 	RecentOutput *string // nil when absent; "" is a valid "no output yet"
 	ExitCode     *int
+	HasPty       *bool // nil when the answering surface cannot observe PTY lifecycle
 	// NotFound marks Daintree's per-entry "Terminal not found" shape: an unknown
 	// id does NOT abort the batched terminal.getStatus and is NOT omitted from the
 	// response — it comes back as a present entry with a per-entry error and a null

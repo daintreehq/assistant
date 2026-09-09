@@ -39,6 +39,15 @@ type CommandSender interface {
 	SendCommand(ctx context.Context, terminalID, command string) error
 }
 
+// ReceiptSender performs the same single send while returning host correlation.
+type ReceiptSender interface {
+	SendCommandWithReceipt(context.Context, string, string) (domain.SubmissionReceipt, error)
+}
+
+type SubmissionStore interface {
+	ActivateAsyncSubmission(string, domain.SubmissionReceipt, int64) (bool, error)
+}
+
 // SendRejectedError marks a send the server DEFINITIVELY rejected (a tool-level
 // error result): the command did NOT run, so the failure text may safely invite
 // a corrected retry. Any other send error is AMBIGUOUS — a transport drop or

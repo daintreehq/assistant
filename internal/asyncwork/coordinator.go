@@ -75,6 +75,7 @@ type TerminalStatus struct {
 	// The last three are BLOCKED states — see domain.IsBlockingWaitingReason. This used
 	// to name only question/prompt, and the two it omitted were both scored as finished.
 	ExitCode *int
+	HasPty   *bool
 }
 
 // StatusReadResult is the outcome of one batched status read. OK is true on a
@@ -96,6 +97,16 @@ type StatusReader interface {
 	// ListTerminals enumerates the live roster; ok=false on an unreadable
 	// roster, in which case absence stays unproven and polling continues.
 	ListTerminals(ctx context.Context) (ids []string, ok bool)
+}
+
+// SubmissionReader correlates an individual send without mixing tokens from
+// multiple invocations that happen to target the same terminal.
+type SubmissionReader interface {
+	ReadSubmission(context.Context, string, string) (domain.TerminalSubmission, StatusReadResult, bool)
+}
+
+type SubmissionStore interface {
+	CheckpointAsyncSubmission(string, domain.SubmissionReceipt, int64) (bool, error)
 }
 
 // Queue is the slice of the attention queue completions publish to.
@@ -179,7 +190,8 @@ type tracked struct {
 	perTerminal map[string]*termState
 	// graceMS is the never-seen-working settle grace for this invocation's tool
 	// (run.async waits longer — see runAsyncNeverWorkedGraceMS).
-	graceMS int64
+	graceMS              int64
+	lastSubmissionReadAt int64
 	// settleAt is the coalescing deadline once every terminal settled (or the
 	// hard deadline hit); 0 while still polling.
 	settleAt int64
@@ -668,8 +680,14 @@ func (c *Coordinator) runPass(ctx context.Context, now int64) {
 		} else {
 			c.noteReadSuccess()
 			gone := c.confirmGone(ctx, now, ids, res)
+			// Oldest probe first: bounded work without starving later operations.
+			sort.SliceStable(polling, func(i, j int) bool { return polling[i].lastSubmissionReadAt < polling[j].lastSubmissionReadAt })
+			probes := 0
 			for _, t := range polling {
-				c.feedStatuses(t, res, gone, now)
+				snapshot, ready := c.submissionReady(ctx, t, res, now, &probes)
+				if ready {
+					c.feedStatuses(t, snapshot, gone, now)
+				}
 			}
 		}
 	}
@@ -691,7 +709,7 @@ func (c *Coordinator) runPass(ctx context.Context, now int64) {
 				if st.outcome == nil {
 					st.outcome = &domain.AsyncTerminalOutcome{
 						Status: domain.SettleStatusWorking,
-						Reason: "still working when the deadline passed",
+						Reason: submissionDeadlineReason(t),
 					}
 				}
 			}
@@ -830,12 +848,18 @@ func (c *Coordinator) feedStatuses(t *tracked, res StatusReadResult, gone map[st
 		}
 
 		v := domain.SettleAgentFSM(agentState, waitingReason, exitCode, st.seenWorking,
-			now-t.rec.CreatedAt, t.graceMS)
+			now-submissionGraceStart(t), t.graceMS)
+		ptyEnded := present && domain.PtyEndedWithoutOutcome(entry.HasPty, agentState, entry.ExitCode)
+		if ptyEnded {
+			v = domain.AgentSettleVerdict{Settled: true, Status: domain.SettleStatusFailed, Finished: true}
+		}
 		if !v.Settled {
 			continue
 		}
 		o := &domain.AsyncTerminalOutcome{Status: v.Status, ExitCode: exitCode}
 		switch {
+		case ptyEnded:
+			o.Reason = domain.PtyEndedUnverifiedReason
 		case gone[id]:
 			o.Reason = "terminal is gone (closed or exited)"
 		case v.Status == domain.SettleStatusFailed && exitCode != nil:

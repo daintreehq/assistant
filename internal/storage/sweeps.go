@@ -200,6 +200,9 @@ func (s *Store) GCRetentionSweep(now int64) error {
 		evCutoff); err != nil {
 		return fmt.Errorf("sweep async invocations: %w", err)
 	}
+	if _, err := s.db.Exec(`DELETE FROM runtime_state WHERE key GLOB 'async_submission:*' AND NOT EXISTS (SELECT 1 FROM async_invocations WHERE runtime_state.key = 'async_submission:' || async_invocations.id)`); err != nil {
+		return fmt.Errorf("sweep async receipts: %w", err)
+	}
 	return nil
 }
 

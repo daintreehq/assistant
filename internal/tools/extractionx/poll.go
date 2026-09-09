@@ -13,10 +13,11 @@ import (
 // readResult is one read across all target terminals folded into a single
 // aggregate signal.
 type readResult struct {
-	signals      signals
-	combinedTail string // terminal-labelled tail fed to the model
-	finished     bool   // every target terminal exited (or is gone)
-	seenWorking  bool   // every target terminal has been observed working at least once
+	lifecycleUnverified bool
+	signals             signals
+	combinedTail        string // terminal-labelled tail fed to the model
+	finished            bool   // every target terminal exited (or is gone)
+	seenWorking         bool   // every target terminal has been observed working at least once
 	// outputAgeKnown is true when at least one terminal's read succeeded and so
 	// contributed a real silence age. False means MsSinceOutput is a default, not a
 	// measurement (every read failed), and must not be reported as one.
@@ -41,6 +42,7 @@ func readSignals(ctx context.Context, deps Deps, terminalIDs []string, tailBytes
 	// exit — require ByID non-empty before trusting exit.
 	allExited := statuses.OK && len(statuses.ByID) > 0
 	minMsSinceOutput := math.MaxInt64
+	lifecycleUnverified := false
 
 	type part struct {
 		terminalID    string
@@ -70,6 +72,9 @@ func readSignals(ctx context.Context, deps Deps, terminalIDs []string, tailBytes
 		}
 		if absent {
 			agentState = "exited"
+		}
+		if present && !entry.NotFound && domain.PtyEndedWithoutOutcome(entry.HasPty, agentState, entry.ExitCode) {
+			lifecycleUnverified = true
 		}
 
 		prev := states[id]
@@ -194,19 +199,21 @@ func readSignals(ctx context.Context, deps Deps, terminalIDs []string, tailBytes
 			Tail:          strings.Join(raw, "\n\n"),
 			MsSinceOutput: ms,
 		},
-		combinedTail:   strings.Join(labelled, "\n\n"),
-		finished:       allExited,
-		seenWorking:    seenWorkingAll,
-		outputAgeKnown: ageKnown,
+		combinedTail:        strings.Join(labelled, "\n\n"),
+		finished:            allExited && !lifecycleUnverified,
+		lifecycleUnverified: lifecycleUnverified,
+		seenWorking:         seenWorkingAll,
+		outputAgeKnown:      ageKnown,
 	}
 }
 
 // pollResult is the outcome of pollUntil.
 type pollResult struct {
-	matched      bool
-	attempts     int
-	combinedTail string
-	finished     bool
+	lifecycleUnverified bool
+	matched             bool
+	attempts            int
+	combinedTail        string
+	finished            bool
 	// exitCode is the final read's single-terminal exit code (nil for multi-terminal
 	// polls, where readSignals leaves the aggregate blank, and while the process is
 	// alive). Carried so a consumed completion can be classified failed on a nonzero
@@ -319,6 +326,9 @@ func pollUntil(ctx context.Context, deps Deps, args pollArgs) pollResult {
 		now := nowMS()
 		r := readSignals(ctx, deps, args.terminalIDs, args.tailBytes, states, now)
 		read = &r
+		if args.isSettleWait && r.lifecycleUnverified {
+			return pollResult{lifecycleUnverified: true, attempts: attempts, combinedTail: r.combinedTail, lastAgentState: r.signals.AgentState, lastWaitingReason: r.signals.WaitingReason, settleWait: args.isSettleWait}
+		}
 
 		matched := func() bool {
 			if args.wait == nil {

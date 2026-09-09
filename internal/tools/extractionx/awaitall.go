@@ -276,11 +276,17 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 			}
 
 			v := domain.SettleAgentFSM(agentState, waitingReason, exitCode, t.seenWorking, now-startedAt, domain.FinishSettleGraceMS)
+			ptyEnded := present && !entry.NotFound && domain.PtyEndedWithoutOutcome(entry.HasPty, agentState, entry.ExitCode)
+			if ptyEnded {
+				v = domain.AgentSettleVerdict{Settled: true, Status: domain.SettleStatusFailed, Finished: true}
+			}
 			if !v.Settled {
 				continue
 			}
 			o := &awaitOutcome{status: v.Status, finished: v.Finished, exitCode: exitCode}
 			switch {
+			case ptyEnded:
+				o.reason = domain.PtyEndedUnverifiedReason
 			case absent:
 				// Same wording as the async coordinator's gone outcome — the model must
 				// see the terminal vanished (closed/removed) rather than a clean finish.

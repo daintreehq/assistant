@@ -8,6 +8,7 @@ import (
 
 	"github.com/daintreehq/assistant/internal/asyncwork"
 	"github.com/daintreehq/assistant/internal/backend"
+	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/mcp"
 	"github.com/daintreehq/assistant/internal/tools/asyncx"
 	"github.com/daintreehq/assistant/internal/tools/extractionx"
@@ -98,6 +99,7 @@ func (r terminalReaderAdapter) ReadStatuses(ctx context.Context, terminalIDs []s
 			WaitingReason: mcpString(e["waitingReason"]),
 			RecentOutput:  mcpStringPtr(e["recentOutput"]),
 			ExitCode:      mcpIntPtr(e["exitCode"]),
+			HasPty:        mcp.TerminalHasPty(res.StructuredContent, res.Text, e),
 			// Daintree returns an UNKNOWN id as a present entry with a per-entry
 			// error and a null agentState (never omits it, never aborts the batch).
 			// The error field alone is not proof — the includeOutput path can stamp
@@ -231,9 +233,29 @@ func (a asyncStatusReaderAdapter) ReadStatuses(ctx context.Context, terminalIDs 
 			AgentState:    e.AgentState,
 			WaitingReason: e.WaitingReason,
 			ExitCode:      e.ExitCode,
+			HasPty:        e.HasPty,
 		}
 	}
 	return out
+}
+
+// ReadSubmission issues one bounded, token-specific read. The status returned
+// alongside the receipt is the only snapshot eligible for the first feed.
+func (a asyncStatusReaderAdapter) ReadSubmission(ctx context.Context, terminalID, token string) (domain.TerminalSubmission, asyncwork.StatusReadResult, bool) {
+	cctx, cancel := context.WithCancel(ctx)
+	timer := time.AfterFunc(2*time.Second, cancel)
+	defer timer.Stop()
+	defer cancel()
+	res, err := a.r.c.CallTool(cctx, "terminal.getStatus", map[string]any{"terminalIds": []string{terminalID}, "submissionToken": token}, mcp.CallOptions{})
+	if err != nil || res.IsError {
+		return domain.TerminalSubmission{}, asyncwork.StatusReadResult{}, false
+	}
+	receipt, entry, ok := mcp.ReadTerminalSubmission(res.StructuredContent, res.Text, terminalID, token)
+	if !ok {
+		return receipt, asyncwork.StatusReadResult{}, false
+	}
+	status := asyncwork.TerminalStatus{AgentState: mcpString(entry["agentState"]), WaitingReason: mcpString(entry["waitingReason"]), ExitCode: mcpIntPtr(entry["exitCode"]), HasPty: mcp.TerminalHasPty(res.StructuredContent, res.Text, entry)}
+	return receipt, asyncwork.StatusReadResult{OK: true, ByID: map[string]asyncwork.TerminalStatus{terminalID: status}}, true
 }
 
 // asyncCommandSenderAdapter performs terminal.run.async's one mutating side
@@ -248,21 +270,26 @@ func (a asyncStatusReaderAdapter) ReadStatuses(ctx context.Context, terminalIDs 
 type asyncCommandSenderAdapter struct{ c *mcp.Client }
 
 func (s asyncCommandSenderAdapter) SendCommand(ctx context.Context, terminalID, command string) error {
+	_, err := s.SendCommandWithReceipt(ctx, terminalID, command)
+	return err
+}
+
+func (s asyncCommandSenderAdapter) SendCommandWithReceipt(ctx context.Context, terminalID, command string) (domain.SubmissionReceipt, error) {
 	res, err := s.c.CallTool(ctx, "terminal.sendCommand", map[string]any{
 		"terminalId": terminalID,
 		"command":    command,
 	}, mcp.CallOptions{})
 	if err != nil {
-		return err
+		return domain.SubmissionReceipt{}, err
 	}
 	if res.IsError {
 		msg := strings.TrimSpace(res.Text)
 		if msg == "" {
 			msg = "terminal.sendCommand returned an error result"
 		}
-		return asyncx.SendRejectedError{Msg: msg}
+		return domain.SubmissionReceipt{}, asyncx.SendRejectedError{Msg: msg}
 	}
-	return nil
+	return mcp.SubmissionReceipt(res.StructuredContent, res.Text, terminalID)
 }
 
 // --- shared MCP result parsing (mirror of daemon/mcpreads.go pure parsers) ---

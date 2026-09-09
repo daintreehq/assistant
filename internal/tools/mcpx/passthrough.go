@@ -50,8 +50,7 @@ func passthrough(ctx context.Context, mcp MCPClient, mcpName string, args map[st
 		if res.Text != "" {
 			msg = fmt.Sprintf("Daintree refused %s: %s", mcpName, res.Text)
 		}
-		return tools.Fail(codeMCPToolError, msg,
-			tools.WithDetails(map[string]any{"structuredContent": res.StructuredContent, "rawText": res.Text}))
+		return hostRefusal(msg, res)
 	}
 	return tools.Ok(fmt.Sprintf("Called %s.", mcpName),
 		map[string]any{"text": res.Text, "structuredContent": res.StructuredContent})
@@ -186,7 +185,7 @@ func terminalSendCommandPassthrough(ctx context.Context, mcp MCPClient, terminal
 		return res
 	}
 	result, _ := res.Result.(map[string]any)
-	return tools.Ok(fmt.Sprintf("Sent to terminal %s: %s.", terminalID, truncateCommand(command, 80)), result)
+	return tools.Ok(fmt.Sprintf("Queued for terminal %s: %s.", terminalID, truncateCommand(command, 80)), result)
 }
 
 // terminalClosePassthrough closes a batch of terminals through the Daintree

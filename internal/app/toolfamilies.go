@@ -111,7 +111,8 @@ func toMcpxToolInfos(infos []mcp.ToolInfo) []mcpx.MCPToolInfo {
 	for _, i := range infos {
 		out = append(out, mcpx.MCPToolInfo{
 			Name: i.Name, Description: i.Description,
-			InputSchema: i.InputSchema, InputSchemaProvided: i.InputSchemaProvided,
+			OutputSchema: i.OutputSchema,
+			InputSchema:  i.InputSchema, InputSchemaProvided: i.InputSchemaProvided,
 		})
 	}
 	return out

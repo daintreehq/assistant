@@ -190,9 +190,12 @@ var localTargetPolicies = map[string]TargetPolicy{
 	"terminal.getStatus":  {Risk: domain.RiskRead, Danger: "safe", Summary: "One terminal's status, optionally with recent output."},
 	// --- action-tier mutations. These confirm (or need a target-scoped grant), and
 	// each is gated at the class the equivalent typed wrapper uses.
-	"terminal.new":           {Risk: domain.RiskTerminal, Danger: "confirm", Summary: "Open a new terminal."},
-	"terminal.inject":        {Risk: domain.RiskTerminal, Danger: "confirm", Summary: "Inject text into a terminal without submitting it."},
-	"terminal.waitUntilIdle": {Risk: domain.RiskTerminal, Danger: "confirm", Summary: "Block until a terminal goes idle."},
+	"terminal.interruptOwned":     {Risk: domain.RiskTerminal, Danger: "safe", Summary: "Request an interrupt for a busy agent launched by this MCP connection; acceptance does not confirm it stopped."},
+	"terminal.setClientMetadata":  {Risk: domain.RiskTerminal, Danger: "safe", Summary: "Replace or clear a terminal's shared client metadata; this does not grant ownership."},
+	"terminal.waitUntilIdleBatch": {Risk: domain.RiskTerminal, Danger: "safe", Summary: "Wait for terminal idle/tracking results; closed or unknown tracking is not task completion."},
+	"terminal.new":                {Risk: domain.RiskTerminal, Danger: "confirm", Summary: "Open a new terminal."},
+	"terminal.inject":             {Risk: domain.RiskTerminal, Danger: "confirm", Summary: "Inject text into a terminal without submitting it."},
+	"terminal.waitUntilIdle":      {Risk: domain.RiskTerminal, Danger: "confirm", Summary: "Block until a terminal goes idle."},
 
 	// EVERY entry above is a name this repo can point at in docs/DAINTREE_MCP.md.
 	// That rule is the catalog's own integrity check, not pedantry: classifying a

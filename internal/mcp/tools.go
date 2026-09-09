@@ -7,9 +7,10 @@ import (
 
 // ToolInfo is a normalized live-tool descriptor (McpToolInfo).
 type ToolInfo struct {
-	Name        string
-	Description string         // optional; "" when absent
-	InputSchema map[string]any // defaulted to {"type":"object","properties":{}} when live tool has none
+	Name         string
+	Description  string // optional; "" when absent
+	OutputSchema map[string]any
+	InputSchema  map[string]any // defaulted to {"type":"object","properties":{}} when live tool has none
 	// InputSchemaProvided reports whether the SERVER advertised the schema above,
 	// as opposed to it being the substituted default. The substitution is a display
 	// convenience — a permissive empty object that a JSON Schema validator accepts
