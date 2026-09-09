@@ -203,10 +203,10 @@ already drifted out of agreement with each other and with the binary.
 |---|---|---|---|---|---|---|---|---|
 | `terminal.run.async` | terminal | operator | yes | grantable | `daintree-mcp` | serial | — | Send a command (or an agent prompt) to ONE Daintree terminal and watch it to completion ASYNCHRONOUSLY |
 | `terminal.await.async` | local | supervisor | — | not needed | `daintree-mcp` | serial | — | Watch agent terminal(s) to completion ASYNCHRONOUSLY — the out-of-turn twin of terminal.awaitAll |
-| `terminal.summarize` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Read a bounded tail of a Daintree terminal and summarize it with the small model |
-| `terminal.read` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | Read a terminal's raw scrollback tail VERBATIM — no model, no summarization, no token cap |
+| `terminal.summarize` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Read a bounded terminal tail and produce a brief overview with the small model |
+| `terminal.read` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | Read a terminal's bounded raw scrollback VERBATIM, without a model |
 | `terminal.extract` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Over MULTIPLE terminalIds, MERGES bounded tails via the small model into ONE plain-TEXT answer — never one per terminal |
-| `terminal.extract.json` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Extract STRUCTURED JSON from one or more Daintree terminal tails with the small model |
+| `terminal.extract.json` | read | supervisor | — | not needed | `daintree-mcp` | read-cohort | — | Extract compact named fields as JSON from terminal tails |
 | `terminal.awaitAll` | read | supervisor | — | not needed | `daintree-mcp` | serial | — | Wait for a COHORT of agent terminals to reach an idle prompt |
 | `terminal.focus` | ui | supervisor | — | not needed | `daintree-mcp` | serial | — | Bring ONE Daintree terminal to the front of THIS session's view — forwards to Daintree's panel.focus with the termina… |
 | `terminal.revealOwned` | ui | supervisor | — | not needed | `daintree-mcp` | serial | — | Reveal a terminal THIS connection created, only when the user asks: Daintree switches to the owning workspace and rai… |
@@ -224,7 +224,7 @@ already drifted out of agreement with each other and with the binary.
 |---|---|---|---|---|---|---|---|---|
 | `timer.schedule` | local | supervisor | — | not needed | — | serial | — | Schedule a durable timer that fires once (delayMs) or repeats (repeat.everyMs plus maxRuns/until) |
 | `timer.list` | read | supervisor | — | not needed | — | serial | — | List the timers still SCHEDULED (not yet fired, not cancelled): id, title, fireAt (RFC3339 UTC), payloadType, runCoun… |
-| `timer.cancel` | local | supervisor | — | not needed | — | serial | — | Cancel a scheduled timer by its tmr_… id (from timer.list): it never fires again and any automation grant held by tha… |
+| `timer.cancel` | local | supervisor | — | not needed | — | serial | — | Cancel a timer by tmr_… id: its future action will NOT happen and its grants are revoked |
 
 ### `tool.*`
 

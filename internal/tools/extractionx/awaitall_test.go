@@ -57,10 +57,10 @@ type safeRouter struct {
 	judgeCalls int
 }
 
-func (r *safeRouter) ExtractText(_ context.Context, _ string, _ []string, _ string) (string, bool, error) {
+func (r *safeRouter) ExtractText(_ context.Context, _ string, _ []string, _ string, _ int) (string, bool, error) {
 	return "", false, nil
 }
-func (r *safeRouter) ExtractJSON(_ context.Context, _ string, _ []string, _ string, _ map[string]any) (any, error) {
+func (r *safeRouter) ExtractJSON(_ context.Context, _ string, _ []string, _ string, _ map[string]any, _ int) (any, error) {
 	return nil, nil
 }
 func (r *safeRouter) Verdict(_ context.Context, _ string, _ string) (bool, string, error) {

@@ -108,8 +108,8 @@ type JudgeInput struct {
 //   - Verdict      → extraction_verdict
 //   - Judge        → terminal_judge (the shared yes/no terminal judge)
 type Router interface {
-	ExtractText(ctx context.Context, instruction string, terminalIDs []string, tail string) (text string, truncated bool, err error)
-	ExtractJSON(ctx context.Context, instruction string, terminalIDs []string, tail string, schema map[string]any) (result any, err error)
+	ExtractText(ctx context.Context, instruction string, terminalIDs []string, tail string, maxTokens int) (text string, truncated bool, err error)
+	ExtractJSON(ctx context.Context, instruction string, terminalIDs []string, tail string, schema map[string]any, maxTokens int) (result any, err error)
 	Verdict(ctx context.Context, result, condition string) (pass bool, reason string, err error)
 	Judge(ctx context.Context, in JudgeInput) (domain.ModelJudgeAnswer, error)
 }

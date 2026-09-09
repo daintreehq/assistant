@@ -123,12 +123,12 @@ func toMcpxToolInfos(infos []mcp.ToolInfo) []mcpx.MCPToolInfo {
 // runs the server-owned terminal_summarize task with the structured purpose+tail.
 type contextRouterAdapter struct{ tasks backend.TaskRunner }
 
-func (r contextRouterAdapter) Summarize(ctx context.Context, purpose, tail string) (string, error) {
+func (r contextRouterAdapter) Summarize(ctx context.Context, purpose, tail string) (string, bool, error) {
 	out, err := backend.RunTerminalSummarize(ctx, r.tasks, backend.TerminalSummarizeInput{Purpose: purpose, Tail: tail})
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	return out.Text, nil
+	return out.Text, out.Truncated, nil
 }
 
 // extractionRouterAdapter maps the backend onto extractionx.Router: text/json
@@ -136,20 +136,19 @@ func (r contextRouterAdapter) Summarize(ctx context.Context, purpose, tail strin
 // server-owned task (the CLI sends structured data only).
 type extractionRouterAdapter struct{ tasks backend.TaskRunner }
 
-func (r extractionRouterAdapter) ExtractText(ctx context.Context, instruction string, terminalIDs []string, tail string) (string, bool, error) {
+func (r extractionRouterAdapter) ExtractText(ctx context.Context, instruction string, terminalIDs []string, tail string, maxTokens int) (string, bool, error) {
 	out, err := backend.RunTerminalExtractText(ctx, r.tasks, backend.TerminalExtractTextInput{
-		Instruction: instruction, TerminalIDs: terminalIDs, Tail: tail,
+		Instruction: instruction, TerminalIDs: terminalIDs, Tail: tail, MaxOutputTokens: maxTokens,
 	})
 	if err != nil {
 		return "", false, err
 	}
-	// The backend task does not report output truncation (its tail is already bounded).
-	return out.Text, false, nil
+	return out.Text, out.Truncated, nil
 }
 
-func (r extractionRouterAdapter) ExtractJSON(ctx context.Context, instruction string, terminalIDs []string, tail string, schema map[string]any) (any, error) {
+func (r extractionRouterAdapter) ExtractJSON(ctx context.Context, instruction string, terminalIDs []string, tail string, schema map[string]any, maxTokens int) (any, error) {
 	out, err := backend.RunTerminalExtractJSON(ctx, r.tasks, backend.TerminalExtractJSONInput{
-		Instruction: instruction, TerminalIDs: terminalIDs, Tail: tail,
+		Instruction: instruction, TerminalIDs: terminalIDs, Tail: tail, MaxOutputTokens: maxTokens,
 	}, schema)
 	if err != nil {
 		return nil, err

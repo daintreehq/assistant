@@ -31,9 +31,9 @@ func (r *recordingMCP) CallTool(_ context.Context, name string, args map[string]
 // consult the model.
 type recordChat struct{ called bool }
 
-func (c *recordChat) Summarize(_ context.Context, _ string, _ string) (string, error) {
+func (c *recordChat) Summarize(_ context.Context, _ string, _ string) (string, bool, error) {
 	c.called = true
-	return "should not happen", nil
+	return "should not happen", false, nil
 }
 
 func readResult(t *testing.T, res tools.ToolResult) map[string]any {

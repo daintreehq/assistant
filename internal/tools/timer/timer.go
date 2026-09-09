@@ -562,7 +562,7 @@ var cancelSchema = json.RawMessage(`{
 func newCancelTool(deps Deps) *tools.Tool {
 	return &tools.Tool{
 		Name:        "timer.cancel",
-		Description: "Cancel a scheduled timer by its tmr_… id (from timer.list): it never fires again and any automation grant held by that timer actor is revoked. Use it when the reminder or scheduled tool call is no longer wanted. An unknown id fails TIMER_NOT_FOUND (unrecoverable). Local bookkeeping only — it never touches terminals or project state. The result reports revokedGrants (live grants that cascade withdrew, 0 if none) — they need no follow-up grant.revoke unless grantRevokeFailed is true.",
+		Description: "Cancel a timer by tmr_… id: its future action will NOT happen and its grants are revoked. Use only when that work is explicitly abandoned or verified complete. 'Close the terminals once done' preserves pending action timers and requested spacing; never cancel them or perform their actions early to enable cleanup. Unknown id: TIMER_NOT_FOUND (unrecoverable). revokedGrants reports grants withdrawn; no grant.revoke is needed unless grantRevokeFailed is true.",
 		Risk:        domain.RiskLocal,
 		Schema:      cancelSchema,
 		Decode:      tools.StrictDecoder(func() any { return &cancelArgs{} }),

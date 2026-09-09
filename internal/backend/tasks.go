@@ -159,17 +159,19 @@ type TerminalSummarizeInput struct {
 
 // TerminalExtractTextInput extracts free text from terminal output.
 type TerminalExtractTextInput struct {
-	TerminalIDs []string `json:"terminal_ids,omitempty"`
-	Instruction string   `json:"instruction"`
-	Tail        string   `json:"tail,omitempty"`
+	TerminalIDs     []string `json:"terminal_ids,omitempty"`
+	Instruction     string   `json:"instruction"`
+	Tail            string   `json:"tail,omitempty"`
+	MaxOutputTokens int      `json:"max_output_tokens,omitempty"`
 }
 
 // TerminalExtractJSONInput extracts a structured value from terminal output. The
 // optional schema travels in TaskRequest.result_schema, not here.
 type TerminalExtractJSONInput struct {
-	TerminalIDs []string `json:"terminal_ids,omitempty"`
-	Instruction string   `json:"instruction"`
-	Tail        string   `json:"tail,omitempty"`
+	TerminalIDs     []string `json:"terminal_ids,omitempty"`
+	Instruction     string   `json:"instruction"`
+	Tail            string   `json:"tail,omitempty"`
+	MaxOutputTokens int      `json:"max_output_tokens,omitempty"`
 }
 
 // ExtractionVerdictInput judges whether an extracted result satisfies a condition.
@@ -248,6 +250,8 @@ type JudgeOutput struct {
 // TextOutput is a plain-text task result (summarize / extract_text).
 type TextOutput struct {
 	Text string `json:"text"`
+	// Derived from the task envelope, never from model-authored JSON.
+	Truncated bool `json:"-"`
 }
 
 // ExtractJSONOutput wraps the extracted structured value.
@@ -368,6 +372,12 @@ func runTypedValidated(ctx context.Context, r TaskRunner, task string, input any
 	}
 	if err := json.Unmarshal(res.Output, out); err != nil {
 		return fmt.Errorf("backend: decode %s output: %w", task, err)
+	}
+	if text, ok := out.(*TextOutput); ok {
+		text.Truncated = res.FinishReason == "length"
+	}
+	if task == TaskTerminalExtractJSON && res.FinishReason == "length" {
+		return &TaskOutputError{Task: task, Reason: "extraction hit its output token limit; request fewer fields or one terminal per call, raise maxTokens, or use terminal.read for complete text"}
 	}
 	if validate != nil {
 		if verr := validate(); verr != nil {

@@ -47,7 +47,7 @@ type MCPClient interface {
 // terminal_summarize task (the backend owns the prompt); the CLI sends only the
 // purpose + terminal tail.
 type Router interface {
-	Summarize(ctx context.Context, purpose, tail string) (string, error)
+	Summarize(ctx context.Context, purpose, tail string) (text string, truncated bool, err error)
 }
 
 // Queue is the slice of the attention queue context.snapshot reads (the open

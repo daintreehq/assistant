@@ -167,7 +167,7 @@ func TestExtractGate_NonzeroExitRetiresAsFailed(t *testing.T) {
 // failExtractRouter fails the extraction model call while keeping the judge sane.
 type failExtractRouter struct{ safeRouter }
 
-func (r *failExtractRouter) ExtractText(_ context.Context, _ string, _ []string, _ string) (string, bool, error) {
+func (r *failExtractRouter) ExtractText(_ context.Context, _ string, _ []string, _ string, _ int) (string, bool, error) {
 	return "", false, context.DeadlineExceeded
 }
 
