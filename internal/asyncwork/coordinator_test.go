@@ -1093,3 +1093,147 @@ func TestCoordinatorAmbiguousTerminalDoesNotFreezeSiblingInvocations(t *testing.
 		t.Errorf("the unproven terminal must keep polling, got %q", got)
 	}
 }
+
+/* --------------------------- submission gating ---------------------------- */
+
+// trackedInv is an invocation whose send carries a real host receipt that has
+// NOT yet been observed reaching the PTY. The harness reader/store implement
+// neither SubmissionReader nor SubmissionStore, which is exactly the shape of a
+// host that answers the send with a token but cannot be re-probed — so the gate
+// stays closed for the whole test.
+func trackedInv(id, group string, createdAt, expiresAt int64) domain.AsyncInvocationRecord {
+	rec := inv(id, group, createdAt, expiresAt)
+	rec.ToolName = "terminal.run.async"
+	rec.Submission = &domain.SubmissionReceipt{Version: 1, Acceptance: "tracked", Token: "tok-1", Phase: "queued"}
+	return rec
+}
+
+// Withholding the completion verdict must not withhold LIFECYCLE facts. A
+// terminal closed inside the pre-pty_written window is decisive on its own
+// evidence; gating it too left the invocation stranded until the hard deadline.
+func TestCoordinatorGoneSettlesWhileSubmissionUnconfirmed(t *testing.T) {
+	h := newHarness([]StatusReadResult{
+		frame(true, map[string]TerminalStatus{}),
+	})
+	h.reader.roster = []string{"term-other"} // term-1 not listed → confirmed gone
+	if err := h.c.Register(trackedInv("asy_sg", "run_sg", 1_000, 900_000), []string{"term-1"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	h.c.Tick(ctx, 20_000)
+	h.c.Tick(ctx, 23_000)
+	events := h.queue.all()
+	if len(events) != 1 {
+		t.Fatalf("published %d events, want 1", len(events))
+	}
+	if !strings.Contains(events[0].args.Summary, "terminal is gone") {
+		t.Errorf("summary %q should carry the gone annotation", events[0].args.Summary)
+	}
+}
+
+// The same applies to a PTY that ended: the send may never have been consumed,
+// but the terminal's lifecycle answer does not depend on the receipt.
+func TestCoordinatorPtyEndedSettlesWhileSubmissionUnconfirmed(t *testing.T) {
+	no := false
+	h := newHarness([]StatusReadResult{
+		frame(true, map[string]TerminalStatus{"term-1": {AgentState: "waiting", HasPty: &no}}),
+	})
+	if err := h.c.Register(trackedInv("asy_sp", "run_sp", 1_000, 900_000), []string{"term-1"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	h.c.Tick(ctx, 5_000)
+	h.c.Tick(ctx, 9_000)
+	events := h.queue.all()
+	if len(events) != 1 {
+		t.Fatalf("published %d events, want 1", len(events))
+	}
+	if !strings.Contains(events[0].args.Summary, domain.PtyEndedUnverifiedReason) {
+		t.Errorf("summary %q should carry the unverified-lifecycle reason", events[0].args.Summary)
+	}
+}
+
+// What the gate DOES suppress: an idle terminal past the grace. Before the PTY
+// write that idle is the state the terminal was in BEFORE this send, so scoring
+// it as the command completing is the bug the receipt exists to prevent.
+func TestCoordinatorUnconfirmedSubmissionIgnoresPreSubmissionIdle(t *testing.T) {
+	h := newHarness([]StatusReadResult{
+		frame(true, map[string]TerminalStatus{"term-1": {AgentState: "waiting"}}),
+	})
+	if err := h.c.Register(trackedInv("asy_si", "run_si", 1_000, 900_000), []string{"term-1"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	h.c.Tick(ctx, 1_000+runAsyncNeverWorkedGraceMS+5_000)
+	if got := h.store.lastStatus("asy_si"); got != "" {
+		t.Fatalf("settled on the pre-submission idle state (%q)", got)
+	}
+	if h.c.ActiveCount() != 1 {
+		t.Errorf("ActiveCount = %d, want 1", h.c.ActiveCount())
+	}
+}
+
+// A legacy (receipt-less) send keeps the old behaviour exactly: nothing to
+// wait for, so completion detection runs from the first tick.
+func TestCoordinatorLegacyReceiptDoesNotGateCompletion(t *testing.T) {
+	h := newHarness([]StatusReadResult{
+		frame(true, map[string]TerminalStatus{"term-1": {AgentState: "working"}}),
+		frame(true, map[string]TerminalStatus{"term-1": {AgentState: "waiting"}}),
+	})
+	rec := inv("asy_lg", "run_lg", 1_000, 900_000)
+	rec.Submission = &domain.SubmissionReceipt{Version: 1, Acceptance: "legacy_unknown"}
+	if err := h.c.Register(rec, []string{"term-1"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	h.c.Tick(ctx, 2_000)
+	h.c.Tick(ctx, 3_000)
+	h.c.Tick(ctx, 6_000)
+	if got := h.store.lastStatus("asy_lg"); got != "succeeded" {
+		t.Fatalf("legacy send status = %q, want succeeded", got)
+	}
+}
+
+// The probe allowance is per PASS and shares ONE deadline: four sequential 2s
+// probes would otherwise let a stalled host hold a 1s tick for ~8s, delaying
+// every other invocation's settle, publish and wake nudge.
+func TestProbeBudgetSharesOneDeadline(t *testing.T) {
+	b := &probeBudget{parent: context.Background()}
+	defer b.release()
+
+	first, ok := b.take()
+	if !ok || first == nil {
+		t.Fatal("first probe must be granted")
+	}
+	for i := 1; i < maxSubmissionProbesPerPass; i++ {
+		next, ok := b.take()
+		if !ok {
+			t.Fatalf("probe %d refused within the allowance", i+1)
+		}
+		if next != first {
+			t.Fatalf("probe %d got its own context — the budget must be shared", i+1)
+		}
+	}
+	if _, ok := b.take(); ok {
+		t.Fatalf("probe %d granted past the allowance", maxSubmissionProbesPerPass+1)
+	}
+
+	// A spent budget cancels rather than deadlines: the MCP client degrades a
+	// connection on DeadlineExceeded, and these are best-effort reads.
+	b.release()
+	if err := first.Err(); err != context.Canceled {
+		t.Errorf("released budget ctx err = %v, want context.Canceled", err)
+	}
+	if _, ok := b.take(); ok {
+		t.Error("a cancelled budget must grant nothing")
+	}
+}
+
+// A pass that never probes must allocate nothing to cancel.
+func TestProbeBudgetIsLazy(t *testing.T) {
+	b := &probeBudget{parent: context.Background()}
+	b.release()
+	if b.ctx != nil || b.cancel != nil || b.timer != nil {
+		t.Errorf("unused budget built machinery: %+v", b)
+	}
+}

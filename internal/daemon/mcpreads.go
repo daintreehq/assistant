@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+
+	mcpclient "github.com/daintreehq/assistant/internal/mcp"
 )
 
 // Pure MCP result parsers. Daintree's terminal tools return their payload only in
@@ -68,6 +70,7 @@ type TerminalStatusEntry struct {
 	Error            string
 	RecentOutput     *string // nil when absent; "" is a valid "no output yet"
 	ExitCode         *int
+	HasPty           *bool
 	SpawnedAt        *int64
 	LastTransitionAt *int64
 }
@@ -155,6 +158,7 @@ func readStatusesWith(ctx context.Context, mcp MCP, terminalIDs []string, includ
 			Error:            asString(e["error"]),
 			RecentOutput:     asStringPtr(e["recentOutput"]),
 			ExitCode:         asIntPtr(e["exitCode"]),
+			HasPty:           mcpclient.TerminalHasPty(res.StructuredContent, res.Text, e),
 			SpawnedAt:        asInt64Ptr(e["spawnedAt"]),
 			LastTransitionAt: asInt64Ptr(e["lastTransitionAt"]),
 		}

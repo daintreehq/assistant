@@ -42,9 +42,10 @@ type MCPStatus struct {
 // guess. It is what tool.schema hands back verbatim and what daintree.invoke
 // validates arguments against.
 type MCPToolInfo struct {
-	Name        string
-	Description string
-	InputSchema map[string]any
+	Name         string
+	Description  string
+	OutputSchema map[string]any
+	InputSchema  map[string]any
 	// InputSchemaProvided reports whether the SERVER advertised InputSchema, rather
 	// than it being the client's substituted empty-object default. Load-bearing for
 	// daintree.invoke: the default accepts every object, so validating against it

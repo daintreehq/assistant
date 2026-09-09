@@ -211,7 +211,7 @@ func newSchemaTool(deps Deps) tools.Tool {
 			if !found {
 				return schemaNotFound(list, requested)
 			}
-			return schemaResult(deps, requested, match.InputSchema, match.InputSchemaProvided)
+			return schemaResult(deps, requested, match.InputSchema, match.InputSchemaProvided, match.OutputSchema)
 		},
 	}
 }
@@ -232,7 +232,7 @@ func resolveSchemaTool(list []MCPToolInfo, requested string) (match MCPToolInfo,
 			match, found = t, true
 			continue
 		}
-		if !sameSchema(match.InputSchema, t.InputSchema) {
+		if !sameSchema(match.InputSchema, t.InputSchema) || !sameSchema(match.OutputSchema, t.OutputSchema) {
 			return MCPToolInfo{}, false, true
 		}
 	}
@@ -268,7 +268,7 @@ type serializedEnvelope struct {
 
 // schemaResult builds the success envelope, then enforces the inline size cap on
 // the WHOLE serialized envelope rather than the schema alone.
-func schemaResult(deps Deps, mcpName string, inputSchema map[string]any, schemaProvided bool) tools.ToolResult {
+func schemaResult(deps Deps, mcpName string, inputSchema map[string]any, schemaProvided bool, outputSchemas ...map[string]any) tools.ToolResult {
 	result := map[string]any{
 		"name":        mcpName,
 		"inputSchema": inputSchema,
@@ -317,6 +317,20 @@ func schemaResult(deps Deps, mcpName string, inputSchema map[string]any, schemaP
 	// still be returned inline.
 	if n := utf8.RuneCount(encoded); n > domain.MaxToolResultChars {
 		return schemaTooLarge(mcpName, inputSchema, n)
+	}
+	// Preserve the usable input contract when the optional output schema cannot
+	// fit inline. Never return a clipped JSON Schema.
+	if len(outputSchemas) > 0 && outputSchemas[0] != nil {
+		result["outputSchema"] = outputSchemas[0]
+		withOutput, outputErr := json.Marshal(serializedEnvelope{Ok: true, Summary: summary, Result: result})
+		if outputErr != nil || utf8.RuneCount(withOutput) > domain.MaxToolResultChars {
+			delete(result, "outputSchema")
+			result["outputSchemaOmitted"] = "Output schema could not be encoded or fit inline; no partial schema was returned."
+			omitted, _ := json.Marshal(serializedEnvelope{Ok: true, Summary: summary, Result: result})
+			if utf8.RuneCount(omitted) > domain.MaxToolResultChars {
+				return schemaTooLarge(mcpName, inputSchema, utf8.RuneCount(omitted))
+			}
+		}
 	}
 	return tools.Ok(summary, result)
 }

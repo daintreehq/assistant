@@ -66,7 +66,8 @@ ones we wrap typed are denylisted there (see `wrappedMCPTools`) and must go thro
 wrapper — the raw forward would skip its validation.
 
 Terminals: `terminal.list`, `terminal.new`, `terminal.getOutput`, `terminal.getStatus`,
-`terminal.sendCommand`, `terminal.inject`, `terminal.waitUntilIdle`, `terminal.rename`,
+`terminal.sendCommand`, `terminal.inject`, `terminal.waitUntilIdle`, `terminal.waitUntilIdleBatch`,
+`terminal.interruptOwned`, `terminal.setClientMetadata`, `terminal.rename`,
 `terminal.close`, `terminal.kill`, `terminal.killBatch`, `terminal.moveToWorktree`,
 `terminal.arm` / `terminal.disarm` / `terminal.disarmAll`.
 
@@ -280,12 +281,56 @@ the useful id/path/branch/issue/PR/status/last-commit metadata.
 
 Daintree PR #12318 makes a reduced status read available to **external workspace-bound** sessions without a live view, provided they pass explicit terminal ids. This does not change the embedded assistant's WebContents pin or revive a destroyed pin. It also does not make terminal listing, launching, closing, or deep output reads available without a renderer. Existing credential-revocation handling remains appropriate for the embedded assistant.
 
-The reduced response declares `source: "pty"` and `unavailableFields: ["armed", "lastCheckResult", "exitCode"]`; renderer responses declare `source: "renderer"` and an empty unavailable list. Missing fields in that list mean unknown, never false or still running. The CLI keeps numeric exit codes optional and settles from observed agent state when no code is available. A PTY row with an error and no agent state can mean an unreadable process, not a closed terminal. Both status adapters record that ambiguity **per entry**, never as a failed batch — a closed terminal repeats the row on every read, so a batch-level failure would be permanent rather than transient, and it would take the healthy siblings, the async coordinator's read-health gate, and the roster arbitration down with it. Instead the row keeps its existing route to whatever authority can actually settle it: `terminal.list`. The watcher's absent ladder and the async coordinator's `confirmGone` both condemn a terminal only when a SUCCESSFUL roster read fails to list it, and a view-less session cannot read the roster at all — so the absence simply stays unproven, the watcher re-checks without paying a deep read or a model call, and the async invocation ends at its own deadline as "still working". In-turn waits, which have no roster to consult, decline to call such a terminal gone and settle out at their attempt cap. The trade is deliberate: never a false exit, and never an unbounded one either.
+The reduced response declares `source: "pty"` and `unavailableFields: ["armed", "lastCheckResult", "exitCode"]`; renderer responses declare `source: "renderer"` and list `hasPty` as unavailable. Missing fields in that list mean unknown, never false or still running. The CLI keeps numeric exit codes optional and settles from observed agent state when no code is available. A PTY row with an error and no agent state can mean an unreadable process, not a closed terminal. Both status adapters record that ambiguity **per entry**, never as a failed batch — a closed terminal repeats the row on every read, so a batch-level failure would be permanent rather than transient, and it would take the healthy siblings, the async coordinator's read-health gate, and the roster arbitration down with it. Instead the row keeps its existing route to whatever authority can actually settle it: `terminal.list`. The watcher's absent ladder and the async coordinator's `confirmGone` both condemn a terminal only when a SUCCESSFUL roster read fails to list it, and a view-less session cannot read the roster at all — so the absence simply stays unproven, the watcher re-checks without paying a deep read or a model call, and the async invocation ends at its own deadline as "still working". In-turn waits, which have no roster to consult, decline to call such a terminal gone and settle out at their attempt cap. The trade is deliberate: never a false exit, and never an unbounded one either.
+
+### Submission, tracking and owned interruption (PRs #12342–#12346)
+
+Feature-detect the live MCP catalog during rollout. `tool.schema` retains the host's
+optional output schema as well as input schema; an over-budget output contract is
+explicitly omitted rather than clipped or used for authorization.
+
+`terminal.sendCommand` returns queue acceptance (`sent:true`), not execution. Its
+optional server-minted `submissionToken` correlates one send, never deduplicates a retry.
+Query `terminal.getStatus` with `terminalIds:[id]` and that `submissionToken`; the matching
+entry's `submission` has `{token,phase,at?}`. `queued`/`writing` remain pending;
+`pty_written` confirms the write to the PTY, not agent consumption. `failed`/`cancelled`
+may leave partial composer input. `unknown` means no retained record, including eviction
+or restart; an unreadable result is separately inconclusive. Never automatically resend.
+The host retains only a bounded history per terminal incarnation.
+
+`terminal.run.async` stores its receipt atomically with activation in the existing
+runtime-state table. Its `running` ledger status describes active supervision. The
+coordinator gates completion on `pty_written`, checkpoints decisive phases before using
+them, and restores receipts after ownership transfer. It anchors the idle grace to the
+local write observation, caps token reads at four per tick and one per operation per five
+seconds, and reports unverified submission at the deadline. Hosts without tokens retain
+the previous status heuristic with explicitly unknown delivery. Receipt cleanup follows
+retained async history; no schema reset is needed.
+
+The PTY surface exposes optional `hasPty`; false means exited or kill requested, not
+completed teardown or successful work. True is not health. Missing/unavailable stays
+unknown. Explicit false without a completion/exit-code outcome terminates waits with an
+unverified lifecycle result instead of classifying stale working/waiting state as success.
+
+Native `terminal.waitUntilIdle` and `terminal.waitUntilIdleBatch` return `trackingState`
+(`tracked`, `closed`, `unknown`). `settled:true` with lost tracking is not task completion.
+The CLI's `terminal.awaitAll` and async tools implement their own status polling.
+
+`terminal.interruptOwned({terminalId})` uses connection-scoped launch ownership and the
+agent's supported interrupt strategy. It is dynamically invocable at terminal risk with
+confirmation. `requested`/`requested-unverified` are acknowledgements, not stopped-state
+proof. Reconnect loses authority; refusal must not trigger kill/close/input fallbacks.
+Explicit host `retriable:false` is preserved by the invocation result.
+
+`terminal.setClientMetadata({terminalId,clientMetadata})` replaces the whole shared
+object (2 KiB, depth 16); null clears it. Read with `terminal.list` using
+`includeClientMetadata:true` and optional `terminalId`. It is a confirmed terminal-risk
+mutation, never an automatic write, ownership claim or durable workflow ledger.
 
 ### Verified call/response shapes
 
-- `terminal.getStatus({ terminalIds: string[] (1–256), includeOutput?: { lines 1–50, stripAnsi } })`
-  → `{ source, unavailableFields, terminals: [{ terminalId, agentId, agentState, waitingReason?, exitCode?, spawnedAt?, lastTransitionAt?, lastCheckResult?, recentOutput?, armed?, error? }] }`.
+- `terminal.getStatus({ terminalIds: string[] (1–256), includeOutput?: { lines 1–50, stripAnsi }, submissionToken?: string })`
+  → `{ source, unavailableFields, terminals: [{ terminalId, agentId, agentState, waitingReason?, exitCode?, hasPty?, submission?, spawnedAt?, lastTransitionAt?, lastCheckResult?, recentOutput?, armed?, error? }] }`.
   There is **no** flat `agentState` and **no** `runtimeStatus`. A numeric `exitCode` reports the process exit code, including zero for success. The PTY fallback cannot report it; consult `source` and `unavailableFields` before interpreting absence. Renderer results can contain null for a signal kill or a running terminal, so use agent state and numeric codes rather than null presence as exit evidence. `spawnedAt` / `lastTransitionAt` are
   epoch-ms timestamps (`lastTransitionAt` = when the agent entered its CURRENT state, not
   when it last produced output). `lastCheckResult` (when present) is a best-effort parse

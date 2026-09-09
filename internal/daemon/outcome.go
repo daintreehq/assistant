@@ -63,15 +63,16 @@ const (
 
 // CheckOutcome is one terminal's resolved check result.
 type CheckOutcome struct {
-	Classification domain.WatcherClassification
-	Confidence     float64
-	Summary        string
-	Evidence       []string
-	EpistemicKind  domain.EpistemicKind
-	ShouldPublish  bool
-	Severity       domain.Severity
-	Stop           bool
-	StopReason     StopReason
+	LifecycleUnverified bool
+	Classification      domain.WatcherClassification
+	Confidence          float64
+	Summary             string
+	Evidence            []string
+	EpistemicKind       domain.EpistemicKind
+	ShouldPublish       bool
+	Severity            domain.Severity
+	Stop                bool
+	StopReason          StopReason
 }
 
 // DecideArgs are the inputs to DecideOutcome.
@@ -144,15 +145,16 @@ func DecideOutcome(a DecideArgs) CheckOutcome {
 	}
 
 	return CheckOutcome{
-		Classification: a.Classification,
-		Confidence:     a.Confidence,
-		Summary:        a.Summary,
-		Evidence:       a.Evidence,
-		EpistemicKind:  domain.ClassificationEpistemicKind(a.Classification, a.UsedModel),
-		ShouldPublish:  shouldPublish,
-		Severity:       severity,
-		Stop:           stop,
-		StopReason:     reason,
+		LifecycleUnverified: a.Signals.LifecycleUnverified,
+		Classification:      a.Classification,
+		Confidence:          a.Confidence,
+		Summary:             a.Summary,
+		Evidence:            a.Evidence,
+		EpistemicKind:       domain.ClassificationEpistemicKind(a.Classification, a.UsedModel),
+		ShouldPublish:       shouldPublish,
+		Severity:            severity,
+		Stop:                stop,
+		StopReason:          reason,
 	}
 }
 

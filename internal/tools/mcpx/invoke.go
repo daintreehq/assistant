@@ -197,8 +197,7 @@ func newInvokeTool(deps Deps) tools.Tool {
 				if msg == "" {
 					msg = fmt.Sprintf("Daintree MCP action %s returned an error.", target.action)
 				}
-				return tools.Fail(codeMCPToolError, msg,
-					tools.WithDetails(map[string]any{"structuredContent": res.StructuredContent}))
+				return hostRefusal(msg, res)
 			}
 			return tools.Ok(fmt.Sprintf("Ran %s (%s).", target.action, target.policy.Risk), map[string]any{
 				"action": target.action, "risk": string(target.policy.Risk),

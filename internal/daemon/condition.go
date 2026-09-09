@@ -11,9 +11,10 @@ import (
 // terminal, plus the resolved classification/confidence threaded back into
 // DecideOutcome.
 type WatcherSignals struct {
-	AgentState    string
-	RuntimeStatus string // "running" | "exited"
-	WaitingReason string // "prompt" | "question"
+	LifecycleUnverified bool // PTY ended without an observed task/process outcome
+	AgentState          string
+	RuntimeStatus       string // "running" | "exited"
+	WaitingReason       string // "prompt" | "question"
 	// ExitCode is the numeric process exit code; nil until the terminal exited.
 	ExitCode *int
 	Tail     string

@@ -273,6 +273,12 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 		}
 	}
 
+	// An unverified member cannot become a done workflow through a more urgent
+	// sibling headline. Carry the aggregate uncertainty separately from its prose.
+	for _, o := range outcomes {
+		headline.LifecycleUnverified = headline.LifecycleUnverified || o.LifecycleUnverified
+	}
+
 	// Stop semantics across ALL terminals (not the headline).
 	var stopReason StopReason
 	switch {
@@ -518,6 +524,9 @@ func resolvePresent(ctx *CheckContext, rec domain.WatcherRecord, options *watche
 
 	agentState := entry.AgentState
 	waitingReason := entry.WaitingReason
+	if domain.PtyEndedWithoutOutcome(entry.HasPty, agentState, entry.ExitCode) {
+		return domain.ClassTerminalExited, 0.95, domain.PtyEndedUnverifiedReason, []string{"hasPty=false"}, WatcherSignals{LifecycleUnverified: true, AgentState: agentState, RuntimeStatus: "exited", ExitCode: entry.ExitCode}, false
+	}
 
 	// Tail: prefer inline recentOutput unless a deep tail is needed OR the inline tail is
 	// whitespace-only. A present-but-blank recentOutput is NOT "no output" — some agent
@@ -832,7 +841,7 @@ func advanceLinkedWorkflow(ctx *CheckContext, rec domain.WatcherRecord, watcherS
 		return
 	}
 	wfStatus := domain.WorkflowDone
-	if watcherStatus == "timeout" || watcherStatus == "error" {
+	if watcherStatus == "timeout" || watcherStatus == "error" || (outcome != nil && outcome.LifecycleUnverified) {
 		wfStatus = domain.WorkflowFailed
 	}
 	patch := map[string]any{

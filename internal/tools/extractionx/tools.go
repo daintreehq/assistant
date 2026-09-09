@@ -323,6 +323,10 @@ func waitFailure(toolName string, poll pollResult, elapsedMs int64) tools.ToolRe
 			details["lastJudgeVerdict"] = poll.lastJudgeVerdict
 		}
 	}
+	if poll.lifecycleUnverified {
+		details["lifecycleUnverified"] = true
+		return tools.Fail("TERMINAL_LIFECYCLE_UNVERIFIED", domain.PtyEndedUnverifiedReason+"; read the terminal output before deciding the task outcome.", tools.WithDetails(details), tools.Unrecoverable())
+	}
 	if poll.blocked {
 		details["blocked"] = true
 		details["blockedReason"] = poll.blockedReason
@@ -434,6 +438,10 @@ func newExtractTool(deps Deps) tools.Tool {
 				// A gate reports booleans rather than failing, so a blocked agent has to
 				// be visible IN the summary or it reads as a plain unmet condition and
 				// the model waits again on something that cannot clear itself.
+				if poll.lifecycleUnverified {
+					result["lifecycleUnverified"] = true
+					return tools.Ok("finished=false, condition not met: "+domain.PtyEndedUnverifiedReason, result)
+				}
 				if poll.blocked {
 					result["blocked"] = true
 					result["blockedReason"] = poll.blockedReason

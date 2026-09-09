@@ -369,8 +369,9 @@ type AsyncInvocationRecord struct {
 	TerminalIdsJson string `json:"terminalIdsJson"` // JSON string[] — the watched terminals
 	// Command is the command terminal.run.async sent before watching; nil for the
 	// watch-only terminal.await.async.
-	Command *string     `json:"command,omitempty"`
-	Status  AsyncStatus `json:"status"`
+	Command    *string            `json:"command,omitempty"`
+	Status     AsyncStatus        `json:"status"`
+	Submission *SubmissionReceipt `json:"submission,omitempty"`
 	// OutcomesJson is the per-terminal settle ledger (JSON map terminalId →
 	// {status, exitCode?, reason?}), written when the invocation settles/expires.
 	OutcomesJson *string `json:"outcomesJson,omitempty"`
