@@ -1,8 +1,12 @@
 // Package timer holds the durable-timer tools: timer.schedule, timer.list,
-// timer.cancel. Timers persist in SQLite and fire whenever a supervision
-// engine is running — the open assistant OR the persistent supervisor daemon
-// after it closes (missed occurrences catch up on the next tick). Every
-// creator appends a lifecycle NOTE.
+// timer.cancel. Timers persist in SQLite and fire whenever a supervision engine
+// is running — the open assistant, or a persistent supervisor daemon IF one is
+// actually holding the project after it closes, which nothing here can promise
+// (DaemonActive reports only this process's own scheduler). Catch-up on the next
+// tick is likewise partial: an enqueue or call_safe_tool still runs late, but a
+// message more than an hour overdue is reported missed rather than delivered
+// against a stale reading of the world (daemon.staleMessageWindowMs). Every
+// creator appends a lifecycle NOTE saying both.
 package timer
 
 import (
@@ -126,12 +130,13 @@ func daemonActive(tctx *tools.ToolContext) bool {
 }
 
 // lifecycleNote is the durability NOTE appended to every schedule summary.
-// The text differs when no scheduler is running right now (one-shot mode).
+// An active scheduler is not proof of an after-close background owner. Both
+// paths must disclose that a stale message is missed rather than caught up.
 func lifecycleNote(active bool) string {
 	if active {
-		return " NOTE: this timer persists and keeps firing after the assistant closes — the background supervisor owns the schedule; missed occurrences catch up on the next tick."
+		return " NOTE: this timer persists and keeps firing after the assistant closes only while a background supervisor is active; otherwise it waits for an assistant scheduler to run. Scheduled messages more than an hour overdue are reported missed."
 	}
-	return " NOTE: no scheduler is running in this one-shot invocation; the timer persists and fires once the assistant (or its background supervisor) next runs."
+	return " NOTE: no scheduler is running in this one-shot invocation; the timer persists and fires once the assistant (or its background supervisor) next runs, subject to the lateness rule: scheduled messages more than an hour overdue are reported missed."
 }
 
 // resolvedFor renders what the schedule path filled in for the model, or "" when it

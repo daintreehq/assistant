@@ -179,6 +179,12 @@ The `ToolContext` provides `Config`, `MCP`, `DB`, `Queue`, `Router`, `ProjectPat
   extraction via the small model; async lands the result on the attention queue).
 - **timer** — `timer.schedule` / `timer.list` / `timer.cancel` (local; durable timers in
   SQLite with one-shot or repeating fire).
+  The schedule result's `daemonActive` says a scheduler is running now. It does not
+  establish an after-close supervisor: that process can be disabled or fail to
+  start. Scheduling replies make after-close delivery conditional on an active
+  background owner. A `message` more than one hour overdue is reported missed
+  rather than executed late, even when its timer record persists.
+
 - **watcher** — `watcher.terminal.create` / `watcher.watchPR` / `watcher.list` /
   `watcher.cancel` (local; terminal watchers with the `WatchCondition` stop/alert DSL,
   default cadence 120s; `watchPR` polls a PR's state/draft/activity transitions).
