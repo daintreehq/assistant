@@ -26,8 +26,12 @@ func TestScheduleLifecycleNotice(t *testing.T) {
 	if !running.Ok {
 		t.Fatalf("running: %+v", running.Error)
 	}
+	// The lateness clause is pinned on every branch: it is the half of the note a
+	// later edit is most likely to drop, and without it the note reads as an
+	// unconditional catch-up promise the scheduler does not keep.
 	if !strings.Contains(running.Summary, "keeps firing after the assistant closes") ||
-		strings.Contains(running.Summary, "no scheduler is running") {
+		strings.Contains(running.Summary, "no scheduler is running") ||
+		!strings.Contains(running.Summary, "overdue are reported missed") {
 		t.Fatalf("running note: %q", running.Summary)
 	}
 
@@ -37,13 +41,15 @@ func TestScheduleLifecycleNotice(t *testing.T) {
 		t.Fatalf("stopped: %+v", stopped.Error)
 	}
 	if !strings.Contains(stopped.Summary, "no scheduler is running") ||
-		!strings.Contains(stopped.Summary, "fires once the assistant") {
+		!strings.Contains(stopped.Summary, "fires once the assistant") ||
+		!strings.Contains(stopped.Summary, "overdue are reported missed") {
 		t.Fatalf("stopped note: %q", stopped.Summary)
 	}
 
 	// daemonActive absent ⇒ assume active (durable wording).
 	absent := tool.Handle(context.Background(), args, ctxDaemon(nil))
-	if !absent.Ok || !strings.Contains(absent.Summary, "keeps firing after the assistant closes") {
+	if !absent.Ok || !strings.Contains(absent.Summary, "keeps firing after the assistant closes") ||
+		!strings.Contains(absent.Summary, "overdue are reported missed") {
 		t.Fatalf("absent note: %q", absent.Summary)
 	}
 }

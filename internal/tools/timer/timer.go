@@ -1,8 +1,12 @@
 // Package timer holds the durable-timer tools: timer.schedule, timer.list,
-// timer.cancel. Timers persist in SQLite and fire whenever a supervision
-// engine is running — the open assistant OR the persistent supervisor daemon
-// after it closes (missed occurrences catch up on the next tick). Every
-// creator appends a lifecycle NOTE.
+// timer.cancel. Timers persist in SQLite and fire whenever a supervision engine
+// is running — the open assistant, or a persistent supervisor daemon IF one is
+// actually holding the project after it closes, which nothing here can promise
+// (DaemonActive reports only this process's own scheduler). Catch-up on the next
+// tick is likewise partial: an enqueue or call_safe_tool still runs late, but a
+// message more than an hour overdue is reported missed rather than delivered
+// against a stale reading of the world (daemon.staleMessageWindowMs). Every
+// creator appends a lifecycle NOTE saying both.
 package timer
 
 import (
