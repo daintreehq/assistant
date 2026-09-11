@@ -425,6 +425,15 @@ func topLevelPropertyNames(inputSchema map[string]any) []string {
 func schemaNotFound(list []MCPToolInfo, requested string) tools.ToolResult {
 	candidates := schemaCandidates(list, requested)
 	msg := fmt.Sprintf("No Daintree MCP tool is named %q. Names are matched exactly and never auto-corrected.", requested)
+	// An action this CLI knows but this host does not serve has no near miss to
+	// suggest, and "search first" would loop back to the same empty result. Name
+	// the served stand-in instead.
+	if steer := absentActionSteer(list, func(name string, _ TargetPolicy) bool { return name == requested }); steer != "" {
+		return tools.Fail(codeToolNotFound, msg+" "+steer, tools.WithDetails(map[string]any{
+			"requestedName": requested,
+			"candidates":    []string{},
+		}))
+	}
 	switch {
 	case len(candidates) > 0:
 		msg += fmt.Sprintf(" Did you mean: %s? Retry tool.schema with one of those exact names.", strings.Join(candidates, ", "))
