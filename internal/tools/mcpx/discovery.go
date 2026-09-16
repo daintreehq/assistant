@@ -224,8 +224,22 @@ func newSearchTool(deps Deps) tools.Tool {
 				}
 				matches = append(matches, r.row)
 			}
-			return tools.Ok(fmt.Sprintf("Found %d Daintree MCP tool(s) matching %q.", len(matches), a.Query),
-				map[string]any{"query": a.Query, "matches": matches, "note": discoveryNote + " " + invokeNote})
+			summary := fmt.Sprintf("Found %d Daintree MCP tool(s) matching %q.", len(matches), a.Query)
+			note := discoveryNote + " " + invokeNote
+			// A lookup for an action that runs ahead of the host came back as a bare
+			// "Found 0", which the model read as "no such capability" and answered
+			// by searching files the fs.* root cannot see. When the query names such
+			// an action, say it is missing HERE and what serves instead. This does
+			// not depend on the match count: an unrelated hit on another word must
+			// not hide it.
+			if steer := absentActionSteer(list, func(name string, _ TargetPolicy) bool {
+				return namesCatalogAction(terms, name)
+			}); steer != "" {
+				summary += " " + steer
+				note = steer + " " + note
+			}
+			return tools.Ok(summary,
+				map[string]any{"query": a.Query, "matches": matches, "note": note})
 		},
 	}
 }

@@ -1,6 +1,7 @@
 package mcpx
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
@@ -55,6 +56,11 @@ type TargetPolicy struct {
 	// Source names where the classification came from ("local" | "host"), so a
 	// discovery result can say whether it is repo-reviewed or host-supplied.
 	Source string
+	// FallbackWhenAbsent names an older action that answers the same question,
+	// for an entry this CLI can run before every Daintree build offers it. When a
+	// host lacks the entry but has the fallback, discovery names the fallback
+	// instead of returning a bare "not found" the model reads as "no such thing".
+	FallbackWhenAbsent string
 }
 
 // RequiredTier is the least tier permitted to run this action, derived from the
@@ -171,9 +177,13 @@ func ResolveTargetPolicy(src TargetPolicySource, action string) TargetPolicy {
 // reviewed change. Do not add one because an action "looks harmless" — read what
 // Daintree does with it first.
 var localTargetPolicies = map[string]TargetPolicy{
-	"slashCommands.list":       {Risk: domain.RiskRead, Danger: "safe", Summary: "Locally discovered agent commands, skills and plugins."},
-	"agentCapabilities.search": {Risk: domain.RiskRead, Danger: "safe", Summary: "Bounded command, skill and plugin lookup for an explicit agent/worktree."},
-	"agentCapabilities.get":    {Risk: domain.RiskRead, Danger: "safe", Summary: "Selected capability invocation syntax and bounded source instructions."},
+	"slashCommands.list": {Risk: domain.RiskRead, Danger: "safe", Summary: "Locally discovered agent commands, skills and plugins."},
+	// The capability catalog runs ahead of the app: Daintree builds without it
+	// still serve slashCommands.list, which lists the locally discovered commands
+	// and skills (not plugin-bundled ones) with names and tokens but no usage, so
+	// a lookup never has to fall back to files the fs.* root cannot reach.
+	"agentCapabilities.search": {Risk: domain.RiskRead, Danger: "safe", Summary: "Bounded command, skill and plugin lookup for an explicit agent/worktree.", FallbackWhenAbsent: "slashCommands.list"},
+	"agentCapabilities.get":    {Risk: domain.RiskRead, Danger: "safe", Summary: "Selected capability invocation syntax and bounded source instructions.", FallbackWhenAbsent: "slashCommands.list"},
 	// --- workbench-tier reads. No confirmation; these are the whole reason the
 	// target-aware path exists, since daintree.call charges a typed system-tier
 	// approval for each of them today.
@@ -302,4 +312,89 @@ func ClassifiedActionNames() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// fallbackGuidance says what a fallback does and does not return, so the model
+// answers from its result instead of inventing the rest. It rides on the steer
+// because that is the moment the model switches to the fallback.
+var fallbackGuidance = map[string]string{
+	"slashCommands.list": "It lists locally discovered commands and skills (not plugin-bundled ones) " +
+		"with their names, descriptions and tokens (`insertText` where the host returns it, " +
+		"otherwise the `label`), not their usage: answer from those, say when arguments are " +
+		"unknown, and treat a source path you cannot read as outside your read scope, never as missing.",
+}
+
+// actionNamespace is the lowercased part of an action name before its first dot.
+func actionNamespace(action string) string {
+	ns := strings.ToLower(action)
+	if i := strings.IndexByte(ns, '.'); i > 0 {
+		ns = ns[:i]
+	}
+	return ns
+}
+
+// namesCatalogAction reports whether a query term names an action's catalog
+// explicitly, by containing its namespace identifier ("agentcapabilities", so
+// "agentCapabilities", "agentCapabilities.search" and "agentCapabilities.get" all
+// count). Fragments ("capabilities", "abilities"), the verb after the dot
+// ("search", "get") and words from the policy summary are generic, so a query about
+// something else never picks up the steer. The runbooks name the identifier, which
+// is what the model searches for first.
+func namesCatalogAction(terms []string, action string) bool {
+	ns := actionNamespace(action)
+	for _, t := range terms {
+		if strings.Contains(t, ns) {
+			return true
+		}
+	}
+	return false
+}
+
+// absentActionSteer explains which allowlisted actions the model asked for are
+// missing from this host and names the served action to use instead. It returns ""
+// when nothing applies: the action is offered, it declares no fallback, or the host
+// lacks the fallback too (pointing at a second missing action would only move the
+// dead end). matches decides which entries the caller is asking about.
+func absentActionSteer(list []MCPToolInfo, matches func(name string, p TargetPolicy) bool) string {
+	offered := make(map[string]bool, len(list))
+	// A host that serves ANY action in a namespace has that catalog, even if it
+	// withholds one member (the native-assistant app branch serves
+	// agentCapabilities.search and withholds .get).
+	// Steering then would push the model off a working action onto a weaker one.
+	servedNamespace := make(map[string]bool, len(list))
+	for _, t := range list {
+		offered[t.Name] = true
+		servedNamespace[actionNamespace(t.Name)] = true
+	}
+	byFallback := map[string][]string{}
+	var fallbacks []string
+	names := make([]string, 0, len(localTargetPolicies))
+	for name := range localTargetPolicies {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		p := localTargetPolicies[name]
+		if p.FallbackWhenAbsent == "" || offered[name] || servedNamespace[actionNamespace(name)] || !offered[p.FallbackWhenAbsent] || !matches(name, p) {
+			continue
+		}
+		if _, ok := byFallback[p.FallbackWhenAbsent]; !ok {
+			fallbacks = append(fallbacks, p.FallbackWhenAbsent)
+		}
+		byFallback[p.FallbackWhenAbsent] = append(byFallback[p.FallbackWhenAbsent], "`"+name+"`")
+	}
+	parts := make([]string, 0, len(fallbacks))
+	for _, fb := range fallbacks {
+		verb := "is"
+		if len(byFallback[fb]) > 1 {
+			verb = "are"
+		}
+		part := fmt.Sprintf("%s %s not offered by this Daintree build; use `%s` instead (read its arguments with `tool.schema`, then run it with `daintree.invoke`).",
+			strings.Join(byFallback[fb], " and "), verb, fb)
+		if g := fallbackGuidance[fb]; g != "" {
+			part += " " + g
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, " ")
 }
