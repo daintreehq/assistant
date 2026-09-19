@@ -277,7 +277,7 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 			}
 			if agentState == string(domain.AgentWorking) {
 				t.seenWorking = true
-				t.lastWorkingAt = now
+				t.lastWorkingAt = domain.WorkingSince(now, entry.LastTransitionAt)
 				if deps.Observations != nil {
 					deps.Observations.MarkWorking(id, now)
 				}

@@ -894,7 +894,7 @@ func (c *Coordinator) feedStatuses(t *tracked, res StatusReadResult, gone map[st
 		}
 		if agentState == string(domain.AgentWorking) {
 			st.seenWorking = true
-			st.lastWorkingAt = now
+			st.lastWorkingAt = domain.WorkingSince(now, entry.LastTransitionAt)
 		}
 
 		v := domain.SettleAgentFSM(agentState, waitingReason, exitCode, st.seenWorking,

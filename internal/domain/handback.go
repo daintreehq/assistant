@@ -83,10 +83,29 @@ func HandbackFresh(h *TerminalHandback, p HandbackPrompt) bool {
 // transition a handback may have been observed and still belong to the current
 // turn. Daintree detects the marker AT the settle out of "working" and stamps
 // observedAt with that same state-change timestamp, so for the current turn the
-// two are equal; the slack only absorbs a quick follow-on transition (a
-// completed→waiting hop). A handback older than that was printed for an earlier
-// turn — the agent has been through working→settled again since.
-const HandbackTransitionSlackMS int64 = 5000
+// two are equal; the slack only absorbs the one quick follow-on transition
+// Daintree makes on its own (its completed→waiting hold is 500ms). A handback
+// older than that was printed for an earlier turn — the agent has been through
+// working→settled again since. Deliberately tight: a wider window is exactly the
+// room a short follow-up turn needs to inherit the previous turn's marker, and a
+// genuine marker rejected here only loses the shortcut, never the completion.
+// Dating is still correlation by proximity; the submission token (#385) is the
+// exact answer and, when held, is the only one consulted.
+const HandbackTransitionSlackMS int64 = 1000
+
+// WorkingSince dates a WORKING sighting for HandbackSentAt's lastWorkingAt. When
+// Daintree reports the transition INTO the current state, that is the turn's real
+// start on Daintree's own clock — precise, and immune to how long ago the status
+// was actually read (a watcher can be handed a shared prefetched snapshot and run
+// well after it; stamping its own clock then would post-date a marker the agent
+// printed in between, and reject a genuine handback for good). Without it, or if
+// it is somehow ahead of the observer's clock, the observer's own `now` stands in.
+func WorkingSince(now int64, lastTransitionAt *int64) int64 {
+	if lastTransitionAt != nil && *lastTransitionAt > 0 && *lastTransitionAt <= now {
+		return *lastTransitionAt
+	}
+	return now
+}
 
 // HandbackSentAt folds everything a consumer knows about WHEN the current turn
 // began into one conservative SentAtMS baseline — the latest of:
@@ -152,6 +171,28 @@ func HandbackReport(h *TerminalHandback) string {
 		out += " (truncated)"
 	}
 	return out
+}
+
+// handbackMarkerFragment identifies Daintree's handback marker line
+// (`DAINTREE-DONE-<code>: <summary> END-<code>`) in a terminal tail.
+const handbackMarkerFragment = "DAINTREE-DONE-"
+
+// StripHandbackMarkerLines drops the marker line(s) from a terminal tail, so an
+// excerpt taken from the END of the tail shows what the agent said before handing
+// back rather than the marker itself — which is, by construction, the last thing
+// it printed.
+func StripHandbackMarkerLines(tail string) string {
+	if !strings.Contains(tail, handbackMarkerFragment) {
+		return tail
+	}
+	lines := strings.Split(tail, "\n")
+	kept := lines[:0:0]
+	for _, l := range lines {
+		if !strings.Contains(l, handbackMarkerFragment) {
+			kept = append(kept, l)
+		}
+	}
+	return strings.Join(kept, "\n")
 }
 
 // HandbackBlocked reports whether a waiting reason forbids reading a handback as

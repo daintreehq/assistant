@@ -206,7 +206,13 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 		}
 		if signals.AgentState == "working" {
 			base.SeenWorking = true
-			base.LastWorkingAt = now
+			// Dated on Daintree's clock when it says when (see domain.WorkingSince):
+			// this check may be running off a prefetched snapshot older than `now`.
+			var transitionAt *int64
+			if hasEntry {
+				transitionAt = entry.LastTransitionAt
+			}
+			base.LastWorkingAt = domain.WorkingSince(now, transitionAt)
 		}
 		perTerminal[terminalID] = base
 
@@ -628,7 +634,9 @@ func resolvePresent(ctx *CheckContext, rec domain.WatcherRecord, options *watche
 				// summary need not repeat it (a bare marker carries nothing). Keep the
 				// same deterministic tail excerpt the question verdict uses, so
 				// completing the turn never costs the operator the question itself.
-				if snip := tailSnippet(signals.Tail, 2, 200); snip != "" {
+				// The marker is the LAST thing the agent printed, so it is dropped first
+				// (and the window widened) or the excerpt would be the marker itself.
+				if snip := tailSnippet(domain.StripHandbackMarkerLines(signals.Tail), 4, 300); snip != "" {
 					sum = fmt.Sprintf("Explore agent finished its turn (handed back) and is asking a question: %q", snip)
 					ev = append(ev, fmt.Sprintf("question: %q", snip))
 				}

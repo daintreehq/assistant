@@ -203,13 +203,17 @@ func TestWatcher_ExploreHandbackKeepsTheQuestion(t *testing.T) {
 	store, queue := newFakeStore(), newFakeQueue()
 	rec := watcherWith("wch_q", []string{"term-x"}, withOptions(watcherOptions{SpawnMode: "explore"}))
 	mcp := newProgMCP(map[string]termCfg{
-		"term-x": {agentState: "waiting", waitingReason: "question", recentOutput: strptr("Which account should I inspect?"),
-			handback: map[string]any{"message": nil, "observedAt": float64(rec.CreatedAt + 1), "truncated": false}},
+		"term-x": {agentState: "waiting", waitingReason: "question",
+			recentOutput: strptr("Which account should I inspect?\nDAINTREE-DONE-abc123: END-abc123\n❯ "),
+			handback:     map[string]any{"message": nil, "observedAt": float64(rec.CreatedAt + 1), "truncated": false}},
 	})
 	store.watchers = []domain.WatcherRecord{rec}
 	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{}), rec)
 	if out.Classification != domain.ClassCompletedSuccess {
 		t.Fatalf("a question-shaped handback is still a completed turn, got %s", out.Classification)
+	}
+	if strings.Contains(out.Summary, "DAINTREE-DONE") {
+		t.Errorf("the excerpt must not be the marker line itself: %q", out.Summary)
 	}
 	if !strings.Contains(out.Summary, "Which account should I inspect?") || !strings.Contains(out.Summary, "no summary") {
 		t.Errorf("the question (and the bare marker) must both be reported: %q", out.Summary)

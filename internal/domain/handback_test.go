@@ -63,6 +63,34 @@ func TestHandbackReport(t *testing.T) {
 	}
 }
 
+func TestWorkingSince(t *testing.T) {
+	at := func(v int64) *int64 { return &v }
+	for name, tc := range map[string]struct {
+		now  int64
+		tr   *int64
+		want int64
+	}{
+		"Daintree's transition time wins over a late observer clock": {5000, at(4000), 4000},
+		"no transition time":                            {5000, nil, 5000},
+		"a transition ahead of the observer is ignored": {5000, at(6000), 5000},
+		"a zero transition is unknown":                  {5000, at(0), 5000},
+	} {
+		if got := WorkingSince(tc.now, tc.tr); got != tc.want {
+			t.Errorf("%s: got %d, want %d", name, got, tc.want)
+		}
+	}
+}
+
+func TestStripHandbackMarkerLines(t *testing.T) {
+	tail := "Which account?\nDAINTREE-DONE-abc123: END-abc123\n❯ "
+	if got := StripHandbackMarkerLines(tail); got != "Which account?\n❯ " {
+		t.Errorf("got %q", got)
+	}
+	if got := StripHandbackMarkerLines("no marker here"); got != "no marker here" {
+		t.Errorf("got %q", got)
+	}
+}
+
 func TestHandbackBlocked(t *testing.T) {
 	for reason, want := range map[string]bool{
 		WaitingApproval: true, WaitingError: true, WaitingQuestion: false, "prompt": false, "": false,
