@@ -846,12 +846,16 @@ func jsonIDArray(id string) string {
 // as an editor's. Every doubt is false, and false is exactly the pre-feature call: a
 // host that predates the argument may reject an unknown key outright, so a catalog
 // read that failed is never a reason to guess. The catalog is cache-first
-// (force=false), so on a warm connection this costs no round trip.
+// (force=false), so on a warm connection this costs no round trip; on a cold one the
+// lookup is bounded (handback.LookupContext), because an optional flag must never
+// hold a launch hostage to an unresponsive tools/list.
 func launchAcceptsHandback(ctx context.Context, deps Deps) bool {
 	if !deps.Config.AgentHandback || deps.MCP == nil {
 		return false
 	}
-	infos, err := deps.MCP.ListTools(ctx, false)
+	lctx, done := handback.LookupContext(ctx)
+	infos, err := deps.MCP.ListTools(lctx, false)
+	done()
 	if err != nil {
 		return false
 	}

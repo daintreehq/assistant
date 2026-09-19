@@ -2,7 +2,6 @@ package mcpx
 
 import (
 	"context"
-	"strings"
 
 	"github.com/daintreehq/assistant/internal/tools"
 	"github.com/daintreehq/assistant/internal/tools/handback"
@@ -22,17 +21,20 @@ import (
 //     rebuilt on reconnect, and a second copy of "supported" would outlive the host
 //     it described.
 //
-// The id is matched as given. Daintree matches ids exactly, so an id it would accept
-// is the same one the roster carries; a truncated id the host rejects anyway simply
-// finds no agent here.
+// The id is matched EXACTLY as it will be sent — no trimming. Daintree matches ids
+// exactly, so an id it would accept is the same one the roster carries; a padded or
+// truncated id the host rejects anyway simply finds no agent here, and goes out as the
+// legacy call.
 func sendRequestsHandback(ctx context.Context, deps Deps, terminalID string) bool {
 	if !deps.AgentHandback || deps.IsAgentTerminal == nil || deps.MCP == nil {
 		return false
 	}
-	if !deps.IsAgentTerminal(strings.TrimSpace(terminalID)) {
+	if !deps.IsAgentTerminal(terminalID) {
 		return false
 	}
-	infos, err := deps.MCP.ListTools(ctx, false)
+	lctx, done := handback.LookupContext(ctx)
+	infos, err := deps.MCP.ListTools(lctx, false)
+	done()
 	if err != nil {
 		return false
 	}
@@ -56,10 +58,11 @@ func withHandback(args map[string]any) map[string]any {
 }
 
 // handbackRefused reports whether a flagged send came back as Daintree refusing the
-// FLAG: a tool-level error result (hostRefusal, which alone carries rawText) whose
-// text names the argument. That is a definitive "nothing was sent", so repeating the
-// call without the flag cannot double-submit. A transport failure is ambiguous, has no
-// rawText, and is never retried.
+// FLAG: a tool-level error result (on this path only hostRefusal attaches rawText)
+// that handback.IsRefusal recognises as one of the host's pre-dispatch refusals. Those
+// are raised before any text is submitted, so repeating the call without the flag does
+// not double-submit. A transport failure is ambiguous, has no rawText, and is never
+// retried; neither is a rejection that merely mentions the word.
 func handbackRefused(res tools.ToolResult) bool {
 	if res.Ok || res.Error == nil {
 		return false

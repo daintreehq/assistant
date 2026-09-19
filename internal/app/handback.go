@@ -31,7 +31,9 @@ func (a *App) sendRequestsHandback(ctx context.Context, terminalID string) bool 
 	if !a.isLiveAgentTerminal(terminalID) {
 		return false
 	}
-	infos, err := a.MCP.ListTools(ctx, false)
+	lctx, done := handback.LookupContext(ctx)
+	infos, err := a.MCP.ListTools(lctx, false)
+	done()
 	if err != nil {
 		return false
 	}

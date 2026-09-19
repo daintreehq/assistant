@@ -1138,44 +1138,46 @@ func TestOpenTerminals_NilFetcherOmitsInventory(t *testing.T) {
 	s.DrainBackgroundWork()
 }
 
-// IsLiveAgentTerminal gates the handback flag (#385): Daintree refuses it on a pane
-// with no agent, so only POSITIVE, fresh evidence may answer true.
+// IsLiveAgentTerminal gates the handback flag (#385). A stale positive is recoverable
+// (Daintree refuses the flag before sending, and the sender falls back), so the 15s
+// model-facing cap does not apply; what the roster itself says is dead must stay false.
 func TestIsLiveAgentTerminal(t *testing.T) {
 	deps, _ := recordingDeps(&fakeRouter{}, &fakeTools{})
 	s := NewSession(deps)
-	one := 1
+	one, zero := 1, 0
 	roster := []backend.OpenTerminal{
 		{ID: "terminal-agent", Kind: "agent", AgentID: "claude", AgentState: "waiting"},
 		// A finished TURN in a live agent — exactly where a follow-up prompt goes.
 		{ID: "terminal-done", Kind: "agent", AgentID: "claude", AgentState: "completed"},
+		// Booting/restored: identity before the FSM reports. The host accepts it.
+		{ID: "terminal-booting", Kind: "agent", AgentID: "claude"},
 		{ID: "terminal-shell", Kind: "shell"},
+		// A state with no agent identity is not an agent.
+		{ID: "terminal-anon", Kind: "terminal", AgentState: "waiting"},
 		// terminal.list falls back to the LAUNCH agent id, so these still name one.
 		{ID: "terminal-exited", Kind: "agent", AgentID: "claude", AgentState: "exited"},
 		{ID: "terminal-dead", Kind: "agent", AgentID: "claude", AgentState: "waiting", ExitCode: &one},
-		{ID: "terminal-stateless", Kind: "agent", AgentID: "claude"},
+		{ID: "terminal-clean-exit", Kind: "agent", AgentID: "claude", AgentState: "waiting", ExitCode: &zero},
+	}
+	want := map[string]bool{
+		"terminal-agent": true, "terminal-done": true, "terminal-booting": true,
+		"terminal-shell": false, "terminal-anon": false, "terminal-exited": false,
+		"terminal-dead": false, "terminal-clean-exit": false,
+		"terminal-unknown": false, "terminal-ag": false, " terminal-agent ": false, "": false,
 	}
 
 	if s.IsLiveAgentTerminal("terminal-agent") {
-		t.Error("a cold cache knows nothing")
+		t.Error("a roster that was never fetched knows nothing")
 	}
-	seedRoster(s, time.Second, roster...)
-	for id, want := range map[string]bool{
-		"terminal-agent": true, "terminal-done": true,
-		"terminal-shell": false, "terminal-exited": false, "terminal-dead": false,
-		"terminal-stateless": false, "terminal-unknown": false, "terminal-age": false, "": false,
-	} {
-		if got := s.IsLiveAgentTerminal(id); got != want {
-			t.Errorf("IsLiveAgentTerminal(%q) = %v, want %v", id, got, want)
+	// Past the model-facing cap on purpose: a turn-start roster must still classify a
+	// follow-up sent after a long generation or an approval wait.
+	for _, age := range []time.Duration{time.Second, rosterSnapshotMaxAge + time.Minute} {
+		seedRoster(s, age, roster...)
+		for id, w := range want {
+			if got := s.IsLiveAgentTerminal(id); got != w {
+				t.Errorf("age %s: IsLiveAgentTerminal(%q) = %v, want %v", age, id, got, w)
+			}
 		}
-	}
-	// Exact ids only: a prefix is not the terminal.
-	if s.IsLiveAgentTerminal("terminal-ag") {
-		t.Error("a prefix must not match")
-	}
-	// Past the freshness cap the snapshot cannot vouch for anything.
-	seedRoster(s, rosterSnapshotMaxAge+time.Second, roster...)
-	if s.IsLiveAgentTerminal("terminal-agent") {
-		t.Error("a stale roster must not classify a terminal as a live agent")
 	}
 	var nilSession *Session
 	if nilSession.IsLiveAgentTerminal("terminal-agent") {

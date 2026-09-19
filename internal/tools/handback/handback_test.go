@@ -1,6 +1,9 @@
 package handback
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestSchemaAccepts(t *testing.T) {
 	supported := map[string]any{
@@ -27,6 +30,11 @@ func TestSchemaAccepts(t *testing.T) {
 		{"no properties key", map[string]any{"type": "object"}, true, false},
 		{"malformed properties", map[string]any{"properties": []any{"handback"}}, true, false},
 		{"nil schema", nil, true, false},
+		{"untyped declaration", map[string]any{"properties": map[string]any{"handback": map[string]any{"description": "x"}}}, true, true},
+		// `false` FORBIDS the key; a non-boolean type would reject the `true` we send.
+		{"declared false", map[string]any{"properties": map[string]any{"handback": false}}, true, false},
+		{"declared null", map[string]any{"properties": map[string]any{"handback": nil}}, true, false},
+		{"declared as a string", map[string]any{"properties": map[string]any{"handback": map[string]any{"type": "string"}}}, true, false},
 	}
 	for _, tc := range cases {
 		if got := SchemaAccepts(tc.schema, tc.provided); got != tc.want {
@@ -42,11 +50,30 @@ func TestIsRefusal(t *testing.T) {
 	if !IsRefusal(true, "Unrecognized key: \"Handback\"") {
 		t.Error("a strict-schema rejection naming the argument is the same refusal")
 	}
-	if IsRefusal(true, "Terminal not found") {
-		t.Error("an unrelated rejection is not a handback refusal")
+	// Incidental mentions are unrelated failures that may have come AFTER dispatch.
+	for _, text := range []string{
+		"Terminal not found",
+		"EBADF: terminal handback-worker not found",
+		"command `echo handback` timed out",
+		"lastHandback is unavailable",
+	} {
+		if IsRefusal(true, text) {
+			t.Errorf("%q is not a refusal of the flag and must not be re-sent", text)
+		}
 	}
 	// A success whose text happens to mention the word was not refused.
 	if IsRefusal(false, "handback requested") {
 		t.Error("only an error result can be a refusal")
+	}
+}
+
+func TestLookupContextIsBoundedByCancelNotDeadline(t *testing.T) {
+	ctx, done := LookupContext(context.Background())
+	if _, has := ctx.Deadline(); has {
+		t.Fatal("a deadline would degrade the MCP connection on expiry; the bound must be a cancel")
+	}
+	done()
+	if ctx.Err() != context.Canceled {
+		t.Fatalf("after release ctx.Err() = %v, want Canceled", ctx.Err())
 	}
 }

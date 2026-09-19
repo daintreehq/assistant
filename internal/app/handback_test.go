@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/daintreehq/assistant/internal/config"
@@ -81,17 +82,36 @@ func TestAsyncSenderFallsBackOnlyOnAHandbackRefusal(t *testing.T) {
 	refusal := mcp.CallResult{IsError: true, Text: "handback needs an agent pane, and terminal 'terminal-a' has no agent running. Send without handback."}
 
 	// Refused flag ⇒ nothing was sent ⇒ one legacy resend, and its receipt is returned.
-	m := &scriptedSendMCP{results: []mcp.CallResult{refusal, {}}}
+	// The fallback answers with a TRACKED receipt, so a synthesized legacy one — the
+	// refused call's, or none — cannot pass for it.
+	tracked := mcp.CallResult{StructuredContent: map[string]any{"sent": true, "terminalId": "terminal-a", "submissionToken": "tok-fallback"}}
+	m := &scriptedSendMCP{results: []mcp.CallResult{refusal, tracked}}
 	receipt, err := asyncCommandSenderAdapter{c: m, requestHandback: always(true)}.
 		SendCommandWithReceipt(context.Background(), "terminal-a", "continue")
 	if err != nil {
 		t.Fatalf("fallback send should succeed: %v", err)
 	}
-	if receipt.Acceptance == "" {
-		t.Error("the fallback's receipt must be returned")
+	if receipt.Token != "tok-fallback" || receipt.Acceptance != "tracked" {
+		t.Errorf("receipt = %+v, want the fallback's tracked receipt", receipt)
 	}
 	if len(m.sends) != 2 || sendJSON(t, m.sends[1]) != legacyAsyncSend {
 		t.Fatalf("expected flagged send then the legacy call, got %+v", m.sends)
+	}
+
+	// The fallback's OWN failure is what gets reported, and it is the last attempt even
+	// if it is refused in the same words.
+	twice := &scriptedSendMCP{results: []mcp.CallResult{refusal, refusal, {}}}
+	_, err = asyncCommandSenderAdapter{c: twice, requestHandback: always(true)}.
+		SendCommandWithReceipt(context.Background(), "terminal-a", "continue")
+	var rejectedTwice asyncx.SendRejectedError
+	if !errors.As(err, &rejectedTwice) || len(twice.sends) != 2 {
+		t.Fatalf("refused twice: err=%v sends=%d, want SendRejectedError after exactly 2 sends", err, len(twice.sends))
+	}
+	lost := &scriptedSendMCP{results: []mcp.CallResult{refusal}, errs: []error{nil, errors.New("connection reset")}}
+	_, err = asyncCommandSenderAdapter{c: lost, requestHandback: always(true)}.
+		SendCommandWithReceipt(context.Background(), "terminal-a", "continue")
+	if err == nil || errors.As(err, &rejectedTwice) || len(lost.sends) != 2 {
+		t.Fatalf("fallback transport failure: err=%v sends=%d, want the ambiguous transport error", err, len(lost.sends))
 	}
 
 	// Any other rejection is reported as a rejection, once.
@@ -119,11 +139,13 @@ func TestAppSendRequestsHandbackFailsClosed(t *testing.T) {
 	if nilApp.sendRequestsHandback(context.Background(), "terminal-a") || nilApp.isLiveAgentTerminal("terminal-a") {
 		t.Error("nil app must be false")
 	}
-	off := &App{Config: config.AppConfig{AgentHandback: false}}
+	// A non-nil client in both, so the gate under test — not the nil-client guard —
+	// is what answers. Neither case may reach it: a zero Client is never dereferenced.
+	off := &App{Config: config.AppConfig{AgentHandback: false}, MCP: &mcp.Client{}}
 	if off.sendRequestsHandback(context.Background(), "terminal-a") {
 		t.Error("switch off must be false")
 	}
-	noSession := &App{Config: config.AppConfig{AgentHandback: true}}
+	noSession := &App{Config: config.AppConfig{AgentHandback: true}, MCP: &mcp.Client{}}
 	if noSession.sendRequestsHandback(context.Background(), "terminal-a") {
 		t.Error("no session (unknown terminal) must be false")
 	}
@@ -142,5 +164,22 @@ func TestAgentTaskToolInfosKeepTheAdvertisedBit(t *testing.T) {
 	}
 	if _, ok := got[0].InputSchema["properties"].(map[string]any)["handback"]; !ok {
 		t.Fatal("projection lost the input schema")
+	}
+}
+
+// The flag is this process's own business. Nothing the MODEL is shown may mention it:
+// a described argument is one the model starts supplying, and a described marker is a
+// second instruction to the agent with no code in it. Asserted on the rendered bytes —
+// the whole projection, schemas and full descriptions — with the switch on (default).
+func TestModelFacingToolsNeverMentionHandback(t *testing.T) {
+	data := render(t, buildInventory(t, ToolInventoryOptions{}))
+	for _, name := range []string{"sendCommand", "spawnForEdits", "run"} {
+		if !strings.Contains(string(data), name) {
+			t.Fatalf("inventory does not contain a %q tool — this guard is not reaching the real registry", name)
+		}
+	}
+	if i := strings.Index(strings.ToLower(string(data)), "handback"); i >= 0 {
+		lo, hi := max(0, i-80), min(len(data), i+80)
+		t.Fatalf("the model-facing tool projection mentions handback: …%s…", data[lo:hi])
 	}
 }

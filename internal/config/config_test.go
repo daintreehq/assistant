@@ -135,6 +135,17 @@ func TestLoadConfig_AgentHandbackDefaultsOnAndCanBeTurnedOff(t *testing.T) {
 	if mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir), AgentHandback: boolptr(false)}).AgentHandback {
 		t.Error("explicit override should beat env")
 	}
+	// Trusted-or-own: a bound project's .env is repo content and must not be able to
+	// change what this process sends to Daintree.
+	t.Setenv("DAINTREE_AGENT_HANDBACK", "")
+	os.Unsetenv("DAINTREE_AGENT_HANDBACK")
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, ".env"), []byte("DAINTREE_AGENT_HANDBACK=0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir), ProjectPath: strptr(projectDir)}).AgentHandback {
+		t.Error("a project .env must not be able to switch handback requests off")
+	}
 	if got := DescribeConfig(AppConfig{AgentHandback: true})["agentHandback"]; got != "true" {
 		t.Errorf("DescribeConfig agentHandback = %q, want true", got)
 	}

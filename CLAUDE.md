@@ -778,7 +778,11 @@ wording) ·
 `DAINTREE_ASSISTANT_OFFLINE` · `DAINTREE_ASSISTANT_STATE_DIR` · `DAINTREE_ASSISTANT_DEBUG_LOG` /
 `DAINTREE_ASSISTANT_LOG_DIR` · `DAINTREE_WORKFLOW_INTELLIGENCE` (the workflow execution-graph
 layer, ON by default now that the backend carries the matching `workflow_state` turn-context
-contract + workflow tasks; `=0` disables it; see docs/WORKFLOW_INTELLIGENCE.md).
+contract + workflow tasks; `=0` disables it; see docs/WORKFLOW_INTELLIGENCE.md) ·
+`DAINTREE_AGENT_HANDBACK` (trusted-or-own, ON by default: every prompt sent to an agent
+carries `handback: true` on `agent.launch` / `terminal.sendCommand` when the host's
+advertised schema accepts it; `=0` sends exactly the pre-feature calls — see
+`internal/tools/handback`).
 (Model/provider variables — every `*_API_KEY` and the `DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL`
 trio — are **backend-only**. The CLI reads none of them and its `AppConfig` carries no
 model or provider fields at all. On a normal install it holds no credential whatsoever;

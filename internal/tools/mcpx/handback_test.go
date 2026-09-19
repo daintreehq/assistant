@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -76,6 +77,7 @@ func TestSendCommandWithoutHandbackIsByteIdenticalToTheLegacyCall(t *testing.T) 
 	}{
 		{"pre-feature deps", &fakeMCP{toolList: sendCatalog(true)}, Deps{}},
 		{"switch off", &fakeMCP{toolList: sendCatalog(true)}, Deps{IsAgentTerminal: isAgent}},
+		{"padded id is not the roster's id", &fakeMCP{toolList: sendCatalog(true)}, Deps{AgentHandback: true, IsAgentTerminal: isAgent}},
 		{"shell or unknown terminal", &fakeMCP{toolList: sendCatalog(true)}, Deps{AgentHandback: true, IsAgentTerminal: agentOnly("terminal-other")}},
 		{"no terminal lookup wired", &fakeMCP{toolList: sendCatalog(true)}, Deps{AgentHandback: true}},
 		{"host schema lacks the argument", &fakeMCP{toolList: sendCatalog(false)}, Deps{AgentHandback: true, IsAgentTerminal: isAgent}},
@@ -86,13 +88,19 @@ func TestSendCommandWithoutHandbackIsByteIdenticalToTheLegacyCall(t *testing.T) 
 	for _, tc := range cases {
 		tc.mcp.connected = true
 		tc.deps.MCP = tc.mcp
-		runSend(t, tc.deps, "terminal-a", "ls")
-		if got := sentJSON(t, tc.mcp); got != legacy {
-			t.Errorf("%s: sent %s, want %s", tc.name, got, legacy)
+		id, want := "terminal-a", legacy
+		if tc.name == "padded id is not the roster's id" {
+			// Looked up exactly as it is sent: the padded id goes out untouched, and
+			// without the flag.
+			id, want = " terminal-a ", `{"command":"ls","terminalId":" terminal-a "}`
+		}
+		runSend(t, tc.deps, id, "ls")
+		if got := sentJSON(t, tc.mcp); got != want {
+			t.Errorf("%s: sent %s, want %s", tc.name, got, want)
 		}
 	}
 	// A shell send never even reads the catalog: the terminal check comes first.
-	if n := cases[2].mcp.listCount; n != 0 {
+	if n := cases[3].mcp.listCount; n != 0 {
 		t.Errorf("a non-agent send read the catalog %d times, want 0", n)
 	}
 }
@@ -102,6 +110,8 @@ func TestSendCommandWithoutHandbackIsByteIdenticalToTheLegacyCall(t *testing.T) 
 type refusingMCP struct {
 	*fakeMCP
 	transportErr error
+	// fallbackErr fails the UNFLAGGED resend, to pin which failure is reported.
+	fallbackErr error
 }
 
 func (r *refusingMCP) CallTool(ctx context.Context, name string, args map[string]any) (MCPCallResult, error) {
@@ -112,7 +122,36 @@ func (r *refusingMCP) CallTool(ctx context.Context, name string, args map[string
 		}
 		return MCPCallResult{IsError: true, Text: "handback needs an agent pane, and terminal 'terminal-a' has no agent running. Send without handback."}, nil
 	}
+	if r.fallbackErr != nil {
+		return MCPCallResult{}, r.fallbackErr
+	}
 	return res, err
+}
+
+type countingObserver struct{ marks int }
+
+func (c *countingObserver) MarkCommandSent(string, int64) { c.marks++ }
+
+// The fallback is the last attempt, its own failure is the one reported, and the
+// settle evidence is invalidated once for what is still one logical send.
+func TestSendCommandFallbackFailureIsReportedAndFinal(t *testing.T) {
+	m := &refusingMCP{
+		fakeMCP:     &fakeMCP{connected: true, toolList: sendCatalog(true)},
+		fallbackErr: errors.New("connection reset"),
+	}
+	obs := &countingObserver{}
+	raw, _ := json.Marshal(sendCommandArgs{TerminalID: "terminal-a", Command: "ls"})
+	res := newTerminalSendCommandTool(Deps{MCP: m, Observer: obs, AgentHandback: true, IsAgentTerminal: agentOnly("terminal-a")}).
+		Handle(context.Background(), raw, nil)
+	if res.Ok || res.Error == nil || !strings.Contains(res.Error.Message, "connection reset") {
+		t.Fatalf("expected the fallback's transport failure, got %+v", res)
+	}
+	if n := len(m.callsTo("terminal.sendCommand")); n != 2 {
+		t.Fatalf("expected exactly 2 sends, got %d", n)
+	}
+	if obs.marks != 1 {
+		t.Errorf("MarkCommandSent called %d times, want 1", obs.marks)
+	}
 }
 
 // A roster a few seconds stale can call a just-exited agent live. Daintree refuses the

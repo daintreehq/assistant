@@ -78,10 +78,33 @@ func TestSpawnWithoutHandbackIsByteIdenticalToTheLegacyCall(t *testing.T) {
 	legacy := &scriptMCP{connected: true, launchResult: launchOK("t")}
 	_ = runSpawn(Deps{MCP: legacy, DB: newSagaStore()}, a)
 	want := launchJSON(t, legacy)
-	// Pinned literally too, so a change to BOTH sides of the comparison cannot pass.
-	const legacyKeys = 5 // agentId, name, prompt, requestKey, worktreeId
-	if n := len(legacy.lastLaunchArgs()); n != legacyKeys {
-		t.Fatalf("legacy launch carries %d args, want %d", n, legacyKeys)
+	// The baseline above comes from the same code, so pin what it must be from the
+	// outside too: exactly the pre-feature argument names, carrying exactly the prompt
+	// and name the (untouched) builders produce.
+	la := legacy.lastLaunchArgs()
+	for _, k := range []string{"agentId", "name", "prompt", "requestKey", "worktreeId"} {
+		if _, ok := la[k]; !ok {
+			t.Fatalf("legacy launch lost its %q argument: %s", k, want)
+		}
+	}
+	if len(la) != 5 {
+		t.Fatalf("legacy launch carries %d args, want exactly the 5 pre-feature ones: %s", len(la), want)
+	}
+	built := a
+	built.Mode = "edit"
+	if la["prompt"] != buildAgentPrompt(&built) || la["worktreeId"] != "wt-1" {
+		t.Fatalf("legacy launch prompt/worktree drifted from the builders: %s", want)
+	}
+	// And a SUPPORTED launch is that same call plus the one flag, nothing else moved.
+	flagged := &scriptMCP{connected: true, launchResult: launchOK("t"), toolList: launchCatalog(true)}
+	_ = runSpawn(Deps{MCP: flagged, DB: newSagaStore(), Config: handbackOn()}, a)
+	fa := flagged.lastLaunchArgs()
+	if fa["handback"] != true {
+		t.Fatal("precondition: the supported launch must carry handback")
+	}
+	delete(fa, "handback")
+	if b, _ := json.Marshal(fa); string(b) != want {
+		t.Fatalf("handback changed more than its own key\n got: %s\nwant: %s", b, want)
 	}
 
 	unadvertised := launchCatalog(true)
