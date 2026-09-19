@@ -3685,13 +3685,16 @@ func (s *Session) currentRoster() []backend.OpenTerminal {
 // ask Daintree for a handback" (internal/tools/handback).
 //
 // Deliberately NOT subject to rosterSnapshotMaxAge. That cap protects the MODEL from a
-// confidently-wrong roster it cannot recover from; this read has a recovery the model
-// does not — Daintree validates the target before sending anything and refuses the
-// flag on a pane with no agent, and the sender then repeats the call without it. So a
-// stale positive costs one refused round trip, while applying the 15s cap here would
-// silently drop the handback from nearly every follow-up: the roster is fetched at
-// turn start and a single model generation or approval wait outlives it. A roster that
-// was never fetched (zero rosterFetchedAt — seeded, not observed) still answers false.
+// confidently-wrong roster it cannot recover from. Applying it here would silently drop
+// the handback from nearly every follow-up — the roster is fetched at turn start and a
+// single model generation or approval wait outlives 15s — while a stale positive is
+// usually cheap: Daintree re-validates the target at submission and refuses the flag on
+// a pane it no longer considers an agent's, and the sender then repeats the call
+// without it. "Usually", not always: Daintree's own identity check can lag an agent
+// that exited to its surviving shell, and that is equally true of a roster fetched one
+// second ago — it is the host's call to make, not something a fresher cache here fixes.
+// A roster that was never fetched (zero rosterFetchedAt — seeded, not observed) still
+// answers false.
 //
 // What must not slip through is a pane the roster ITSELF says has no live agent.
 // Daintree's terminal.list falls back to the LAUNCH agent id, so a pane whose agent

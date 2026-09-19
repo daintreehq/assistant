@@ -89,6 +89,9 @@ type Deps struct {
 	// nil (or an unbound pin) ⇒ the id stays omitted and Daintree picks its live
 	// active worktree, which is exactly the pre-pin behaviour.
 	WorktreePin WorktreePin
+	// handbackMemo narrows the handback decision per spawn key (see launchAcceptsHandback).
+	// Set by Tools; nil ⇒ nothing is remembered.
+	handbackMemo *handbackMemo
 	// DefaultAgent reads the agent Daintree would launch when a spawn names none —
 	// the user's setting, not this tool's guess. nil (or an empty read) falls back to
 	// the built-in default, which is what an older host that reports no default gets.
@@ -133,6 +136,11 @@ func (d Deps) daemonActive() bool {
 // re-spawning), plus two RiskRead readers (status by id, list newest-first) so the
 // model can inspect the spawn saga without re-launching anything.
 func Tools(deps Deps) []tools.Tool {
+	// One memo for the family's lifetime, shared by every dispatch of the spawn tool
+	// (Deps is copied by value into each handler; the pointer is what they share).
+	if deps.handbackMemo == nil {
+		deps.handbackMemo = &handbackMemo{}
+	}
 	return []tools.Tool{
 		newSpawnForEditsTool(deps),
 		newSuperviseTerminalTool(deps),

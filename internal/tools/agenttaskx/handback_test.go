@@ -181,3 +181,58 @@ func TestSpawnCancelledDuringHandbackDiscoveryWritesNoSaga(t *testing.T) {
 		t.Fatalf("cancelled discovery must not launch or write a saga (launches=%d rows=%d)", mcp.launchCount(), len(db.launches))
 	}
 }
+
+// Daintree refuses the flag for an id that is not a registered agent, before launching
+// anything. The model never asked for the flag and cannot remove it, so the launch that
+// worked before the feature must still work: one legacy retry under the same key.
+func TestSpawnFallsBackWhenTheHostRefusesTheFlag(t *testing.T) {
+	a := handbackSpawn()
+	mcp := &scriptMCP{
+		connected: true, launchResult: launchOK("term_1"), toolList: launchCatalog(true),
+		refuseHandback: "handback needs an agent to answer it, and this id is not a registered agent",
+	}
+	if res := runSpawn(Deps{MCP: mcp, DB: newSagaStore(), Config: handbackOn()}, a); !res.Ok {
+		t.Fatalf("the legacy retry should have launched, got %+v", res.Error)
+	}
+	if n := mcp.launchCount(); n != 2 {
+		t.Fatalf("agent.launch called %d times, want the refused call then one retry", n)
+	}
+	if _, flagged := mcp.lastLaunchArgs()["handback"]; flagged {
+		t.Error("the retry must be the legacy call")
+	}
+
+	// An unrelated refusal is final, and a transport failure is never relaunched.
+	other := &scriptMCP{connected: true, toolList: launchCatalog(true), launchResult: MCPCallResult{IsError: true, Text: "agent not installed"}}
+	if res := runSpawn(Deps{MCP: other, DB: newSagaStore(), Config: handbackOn()}, a); res.Ok || other.launchCount() != 1 {
+		t.Fatalf("unrelated refusal: ok=%v launches=%d, want a failure after 1 launch", res.Ok, other.launchCount())
+	}
+	thrown := &scriptMCP{connected: true, toolList: launchCatalog(true), launchThrows: true, launchErr: errBoom("reset while sending handback needs an agent")}
+	if res := runSpawn(Deps{MCP: thrown, DB: newSagaStore(), Config: handbackOn()}, a); res.Ok || thrown.launchCount() != 1 {
+		t.Fatalf("transport failure: ok=%v launches=%d, want a failure after 1 launch", res.Ok, thrown.launchCount())
+	}
+}
+
+// Daintree rejects a requestKey reused with different args while it holds the first
+// call's success. A spawn that went out WITHOUT the flag (cold catalog, lookup failed)
+// must therefore stay without it when repeated — and a key never seen is unaffected.
+func TestSpawnHandbackDecisionIsOnlyEverNarrowedPerKey(t *testing.T) {
+	a := handbackSpawn()
+	memo := &handbackMemo{}
+	cold := &scriptMCP{connected: true, launchResult: launchOK("t"), toolListErr: errBoom("tools/list timed out")}
+	_ = runSpawn(Deps{MCP: cold, DB: newSagaStore(), Config: handbackOn(), handbackMemo: memo}, a)
+	want := launchJSON(t, cold)
+
+	warm := &scriptMCP{connected: true, launchResult: launchOK("t"), toolList: launchCatalog(true)}
+	_ = runSpawn(Deps{MCP: warm, DB: newSagaStore(), Config: handbackOn(), handbackMemo: memo}, a)
+	if got := launchJSON(t, warm); got != want {
+		t.Errorf("the repeated spawn changed its args under one requestKey\n got: %s\nwant: %s", got, want)
+	}
+
+	b := a
+	b.Title = "a different spawn"
+	fresh := &scriptMCP{connected: true, launchResult: launchOK("t"), toolList: launchCatalog(true)}
+	_ = runSpawn(Deps{MCP: fresh, DB: newSagaStore(), Config: handbackOn(), handbackMemo: memo}, b)
+	if fresh.lastLaunchArgs()["handback"] != true {
+		t.Error("a different key must still ask for a handback")
+	}
+}

@@ -779,7 +779,7 @@ wording) ·
 `DAINTREE_ASSISTANT_LOG_DIR` · `DAINTREE_WORKFLOW_INTELLIGENCE` (the workflow execution-graph
 layer, ON by default now that the backend carries the matching `workflow_state` turn-context
 contract + workflow tasks; `=0` disables it; see docs/WORKFLOW_INTELLIGENCE.md) ·
-`DAINTREE_AGENT_HANDBACK` (trusted-or-own, ON by default: every prompt sent to an agent
+`DAINTREE_AGENT_HANDBACK` (trusted-or-own, ON by default: a prompt sent to a known agent
 carries `handback: true` on `agent.launch` / `terminal.sendCommand` when the host's
 advertised schema accepts it; `=0` sends exactly the pre-feature calls — see
 `internal/tools/handback`).

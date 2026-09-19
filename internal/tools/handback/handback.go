@@ -59,13 +59,14 @@ func SchemaAccepts(inputSchema map[string]any, provided bool) bool {
 // bites on a COLD cache against an unresponsive host — where the alternative is an
 // optional flag holding a spawn or a send hostage, since ListTools has no timeout of
 // its own and a turn's context has no deadline.
-const lookupBudget = 2 * time.Second
+// A var only so the test can shrink it; production never writes it.
+var lookupBudget = 2 * time.Second
 
 // LookupContext returns a child context for one capability lookup, bounded by a
-// CANCEL (time.AfterFunc), never a deadline: mcp.Client degrades the connection on a
-// DeadlineExceeded and treats Canceled as a caller abort (the mcp-bestEffort rule). On
-// expiry the lookup fails, the flag is omitted, and the caller carries on with its own
-// context untouched.
+// CANCEL (time.AfterFunc) rather than a deadline — the shape every best-effort MCP
+// read in this repo uses, so an expired optional read is always seen by the client as
+// its caller walking away and never as a transport timeout. On expiry the lookup
+// fails, the flag is omitted, and the caller carries on with its own context untouched.
 func LookupContext(ctx context.Context) (context.Context, func()) {
 	cctx, cancel := context.WithCancel(ctx)
 	timer := time.AfterFunc(lookupBudget, cancel)
@@ -78,8 +79,8 @@ func LookupContext(ctx context.Context) (context.Context, func()) {
 // IsRefusal reports whether a tool-level error RESULT is Daintree refusing the FLAG
 // itself. Daintree validates the target before dispatching anything and rejects
 // `handback: true` on a pane with no agent running; a strict schema rejects the key
-// outright. Both happen before any text is submitted, which is what makes repeating
-// the call without the flag safe. The model cannot act on either (it has no such
+// outright. Both are raised before any text is submitted, which is what makes
+// repeating the call without the flag safe. The model cannot act on either (it has no such
 // argument to drop), so the sender repeats the call once without it.
 //
 // Matched on those two refusals' own wording, NOT on the bare argument name: a

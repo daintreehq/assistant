@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/daintreehq/assistant/internal/debuglog"
@@ -492,7 +493,7 @@ func spawn(ctx context.Context, deps Deps, a *spawnArgs, actor domain.ToolActor)
 	// Decided HERE, ahead of the cancellation check and the saga write, because a cold
 	// catalog makes this a round trip: resolving it after the record exists would let a
 	// cancel landing mid-read strand a launch_requested row for a launch never sent.
-	requestHandback := launchAcceptsHandback(ctx, deps)
+	requestHandback := launchAcceptsHandback(ctx, deps, idempotencyKey)
 	// The reads above can take a beat; if the turn was cancelled meanwhile, stop
 	// before writing the saga or launching (don't leave an orphaned record).
 	if ctx.Err() != nil {
@@ -525,6 +526,18 @@ func spawn(ctx context.Context, deps Deps, a *spawnArgs, actor domain.ToolActor)
 		launchArgs[handback.Arg] = true
 	}
 	res, err := deps.MCP.CallTool(ctx, "agent.launch", launchArgs)
+	if err == nil && requestHandback && handback.IsRefusal(res.IsError, res.Text) {
+		// Daintree refuses the flag for an id that is not a registered agent (a bare
+		// "terminal" reaches here when the agent roster could not be read and the id
+		// check failed open) — BEFORE launching anything, and it caches only successes
+		// under a requestKey, so the same key may carry the legacy args. Without this a
+		// launch that worked before the feature would now fail on a flag the model
+		// never asked for and cannot remove. An error RESULT only: a transport error is
+		// ambiguous and takes the reconcile path below, never a second launch.
+		delete(launchArgs, handback.Arg)
+		deps.handbackMemo.suppress(idempotencyKey)
+		res, err = deps.MCP.CallTool(ctx, "agent.launch", launchArgs)
+	}
 	if err != nil {
 		// A cancellation landing while agent.launch was IN FLIGHT is not "nothing
 		// happened": the request may have reached Daintree before the client aborted,
@@ -849,10 +862,26 @@ func jsonIDArray(id string) string {
 // (force=false), so on a warm connection this costs no round trip; on a cold one the
 // lookup is bounded (handback.LookupContext), because an optional flag must never
 // hold a launch hostage to an unresponsive tools/list.
-func launchAcceptsHandback(ctx context.Context, deps Deps) bool {
+func launchAcceptsHandback(ctx context.Context, deps Deps, idempotencyKey string) bool {
 	if !deps.Config.AgentHandback || deps.MCP == nil {
 		return false
 	}
+	accepts := hostLaunchAcceptsHandback(ctx, deps)
+	// The decision is part of the wire args, and Daintree rejects a requestKey reused
+	// with DIFFERENT args while it still holds the first call's success. A lookup that
+	// timed out on a cold catalog sends the legacy call; the same spawn repeated a
+	// moment later, catalog now warm, would add the flag under that key and collide.
+	// So the first decision for a key can only ever be narrowed: once a key has gone
+	// out without the flag it stays without it. Never widened the other way — a
+	// remembered "yes" must not outlive the host that advertised it.
+	if !accepts {
+		deps.handbackMemo.suppress(idempotencyKey)
+		return false
+	}
+	return !deps.handbackMemo.suppressed(idempotencyKey)
+}
+
+func hostLaunchAcceptsHandback(ctx context.Context, deps Deps) bool {
 	lctx, done := handback.LookupContext(ctx)
 	infos, err := deps.MCP.ListTools(lctx, false)
 	done()
@@ -865,4 +894,36 @@ func launchAcceptsHandback(ctx context.Context, deps Deps) bool {
 		}
 	}
 	return false
+}
+
+// handbackMemo remembers the spawn keys that have gone out WITHOUT the flag, for the
+// life of the process. In memory on purpose: it guards Daintree's per-MCP-session
+// dedup cache, which does not survive a restart either, and the saga table is not the
+// place for a transport detail. All methods are nil-safe — an unwired Deps (tests)
+// simply remembers nothing.
+type handbackMemo struct {
+	mu   sync.Mutex
+	keys map[string]struct{}
+}
+
+func (m *handbackMemo) suppress(key string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.keys == nil {
+		m.keys = map[string]struct{}{}
+	}
+	m.keys[key] = struct{}{}
+}
+
+func (m *handbackMemo) suppressed(key string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.keys[key]
+	return ok
 }

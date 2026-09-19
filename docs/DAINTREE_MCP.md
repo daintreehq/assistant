@@ -349,12 +349,14 @@ mutation, never an automatic write, ownership claim or durable workflow ledger.
   the instruction **server-side** (it carries a code only Daintree knows), so the
   Assistant sends the flag and never any text about it — not in the task prompt, not in a
   tool description. It is **not** a model-facing argument: the Assistant adds it itself to
-  every prompt it sends an agent (`agentTask.spawnForEdits` in both modes, and
-  `terminal.sendCommand` / `terminal.run.async` to a terminal its cached roster shows
-  holding a live agent), and only when the connected host **advertises** `handback` in that
-  tool's input schema — a host that predates it receives exactly the old call. Daintree
-  refuses the flag on a pane with no agent running (nothing is sent); the Assistant then
-  repeats the send once without it. The flag is not part of the spawn's `requestKey`.
+  the prompts it sends an agent (`agentTask.spawnForEdits` in both modes, and
+  `terminal.sendCommand` / `terminal.run.async` to a terminal its last observed roster
+  shows holding an agent — best-effort: a terminal it has not seen yet goes without), and
+  only when the connected host **advertises** `handback` in that
+  tool's input schema — a host that predates it receives exactly the old call. When
+  Daintree refuses the flag itself (a pane or an id it does not consider an agent's —
+  raised before anything is sent or launched) the Assistant repeats the call once
+  without it. The flag is not part of the spawn's `requestKey`.
   `DAINTREE_AGENT_HANDBACK=0` turns the whole behaviour off.
 - `terminal.armByState` / `terminal.armAll` / `terminal.armDefault` and the whole
   `fleet.*` family are **renderer-only** (no `mcpOutputSchema`) — **not** callable over

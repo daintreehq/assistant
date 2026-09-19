@@ -40,6 +40,8 @@ type scriptMCP struct {
 	toolListErr   error
 	onListTools   func()
 	listToolForce []bool
+	// refuseHandback, when set, is the error text a FLAGGED agent.launch is refused with.
+	refuseHandback string
 }
 
 func (m *scriptMCP) Connected() bool { return m.connected }
@@ -64,6 +66,9 @@ func (m *scriptMCP) CallTool(ctx context.Context, name string, args map[string]a
 	case "agent.launch":
 		if m.onLaunch != nil {
 			m.onLaunch()
+		}
+		if _, flagged := args["handback"]; flagged && m.refuseHandback != "" {
+			return MCPCallResult{IsError: true, Text: m.refuseHandback}, nil
 		}
 		if m.launchThrows {
 			if m.launchErr != nil {

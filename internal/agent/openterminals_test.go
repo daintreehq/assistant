@@ -1166,6 +1166,10 @@ func TestIsLiveAgentTerminal(t *testing.T) {
 		"terminal-unknown": false, "terminal-ag": false, " terminal-agent ": false, "": false,
 	}
 
+	// Entries present but never FETCHED (zero timestamp): seeded, not observed.
+	s.rosterMu.Lock()
+	s.roster = roster
+	s.rosterMu.Unlock()
 	if s.IsLiveAgentTerminal("terminal-agent") {
 		t.Error("a roster that was never fetched knows nothing")
 	}

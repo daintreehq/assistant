@@ -3,6 +3,7 @@ package handback
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestSchemaAccepts(t *testing.T) {
@@ -67,13 +68,22 @@ func TestIsRefusal(t *testing.T) {
 	}
 }
 
-func TestLookupContextIsBoundedByCancelNotDeadline(t *testing.T) {
+func TestLookupContextExpiresByCancelNotDeadline(t *testing.T) {
+	old := lookupBudget
+	lookupBudget = 10 * time.Millisecond
+	defer func() { lookupBudget = old }()
+
 	ctx, done := LookupContext(context.Background())
+	defer done()
 	if _, has := ctx.Deadline(); has {
-		t.Fatal("a deadline would degrade the MCP connection on expiry; the bound must be a cancel")
+		t.Fatal("the bound must be a cancel, not a deadline")
 	}
-	done()
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the lookup context never expired on its own")
+	}
 	if ctx.Err() != context.Canceled {
-		t.Fatalf("after release ctx.Err() = %v, want Canceled", ctx.Err())
+		t.Fatalf("expiry surfaced as %v, want Canceled", ctx.Err())
 	}
 }
