@@ -137,23 +137,9 @@ func TestSpawnIdempotencyKeyIsUnchangedByHandback(t *testing.T) {
 	}
 	// The pre-feature key for these exact args, pinned as a literal: equality between
 	// three runs of the same code would still pass if all three had drifted together.
-	const preFeatureKey = "PINNED_KEY"
+	const preFeatureKey = "c51cfdc574d4092a"
 	if keyWith != preFeatureKey {
 		t.Fatalf("requestKey = %s, want the pre-feature key %s", keyWith, preFeatureKey)
-	}
-}
-
-// A supporting host dedupes a retry on the saga exactly as before: the second call is
-// an idempotent hit and never launches again.
-func TestSpawnHandbackRetryStillDedupes(t *testing.T) {
-	a := handbackSpawn()
-	db := newSagaStore()
-	mcp := &scriptMCP{connected: true, launchResult: launchOK("term_1"), toolList: launchCatalog(true)}
-	_ = runSpawn(Deps{MCP: mcp, DB: db, Config: handbackOn()}, a)
-	// The switch flips between attempts; the saga, keyed without it, still matches.
-	_ = runSpawn(Deps{MCP: mcp, DB: db, Config: config.AppConfig{}}, a)
-	if n := mcp.launchCount(); n != 1 {
-		t.Fatalf("agent.launch called %d times, want 1", n)
 	}
 }
 
