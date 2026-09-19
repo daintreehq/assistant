@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/daintreehq/assistant/internal/domain"
 	mcpclient "github.com/daintreehq/assistant/internal/mcp"
 )
 
@@ -73,6 +74,13 @@ type TerminalStatusEntry struct {
 	HasPty           *bool
 	SpawnedAt        *int64
 	LastTransitionAt *int64
+	// LastHandback is the handback marker the agent printed, when Daintree sent
+	// one (nil otherwise — and nil is NOT "still working"; see domain.TerminalHandback).
+	// It is the terminal's LAST handback, not necessarily this prompt's: consumers
+	// must pass it through domain.FreshHandback before acting on it. terminal.list
+	// never carries it, so the absent ladder (resolveAbsent) structurally cannot
+	// see one and keeps its judge-gated behaviour.
+	LastHandback *domain.TerminalHandback
 }
 
 // NotFound reports Daintree's per-entry "terminal not found" shape: an unknown
@@ -161,6 +169,7 @@ func readStatusesWith(ctx context.Context, mcp MCP, terminalIDs []string, includ
 			HasPty:           mcpclient.TerminalHasPty(res.StructuredContent, res.Text, e),
 			SpawnedAt:        asInt64Ptr(e["spawnedAt"]),
 			LastTransitionAt: asInt64Ptr(e["lastTransitionAt"]),
+			LastHandback:     mcpclient.TerminalHandback(e),
 		}
 	}
 	return StatusBatch{Ok: true, ByID: byID}

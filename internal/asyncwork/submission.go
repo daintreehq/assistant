@@ -57,6 +57,21 @@ func submissionGraceStart(t *tracked) int64 {
 	return t.rec.CreatedAt
 }
 
+// handbackPrompt is the freshness context for a handback on this invocation's
+// terminal. A TRACKED send has a submission token, and Daintree stamps the same
+// token (#12337) on the handback that submission asked for — an exact match, and
+// the only one accepted when we hold a token. Otherwise (a legacy host, or
+// terminal.await.async, which sends nothing) the invocation row's creation time
+// stands in: it is written around the send / after the prompt it awaits, so a
+// handback observed at or after it cannot belong to an earlier prompt. Both are
+// durable on the record, so an adopting owner matches exactly as the original did.
+func handbackPrompt(t *tracked) domain.HandbackPrompt {
+	if r := t.rec.Submission; r != nil && r.Acceptance == "tracked" && r.Token != "" {
+		return domain.HandbackPrompt{Token: r.Token}
+	}
+	return domain.HandbackPrompt{SentAtMS: t.rec.CreatedAt}
+}
+
 func submissionDeadlineReason(t *tracked) string {
 	if r := t.rec.Submission; r != nil && r.Acceptance != "legacy_unknown" && r.Phase != "pty_written" {
 		return "submission could not be verified before the deadline; input may remain queued or partially written — inspect the terminal before sending again"

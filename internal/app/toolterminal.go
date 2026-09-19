@@ -101,6 +101,9 @@ func (r terminalReaderAdapter) ReadStatuses(ctx context.Context, terminalIDs []s
 			RecentOutput:  mcpStringPtr(e["recentOutput"]),
 			ExitCode:      mcpIntPtr(e["exitCode"]),
 			HasPty:        mcp.TerminalHasPty(res.StructuredContent, res.Text, e),
+			// The terminal's LAST handback, unfiltered — freshness is the consumer's
+			// decision (each wait knows its own prompt), never this adapter's.
+			LastHandback: mcp.TerminalHandback(e),
 			// Daintree returns an UNKNOWN id as a present entry with a per-entry
 			// error and a null agentState (never omits it, never aborts the batch).
 			// The error field alone is not proof — the includeOutput path can stamp
@@ -235,6 +238,7 @@ func (a asyncStatusReaderAdapter) ReadStatuses(ctx context.Context, terminalIDs 
 			WaitingReason: e.WaitingReason,
 			ExitCode:      e.ExitCode,
 			HasPty:        e.HasPty,
+			LastHandback:  e.LastHandback,
 		}
 	}
 	return out
@@ -257,7 +261,7 @@ func (a asyncStatusReaderAdapter) ReadSubmission(ctx context.Context, terminalID
 	if !ok {
 		return receipt, asyncwork.StatusReadResult{}, false
 	}
-	status := asyncwork.TerminalStatus{AgentState: mcpString(entry["agentState"]), WaitingReason: mcpString(entry["waitingReason"]), ExitCode: mcpIntPtr(entry["exitCode"]), HasPty: mcp.TerminalHasPty(res.StructuredContent, res.Text, entry)}
+	status := asyncwork.TerminalStatus{AgentState: mcpString(entry["agentState"]), WaitingReason: mcpString(entry["waitingReason"]), ExitCode: mcpIntPtr(entry["exitCode"]), HasPty: mcp.TerminalHasPty(res.StructuredContent, res.Text, entry), LastHandback: mcp.TerminalHandback(entry)}
 	return receipt, asyncwork.StatusReadResult{OK: true, ByID: map[string]asyncwork.TerminalStatus{terminalID: status}}, true
 }
 

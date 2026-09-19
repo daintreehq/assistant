@@ -85,4 +85,9 @@ type AsyncTerminalOutcome struct {
 	Status   string `json:"status"`
 	ExitCode *int   `json:"exitCode,omitempty"`
 	Reason   string `json:"reason,omitempty"`
+	// Handback is the agent's own handback for THIS invocation's send (already
+	// freshness-filtered), or nil. Persisted with the outcome so a publish retry
+	// or an adopting owner renders the same summary; omitempty keeps a ledger row
+	// with no handback byte-identical to one written before the field existed.
+	Handback *TerminalHandback `json:"handback,omitempty"`
 }

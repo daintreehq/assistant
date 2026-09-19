@@ -93,6 +93,9 @@ type TerminalStatus struct {
 	// to name only question/prompt, and the two it omitted were both scored as finished.
 	ExitCode *int
 	HasPty   *bool
+	// LastHandback is the handback marker the agent last printed, when Daintree
+	// sent one — unfiltered; feedStatuses matches it to this invocation's send.
+	LastHandback *domain.TerminalHandback
 }
 
 // StatusReadResult is the outcome of one batched status read. OK is true on a
@@ -895,6 +898,14 @@ func (c *Coordinator) feedStatuses(t *tracked, res StatusReadResult, gone map[st
 			continue
 		}
 		o := &domain.AsyncTerminalOutcome{Status: v.Status, ExitCode: exitCode}
+		// Annotate a settle the FSM ALREADY reached with the agent's own handback —
+		// never a reason to settle (one settle policy, shared with awaitAll, and a
+		// handback says nothing about whether an edit is correct). Skipped where
+		// there is no current turn to summarize (gone, PTY ended) or the agent is
+		// parked on an approval/error rather than where its marker left it.
+		if present && !gone[id] && !ptyEnded && !domain.HandbackBlocked(waitingReason) {
+			o.Handback = domain.FreshHandback(entry.LastHandback, handbackPrompt(t))
+		}
 		switch {
 		case ptyEnded:
 			o.Reason = domain.PtyEndedUnverifiedReason
@@ -1190,6 +1201,11 @@ func summarizeInvocation(t *tracked) (line string, failed, question bool) {
 		p := id + ": " + st.outcome.Status
 		if st.outcome.Reason != "" {
 			p += " — " + st.outcome.Reason
+		}
+		if st.outcome.Handback != nil {
+			// The wake prompt renders this line verbatim, so the agent's message goes
+			// in only through HandbackReport: quoted, attributed, never instructions.
+			p += " — " + domain.HandbackReport(st.outcome.Handback)
 		}
 		switch st.outcome.Status {
 		case domain.SettleStatusFailed:

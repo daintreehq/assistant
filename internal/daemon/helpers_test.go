@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 
 	"github.com/daintreehq/assistant/internal/domain"
 )
@@ -40,6 +41,9 @@ type termCfg struct {
 	tail           string  // returned by terminal.getOutput
 	exitCode       *int
 	omitFromStatus bool // present in the map (so getOutput serves its tail) but skipped by getStatus — models the absent-but-listed terminal
+	// handback, when non-nil, is emitted verbatim as the entry's `lastHandback`
+	// (Daintree's wire object: message / observedAt / submissionToken / truncated).
+	handback map[string]any
 }
 
 // progMCP is a programmable MCP fake used across the
@@ -163,6 +167,9 @@ func (m *progMCP) CallRead(_ context.Context, name string, args map[string]any) 
 			if cfg.exitCode != nil {
 				e["exitCode"] = float64(*cfg.exitCode)
 			}
+			if cfg.handback != nil {
+				e["lastHandback"] = cfg.handback
+			}
 			terminals = append(terminals, e)
 		}
 		payload := map[string]any{"terminals": terminals}
@@ -216,9 +223,14 @@ type progModel struct {
 	verdict  domain.WatcherVerdict
 	classErr error
 	judgeFn  func(question, tail string) domain.ModelJudgeAnswer
+	// judgeCalls / classifyCalls count every model consultation (atomic: condition
+	// judges run in parallel goroutines), so a test can assert a path made NONE.
+	judgeCalls    atomic.Int64
+	classifyCalls atomic.Int64
 }
 
 func (m *progModel) Classify(_ context.Context, _ ClassifyInput) (domain.WatcherVerdict, error) {
+	m.classifyCalls.Add(1)
 	if m.classErr != nil {
 		return domain.WatcherVerdict{}, m.classErr
 	}
@@ -226,6 +238,7 @@ func (m *progModel) Classify(_ context.Context, _ ClassifyInput) (domain.Watcher
 }
 
 func (m *progModel) Judge(_ context.Context, in JudgeInput) (domain.ModelJudgeAnswer, error) {
+	m.judgeCalls.Add(1)
 	if m.judgeFn != nil {
 		return m.judgeFn(in.Question, in.Tail), nil
 	}
