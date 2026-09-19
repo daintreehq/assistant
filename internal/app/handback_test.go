@@ -178,7 +178,17 @@ func TestModelFacingToolsNeverMentionHandback(t *testing.T) {
 			t.Fatalf("inventory does not contain a %q tool — this guard is not reaching the real registry", name)
 		}
 	}
-	if i := strings.Index(strings.ToLower(string(data)), "handback"); i >= 0 {
+	// The one sanctioned mention is the RESULT field terminal.awaitAll documents
+	// (`agentHandback`, the agent's own summary as quoted data): a field the model
+	// receives has to be describable, and it is neither an argument the model could
+	// start supplying nor the marker. Blank exactly that token — same length, so the
+	// excerpt offsets below still line up — and keep the guard strict for the rest.
+	const resultField = "agentHandback"
+	if !strings.Contains(string(data), resultField) {
+		t.Fatalf("inventory no longer documents %q — drop this exemption rather than keep a dead one", resultField)
+	}
+	scrubbed := strings.ReplaceAll(string(data), resultField, strings.Repeat("_", len(resultField)))
+	if i := strings.Index(strings.ToLower(scrubbed), "handback"); i >= 0 {
 		lo, hi := max(0, i-80), min(len(data), i+80)
 		t.Fatalf("the model-facing tool projection mentions handback: …%s…", data[lo:hi])
 	}

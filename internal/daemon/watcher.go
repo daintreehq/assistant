@@ -201,8 +201,18 @@ func RunTerminalWatcherCheck(ctx *CheckContext, rec domain.WatcherRecord) CheckO
 		if prevState != nil && prevState.SeenWorking {
 			base.SeenWorking = true
 		}
+		if prevState != nil {
+			base.LastWorkingAt = prevState.LastWorkingAt
+		}
 		if signals.AgentState == "working" {
 			base.SeenWorking = true
+			// Dated on Daintree's clock when it says when (see domain.WorkingSince):
+			// this check may be running off a prefetched snapshot older than `now`.
+			var transitionAt *int64
+			if hasEntry {
+				transitionAt = entry.LastTransitionAt
+			}
+			base.LastWorkingAt = domain.WorkingSince(now, transitionAt)
 		}
 		perTerminal[terminalID] = base
 
@@ -577,6 +587,12 @@ func resolvePresent(ctx *CheckContext, rec domain.WatcherRecord, options *watche
 		MsSinceOutput: msSinceOutput,
 	}
 
+	// The handback the agent printed for THIS prompt, or nil. Stale handbacks are
+	// dropped here, at the boundary, so nothing below can act on (or quote) a
+	// marker left over from an earlier prompt on the same terminal. nil leaves
+	// every branch below byte-identical to a host that never sends the field.
+	hb := watchedHandback(rec, entry, prevState)
+
 	switch {
 	case agentState == "exited":
 		evidence := []string{"agentState=exited"}
@@ -584,6 +600,54 @@ func resolvePresent(ctx *CheckContext, rec domain.WatcherRecord, options *watche
 			evidence = append(evidence, fmt.Sprintf("exitCode=%d (nonzero)", *signals.ExitCode))
 		}
 		return domain.ClassTerminalExited, 0.95, "Terminal exited.", evidence, signals, false
+
+	case agentState == "waiting" && hb != nil && !domain.HandbackBlocked(waitingReason) &&
+		(options.SpawnMode == "explore" || (waitingReason != domain.WaitingQuestion && scopedForVerification(options))):
+		// The agent SAID it handed back. That replaces the passive question "has it
+		// stopped?" — which is all the explore finish judge, the SeenWorking latch
+		// and the spawn grace exist to answer — with positive evidence, so none of
+		// them run: no model call, no cooldown, and no wait for a working sighting
+		// (a handback observed after the watcher was created is itself proof the
+		// agent picked the prompt up and replied). It never answers "did it work?":
+		//   - explore is read-only and behavioural, exactly like its
+		//     agentState=completed branch below, so it completes directly;
+		//   - edit goes through gateCompletion, so git verification and the
+		//     acceptance contract still decide the outcome. Without a handback an
+		//     edit agent at its prompt reads as "waiting for input" and never
+		//     reaches the gate at all.
+		// Approval / error are excluded above (HandbackBlocked): the agent is parked
+		// ON something, so the marker it printed earlier is not where it is now, and
+		// the existing blocked verdict stands. An edit watcher with NO verification
+		// scope (a hand-made watcher.terminal.create, an adopted supervisor) stays
+		// out too: the gate would pulse whichever worktree is ACTIVE, and a clean
+		// answer about the wrong tree would become a verified completion that this
+		// `waiting` reading could never have produced before. An edit agent with a structured
+		// `question` stays "asking a question" too (next case) — gating that into a
+		// completion could attach an irreversible suggestion to a turn that asked
+		// something. An explore agent asking a question HAS completed its turn;
+		// answering is the main thread's call, and the quoted message carries it.
+		stateEv := fmt.Sprintf("agentState=waiting%s (handback observed; finish judge not consulted)", parens(waitingReason))
+		if options.SpawnMode == "explore" {
+			sum, ev := "Explore agent finished its turn (handed back).", []string{stateEv}
+			if waitingReason == domain.WaitingQuestion {
+				// The turn is over, but it ended ON a question, and the handback
+				// summary need not repeat it (a bare marker carries nothing). Keep the
+				// same deterministic tail excerpt the question verdict uses, so
+				// completing the turn never costs the operator the question itself.
+				// The marker is the LAST thing the agent printed, so it is dropped first
+				// (and the window widened) or the excerpt would be the marker itself.
+				if snip := tailSnippet(domain.StripHandbackMarkerLines(signals.Tail), 4, 300); snip != "" {
+					sum = fmt.Sprintf("Explore agent finished its turn (handed back) and is asking a question: %q", snip)
+					ev = append(ev, fmt.Sprintf("question: %q", snip))
+				}
+			}
+			sum, ev = withHandback(sum, ev, hb)
+			return domain.ClassCompletedSuccess, 0.9, sum, ev, signals, false
+		}
+		g := gateCompletion(ctx, options.VerificationScope, []string{stateEv},
+			&gateInput{rec: rec, signals: signals, acceptanceCriteria: options.AcceptanceCriteria})
+		sum, ev := withHandback(g.summary, g.evidence, hb)
+		return g.classification, g.confidence, sum, ev, signals, false
 
 	case agentState == "waiting":
 		// See the terminal.list branch above: approval and error are blocked states
@@ -633,6 +697,14 @@ func resolvePresent(ctx *CheckContext, rec domain.WatcherRecord, options *watche
 				ev = append(ev, fmt.Sprintf("question: %q", snip))
 			}
 		}
+		// An edit agent that handed back but stays "waiting for input" — it is asking
+		// something, or this watcher has no worktree to verify against (see the
+		// handback case above): the verdict is unchanged, the agent's own summary
+		// travels with it. Approval/error never carry a quote — a blocked verdict
+		// stays exactly as it was.
+		if !domain.HandbackBlocked(waitingReason) && options.SpawnMode != "explore" {
+			sum, ev = withHandback(sum, ev, hb)
+		}
 		return domain.ClassWaitingForInput, 0.9, sum, ev, signals, false
 
 	case agentState == "completed":
@@ -646,11 +718,15 @@ func resolvePresent(ctx *CheckContext, rec domain.WatcherRecord, options *watche
 			// "completed"), so accept it directly here — matching the in-turn
 			// domain.FinishPreFilter, which also hard-accepts completed/exited.
 			ev := []string{"agentState=completed (explore; read-only, not git-gated)"}
-			return domain.ClassCompletedSuccess, 0.9, "Explore agent finished its turn.", ev, signals, false
+			sum, ev := withHandback("Explore agent finished its turn.", ev, hb)
+			return domain.ClassCompletedSuccess, 0.9, sum, ev, signals, false
 		}
 		g := gateCompletion(ctx, options.VerificationScope, []string{"agentState=completed"},
 			&gateInput{rec: rec, signals: signals, acceptanceCriteria: options.AcceptanceCriteria})
-		return g.classification, g.confidence, g.summary, g.evidence, signals, false
+		// The FSM already supplied the finish signal; a fresh handback only adds the
+		// agent's summary to a verdict the gate has ALREADY worded.
+		sum, ev := withHandback(g.summary, g.evidence, hb)
+		return g.classification, g.confidence, sum, ev, signals, false
 
 	case readFailed:
 		rf := perTerminal[terminalID].ReadFailures
@@ -951,6 +1027,55 @@ func exploreSettledComplete(prevState *TerminalState, rec domain.WatcherRecord, 
 		return true
 	}
 	return now-rec.CreatedAt >= WatcherSpawnGraceMS
+}
+
+// watchedHandback returns the terminal's handback iff it belongs to the turn
+// this watcher is supervising NOW. The watcher holds no submission token today
+// (#385 is what will send one), so freshness is dated, and a watcher outlives
+// prompts: it can stay armed across a follow-up send (an inconclusive edit
+// verification, a sibling target still working, a reused supervisor), while the
+// terminal keeps prompt A's handback until a newer one overwrites it. So the
+// baseline is the LATEST of three things (domain.HandbackSentAt):
+//   - rec.CreatedAt — stamped after the launch that carried the first prompt;
+//   - the last tick this watcher saw the agent working — a marker observed before
+//     that was printed for an earlier turn;
+//   - Daintree's lastTransitionAt — which catches a turn that started and settled
+//     between two ticks, never seen working at all.
+//
+// All three only raise the bar. The cost is one-sided: an agent fast enough to
+// hand back before the watcher row was written reads as stale and simply takes
+// the existing judge-gated ladder.
+func watchedHandback(rec domain.WatcherRecord, entry TerminalStatusEntry, prevState *TerminalState) *domain.TerminalHandback {
+	var lastWorkingAt int64
+	if prevState != nil {
+		lastWorkingAt = prevState.LastWorkingAt
+	}
+	return domain.FreshHandback(entry.LastHandback, domain.HandbackPrompt{
+		SentAtMS: domain.HandbackSentAt(rec.CreatedAt, lastWorkingAt, entry.LastTransitionAt),
+	})
+}
+
+// scopedForVerification reports whether this watcher names the worktree its
+// completion gate should verify.
+func scopedForVerification(options *watcherOptions) bool {
+	return options.VerificationScope != nil && options.VerificationScope.WorktreeID != ""
+}
+
+// withHandback folds a fresh handback into an ALREADY-DECIDED verdict's summary
+// and evidence: the `handback observed at …` evidence line plus the agent's own
+// summary as quoted, attributed data (domain.HandbackReport). It runs after the
+// verdict wording is chosen and never changes a classification. nil is the
+// identity — same string, same slice — which is what keeps a terminal with no
+// handback byte-identical to before. Summary and evidence both flow straight into
+// the published queue event, so this one call reaches the inbox too.
+func withHandback(summary string, evidence []string, hb *domain.TerminalHandback) (string, []string) {
+	if hb == nil {
+		return summary, evidence
+	}
+	out := make([]string, 0, len(evidence)+1)
+	out = append(out, evidence...)
+	out = append(out, domain.HandbackEvidence(hb))
+	return summary + " " + domain.HandbackReport(hb), out
 }
 
 func humanize(c domain.WatcherClassification) string {

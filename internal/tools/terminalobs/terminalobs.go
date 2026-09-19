@@ -89,6 +89,24 @@ func (m *Memory) MarkCommandSent(terminalID string, at int64) {
 	m.byID[terminalID] = r
 }
 
+// LastCommandAt returns the epoch-ms of the assistant's last (attempted) input
+// injection into the terminal; ok=false when this session never sent it anything
+// (or only under a zero clock). It is the closest thing this process has to "when
+// was the current prompt sent", which is what a handback's freshness is measured
+// against. Stamped ON ATTEMPT, so it never post-dates the real send.
+func (m *Memory) LastCommandAt(terminalID string) (int64, bool) {
+	if m == nil || terminalID == "" {
+		return 0, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.byID[terminalID]
+	if !ok || !r.commanded || r.lastCommandAt <= 0 {
+		return 0, false
+	}
+	return r.lastCommandAt, true
+}
+
 // SeenWorkingSinceLastCommand reports whether the terminal has been observed
 // working STRICTLY after the assistant's last input injection — the cross-call
 // form of the waits' seenWorking settle gate. A same-millisecond tie fails

@@ -38,6 +38,13 @@ type TerminalStatusEntry struct {
 	RecentOutput *string // nil when absent; "" is a valid "no output yet"
 	ExitCode     *int
 	HasPty       *bool // nil when the answering surface cannot observe PTY lifecycle
+	// LastHandback is the handback marker the agent last printed, when Daintree
+	// sent one. It is the terminal's LAST handback, not necessarily this wait's —
+	// pass it through domain.FreshHandback. nil is never "still working".
+	LastHandback *domain.TerminalHandback
+	// LastTransitionAt is Daintree's epoch-ms of the terminal's last agentState
+	// change (nil when absent) — a freshness bound for LastHandback.
+	LastTransitionAt *int64
 	// NotFound marks Daintree's per-entry "Terminal not found" shape: an unknown
 	// id does NOT abort the batched terminal.getStatus and is NOT omitted from the
 	// response — it comes back as a present entry with a per-entry error and a null
@@ -129,6 +136,15 @@ type Router interface {
 type Observations interface {
 	MarkWorking(terminalID string, at int64)
 	SeenWorkingSinceLastCommand(terminalID string) bool
+}
+
+// CommandTimes is the OPTIONAL extension of Observations a wait uses to date the
+// prompt it is waiting on: the last time this session injected input into the
+// terminal. Discovered by type assertion rather than added to Observations so
+// the many fakes that implement the narrow seam keep compiling, and a wait
+// without it simply falls back to its own start time (see awaitCohort).
+type CommandTimes interface {
+	LastCommandAt(terminalID string) (int64, bool)
 }
 
 // SupervisorRetirer retires the spawn-attached supervisor watcher(s) of a terminal

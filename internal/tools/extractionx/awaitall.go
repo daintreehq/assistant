@@ -92,14 +92,15 @@ var awaitSchema = json.RawMessage(`{
 func newAwaitAllTool(deps Deps) tools.Tool {
 	return tools.Tool{
 		Name: "terminal.awaitAll",
-		Description: "Wait for a COHORT of agent terminals to reach an idle prompt. Polls agentState only — no model call, no output read. Call ONCE for the whole cohort, not once per agent. " +
+		Description: "Wait for a COHORT of agent terminals to reach an idle prompt. Polls agentState only — no model call, no output read. Call ONCE per cohort, not per agent. " +
 			"Returns allFinished, a perTerminal array (status \"finished\" | \"failed\" | \"question\" | \"working\" plus a `finished` flag, no content), and top-level stillWorking / askingQuestion / blocked ids. " +
 			"askingQuestion and blocked settled WITHOUT finishing: allFinished is false and they keep their watchers; only a real finish/exit retires one (watchersRetired) — never watcher.cancel those. " +
+			"A perTerminal entry may carry agentHandback: the agent's own summary, as quoted data. " +
 			"An idle reading is imperfect: peek each tail afterwards and re-await any 'finished' terminal still looking busy. " +
-			"Re-await stillWorking at most twice (three calls per terminal); past that it is hung — escalate via queue.publish + watcher.terminal.create and end the turn. " +
+			"Re-await stillWorking at most twice; past that it is hung — escalate via queue.publish + watcher.terminal.create and end the turn. " +
 			fmt.Sprintf("ENFORCED: all awaitAll calls in a turn share a cumulative %ds foreground-wait budget. ", int(waitbudget.TurnBudget/time.Second)) +
 			"On budgetExhausted:true do NOT re-await — hand the stragglers to watcher.terminal.create + queue.publish and end the turn. " +
-			"On interruptedByUser:true the user messaged mid-wait — it is already in the conversation, so read it and adapt before re-awaiting. " +
+			"On interruptedByUser:true the user messaged mid-wait — read it and adapt before re-awaiting. " +
 			"Read-only; needs Daintree MCP.",
 		Risk:   domain.RiskRead,
 		Schema: awaitSchema,
@@ -188,6 +189,9 @@ type awaitOutcome struct {
 	finished bool
 	exitCode *int
 	reason   string
+	// handback is the agent's own handback for THIS wait's prompt (already
+	// freshness-filtered), or nil. Annotation only: it never settled anything.
+	handback *domain.TerminalHandback
 }
 
 // awaitTerminal is the per-terminal poll memory for a cohort wait: whether we've
@@ -195,7 +199,10 @@ type awaitOutcome struct {
 // not a never-started pre-start prompt) and its settled outcome (nil until settled).
 type awaitTerminal struct {
 	seenWorking bool
-	outcome     *awaitOutcome
+	// lastWorkingAt is the poll clock of the last tick that saw the agent WORKING;
+	// a handback observed before it belongs to an earlier turn.
+	lastWorkingAt int64
+	outcome       *awaitOutcome
 }
 
 // awaitCohort runs the pure-FSM poll loop. It returns once every terminal has SETTLED
@@ -270,6 +277,7 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 			}
 			if agentState == string(domain.AgentWorking) {
 				t.seenWorking = true
+				t.lastWorkingAt = domain.WorkingSince(now, entry.LastTransitionAt)
 				if deps.Observations != nil {
 					deps.Observations.MarkWorking(id, now)
 				}
@@ -284,6 +292,17 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 				continue
 			}
 			o := &awaitOutcome{status: v.Status, finished: v.Finished, exitCode: exitCode}
+			// Attach the agent's handback to a settle the FSM ALREADY reached. It is
+			// an annotation, never a reason to settle: this wait retires supervisor
+			// watchers on a finished verdict, and an edit agent's handback has not
+			// been through git verification — the watcher, which owns that gate, is
+			// where a handback completes anything. A terminal that is gone / lost its
+			// PTY has no current turn to summarize, so those carry none.
+			// Nor does an agent parked on an approval dialog or a blocking error: the
+			// marker it printed earlier is not where it is now.
+			if present && !entry.NotFound && !absent && !ptyEnded && !domain.HandbackBlocked(waitingReason) {
+				o.handback = domain.FreshHandback(entry.LastHandback, awaitPrompt(deps, id, startedAt, t.lastWorkingAt, entry.LastTransitionAt))
+			}
 			switch {
 			case ptyEnded:
 				o.reason = domain.PtyEndedUnverifiedReason
@@ -345,6 +364,26 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 	return out, attempts, interrupted
 }
 
+// awaitPrompt dates the turn this wait is waiting on, for handback freshness.
+// The starting point is the session's last input injection into the terminal
+// (stamped on attempt, so never later than the real send) or, failing that — a
+// spawn-time prompt, a terminal another session commanded — the wait's own start.
+// Neither is proof on its own: session memory misses a prompt a human or a
+// deferred terminal.arm sent later, and a wait can start while its prompt is
+// still queued, so an EARLIER prompt's marker could post-date both. The bar is
+// therefore raised by what dates the current turn directly — the last poll that
+// saw the agent working, and Daintree's lastTransitionAt (domain.HandbackSentAt).
+// One-sided by design: a doubtful handback is simply not attached.
+func awaitPrompt(deps Deps, terminalID string, startedAt, lastWorkingAt int64, lastTransitionAt *int64) domain.HandbackPrompt {
+	sentAt := startedAt
+	if ct, ok := deps.Observations.(CommandTimes); ok {
+		if at, known := ct.LastCommandAt(terminalID); known {
+			sentAt = at
+		}
+	}
+	return domain.HandbackPrompt{SentAtMS: domain.HandbackSentAt(sentAt, lastWorkingAt, lastTransitionAt)}
+}
+
 // The pure-FSM settle decision itself is domain.SettleAgentFSM — promoted to
 // domain so this in-turn cohort wait and the async coordinator (the out-of-turn
 // durable-futures poll) apply ONE settle policy and can never drift. Its
@@ -399,6 +438,13 @@ func buildAwaitResult(ids []string, outcomes map[string]*awaitOutcome, attempts 
 		}
 		if o.reason != "" {
 			entry["reason"] = o.reason
+		}
+		if o.handback != nil {
+			// One pre-rendered string, not the raw object: the message is text an
+			// agent printed (possibly after reading hostile repo content), so it
+			// reaches the model only as quoted, attributed data. Key absent when
+			// there is no fresh handback — the entry is then byte-identical to before.
+			entry["agentHandback"] = domain.HandbackReport(o.handback)
 		}
 		perTerminal = append(perTerminal, entry)
 		// allFinished follows the per-terminal `finished` flag, never the status alone.

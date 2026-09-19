@@ -85,4 +85,12 @@ type AsyncTerminalOutcome struct {
 	Status   string `json:"status"`
 	ExitCode *int   `json:"exitCode,omitempty"`
 	Reason   string `json:"reason,omitempty"`
+	// AgentHandback is the agent's own handback summary for THIS invocation's
+	// send, ALREADY rendered by HandbackReport — quoted, attributed, untrusted.
+	// The rendered string is what is persisted, never the raw object: this ledger
+	// is returned verbatim to the model by async.list, so a raw `message` here
+	// would reach it with no attribution at all. One string also means a publish
+	// retry or an adopting owner reproduces the same line byte-for-byte. omitempty
+	// keeps a row with no handback identical to one written before the field existed.
+	AgentHandback string `json:"agentHandback,omitempty"`
 }

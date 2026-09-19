@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"strings"
 	"time"
 
@@ -101,6 +102,10 @@ func (r terminalReaderAdapter) ReadStatuses(ctx context.Context, terminalIDs []s
 			RecentOutput:  mcpStringPtr(e["recentOutput"]),
 			ExitCode:      mcpIntPtr(e["exitCode"]),
 			HasPty:        mcp.TerminalHasPty(res.StructuredContent, res.Text, e),
+			// The terminal's LAST handback, unfiltered — freshness is the consumer's
+			// decision (each wait knows its own prompt), never this adapter's.
+			LastHandback:     mcp.TerminalHandback(e),
+			LastTransitionAt: mcpInt64Ptr(e["lastTransitionAt"]),
 			// Daintree returns an UNKNOWN id as a present entry with a per-entry
 			// error and a null agentState (never omits it, never aborts the batch).
 			// The error field alone is not proof — the includeOutput path can stamp
@@ -231,10 +236,12 @@ func (a asyncStatusReaderAdapter) ReadStatuses(ctx context.Context, terminalIDs 
 			continue
 		}
 		out.ByID[id] = asyncwork.TerminalStatus{
-			AgentState:    e.AgentState,
-			WaitingReason: e.WaitingReason,
-			ExitCode:      e.ExitCode,
-			HasPty:        e.HasPty,
+			AgentState:       e.AgentState,
+			WaitingReason:    e.WaitingReason,
+			ExitCode:         e.ExitCode,
+			HasPty:           e.HasPty,
+			LastHandback:     e.LastHandback,
+			LastTransitionAt: e.LastTransitionAt,
 		}
 	}
 	return out
@@ -257,7 +264,7 @@ func (a asyncStatusReaderAdapter) ReadSubmission(ctx context.Context, terminalID
 	if !ok {
 		return receipt, asyncwork.StatusReadResult{}, false
 	}
-	status := asyncwork.TerminalStatus{AgentState: mcpString(entry["agentState"]), WaitingReason: mcpString(entry["waitingReason"]), ExitCode: mcpIntPtr(entry["exitCode"]), HasPty: mcp.TerminalHasPty(res.StructuredContent, res.Text, entry)}
+	status := asyncwork.TerminalStatus{AgentState: mcpString(entry["agentState"]), WaitingReason: mcpString(entry["waitingReason"]), ExitCode: mcpIntPtr(entry["exitCode"]), HasPty: mcp.TerminalHasPty(res.StructuredContent, res.Text, entry), LastHandback: mcp.TerminalHandback(entry), LastTransitionAt: mcpInt64Ptr(entry["lastTransitionAt"])}
 	return receipt, asyncwork.StatusReadResult{OK: true, ByID: map[string]asyncwork.TerminalStatus{terminalID: status}}, true
 }
 
@@ -366,6 +373,17 @@ func mcpIntPtr(v any) *int {
 		return nil
 	}
 	n := int(int64(f))
+	return &n
+}
+
+// mcpInt64Ptr is mcpIntPtr for epoch-ms values: integral, finite, and inside the
+// range float64 represents exactly — anything else is "absent".
+func mcpInt64Ptr(v any) *int64 {
+	f, ok := v.(float64)
+	if !ok || f != math.Trunc(f) || math.Abs(f) > 1<<53 {
+		return nil
+	}
+	n := int64(f)
 	return &n
 }
 

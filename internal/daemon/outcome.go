@@ -195,7 +195,13 @@ type TerminalState struct {
 	// submitted) for several seconds, so a "waiting" reading is only a real
 	// end-of-turn once we have first seen it work. Without this latch the first tick
 	// (~3s, inside the spawn grace) misreads the pre-start prompt as "completed".
-	SeenWorking     bool   `json:"seenWorking,omitempty"`
+	SeenWorking bool `json:"seenWorking,omitempty"`
+	// LastWorkingAt is the check clock (epoch-ms) of the most recent tick that saw
+	// this agent WORKING. It dates the current turn for handback freshness: a
+	// handback is observed at the settle OUT of working, so one observed before
+	// this was printed for an earlier prompt on the same terminal. The check clock
+	// is read BEFORE the status read, so it never post-dates the settle it bounds.
+	LastWorkingAt   int64  `json:"lastWorkingAt,omitempty"`
 	ReadFailures    int    `json:"readFailures,omitempty"`
 	LastClassifyKey string `json:"lastClassifyKey,omitempty"`
 	// LastFinishJudgeAt is the epoch-ms of the last finished-judge run for this
