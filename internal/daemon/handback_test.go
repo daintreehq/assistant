@@ -15,23 +15,33 @@ func handbackAt(observedAt int64, message string) map[string]any {
 	return map[string]any{"message": message, "observedAt": float64(observedAt), "truncated": false}
 }
 
-// An explore agent that hands back completes WITHOUT the finish judge — and
-// without the SeenWorking latch or the spawn grace either: this is the very
-// first tick of a fresh watcher, where the no-handback ladder would defer
-// ("waiting to start its turn"). The judge is wired to a confident NO so a
-// completion can only have come from the handback.
+// An explore agent that hands back completes WITHOUT the finish judge. Both runs
+// use an AGED watcher, where the no-handback ladder is past its grace and DOES
+// reach the judge — the control proves that, so the zero below is the handback's
+// doing and not a judge that was never reachable. The judge answers a confident
+// NO, so a completion can only have come from the handback.
 func TestWatcher_ExploreHandbackCompletesWithoutJudge(t *testing.T) {
-	store, queue := newFakeStore(), newFakeQueue()
-	rec := watcherWith("wch_hb", []string{"term-x"}, withOptions(watcherOptions{SpawnMode: "explore"}))
-	mcp := newProgMCP(map[string]termCfg{
-		"term-x": {agentState: "waiting", waitingReason: "prompt", recentOutput: strptr("❯ "),
-			handback: handbackAt(rec.CreatedAt+5, "Mapped the 3 call sites; none are reachable.")},
-	})
-	store.watchers = []domain.WatcherRecord{rec}
-	model := &progModel{judgeFn: finishedNoJudge}
+	run := func(withHandback bool) (CheckOutcome, *progModel) {
+		store, queue := newFakeStore(), newFakeQueue()
+		rec := aged(watcherWith("wch_hb", []string{"term-x"}, withOptions(watcherOptions{SpawnMode: "explore"})))
+		cfg := termCfg{agentState: "waiting", waitingReason: "prompt", recentOutput: strptr("some output\n❯ ")}
+		if withHandback {
+			cfg.handback = handbackAt(rec.CreatedAt+5, "Mapped the 3 call sites; none are reachable.")
+		}
+		store.watchers = []domain.WatcherRecord{rec}
+		model := &progModel{judgeFn: finishedNoJudge}
+		return RunTerminalWatcherCheck(ctxFor(store, queue, newProgMCP(map[string]termCfg{"term-x": cfg}), model), rec), model
+	}
 
-	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, model), rec)
+	control, controlModel := run(false)
+	if n := controlModel.judgeCalls.Load(); n != 1 {
+		t.Fatalf("control: without a handback the finish judge must run exactly once, ran %d", n)
+	}
+	if control.Classification == domain.ClassCompletedSuccess {
+		t.Fatalf("control: a NO judge must not complete, got %s", control.Classification)
+	}
 
+	out, model := run(true)
 	if out.Classification != domain.ClassCompletedSuccess || !out.Stop {
 		t.Fatalf("fresh handback → completed_success+stop, got %s stop=%v (%s)", out.Classification, out.Stop, out.Summary)
 	}
@@ -41,9 +51,25 @@ func TestWatcher_ExploreHandbackCompletesWithoutJudge(t *testing.T) {
 	if n := model.classifyCalls.Load(); n != 0 {
 		t.Errorf("Classify must not be called on a handback completion; called %d times", n)
 	}
-	wantEv := "handback observed at"
-	if !containsSubstr(out.Evidence, wantEv) {
-		t.Errorf("evidence must say what was seen (%q); got %v", wantEv, out.Evidence)
+	if !containsSubstr(out.Evidence, "handback observed at") {
+		t.Errorf("evidence must say what was seen; got %v", out.Evidence)
+	}
+}
+
+// …and it needs neither the SeenWorking latch nor the spawn grace: on the very
+// first tick of a FRESH watcher the no-handback ladder defers ("waiting to start
+// its turn"), while a handback observed after the watcher was created is itself
+// proof the agent picked the prompt up and replied.
+func TestWatcher_ExploreHandbackCompletesInsideTheGrace(t *testing.T) {
+	store, queue := newFakeStore(), newFakeQueue()
+	rec := watcherWith("wch_hbfresh", []string{"term-x"}, withOptions(watcherOptions{SpawnMode: "explore"}))
+	mcp := newProgMCP(map[string]termCfg{
+		"term-x": {agentState: "waiting", waitingReason: "prompt", recentOutput: strptr("❯ "), handback: handbackAt(rec.CreatedAt+5, "done")},
+	})
+	store.watchers = []domain.WatcherRecord{rec}
+	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{judgeFn: finishedNoJudge}), rec)
+	if out.Classification != domain.ClassCompletedSuccess || !out.Stop {
+		t.Fatalf("got %s stop=%v (%s)", out.Classification, out.Stop, out.Summary)
 	}
 }
 
@@ -107,6 +133,89 @@ func TestWatcher_StaleHandbackDoesNotComplete(t *testing.T) {
 	}
 }
 
+// The harder staleness case: ONE long-lived watcher, two prompts. Prompt A handed
+// back AFTER the watcher was created — so creation time alone would accept it —
+// then prompt B was sent. B must not complete on A's retained marker.
+func TestWatcher_EarlierPromptsHandbackDoesNotCompleteALaterPrompt(t *testing.T) {
+	t.Run("the watcher saw the agent working on B", func(t *testing.T) {
+		store, queue := newFakeStore(), newFakeQueue()
+		rec := aged(watcherWith("wch_ab", []string{"term-x"}, withOptions(watcherOptions{SpawnMode: "explore"})))
+		promptA := handbackAt(rec.CreatedAt+1000, "prompt A's summary") // after creation, before "now"
+		mcp := newProgMCP(map[string]termCfg{
+			"term-x": {agentState: "working", recentOutput: strptr("⏺ working on B…"), handback: promptA},
+		})
+		store.watchers = []domain.WatcherRecord{rec}
+		model := &progModel{judgeFn: finishedNoJudge}
+		if out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, model), rec); out.Stop {
+			t.Fatalf("a working agent must not stop the watcher, got %s", out.Classification)
+		}
+
+		rec.OptionsJson = ptrStr(store.watchPatches["wch_ab"]["optionsJson"].(string))
+		mcp.perTerminal["term-x"] = termCfg{agentState: "waiting", waitingReason: "prompt", recentOutput: strptr("⏺ still mid-task"), handback: promptA}
+		out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, model), rec)
+
+		if out.Classification == domain.ClassCompletedSuccess || out.Stop {
+			t.Fatalf("prompt A's marker must not complete prompt B; got %s (%s)", out.Classification, out.Summary)
+		}
+		if model.judgeCalls.Load() == 0 {
+			t.Error("B must take the existing judge-gated ladder")
+		}
+		if strings.Contains(out.Summary, "prompt A") {
+			t.Errorf("prompt A's summary must not be quoted for B: %q", out.Summary)
+		}
+	})
+
+	t.Run("B ran between two ticks, but Daintree dates the last transition", func(t *testing.T) {
+		store, queue := newFakeStore(), newFakeQueue()
+		rec := aged(watcherWith("wch_ab2", []string{"term-x"}, withOptions(watcherOptions{SpawnMode: "explore"})))
+		mcp := newProgMCP(map[string]termCfg{
+			"term-x": {agentState: "waiting", waitingReason: "prompt", recentOutput: strptr("⏺ still mid-task"),
+				handback:         handbackAt(rec.CreatedAt+1000, "prompt A's summary"),
+				lastTransitionAt: rec.CreatedAt + 1000 + domain.HandbackTransitionSlackMS + 1},
+		})
+		store.watchers = []domain.WatcherRecord{rec}
+		model := &progModel{judgeFn: finishedNoJudge}
+		out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, model), rec)
+		if out.Classification == domain.ClassCompletedSuccess || out.Stop || model.judgeCalls.Load() == 0 {
+			t.Fatalf("a marker older than the last state transition must not complete; got %s judge=%d", out.Classification, model.judgeCalls.Load())
+		}
+	})
+
+	t.Run("a marker stamped AT the settle transition is this turn's", func(t *testing.T) {
+		store, queue := newFakeStore(), newFakeQueue()
+		rec := aged(watcherWith("wch_ab3", []string{"term-x"}, withOptions(watcherOptions{SpawnMode: "explore"})))
+		at := rec.CreatedAt + 1000
+		mcp := newProgMCP(map[string]termCfg{
+			"term-x": {agentState: "waiting", waitingReason: "prompt", recentOutput: strptr("❯ "), handback: handbackAt(at, "done"), lastTransitionAt: at},
+		})
+		store.watchers = []domain.WatcherRecord{rec}
+		out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{judgeFn: finishedNoJudge}), rec)
+		if out.Classification != domain.ClassCompletedSuccess {
+			t.Fatalf("Daintree stamps observedAt with the settle's own timestamp — that must stay fresh; got %s", out.Classification)
+		}
+	})
+}
+
+// An explore turn that ended ON a question completes (whether to answer is the
+// main thread's call) — but the question text must survive, even beside a bare
+// marker that carries no summary at all.
+func TestWatcher_ExploreHandbackKeepsTheQuestion(t *testing.T) {
+	store, queue := newFakeStore(), newFakeQueue()
+	rec := watcherWith("wch_q", []string{"term-x"}, withOptions(watcherOptions{SpawnMode: "explore"}))
+	mcp := newProgMCP(map[string]termCfg{
+		"term-x": {agentState: "waiting", waitingReason: "question", recentOutput: strptr("Which account should I inspect?"),
+			handback: map[string]any{"message": nil, "observedAt": float64(rec.CreatedAt + 1), "truncated": false}},
+	})
+	store.watchers = []domain.WatcherRecord{rec}
+	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{}), rec)
+	if out.Classification != domain.ClassCompletedSuccess {
+		t.Fatalf("a question-shaped handback is still a completed turn, got %s", out.Classification)
+	}
+	if !strings.Contains(out.Summary, "Which account should I inspect?") || !strings.Contains(out.Summary, "no summary") {
+		t.Errorf("the question (and the bare marker) must both be reported: %q", out.Summary)
+	}
+}
+
 // A blocking waiting reason beside a fresh handback is NOT a clean completion:
 // the blocked verdict stands exactly as it would with no handback at all.
 func TestWatcher_BlockedHandbackIsNotACleanCompletion(t *testing.T) {
@@ -139,11 +248,13 @@ func TestWatcher_BlockedHandbackIsNotACleanCompletion(t *testing.T) {
 }
 
 // Finished is not correct: an edit agent's handback routes INTO gateCompletion,
-// so a dirty tree still withholds a verified completion. Without the handback
-// the same terminal reads "waiting for input" and never reaches the gate.
+// so a dirty tree is reported UNVERIFIED and the watcher stays armed — never a
+// clean success on the agent's say-so. Without the handback the same terminal
+// reads "waiting for input" and never reaches the gate.
 func TestWatcher_EditHandbackStillGoesThroughTheGate(t *testing.T) {
 	store, queue := newFakeStore(), newFakeQueue()
-	rec := watcherWith("wch_edit", []string{"term-x"}, withOptions(watcherOptions{SpawnMode: "edit"}))
+	rec := watcherWith("wch_edit", []string{"term-x"}, withOptions(watcherOptions{
+		SpawnMode: "edit", VerificationScope: &verificationScope{WorktreeID: "/wt/feature"}}))
 	mcp := newProgMCP(map[string]termCfg{
 		"term-x": {agentState: "waiting", waitingReason: "prompt", recentOutput: strptr("❯ "),
 			handback: handbackAt(rec.CreatedAt+1, "Refactor complete, tests pass.")},
@@ -153,14 +264,37 @@ func TestWatcher_EditHandbackStillGoesThroughTheGate(t *testing.T) {
 
 	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{}), rec)
 
-	if out.Classification == domain.ClassWaitingForInput {
-		t.Fatalf("an edit handback must reach the completion gate, got %s", out.Classification)
+	if out.Classification != domain.ClassCompletedUnverified {
+		t.Fatalf("a dirty tree behind an edit handback must be completed_unverified, got %s (%s)", out.Classification, out.Summary)
 	}
-	if len(mcp.callsFor("git.getProjectPulse")) == 0 {
-		t.Error("an edit handback must still be git-verified (gateCompletion never ran)")
+	pulses := mcp.callsFor("git.getProjectPulse")
+	if len(pulses) == 0 || pulses[0].args["worktreeId"] != "/wt/feature" {
+		t.Errorf("the gate must verify the watcher's OWN worktree, got %+v", pulses)
 	}
 	if !strings.Contains(out.Summary, "Agent's own handback summary") {
 		t.Errorf("the gate's verdict must carry the agent's summary: %q", out.Summary)
+	}
+}
+
+// An edit watcher with NO verification scope would have the gate pulse whichever
+// worktree is active — so a handback must not open that route. The verdict stays
+// "waiting for input" (exactly as without a handback), with the summary attached.
+func TestWatcher_UnscopedEditHandbackDoesNotReachTheGate(t *testing.T) {
+	store, queue := newFakeStore(), newFakeQueue()
+	rec := watcherWith("wch_unscoped", []string{"term-x"}, withOptions(watcherOptions{SpawnMode: "edit"}))
+	mcp := newProgMCP(map[string]termCfg{
+		"term-x": {agentState: "waiting", waitingReason: "prompt", recentOutput: strptr("❯ "), handback: handbackAt(rec.CreatedAt+1, "all done")},
+	})
+	store.watchers = []domain.WatcherRecord{rec}
+	out := RunTerminalWatcherCheck(ctxFor(store, queue, mcp, &progModel{}), rec)
+	if out.Classification != domain.ClassWaitingForInput || out.Stop {
+		t.Fatalf("got %s stop=%v", out.Classification, out.Stop)
+	}
+	if len(mcp.callsFor("git.getProjectPulse")) != 0 {
+		t.Error("an unscoped watcher must not verify a worktree it cannot name")
+	}
+	if !strings.Contains(out.Summary, "Agent's own handback summary") {
+		t.Errorf("the agent's summary should still travel with the verdict: %q", out.Summary)
 	}
 }
 
@@ -182,6 +316,9 @@ func TestWatcher_NoHandbackVerdictsAreByteIdentical(t *testing.T) {
 		aged  bool
 		judge func(string, string) domain.ModelJudgeAnswer
 		want  pin
+		// noPin: the wording belongs to another layer (the completion gate, the tail
+		// classifier); only the none-vs-stale identity is asserted for these.
+		noPin bool
 	}{
 		{
 			name: "explore idle, judge confirms", mode: "explore", aged: true, judge: finishedYesJudge,
@@ -206,6 +343,24 @@ func TestWatcher_NoHandbackVerdictsAreByteIdentical(t *testing.T) {
 			cfg: termCfg{agentState: "completed", recentOutput: strptr("done")},
 			want: pin{domain.ClassCompletedSuccess, 0.9, "Explore agent finished its turn.",
 				[]string{"agentState=completed (explore; read-only, not git-gated)"}, true},
+		},
+		{
+			// nil evidence must stay nil — never become [] (they serialize differently).
+			name: "idle, blank output", mode: "explore", judge: finishedYesJudge,
+			cfg:  termCfg{agentState: "idle", recentOutput: strptr(""), tail: ""},
+			want: pin{domain.ClassNoChange, 0.4, "No new output.", nil, false},
+		},
+		{
+			name: "edit completed, through the gate", mode: "edit", judge: finishedYesJudge, noPin: true,
+			cfg: termCfg{agentState: "completed", recentOutput: strptr("done")},
+		},
+		{
+			name: "edit question", mode: "edit", judge: finishedYesJudge, noPin: true,
+			cfg: termCfg{agentState: "waiting", waitingReason: "question", recentOutput: strptr("Proceed with the rename?")},
+		},
+		{
+			name: "explore approval", mode: "explore", aged: true, judge: finishedYesJudge, noPin: true,
+			cfg: termCfg{agentState: "waiting", waitingReason: "approval", recentOutput: strptr("Allow? (y/n)")},
 		},
 		{
 			name: "edit waiting at prompt", mode: "edit", judge: finishedYesJudge,
@@ -249,7 +404,7 @@ func TestWatcher_NoHandbackVerdictsAreByteIdentical(t *testing.T) {
 				return got, b
 			}
 			got, bare := run(nil)
-			if !reflect.DeepEqual(got, tc.want) {
+			if !tc.noPin && !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("no-handback verdict drifted from the pre-change wording:\n got %+v\nwant %+v", got, tc.want)
 			}
 			if _, stale := run(handbackAt(0, "an earlier prompt's summary")); string(stale) != string(bare) {

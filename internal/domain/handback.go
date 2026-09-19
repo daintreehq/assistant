@@ -79,6 +79,42 @@ func HandbackFresh(h *TerminalHandback, p HandbackPrompt) bool {
 	return h.ObservedAt >= p.SentAtMS
 }
 
+// HandbackTransitionSlackMS is how far before the terminal's last state
+// transition a handback may have been observed and still belong to the current
+// turn. Daintree detects the marker AT the settle out of "working" and stamps
+// observedAt with that same state-change timestamp, so for the current turn the
+// two are equal; the slack only absorbs a quick follow-on transition (a
+// completed→waiting hop). A handback older than that was printed for an earlier
+// turn — the agent has been through working→settled again since.
+const HandbackTransitionSlackMS int64 = 5000
+
+// HandbackSentAt folds everything a consumer knows about WHEN the current turn
+// began into one conservative SentAtMS baseline — the latest of:
+//
+//   - sentAt: when the prompt was (at the latest) sent, as the consumer dates it
+//     (watcher creation, the last input injection, an invocation's row);
+//   - lastWorkingAt: the last time this consumer itself saw the agent WORKING. A
+//     handback is observed at the settle OUT of working, so one observed before a
+//     working sighting was printed for an earlier turn. This is what stops a
+//     long-lived watcher from completing prompt B on prompt A's retained marker;
+//   - lastTransitionAt − slack: Daintree's own timestamp of the terminal's last
+//     state change, which catches the turn the consumer never saw working at all
+//     (one that started and settled between two polls).
+//
+// Every term can only RAISE the bar, so each error is the safe one: a genuine
+// handback read as stale just takes the pre-handback path. 0/nil terms are unknown
+// and ignored; a result of 0 means nothing is known (HandbackFresh then refuses).
+func HandbackSentAt(sentAt, lastWorkingAt int64, lastTransitionAt *int64) int64 {
+	base := sentAt
+	if lastWorkingAt > base {
+		base = lastWorkingAt
+	}
+	if lastTransitionAt != nil && *lastTransitionAt-HandbackTransitionSlackMS > base {
+		base = *lastTransitionAt - HandbackTransitionSlackMS
+	}
+	return base
+}
+
 // FreshHandback returns h when it is fresh for p, else nil — the form call sites
 // want, so a stale handback is dropped at the boundary and can't leak into a
 // summary further down.

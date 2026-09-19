@@ -199,7 +199,10 @@ type awaitOutcome struct {
 // not a never-started pre-start prompt) and its settled outcome (nil until settled).
 type awaitTerminal struct {
 	seenWorking bool
-	outcome     *awaitOutcome
+	// lastWorkingAt is the poll clock of the last tick that saw the agent WORKING;
+	// a handback observed before it belongs to an earlier turn.
+	lastWorkingAt int64
+	outcome       *awaitOutcome
 }
 
 // awaitCohort runs the pure-FSM poll loop. It returns once every terminal has SETTLED
@@ -274,6 +277,7 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 			}
 			if agentState == string(domain.AgentWorking) {
 				t.seenWorking = true
+				t.lastWorkingAt = now
 				if deps.Observations != nil {
 					deps.Observations.MarkWorking(id, now)
 				}
@@ -297,7 +301,7 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 			// Nor does an agent parked on an approval dialog or a blocking error: the
 			// marker it printed earlier is not where it is now.
 			if present && !entry.NotFound && !absent && !ptyEnded && !domain.HandbackBlocked(waitingReason) {
-				o.handback = domain.FreshHandback(entry.LastHandback, awaitPrompt(deps, id, startedAt))
+				o.handback = domain.FreshHandback(entry.LastHandback, awaitPrompt(deps, id, startedAt, t.lastWorkingAt, entry.LastTransitionAt))
 			}
 			switch {
 			case ptyEnded:
@@ -360,21 +364,24 @@ func awaitCohort(ctx context.Context, deps Deps, ids []string, pollIntervalMs, m
 	return out, attempts, interrupted
 }
 
-// awaitPrompt dates the prompt this wait is waiting on, for handback freshness.
-// Best available first: the session's last input injection into the terminal
-// (stamped on attempt, so never later than the real send). Failing that — a
-// spawn-time prompt, or a terminal another session commanded — the wait's own
-// start: the prompt was necessarily sent before the wait began, so a handback
-// observed after that cannot belong to an earlier prompt. That fallback is
-// one-sided: an agent that handed back before the wait started reads as stale
-// and the result just omits the summary, exactly as if none had been sent.
-func awaitPrompt(deps Deps, terminalID string, startedAt int64) domain.HandbackPrompt {
-	if ct, ok := deps.Observations.(CommandTimes); ok && ct != nil {
+// awaitPrompt dates the turn this wait is waiting on, for handback freshness.
+// The starting point is the session's last input injection into the terminal
+// (stamped on attempt, so never later than the real send) or, failing that — a
+// spawn-time prompt, a terminal another session commanded — the wait's own start.
+// Neither is proof on its own: session memory misses a prompt a human or a
+// deferred terminal.arm sent later, and a wait can start while its prompt is
+// still queued, so an EARLIER prompt's marker could post-date both. The bar is
+// therefore raised by what dates the current turn directly — the last poll that
+// saw the agent working, and Daintree's lastTransitionAt (domain.HandbackSentAt).
+// One-sided by design: a doubtful handback is simply not attached.
+func awaitPrompt(deps Deps, terminalID string, startedAt, lastWorkingAt int64, lastTransitionAt *int64) domain.HandbackPrompt {
+	sentAt := startedAt
+	if ct, ok := deps.Observations.(CommandTimes); ok {
 		if at, known := ct.LastCommandAt(terminalID); known {
-			return domain.HandbackPrompt{SentAtMS: at}
+			sentAt = at
 		}
 	}
-	return domain.HandbackPrompt{SentAtMS: startedAt}
+	return domain.HandbackPrompt{SentAtMS: domain.HandbackSentAt(sentAt, lastWorkingAt, lastTransitionAt)}
 }
 
 // The pure-FSM settle decision itself is domain.SettleAgentFSM — promoted to

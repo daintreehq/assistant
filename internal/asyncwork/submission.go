@@ -60,16 +60,21 @@ func submissionGraceStart(t *tracked) int64 {
 // handbackPrompt is the freshness context for a handback on this invocation's
 // terminal. A TRACKED send has a submission token, and Daintree stamps the same
 // token (#12337) on the handback that submission asked for — an exact match, and
-// the only one accepted when we hold a token. Otherwise (a legacy host, or
-// terminal.await.async, which sends nothing) the invocation row's creation time
-// stands in: it is written around the send / after the prompt it awaits, so a
-// handback observed at or after it cannot belong to an earlier prompt. Both are
-// durable on the record, so an adopting owner matches exactly as the original did.
-func handbackPrompt(t *tracked) domain.HandbackPrompt {
+// the only one accepted when we hold a token.
+//
+// Otherwise (a legacy host, or terminal.await.async, which sends nothing) the
+// match is dated, and the row's creation time alone is NOT enough: run.async
+// writes the row BEFORE its send, and await.async may register while the prompt
+// it awaits is still queued, so an EARLIER prompt can hand back after CreatedAt.
+// The bar is therefore raised by everything that dates the current turn — the
+// last pass this coordinator saw the agent working, and Daintree's own
+// lastTransitionAt (domain.HandbackSentAt). A handback is an annotation here, so
+// the safe error is to omit it.
+func handbackPrompt(t *tracked, lastWorkingAt int64, lastTransitionAt *int64) domain.HandbackPrompt {
 	if r := t.rec.Submission; r != nil && r.Acceptance == "tracked" && r.Token != "" {
 		return domain.HandbackPrompt{Token: r.Token}
 	}
-	return domain.HandbackPrompt{SentAtMS: t.rec.CreatedAt}
+	return domain.HandbackPrompt{SentAtMS: domain.HandbackSentAt(t.rec.CreatedAt, lastWorkingAt, lastTransitionAt)}
 }
 
 func submissionDeadlineReason(t *tracked) string {

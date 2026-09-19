@@ -44,6 +44,9 @@ type termCfg struct {
 	// handback, when non-nil, is emitted verbatim as the entry's `lastHandback`
 	// (Daintree's wire object: message / observedAt / submissionToken / truncated).
 	handback map[string]any
+	// lastTransitionAt, when non-zero, is emitted as the entry's lastTransitionAt
+	// (Daintree's epoch-ms of the terminal's last agentState change).
+	lastTransitionAt int64
 }
 
 // progMCP is a programmable MCP fake used across the
@@ -169,6 +172,9 @@ func (m *progMCP) CallRead(_ context.Context, name string, args map[string]any) 
 			}
 			if cfg.handback != nil {
 				e["lastHandback"] = cfg.handback
+			}
+			if cfg.lastTransitionAt != 0 {
+				e["lastTransitionAt"] = float64(cfg.lastTransitionAt)
 			}
 			terminals = append(terminals, e)
 		}

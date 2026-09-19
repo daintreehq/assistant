@@ -96,6 +96,9 @@ type TerminalStatus struct {
 	// LastHandback is the handback marker the agent last printed, when Daintree
 	// sent one — unfiltered; feedStatuses matches it to this invocation's send.
 	LastHandback *domain.TerminalHandback
+	// LastTransitionAt is Daintree's epoch-ms of the terminal's last agentState
+	// change (nil when absent) — a freshness bound for LastHandback.
+	LastTransitionAt *int64
 }
 
 // StatusReadResult is the outcome of one batched status read. OK is true on a
@@ -195,7 +198,11 @@ type Deps struct {
 // the settled outcome (nil until settled).
 type termState struct {
 	seenWorking bool
-	outcome     *domain.AsyncTerminalOutcome
+	// lastWorkingAt is the tick clock of the last pass that saw the agent WORKING;
+	// a handback observed before it belongs to an earlier turn. In-memory only —
+	// an adopting owner restarts at 0, which leaves the row/transition bounds.
+	lastWorkingAt int64
+	outcome       *domain.AsyncTerminalOutcome
 }
 
 // tracked is one live invocation's in-memory poll state. Not persisted as-is:
@@ -887,6 +894,7 @@ func (c *Coordinator) feedStatuses(t *tracked, res StatusReadResult, gone map[st
 		}
 		if agentState == string(domain.AgentWorking) {
 			st.seenWorking = true
+			st.lastWorkingAt = now
 		}
 
 		v := domain.SettleAgentFSM(agentState, waitingReason, exitCode, st.seenWorking,
@@ -904,7 +912,9 @@ func (c *Coordinator) feedStatuses(t *tracked, res StatusReadResult, gone map[st
 		// there is no current turn to summarize (gone, PTY ended) or the agent is
 		// parked on an approval/error rather than where its marker left it.
 		if present && !gone[id] && !ptyEnded && !domain.HandbackBlocked(waitingReason) {
-			o.Handback = domain.FreshHandback(entry.LastHandback, handbackPrompt(t))
+			// Persist the RENDERED report, never the raw message: see AgentHandback.
+			o.AgentHandback = domain.HandbackReport(domain.FreshHandback(entry.LastHandback,
+				handbackPrompt(t, st.lastWorkingAt, entry.LastTransitionAt)))
 		}
 		switch {
 		case ptyEnded:
@@ -1202,10 +1212,10 @@ func summarizeInvocation(t *tracked) (line string, failed, question bool) {
 		if st.outcome.Reason != "" {
 			p += " — " + st.outcome.Reason
 		}
-		if st.outcome.Handback != nil {
-			// The wake prompt renders this line verbatim, so the agent's message goes
-			// in only through HandbackReport: quoted, attributed, never instructions.
-			p += " — " + domain.HandbackReport(st.outcome.Handback)
+		if st.outcome.AgentHandback != "" {
+			// The wake prompt renders this line verbatim; AgentHandback is already
+			// HandbackReport's output — quoted, attributed, never instructions.
+			p += " — " + st.outcome.AgentHandback
 		}
 		switch st.outcome.Status {
 		case domain.SettleStatusFailed:

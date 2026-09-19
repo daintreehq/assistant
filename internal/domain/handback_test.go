@@ -81,3 +81,29 @@ func TestHandbackEvidence(t *testing.T) {
 		t.Error("nil handback has no evidence line")
 	}
 }
+
+// Every term can only RAISE the baseline — so each error is the safe one.
+func TestHandbackSentAt(t *testing.T) {
+	at := func(v int64) *int64 { return &v }
+	cases := []struct {
+		name             string
+		sentAt, workedAt int64
+		transition       *int64
+		want             int64
+	}{
+		{"nothing known", 0, 0, nil, 0},
+		{"send time only", 1000, 0, nil, 1000},
+		{"a later working sighting wins", 1000, 3000, nil, 3000},
+		{"an earlier working sighting never lowers it", 3000, 1000, nil, 3000},
+		{"a much later transition wins, less the slack", 1000, 0, at(60_000), 60_000 - HandbackTransitionSlackMS},
+		{"a transition inside the slack changes nothing", 1000, 0, at(1000 + HandbackTransitionSlackMS), 1000},
+		{"an old transition never lowers it", 9000, 0, at(100), 9000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := HandbackSentAt(tc.sentAt, tc.workedAt, tc.transition); got != tc.want {
+				t.Errorf("got %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
