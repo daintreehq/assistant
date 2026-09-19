@@ -33,9 +33,27 @@ type scriptMCP struct {
 	// listCtxErrs records ctx.Err() at each terminal.list call, so a test can prove
 	// a reconcile read ran on a LIVE (detached) ctx even after the turn's ctx died.
 	listCtxErrs []error
+	// toolList is the advertised catalog ListTools serves (nil ⇒ a host advertising
+	// nothing, which is what every pre-handback test runs against); toolListErr fails
+	// the read; onListTools runs inside it (models a cancel landing mid-discovery).
+	toolList      []MCPToolInfo
+	toolListErr   error
+	onListTools   func()
+	listToolForce []bool
 }
 
 func (m *scriptMCP) Connected() bool { return m.connected }
+
+func (m *scriptMCP) ListTools(_ context.Context, force bool) ([]MCPToolInfo, error) {
+	m.listToolForce = append(m.listToolForce, force)
+	if m.onListTools != nil {
+		m.onListTools()
+	}
+	if m.toolListErr != nil {
+		return nil, m.toolListErr
+	}
+	return m.toolList, nil
+}
 
 func (m *scriptMCP) CallTool(ctx context.Context, name string, args map[string]any) (MCPCallResult, error) {
 	m.calls = append(m.calls, recordedCall{name: name, args: args})

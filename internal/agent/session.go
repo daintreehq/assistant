@@ -3680,6 +3680,43 @@ func (s *Session) currentRoster() []backend.OpenTerminal {
 	return append([]backend.OpenTerminal(nil), s.roster...)
 }
 
+// IsLiveAgentTerminal reports whether the cached roster POSITIVELY shows a live agent
+// in the terminal with this exact id. It is the local answer to "may this send ask
+// Daintree for a handback" (internal/tools/handback): Daintree refuses the flag on a
+// pane with no agent running, and a plain shell must never be sent it, so every doubt
+// is false — an unknown id, a cold cache, or a snapshot past rosterSnapshotMaxAge
+// (the same cap the model-facing read applies, for the same reason: a stale roster is
+// a confident wrong answer).
+//
+// A non-empty agentId is NOT enough on its own. Daintree's terminal.list falls back to
+// the LAUNCH agent id, so a pane whose agent has exited to a bare shell still names
+// one; the agent must also report a state, that state must not be "exited", and the
+// process must not have an exit code. ("completed" is a finished TURN in a live agent,
+// which is exactly the terminal a follow-up prompt goes to.)
+//
+// Pure cache read under rosterMu: no MCP call, no refresh kick, no grace wait — it
+// runs inside terminal.sendCommand's dispatch, and unlike currentRosterForRound it
+// must never schedule work. A terminal spawned seconds ago is simply unknown until the
+// post-spawn refresh lands, and its first follow-up goes out without the flag.
+func (s *Session) IsLiveAgentTerminal(terminalID string) bool {
+	if s == nil || terminalID == "" {
+		return false
+	}
+	s.rosterMu.Lock()
+	defer s.rosterMu.Unlock()
+	if s.rosterFetchedAt.IsZero() || time.Since(s.rosterFetchedAt) > rosterSnapshotMaxAge {
+		return false
+	}
+	for _, t := range s.roster {
+		if t.ID != terminalID {
+			continue
+		}
+		return t.AgentID != "" && t.AgentState != "" &&
+			t.AgentState != string(domain.AgentExited) && t.ExitCode == nil
+	}
+	return false
+}
+
 // rosterRoundZeroGrace bounds how long ROUND 0 waits on an already-in-flight roster
 // refresh before building its request. It is a wait on a completion signal, never on
 // an MCP call: the fetch is detached and self-bounded either way, and every other

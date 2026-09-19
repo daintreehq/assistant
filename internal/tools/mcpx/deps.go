@@ -93,6 +93,16 @@ type Deps struct {
 	// Observer records input injections into the shared settle memory. nil ⇒ no
 	// recording (tests / stripped tool sets).
 	Observer CommandObserver
+	// AgentHandback is the resolved feature switch (config.AppConfig.AgentHandback):
+	// when true, a terminal.sendCommand to an AGENT terminal asks Daintree for a
+	// handback (see handback.go). The zero value is off, which is the pre-feature call.
+	AgentHandback bool
+	// IsAgentTerminal reports whether a terminal is KNOWN, from state this process
+	// already holds, to have a live agent in it. It must do no I/O — it sits in the
+	// send path — and must answer false for anything it cannot vouch for: Daintree
+	// refuses the flag on a pane with no agent, and a plain shell must never be sent
+	// it. nil ⇒ no terminal is known to be an agent's, so the flag is never added.
+	IsAgentTerminal func(terminalID string) bool
 	// WrapperNames are local typed tools registered by OTHER families (mcpwrap's
 	// forge/worktree/project/diagnostic wrappers) whose names are also raw Daintree MCP
 	// action names.

@@ -165,6 +165,14 @@ type AppConfig struct {
 	// backend that does not carry the matching TurnContext contract.
 	WorkflowIntelligence bool
 
+	// AgentHandback asks Daintree for a handback on every prompt this process sends
+	// to an agent: `handback: true` rides agent.launch and agent-terminal sends as a
+	// wire ARGUMENT (Daintree appends the instruction server-side; no text is added
+	// here). Defaults ON; DAINTREE_AGENT_HANDBACK=0 is the one off switch and yields
+	// exactly the pre-feature calls. A host whose advertised schema lacks the
+	// argument never receives it either way (internal/tools/handback).
+	AgentHandback bool
+
 	// Routing is the caller's endpoint-selection preference, sent to the backend on
 	// every turn. The zero value means "no preference" and is what almost every
 	// install runs: the server default is a no-training privacy floor ranked by
@@ -208,6 +216,7 @@ type ConfigOverrides struct {
 	LogDir               *string
 	ProjectInstructions  *string
 	WorkflowIntelligence *bool
+	AgentHandback        *bool
 	// AllowInsecureBackend is the deliberately-named escape hatch for a non-loopback
 	// plaintext HTTP backend endpoint (--allow-insecure-backend). Trusted-only, like
 	// Tier/AutoApprove/Offline: a bound project's .env must not be able to downgrade
@@ -428,6 +437,15 @@ func loadConfig(overrides ConfigOverrides, ensureStateDir bool) (AppConfig, erro
 	cfg.WorkflowIntelligence = resolveBoolDefault(
 		overrides.WorkflowIntelligence,
 		e.trustedOrOwnGet("DAINTREE_WORKFLOW_INTELLIGENCE"),
+		true,
+	)
+
+	// Trusted-or-own, like the flag above: it changes what this process sends to
+	// Daintree, and a bound project's .env is arbitrary repo content that must not be
+	// able to switch that.
+	cfg.AgentHandback = resolveBoolDefault(
+		overrides.AgentHandback,
+		e.trustedOrOwnGet("DAINTREE_AGENT_HANDBACK"),
 		true,
 	)
 
@@ -719,6 +737,7 @@ func DescribeConfig(cfg AppConfig) map[string]string {
 		"offline":              strconv.FormatBool(cfg.Offline),
 		"debugLog":             strconv.FormatBool(cfg.DebugLog),
 		"workflowIntelligence": strconv.FormatBool(cfg.WorkflowIntelligence),
+		"agentHandback":        strconv.FormatBool(cfg.AgentHandback),
 		"allowInsecureBackend": strconv.FormatBool(cfg.AllowInsecureBackend),
 	}
 	if cfg.EndpointInsecureRejected != nil {

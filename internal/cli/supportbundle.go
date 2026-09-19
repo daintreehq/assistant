@@ -193,6 +193,7 @@ func collectSupportBundle(ctx context.Context, opts Options, cfg config.AppConfi
 		"autoApprove":          cfg.AutoApprove,
 		"offline":              cfg.Offline,
 		"workflowIntelligence": cfg.WorkflowIntelligence,
+		"agentHandback":        cfg.AgentHandback,
 		"debugLogEnabled":      cfg.DebugLog,
 		"stateDir":             cfg.StateDir,
 		"projectPath":          cfg.ProjectPath,

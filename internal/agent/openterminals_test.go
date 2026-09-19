@@ -1137,3 +1137,48 @@ func TestOpenTerminals_NilFetcherOmitsInventory(t *testing.T) {
 	}
 	s.DrainBackgroundWork()
 }
+
+// IsLiveAgentTerminal gates the handback flag (#385): Daintree refuses it on a pane
+// with no agent, so only POSITIVE, fresh evidence may answer true.
+func TestIsLiveAgentTerminal(t *testing.T) {
+	deps, _ := recordingDeps(&fakeRouter{}, &fakeTools{})
+	s := NewSession(deps)
+	one := 1
+	roster := []backend.OpenTerminal{
+		{ID: "terminal-agent", Kind: "agent", AgentID: "claude", AgentState: "waiting"},
+		// A finished TURN in a live agent — exactly where a follow-up prompt goes.
+		{ID: "terminal-done", Kind: "agent", AgentID: "claude", AgentState: "completed"},
+		{ID: "terminal-shell", Kind: "shell"},
+		// terminal.list falls back to the LAUNCH agent id, so these still name one.
+		{ID: "terminal-exited", Kind: "agent", AgentID: "claude", AgentState: "exited"},
+		{ID: "terminal-dead", Kind: "agent", AgentID: "claude", AgentState: "waiting", ExitCode: &one},
+		{ID: "terminal-stateless", Kind: "agent", AgentID: "claude"},
+	}
+
+	if s.IsLiveAgentTerminal("terminal-agent") {
+		t.Error("a cold cache knows nothing")
+	}
+	seedRoster(s, time.Second, roster...)
+	for id, want := range map[string]bool{
+		"terminal-agent": true, "terminal-done": true,
+		"terminal-shell": false, "terminal-exited": false, "terminal-dead": false,
+		"terminal-stateless": false, "terminal-unknown": false, "terminal-age": false, "": false,
+	} {
+		if got := s.IsLiveAgentTerminal(id); got != want {
+			t.Errorf("IsLiveAgentTerminal(%q) = %v, want %v", id, got, want)
+		}
+	}
+	// Exact ids only: a prefix is not the terminal.
+	if s.IsLiveAgentTerminal("terminal-ag") {
+		t.Error("a prefix must not match")
+	}
+	// Past the freshness cap the snapshot cannot vouch for anything.
+	seedRoster(s, rosterSnapshotMaxAge+time.Second, roster...)
+	if s.IsLiveAgentTerminal("terminal-agent") {
+		t.Error("a stale roster must not classify a terminal as a live agent")
+	}
+	var nilSession *Session
+	if nilSession.IsLiveAgentTerminal("terminal-agent") {
+		t.Error("nil session must be false")
+	}
+}

@@ -52,7 +52,7 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 	}))...)
 	all = append(all, addr(tools.SetRequires(asyncx.Tools(asyncx.Deps{
 		Reader:      terminalReaderAdapter{c: a.MCP},
-		Sender:      asyncCommandSenderAdapter{c: a.MCP},
+		Sender:      asyncCommandSenderAdapter{c: a.MCP, requestHandback: a.sendRequestsHandback},
 		Coordinator: a.asyncCoordinator,
 		Store:       a.Store,
 		SessionID:   a.SessionID,
@@ -89,6 +89,10 @@ func DefaultToolBuilder(a *App) ([]*tools.Tool, error) {
 	all = append(all, addr(tools.SetRequires(mcpx.Tools(mcpx.Deps{
 		MCP:      mcpxMCPAdapter{c: a.MCP},
 		Observer: a.terminalObs,
+		// Handback requests (#385): the switch plus the zero-I/O "is this an agent
+		// terminal" read; the wrapper checks the host's advertised schema itself.
+		AgentHandback:   a.Config.AgentHandback,
+		IsAgentTerminal: a.isLiveAgentTerminal,
 		// mcpwrap's wrappers are named for the raw MCP actions they govern, so
 		// tool.schema must know about them to warn that the local tool — not the raw
 		// schema it is handing back — is what the model actually calls. mcpx cannot

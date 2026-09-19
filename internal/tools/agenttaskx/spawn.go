@@ -11,6 +11,7 @@ import (
 	"github.com/daintreehq/assistant/internal/debuglog"
 	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/tools"
+	"github.com/daintreehq/assistant/internal/tools/handback"
 )
 
 // SupervisorDefaultCadenceMs is the supervisor-watcher cadence.
@@ -488,7 +489,11 @@ func spawn(ctx context.Context, deps Deps, a *spawnArgs, actor domain.ToolActor)
 			"requestedAgentId": agentID, "availableAgents": available, "suggestion": suggestion,
 		}))
 	}
-	// The roster read above can take a beat; if the turn was cancelled meanwhile, stop
+	// Decided HERE, ahead of the cancellation check and the saga write, because a cold
+	// catalog makes this a round trip: resolving it after the record exists would let a
+	// cancel landing mid-read strand a launch_requested row for a launch never sent.
+	requestHandback := launchAcceptsHandback(ctx, deps)
+	// The reads above can take a beat; if the turn was cancelled meanwhile, stop
 	// before writing the saga or launching (don't leave an orphaned record).
 	if ctx.Err() != nil {
 		return tools.Fail(codeCancelled, "Turn cancelled before the agent was launched.", tools.Unrecoverable())
@@ -511,6 +516,13 @@ func spawn(ctx context.Context, deps Deps, a *spawnArgs, actor domain.ToolActor)
 	launchArgs := map[string]any{"agentId": agentID, "name": name, "prompt": prompt, "requestKey": idempotencyKey}
 	if worktreeID != "" {
 		launchArgs["worktreeId"] = worktreeID
+	}
+	// A transport flag, NOT part of the launch's identity: it is absent from
+	// computeIdempotencyKey on purpose. Daintree appends its instruction after the
+	// prompt this process built, so the key — a function of that prompt — is the same
+	// whether or not the host can be asked, and a retry keeps it.
+	if requestHandback {
+		launchArgs[handback.Arg] = true
 	}
 	res, err := deps.MCP.CallTool(ctx, "agent.launch", launchArgs)
 	if err != nil {
@@ -826,4 +838,27 @@ func jsonIDArray(id string) string {
 		return ""
 	}
 	return string(b)
+}
+
+// launchAcceptsHandback reports whether this spawn should ask Daintree for a handback:
+// the feature switch is on AND the connected host ADVERTISES the argument on
+// agent.launch. Both modes share it — an explorer's report is as much a finished turn
+// as an editor's. Every doubt is false, and false is exactly the pre-feature call: a
+// host that predates the argument may reject an unknown key outright, so a catalog
+// read that failed is never a reason to guess. The catalog is cache-first
+// (force=false), so on a warm connection this costs no round trip.
+func launchAcceptsHandback(ctx context.Context, deps Deps) bool {
+	if !deps.Config.AgentHandback || deps.MCP == nil {
+		return false
+	}
+	infos, err := deps.MCP.ListTools(ctx, false)
+	if err != nil {
+		return false
+	}
+	for _, info := range infos {
+		if info.Name == "agent.launch" {
+			return handback.SchemaAccepts(info.InputSchema, info.InputSchemaProvided)
+		}
+	}
+	return false
 }

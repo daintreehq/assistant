@@ -24,11 +24,25 @@ type MCPCallResult struct {
 	IsError           bool   `json:"isError"`
 }
 
+// MCPToolInfo is the slice of a Daintree tool descriptor the spawn reads: the
+// ADVERTISED input schema, which is the only place a host says whether agent.launch
+// accepts an optional argument this CLI learned about later (internal/tools/handback).
+// InputSchemaProvided separates a schema the server published from the client's
+// accept-anything stand-in, which must never read as support.
+type MCPToolInfo struct {
+	Name                string
+	InputSchema         map[string]any
+	InputSchemaProvided bool
+}
+
 // MCPClient is the slice of the Daintree MCP transport this family reaches:
-// agent.launch (the side-effecting spawn) and terminal.list (reconciliation).
+// agent.launch (the side-effecting spawn), terminal.list (reconciliation), and the
+// cache-first tool catalog (force=false costs no round trip once the connection is
+// warm), read only to learn what agent.launch's schema advertises.
 type MCPClient interface {
 	Connected() bool
 	CallTool(ctx context.Context, name string, args map[string]any) (MCPCallResult, error)
+	ListTools(ctx context.Context, force bool) ([]MCPToolInfo, error)
 }
 
 // Store is the slice of the storage layer the spawn saga touches. The signatures
