@@ -1137,3 +1137,54 @@ func TestOpenTerminals_NilFetcherOmitsInventory(t *testing.T) {
 	}
 	s.DrainBackgroundWork()
 }
+
+// IsLiveAgentTerminal gates the handback flag (#385). A stale positive is recoverable
+// (Daintree refuses the flag before sending, and the sender falls back), so the 15s
+// model-facing cap does not apply; what the roster itself says is dead must stay false.
+func TestIsLiveAgentTerminal(t *testing.T) {
+	deps, _ := recordingDeps(&fakeRouter{}, &fakeTools{})
+	s := NewSession(deps)
+	one, zero := 1, 0
+	roster := []backend.OpenTerminal{
+		{ID: "terminal-agent", Kind: "agent", AgentID: "claude", AgentState: "waiting"},
+		// A finished TURN in a live agent — exactly where a follow-up prompt goes.
+		{ID: "terminal-done", Kind: "agent", AgentID: "claude", AgentState: "completed"},
+		// Booting/restored: identity before the FSM reports. The host accepts it.
+		{ID: "terminal-booting", Kind: "agent", AgentID: "claude"},
+		{ID: "terminal-shell", Kind: "shell"},
+		// A state with no agent identity is not an agent.
+		{ID: "terminal-anon", Kind: "terminal", AgentState: "waiting"},
+		// terminal.list falls back to the LAUNCH agent id, so these still name one.
+		{ID: "terminal-exited", Kind: "agent", AgentID: "claude", AgentState: "exited"},
+		{ID: "terminal-dead", Kind: "agent", AgentID: "claude", AgentState: "waiting", ExitCode: &one},
+		{ID: "terminal-clean-exit", Kind: "agent", AgentID: "claude", AgentState: "waiting", ExitCode: &zero},
+	}
+	want := map[string]bool{
+		"terminal-agent": true, "terminal-done": true, "terminal-booting": true,
+		"terminal-shell": false, "terminal-anon": false, "terminal-exited": false,
+		"terminal-dead": false, "terminal-clean-exit": false,
+		"terminal-unknown": false, "terminal-ag": false, " terminal-agent ": false, "": false,
+	}
+
+	// Entries present but never FETCHED (zero timestamp): seeded, not observed.
+	s.rosterMu.Lock()
+	s.roster = roster
+	s.rosterMu.Unlock()
+	if s.IsLiveAgentTerminal("terminal-agent") {
+		t.Error("a roster that was never fetched knows nothing")
+	}
+	// Past the model-facing cap on purpose: a turn-start roster must still classify a
+	// follow-up sent after a long generation or an approval wait.
+	for _, age := range []time.Duration{time.Second, rosterSnapshotMaxAge + time.Minute} {
+		seedRoster(s, age, roster...)
+		for id, w := range want {
+			if got := s.IsLiveAgentTerminal(id); got != w {
+				t.Errorf("age %s: IsLiveAgentTerminal(%q) = %v, want %v", age, id, got, w)
+			}
+		}
+	}
+	var nilSession *Session
+	if nilSession.IsLiveAgentTerminal("terminal-agent") {
+		t.Error("nil session must be false")
+	}
+}

@@ -15,6 +15,9 @@ import (
 type blockingMCP struct{ ctxErr error }
 
 func (m *blockingMCP) Connected() bool { return true }
+func (m *blockingMCP) ListTools(context.Context, bool) ([]MCPToolInfo, error) {
+	return nil, nil
+}
 func (m *blockingMCP) CallTool(ctx context.Context, _ string, _ map[string]any) (MCPCallResult, error) {
 	<-ctx.Done()
 	m.ctxErr = ctx.Err()
@@ -25,6 +28,9 @@ func (m *blockingMCP) CallTool(ctx context.Context, _ string, _ map[string]any) 
 type errMCP struct{}
 
 func (errMCP) Connected() bool { return true }
+func (errMCP) ListTools(context.Context, bool) ([]MCPToolInfo, error) {
+	return nil, errBoom("transport down")
+}
 func (errMCP) CallTool(context.Context, string, map[string]any) (MCPCallResult, error) {
 	return MCPCallResult{}, errBoom("transport down")
 }

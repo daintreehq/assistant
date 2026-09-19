@@ -44,6 +44,28 @@ func (m agentTaskMCPAdapter) CallTool(ctx context.Context, name string, args map
 	return agenttaskx.MCPCallResult{Text: res.Text, StructuredContent: res.StructuredContent, IsError: res.IsError}, nil
 }
 
+// ListTools projects the client's cache-first catalog onto the spawn's narrow
+// descriptor. InputSchemaProvided is carried through, not recomputed: dropping it
+// would make the client's accept-anything stand-in indistinguishable from a schema
+// the host published (the #311 lesson, see toMcpxToolInfos).
+func (m agentTaskMCPAdapter) ListTools(ctx context.Context, force bool) ([]agenttaskx.MCPToolInfo, error) {
+	infos, err := m.c.ListTools(ctx, force)
+	if err != nil {
+		return nil, err
+	}
+	return toAgentTaskToolInfos(infos), nil
+}
+
+// toAgentTaskToolInfos is split out for the same reason as toMcpxToolInfos: so the
+// field mapping is unit testable without a live client.
+func toAgentTaskToolInfos(infos []mcp.ToolInfo) []agenttaskx.MCPToolInfo {
+	out := make([]agenttaskx.MCPToolInfo, 0, len(infos))
+	for _, i := range infos {
+		out = append(out, agenttaskx.MCPToolInfo{Name: i.Name, InputSchema: i.InputSchema, InputSchemaProvided: i.InputSchemaProvided})
+	}
+	return out
+}
+
 // contextMCPAdapter maps *mcp.Client onto contextx.MCPClient (adds Status()).
 type contextMCPAdapter struct{ c *mcp.Client }
 

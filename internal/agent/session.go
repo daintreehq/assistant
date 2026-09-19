@@ -3680,6 +3680,51 @@ func (s *Session) currentRoster() []backend.OpenTerminal {
 	return append([]backend.OpenTerminal(nil), s.roster...)
 }
 
+// IsLiveAgentTerminal reports whether the last roster this session OBSERVED shows an
+// agent in the terminal with this exact id. It is the local answer to "may this send
+// ask Daintree for a handback" (internal/tools/handback).
+//
+// Deliberately NOT subject to rosterSnapshotMaxAge. That cap protects the MODEL from a
+// confidently-wrong roster it cannot recover from. Applying it here would silently drop
+// the handback from nearly every follow-up — the roster is fetched at turn start and a
+// single model generation or approval wait outlives 15s — while a stale positive is
+// usually cheap: Daintree re-validates the target at submission and refuses the flag on
+// a pane it no longer considers an agent's, and the sender then repeats the call
+// without it. "Usually", not always: Daintree's own identity check can lag an agent
+// that exited to its surviving shell, and that is equally true of a roster fetched one
+// second ago — it is the host's call to make, not something a fresher cache here fixes.
+// A roster that was never fetched (zero rosterFetchedAt — seeded, not observed) still
+// answers false.
+//
+// What must not slip through is a pane the roster ITSELF says has no live agent.
+// Daintree's terminal.list falls back to the LAUNCH agent id, so a pane whose agent
+// exited to a bare shell still names one: an "exited" state or an exit code vetoes it.
+// An empty state does not — a booting or restored agent has an identity before its
+// FSM reports, and the host accepts it. ("completed" is a finished TURN in a live
+// agent, exactly where a follow-up prompt goes.)
+//
+// Pure cache read under rosterMu: no MCP call, no refresh kick, no grace wait — it
+// runs inside terminal.sendCommand's dispatch, and unlike currentRosterForRound it
+// must never schedule work. A terminal the roster has not seen yet (spawned a moment
+// ago, refresh still in flight) is unknown, and that one send goes out without the flag.
+func (s *Session) IsLiveAgentTerminal(terminalID string) bool {
+	if s == nil || terminalID == "" {
+		return false
+	}
+	s.rosterMu.Lock()
+	defer s.rosterMu.Unlock()
+	if s.rosterFetchedAt.IsZero() {
+		return false
+	}
+	for _, t := range s.roster {
+		if t.ID != terminalID {
+			continue
+		}
+		return t.AgentID != "" && t.AgentState != string(domain.AgentExited) && t.ExitCode == nil
+	}
+	return false
+}
+
 // rosterRoundZeroGrace bounds how long ROUND 0 waits on an already-in-flight roster
 // refresh before building its request. It is a wait on a completion signal, never on
 // an MCP call: the fetch is detached and self-bounded either way, and every other

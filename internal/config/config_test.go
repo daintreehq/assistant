@@ -35,7 +35,7 @@ func isolatedHome(t *testing.T) string {
 		// Routing is VALIDATED at load, so an ambient invalid value here would fail
 		// every unrelated config test with a message about endpoint routing.
 		"DAINTREE_ROUTING_PRIVACY", "DAINTREE_ROUTING_SORT",
-		"DAINTREE_ROUTING_ONLY", "DAINTREE_ROUTING_IGNORE",
+		"DAINTREE_ROUTING_ONLY", "DAINTREE_ROUTING_IGNORE", "DAINTREE_AGENT_HANDBACK",
 	} {
 		os.Unsetenv(k)
 	}
@@ -112,6 +112,42 @@ func TestLoadConfig_WorkflowIntelligenceDefaultsOnAndCanBeTurnedOff(t *testing.T
 	t.Setenv("DAINTREE_WORKFLOW_INTELLIGENCE", "0")
 	if !mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir), WorkflowIntelligence: boolptr(true)}).WorkflowIntelligence {
 		t.Error("explicit override should beat env")
+	}
+}
+
+func TestLoadConfig_AgentHandbackDefaultsOnAndCanBeTurnedOff(t *testing.T) {
+	isolatedHome(t)
+	stateDir := t.TempDir()
+	if !mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir)}).AgentHandback {
+		t.Error("agentHandback should default ON — the model does nothing to enable it")
+	}
+	for _, off := range []string{"0", "false", "off"} {
+		t.Setenv("DAINTREE_AGENT_HANDBACK", off)
+		if mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir)}).AgentHandback {
+			t.Errorf("DAINTREE_AGENT_HANDBACK=%q should turn handback requests off", off)
+		}
+	}
+	// An explicit override beats the env, in both directions.
+	if !mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir), AgentHandback: boolptr(true)}).AgentHandback {
+		t.Error("explicit override should beat env")
+	}
+	t.Setenv("DAINTREE_AGENT_HANDBACK", "1")
+	if mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir), AgentHandback: boolptr(false)}).AgentHandback {
+		t.Error("explicit override should beat env")
+	}
+	// Trusted-or-own: a bound project's .env is repo content and must not be able to
+	// change what this process sends to Daintree.
+	t.Setenv("DAINTREE_AGENT_HANDBACK", "")
+	os.Unsetenv("DAINTREE_AGENT_HANDBACK")
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, ".env"), []byte("DAINTREE_AGENT_HANDBACK=0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !mustLoad(t, ConfigOverrides{StateDir: strptr(stateDir), ProjectPath: strptr(projectDir)}).AgentHandback {
+		t.Error("a project .env must not be able to switch handback requests off")
+	}
+	if got := DescribeConfig(AppConfig{AgentHandback: true})["agentHandback"]; got != "true" {
+		t.Errorf("DescribeConfig agentHandback = %q, want true", got)
 	}
 }
 

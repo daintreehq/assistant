@@ -297,8 +297,17 @@ func newTerminalSendCommandTool(deps Deps) tools.Tool {
 			if deps.Observer != nil {
 				deps.Observer.MarkCommandSent(strings.TrimSpace(a.TerminalID), domain.NowMS())
 			}
-			return terminalSendCommandPassthrough(ctx, deps.MCP, a.TerminalID, a.Command,
-				map[string]any{"terminalId": a.TerminalID, "command": a.Command})
+			args := map[string]any{"terminalId": a.TerminalID, "command": a.Command}
+			if !sendRequestsHandback(ctx, deps, a.TerminalID) {
+				return terminalSendCommandPassthrough(ctx, deps.MCP, a.TerminalID, a.Command, args)
+			}
+			res := terminalSendCommandPassthrough(ctx, deps.MCP, a.TerminalID, a.Command, withHandback(args))
+			if handbackRefused(res) {
+				// Daintree validated the target and sent NOTHING. The model has no
+				// argument to drop, so drop it here and send what it asked for.
+				return terminalSendCommandPassthrough(ctx, deps.MCP, a.TerminalID, a.Command, args)
+			}
+			return res
 		},
 	}
 }

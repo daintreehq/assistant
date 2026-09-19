@@ -12,6 +12,7 @@ import (
 	"github.com/daintreehq/assistant/internal/mcp"
 	"github.com/daintreehq/assistant/internal/tools/asyncx"
 	"github.com/daintreehq/assistant/internal/tools/extractionx"
+	"github.com/daintreehq/assistant/internal/tools/handback"
 	"github.com/daintreehq/assistant/internal/tools/terminalid"
 )
 
@@ -269,7 +270,15 @@ func (a asyncStatusReaderAdapter) ReadSubmission(ctx context.Context, terminalID
 // accepted the command before the connection dropped — and the tool phrases
 // the two failures differently (a rejected send may be retried; an ambiguous
 // one must not be blindly re-sent).
-type asyncCommandSenderAdapter struct{ c *mcp.Client }
+type asyncCommandSenderAdapter struct {
+	c mcpToolCaller
+	// requestHandback decides whether THIS send asks Daintree for a handback (#385).
+	// terminal.run.async is the other way a follow-up prompt reaches an agent, so it
+	// applies the same three gates as the terminal.sendCommand wrapper — switch on,
+	// target known to hold a live agent, argument advertised by the host — through
+	// App.sendRequestsHandback. nil ⇒ never, which is the pre-feature call.
+	requestHandback func(ctx context.Context, terminalID string) bool
+}
 
 func (s asyncCommandSenderAdapter) SendCommand(ctx context.Context, terminalID, command string) error {
 	_, err := s.SendCommandWithReceipt(ctx, terminalID, command)
@@ -277,10 +286,23 @@ func (s asyncCommandSenderAdapter) SendCommand(ctx context.Context, terminalID, 
 }
 
 func (s asyncCommandSenderAdapter) SendCommandWithReceipt(ctx context.Context, terminalID, command string) (domain.SubmissionReceipt, error) {
-	res, err := s.c.CallTool(ctx, "terminal.sendCommand", map[string]any{
+	args := map[string]any{
 		"terminalId": terminalID,
 		"command":    command,
-	}, mcp.CallOptions{})
+	}
+	flagged := s.requestHandback != nil && s.requestHandback(ctx, terminalID)
+	if flagged {
+		args[handback.Arg] = true
+	}
+	res, err := s.c.CallTool(ctx, "terminal.sendCommand", args, mcp.CallOptions{})
+	if err == nil && flagged && handback.IsRefusal(res.IsError, res.Text) {
+		// Daintree validates the target BEFORE dispatching and refused the flag, so
+		// nothing was sent: repeating the call without it is still the ONE send this
+		// adapter promises. Only an error RESULT gets here — a transport error stays
+		// ambiguous and is returned as-is below, never re-sent.
+		delete(args, handback.Arg)
+		res, err = s.c.CallTool(ctx, "terminal.sendCommand", args, mcp.CallOptions{})
+	}
 	if err != nil {
 		return domain.SubmissionReceipt{}, err
 	}

@@ -24,11 +24,25 @@ type MCPCallResult struct {
 	IsError           bool   `json:"isError"`
 }
 
+// MCPToolInfo is the slice of a Daintree tool descriptor the spawn reads: the
+// ADVERTISED input schema, which is the only place a host says whether agent.launch
+// accepts an optional argument this CLI learned about later (internal/tools/handback).
+// InputSchemaProvided separates a schema the server published from the client's
+// accept-anything stand-in, which must never read as support.
+type MCPToolInfo struct {
+	Name                string
+	InputSchema         map[string]any
+	InputSchemaProvided bool
+}
+
 // MCPClient is the slice of the Daintree MCP transport this family reaches:
-// agent.launch (the side-effecting spawn) and terminal.list (reconciliation).
+// agent.launch (the side-effecting spawn), terminal.list (reconciliation), and the
+// cache-first tool catalog (force=false costs no round trip once the connection is
+// warm), read only to learn what agent.launch's schema advertises.
 type MCPClient interface {
 	Connected() bool
 	CallTool(ctx context.Context, name string, args map[string]any) (MCPCallResult, error)
+	ListTools(ctx context.Context, force bool) ([]MCPToolInfo, error)
 }
 
 // Store is the slice of the storage layer the spawn saga touches. The signatures
@@ -75,6 +89,9 @@ type Deps struct {
 	// nil (or an unbound pin) ⇒ the id stays omitted and Daintree picks its live
 	// active worktree, which is exactly the pre-pin behaviour.
 	WorktreePin WorktreePin
+	// handbackMemo narrows the handback decision per spawn key (see launchAcceptsHandback).
+	// Set by Tools; nil ⇒ nothing is remembered.
+	handbackMemo *handbackMemo
 	// DefaultAgent reads the agent Daintree would launch when a spawn names none —
 	// the user's setting, not this tool's guess. nil (or an empty read) falls back to
 	// the built-in default, which is what an older host that reports no default gets.
@@ -119,6 +136,11 @@ func (d Deps) daemonActive() bool {
 // re-spawning), plus two RiskRead readers (status by id, list newest-first) so the
 // model can inspect the spawn saga without re-launching anything.
 func Tools(deps Deps) []tools.Tool {
+	// One memo for the family's lifetime, shared by every dispatch of the spawn tool
+	// (Deps is copied by value into each handler; the pointer is what they share).
+	if deps.handbackMemo == nil {
+		deps.handbackMemo = &handbackMemo{}
+	}
 	return []tools.Tool{
 		newSpawnForEditsTool(deps),
 		newSuperviseTerminalTool(deps),
