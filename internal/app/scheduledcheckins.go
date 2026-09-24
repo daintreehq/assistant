@@ -53,7 +53,14 @@ type scheduledCheckinsNegotiation struct {
 //     compaction gates on surfaces that never negotiated them, which is a decision
 //     about other features this one has no business making (826a5d0 removed a boot
 //     warm-up for exactly that). It does READ the shared cache, because an explicit
-//     handshake for the same endpoint is the same question already answered.
+//     handshake for the same endpoint is the same question already answered (a
+//     `false` there included).
+//   - The NEWEST answer for the live endpoint wins, in both directions. A backend can
+//     roll back: if this gate negotiated `true` and a later explicit handshake (a
+//     /doctor, a /routing) reports `false` for the same URL, the private `true` must
+//     not keep sending a field that now 422s every turn — and a later negotiation
+//     likewise supersedes an older handshake. Snapshots carry a sequence number for
+//     exactly this comparison.
 //   - A failed ask is retried no sooner than scheduledCheckinsRetryAfter per endpoint.
 //     A /backend switch changes the live URL, so the stale answer stops being believed
 //     and the next consult asks the new endpoint.
@@ -62,16 +69,18 @@ func (a *App) backendAcceptsScheduledCheckins() bool {
 		return false
 	}
 	live := a.Backend.BaseURL()
-	if snap := a.backendCaps.Load(); snap != nil && snap.baseURL == live {
-		if snap.caps.Respond.ScheduledCheckins {
-			return true
-		}
-	}
 	n := &a.checkins
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.snap != nil && n.snap.baseURL == live {
-		return n.snap.caps.Respond.ScheduledCheckins
+	var answer *backendCapsSnapshot
+	if snap := a.backendCaps.Load(); snap != nil && snap.baseURL == live {
+		answer = snap
+	}
+	if snap := n.snap; snap != nil && snap.baseURL == live && (answer == nil || snap.seq > answer.seq) {
+		answer = snap
+	}
+	if answer != nil {
+		return answer.caps.Respond.ScheduledCheckins
 	}
 	if n.inFlight {
 		return false
@@ -113,5 +122,5 @@ func (a *App) negotiateScheduledCheckins() {
 		n.lastFailAt = time.Now()
 		return
 	}
-	n.snap = &backendCapsSnapshot{baseURL: asked, caps: caps}
+	n.snap = &backendCapsSnapshot{baseURL: asked, caps: caps, seq: backendCapsSeq.Add(1)}
 }

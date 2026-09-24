@@ -178,3 +178,54 @@ func TestScheduledCheckinsReachTheWire(t *testing.T) {
 		t.Fatalf("scheduled check-in rows = %q", rows)
 	}
 }
+
+// A backend rollback must close the gate. The lazy probe filed `true` privately; a
+// LATER explicit handshake for the same endpoint says `false`. The newer answer wins —
+// otherwise the private `true` keeps sending a field the rolled-back backend now 422s
+// on every turn. And a still-newer handshake that says `true` again reopens it.
+func TestScheduledCheckinsGateFollowsTheNewestAnswerBothWays(t *testing.T) {
+	var accepts atomic.Bool
+	accepts.Store(true)
+	fb := &fakeBackend{caps: func() (backend.Capabilities, error) {
+		caps := backend.Capabilities{}
+		caps.Respond.ScheduledCheckins = accepts.Load()
+		return caps, nil
+	}}
+	a := checkinApp(t, fb)
+
+	_ = a.backendAcceptsScheduledCheckins()
+	waitNegotiated(t, a)
+	if !a.backendAcceptsScheduledCheckins() {
+		t.Fatal("precondition: the lazy probe should have opened the gate")
+	}
+
+	accepts.Store(false) // the deployment rolls back
+	if _, err := a.BackendCapabilities(context.Background()); err != nil {
+		t.Fatalf("explicit handshake: %v", err)
+	}
+	if a.backendAcceptsScheduledCheckins() {
+		t.Fatal("a newer handshake reporting scheduled_checkins:false must close the gate over the older private true")
+	}
+
+	accepts.Store(true) // and forward again
+	if _, err := a.BackendCapabilities(context.Background()); err != nil {
+		t.Fatalf("explicit handshake: %v", err)
+	}
+	if !a.backendAcceptsScheduledCheckins() {
+		t.Fatal("a still-newer handshake reporting true must reopen the gate")
+	}
+}
+
+// An explicit handshake that already said `false` for the live endpoint is an answer:
+// the gate must not go and negotiate around it.
+func TestScheduledCheckinsGateTrustsAnExplicitNo(t *testing.T) {
+	a, calls := pinCapableApp(t, nil, checkinCaps(), nil)
+	a.backendCaps.Store(&backendCapsSnapshot{baseURL: a.Backend.BaseURL(), caps: backend.Capabilities{}, seq: backendCapsSeq.Add(1)})
+	if a.backendAcceptsScheduledCheckins() {
+		t.Fatal("an explicit false for the live endpoint must keep the gate shut")
+	}
+	waitNegotiated(t, a)
+	if got := atomic.LoadInt32(calls); got != 0 {
+		t.Fatalf("the gate negotiated around an explicit answer: %d calls", got)
+	}
+}

@@ -397,7 +397,15 @@ func (a *App) DisplaySize() *prompts.DisplayContext { return a.display.Load() }
 type backendCapsSnapshot struct {
 	baseURL string
 	caps    backend.Capabilities
+	// seq orders snapshots across the caches that hold them (the shared backendCaps
+	// and the scheduled check-in gate's private slot): the higher value is the newer
+	// answer. Stamped from backendCapsSeq when the answer is FILED. Zero (a literal
+	// built in a test) reads as older than any filed answer.
+	seq uint64
 }
+
+// backendCapsSeq issues snapshot sequence numbers; see backendCapsSnapshot.seq.
+var backendCapsSeq atomic.Uint64
 
 // BackendCapabilities fetches the live backend's capability descriptor and caches it
 // for the per-turn readers. Every capability fetch should come through here so the
@@ -426,7 +434,7 @@ func (a *App) BackendCapabilities(ctx context.Context) (backend.Capabilities, er
 	if err != nil {
 		return backend.Capabilities{}, err
 	}
-	a.backendCaps.Store(&backendCapsSnapshot{baseURL: asked, caps: caps})
+	a.backendCaps.Store(&backendCapsSnapshot{baseURL: asked, caps: caps, seq: backendCapsSeq.Add(1)})
 	return caps, nil
 }
 
