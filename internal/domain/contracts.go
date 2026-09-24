@@ -45,6 +45,35 @@ type EventTarget struct {
 	// real one means the single gate before a turn starts can be exact no matter which
 	// path the event arrived by.
 	TimerDueAt int64 `json:"timerDueAt,omitempty"`
+	// The schedule's shape AT THIS FIRE, carried on a scheduled message only, so the
+	// turn it starts can see where a repeating check-in loop stands without a
+	// timer.list round trip: its cadence, its bounds, and whether this occurrence is
+	// the LAST one (TimerFinal — the claim that fired it retired the row, so no further
+	// tick is coming and the turn must wrap up rather than defer to "next check").
+	//
+	// Delivery metadata, never meaning: IsTimerMessageEvent does not read any of them,
+	// and every path that clears TimerMessage clears these with it. Zero means "not
+	// set" (a one-shot, an unbounded field, or an event written before they existed).
+	TimerEveryMs     int64 `json:"timerEveryMs,omitempty"`
+	TimerMaxRuns     int   `json:"timerMaxRuns,omitempty"`
+	TimerRepeatUntil int64 `json:"timerRepeatUntil,omitempty"`
+	TimerFinal       bool  `json:"timerFinal,omitempty"`
+}
+
+// ClearTimerMessage returns a copy of t with the scheduled-message provenance removed —
+// the marker, the occurrence, and the loop-position metadata that only means anything
+// beside the marker. Every path that must NOT confer instruction status on an event
+// (a failure published through a message's target, a model-authored queue.publish)
+// goes through here, so a field added to the provenance later is cleared everywhere
+// at once rather than at whichever site remembered it.
+func (t EventTarget) ClearTimerMessage() EventTarget {
+	t.TimerMessage = false
+	t.TimerOccurrence = 0
+	t.TimerEveryMs = 0
+	t.TimerMaxRuns = 0
+	t.TimerRepeatUntil = 0
+	t.TimerFinal = false
+	return t
 }
 
 // RecommendedAction is a suggested follow-up tool call surfaced on a queue event.

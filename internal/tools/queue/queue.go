@@ -138,10 +138,8 @@ func newPublishTool(deps Deps) *tools.Tool {
 			// deliver its text as the user's own instruction, in a paid turn, with no
 			// timer behind it. Only fireTimer may confer that meaning, so it is cleared
 			// here rather than validated: there is no legitimate caller to accommodate.
-			if a.Target != nil && (a.Target.TimerMessage || a.Target.TimerOccurrence != 0) {
-				stripped := *a.Target
-				stripped.TimerMessage = false
-				stripped.TimerOccurrence = 0
+			if a.Target != nil && *a.Target != a.Target.ClearTimerMessage() {
+				stripped := a.Target.ClearTimerMessage()
 				a.Target = &stripped
 			}
 			q := deps.queue()
