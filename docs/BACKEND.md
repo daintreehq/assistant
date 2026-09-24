@@ -579,7 +579,8 @@ with something unparseable (usually a provider or compatibility problem).
   unusable agent id. `request.runtime` carries tier, MCP, scheduler, a freshly read typed
   worktree snapshot, open terminals, and the terminal geometry the reply renders at. Stable project
   and agent fields are not duplicated in this fresh tail. `request.turn` carries the goal,
-  wake, workflow runs, async operations, memories, and `resumed_watchers`.
+  wake, workflow runs, async operations, memories, `resumed_watchers`, and — when the
+  endpoint accepts it — `scheduled_checkins` (below).
 - **The integration surface names its endpoints.** `runtime.mcp_servers` lists every MCP
   server this process is wired to — the primary Daintree control plane, and nothing else
   since the docs client was removed (issue #332) — each as `name` + a `description` leading
@@ -625,6 +626,20 @@ with something unparseable (usually a provider or compatibility problem).
   fails closed and withholds the geometry until a handshake advertises support (the
   descriptor is cached by `App.BackendCapabilities` and re-fetched when the endpoint
   changes). Delete the gate once no such deployment is reachable.
+- **A check-in loop rides every turn.** `turn.scheduled_checkins` carries one line per
+  still-scheduled `message` timer — the ticks of a repeating check-in loop, each of which
+  will start a turn — nearest first, capped at 10 plus a `+N more — call timer.list` tail:
+  id, title (untrusted, collapsed, quote-neutralised, clipped), next fire (RFC3339 UTC and
+  relative), cadence or `once`, runs done/max, `until` deadline, and the linked
+  `workflowRunId`. `enqueue` and `call_safe_tool` timers are deliberately absent: neither
+  starts a turn. Re-read every round on every turn kind, wakes included, so a watcher or
+  async completion wake sees the loop it runs inside. **Gated on
+  `capabilities.respond.scheduled_checkins`** for the same `extra="forbid"` reason as
+  `display_context`, but unlike that gate it NEGOTIATES: the first round that actually has
+  a message timer to send starts one detached capability GET (its answer kept in the
+  gate's own slot, never the shared cache, so no other gate opens as a side effect) and
+  the block rides from a later round. A launch with no message timer never asks. See
+  `App.backendAcceptsScheduledCheckins`.
 - **Worktree read state is explicit.** An omitted `runtime.worktree` means the live read was
   unavailable, `{current:null}` means Daintree definitively reports no current worktree,
   and a current object carries id/path/branch/issue/PR/status/last-commit fields.

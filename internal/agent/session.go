@@ -16,6 +16,7 @@ import (
 	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/models"
 	"github.com/daintreehq/assistant/internal/prompts"
+	"github.com/daintreehq/assistant/internal/timers"
 	"github.com/daintreehq/assistant/internal/waitbudget"
 )
 
@@ -3101,6 +3102,9 @@ func (s *Session) buildTurnContext(goal string, isWake bool, recalled []domain.M
 		AsyncOperations: asyncInvocationStrings(s.asyncInvocationsForFooter()),
 		ResumedWatchers: resumedWatchers,
 		WorkflowState:   s.workflowDigestsForTurn(),
+		// Every turn kind, wakes included: the point is that a watcher or async
+		// completion wake sees the check-in loop it is running inside.
+		ScheduledCheckins: s.scheduledCheckinsForTurn(),
 	}
 	pinned := memoryStrings(s.pinnedMemoriesForFooter())
 	relevant := memoryStrings(recalled)
@@ -3299,6 +3303,29 @@ func (s *Session) asyncInvocationsForFooter() []domain.AsyncInvocationRecord {
 	rows, _ := s.deps.AsyncInvocationLister.ListLiveAsyncInvocations()
 	if len(rows) > activeAsyncOperationsLimit {
 		rows = rows[:activeAsyncOperationsLimit]
+	}
+	return rows
+}
+
+// scheduledCheckinsForTurn renders the still-scheduled MESSAGE timers for this round's
+// turn context, best-effort: a nil lister, a read error, or no message timer yields nil.
+// The rows are read BEFORE the gate is consulted, and the gate only when there is
+// something to send — the production gate negotiates the capability on first use, so
+// asking it unconditionally would put a round trip on every ordinary launch.
+func (s *Session) scheduledCheckinsForTurn() []string {
+	if s.deps.ScheduledTimerLister == nil {
+		return nil
+	}
+	scheduled, err := s.deps.ScheduledTimerLister.ListTimers(timers.StatusScheduled)
+	if err != nil {
+		return nil
+	}
+	rows := scheduledCheckinRows(scheduled, domain.NowMS())
+	if len(rows) == 0 {
+		return nil
+	}
+	if s.deps.BackendAcceptsScheduledCheckins == nil || !s.deps.BackendAcceptsScheduledCheckins() {
+		return nil
 	}
 	return rows
 }
