@@ -785,10 +785,19 @@ func TestSpawnWatcherLifecycleNoticeSchedulerRunning(t *testing.T) {
 	if !res.Ok {
 		t.Fatalf("expected ok, got %+v", res.Error)
 	}
+	// Watchers are project-scoped and adopted by the next owner (Store.BeginOwnership),
+	// so the note must say supervision is durable — and must never again claim the
+	// watcher dies with the window, which told the model its true after-close
+	// promises were false.
 	if !strings.Contains(res.Summary, "watcher") ||
-		!strings.Contains(res.Summary, "discarded when you close the assistant") ||
-		!strings.Contains(res.Summary, "does not resume on the next launch") {
-		t.Fatalf("lifecycle note missing: %q", res.Summary)
+		!strings.Contains(res.Summary, "supervision is durable") ||
+		!strings.Contains(res.Summary, "keeps checking after the assistant closes") {
+		t.Fatalf("durable lifecycle note missing: %q", res.Summary)
+	}
+	for _, stale := range []string{"discarded when you close", "does not resume on the next launch", "session-scoped"} {
+		if strings.Contains(res.Summary, stale) {
+			t.Fatalf("lifecycle note still carries the false %q claim: %q", stale, res.Summary)
+		}
 	}
 }
 
@@ -811,7 +820,7 @@ func TestSpawnNoWatcherOmitsLifecycleNote(t *testing.T) {
 	if !res.Ok {
 		t.Fatalf("expected ok, got %+v", res.Error)
 	}
-	if strings.Contains(res.Summary, "discarded when you close the assistant") {
+	if strings.Contains(res.Summary, "NOTE:") {
 		t.Fatalf("lifecycle note should be omitted with no watcher: %q", res.Summary)
 	}
 }

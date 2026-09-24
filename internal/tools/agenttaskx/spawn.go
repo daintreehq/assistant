@@ -782,10 +782,16 @@ func finishBoundLaunch(deps Deps, a *spawnArgs, record *domain.AgentLaunchRecord
 
 	lifecycleNote := ""
 	if watcherID != "" {
+		// The same notes agentTask.superviseTerminal appends, because it is the same
+		// watcher. This used to say the watcher was "discarded when you close the
+		// assistant" and "session-scoped" — false since watchers became project-scoped
+		// and adopted by the next owner (Store.BeginOwnership), and the one false
+		// sentence a supervision loop cannot afford: it tells the model its after-close
+		// promises are lies, so it stops making the ones that are true.
 		if deps.daemonActive() {
-			lifecycleNote = " NOTE: supervision runs only while this assistant is open; this watcher is discarded when you close the assistant and does not resume on the next launch (watchers are session-scoped)."
+			lifecycleNote = durableSupervisionNote
 		} else {
-			lifecycleNote = " NOTE: no scheduler is running in this session, so this watcher will not check until the assistant runs interactively."
+			lifecycleNote = " NOTE: no scheduler is running in this one-shot invocation, so this watcher will not check until the assistant (or its background supervisor) next runs."
 		}
 	}
 
