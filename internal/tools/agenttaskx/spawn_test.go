@@ -786,15 +786,17 @@ func TestSpawnWatcherLifecycleNoticeSchedulerRunning(t *testing.T) {
 		t.Fatalf("expected ok, got %+v", res.Error)
 	}
 	// Watchers are project-scoped and adopted by the next owner (Store.BeginOwnership),
-	// so the note must say supervision is durable — and must never again claim the
-	// watcher dies with the window, which told the model its true after-close
-	// promises were false.
+	// so the note must say the watcher persists — and must never again claim it dies
+	// with the window. But DaemonActive only means THIS process runs a scheduler, not
+	// that a background supervisor exists, so after-close checking must stay
+	// conditional rather than promised.
 	if !strings.Contains(res.Summary, "watcher") ||
-		!strings.Contains(res.Summary, "supervision is durable") ||
-		!strings.Contains(res.Summary, "keeps checking after the assistant closes") {
-		t.Fatalf("durable lifecycle note missing: %q", res.Summary)
+		!strings.Contains(res.Summary, "resumes under the next owner of this project") ||
+		!strings.Contains(res.Summary, "only while a background supervisor is actually running") {
+		t.Fatalf("lifecycle note missing its persistence + conditional after-close wording: %q", res.Summary)
 	}
-	for _, stale := range []string{"discarded when you close", "does not resume on the next launch", "session-scoped"} {
+	for _, stale := range []string{"discarded when you close", "does not resume on the next launch", "session-scoped",
+		"supervision is durable", "the background supervisor adopts it"} {
 		if strings.Contains(res.Summary, stale) {
 			t.Fatalf("lifecycle note still carries the false %q claim: %q", stale, res.Summary)
 		}

@@ -14,9 +14,10 @@ import (
 const supervisorDefaultCadenceMs = 3000
 
 // durableSupervisionNote is appended to a summary whenever a supervisor watcher
-// is attached: watchers are project-scoped and keep running after the assistant
-// closes (the background supervisor adopts them).
-const durableSupervisionNote = " NOTE: supervision is durable — the watcher keeps checking after the assistant closes (the background supervisor adopts it) and pauses only if Daintree itself closes."
+// is attached. Same wording and reasoning as agenttaskx.durableSupervisionNote:
+// persistence and adoption by the next owner are guaranteed; after-close checking
+// holds only while a background supervisor is actually running.
+const durableSupervisionNote = " NOTE: the watcher is project-scoped — it persists and resumes under the next owner of this project. It keeps checking after the assistant closes only while a background supervisor is actually running; otherwise it resumes when the assistant next opens. Pauses if Daintree itself closes."
 
 // workflowMcpArgs is the shared shape for the workflow MCP passthroughs: an
 // opaque arguments record (workflow setup fields are Daintree-defined), an
