@@ -517,7 +517,7 @@ func newListTool(deps Deps) *tools.Tool {
 	schema, _ := json.Marshal(tools.NoArgs)
 	return &tools.Tool{
 		Name:        "timer.list",
-		Description: "List the timers still SCHEDULED (not yet fired, not cancelled): id, title, fireAt (RFC3339 UTC), payloadType, runCount and any repeat settings. Timers do NOT ride the turn context, so this is the only way to see what is pending — call it before scheduling a near-duplicate reminder, when the user asks what is scheduled, or to get a tmr_… id for timer.cancel.",
+		Description: "List the timers still SCHEDULED (not yet fired, not cancelled): id, title, fireAt (RFC3339 UTC), payloadType, runCount, repeat settings (repeatEveryMs, maxRuns, runsLeft, repeatUntil) and target (workflowRunId/worktreeId/terminalId it was linked to). Only \"message\" timers — the check-ins that start a turn — may also ride the turn context, and only the nearest few; this is the full list. Call it before scheduling a near-duplicate, when the user asks what is scheduled, or to get a tmr_… id for timer.cancel.",
 		Risk:        domain.RiskRead,
 		Schema:      schema,
 		Handle: func(_ context.Context, _ json.RawMessage, _ *tools.ToolContext) tools.ToolResult {
@@ -543,12 +543,46 @@ func newListTool(deps Deps) *tools.Tool {
 				}
 				if r.MaxRuns != nil {
 					view["maxRuns"] = *r.MaxRuns
+					// Occurrences still to come under the cap. An until deadline can
+					// end the schedule sooner, so this is an upper bound, not a promise.
+					left := *r.MaxRuns - r.RunCount
+					if left < 0 {
+						left = 0
+					}
+					view["runsLeft"] = left
+				}
+				if r.RepeatUntil != nil {
+					view["repeatUntil"] = time.UnixMilli(*r.RepeatUntil).UTC().Format(time.RFC3339)
+				}
+				// The linkage the timer was scheduled with — above all workflowRunId, which
+				// is how a check-in loop is joined to the ledger row it is driving. Decoded
+				// through the same strict type timer.schedule wrote, and omitted rather
+				// than guessed at when the stored blob does not parse.
+				if tgt := decodeTarget(r.TargetJson); tgt != nil {
+					view["target"] = tgt
 				}
 				out = append(out, view)
 			}
 			return tools.Ok(fmt.Sprintf("%d scheduled timer(s).", len(out)), map[string]any{"timers": out})
 		},
 	}
+}
+
+// decodeTarget returns a row's stored target as the schedule-time shape, or nil when it
+// is absent, empty, unreadable, or carries no field. It never fails the listing: a
+// target is context for the row, and one bad blob must not hide every pending timer.
+func decodeTarget(raw *string) *timerTarget {
+	if raw == nil || strings.TrimSpace(*raw) == "" {
+		return nil
+	}
+	var t timerTarget
+	if err := json.Unmarshal([]byte(*raw), &t); err != nil {
+		return nil
+	}
+	if t == (timerTarget{}) {
+		return nil
+	}
+	return &t
 }
 
 // --- timer.cancel ---

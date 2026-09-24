@@ -174,6 +174,15 @@ type AsyncInvocationLister interface {
 	ListLiveAsyncInvocations() ([]domain.AsyncInvocationRecord, error)
 }
 
+// ScheduledTimerLister is the read-only timer seam for the turn context's
+// scheduled-check-ins block: it returns the timers of one status (the Session asks for
+// "scheduled") so the model sees, every round, which scheduled MESSAGES are still
+// going to start a turn — the ticks of a check-in loop. Optional: nil omits the
+// block. Best-effort local read; never blocks or breaks the turn.
+type ScheduledTimerLister interface {
+	ListTimers(status string) ([]domain.TimerRecord, error)
+}
+
 // WorkflowDigestLister is the read-only workflow-intelligence seam for the
 // turn context (satisfied by *workflowgraph.Service): it renders the open
 // execution graphs as bounded, prompt-ready digests, re-read every round like
@@ -334,6 +343,14 @@ type SessionDeps struct {
 	// AsyncInvocationLister feeds the turn context's active-async-operations block,
 	// re-read every round like the workflow ledger (optional; nil ⇒ omitted).
 	AsyncInvocationLister AsyncInvocationLister
+	// ScheduledTimerLister feeds the turn context's scheduled_checkins block, re-read
+	// every round (optional; nil ⇒ omitted).
+	ScheduledTimerLister ScheduledTimerLister
+	// BackendAcceptsScheduledCheckins reports whether the endpoint about to be called
+	// accepts turn.scheduled_checkins. Consulted per round, and ONLY when there are rows
+	// to send, because the production gate may negotiate on first use. nil ⇒ fails
+	// closed (the default in tests), so the block never reaches the wire.
+	BackendAcceptsScheduledCheckins func() bool
 	// WorkflowDigestLister feeds the turn context's workflow_state block with the
 	// open execution-graph digests, re-read every round (optional; nil ⇒ omitted —
 	// the default, and always when workflow intelligence is disabled).

@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/daintreehq/assistant/internal/domain"
 )
@@ -512,11 +513,29 @@ func IsWakeFailureReply(reply string) bool {
 // assistant must not answer as though somebody is sitting there to take a follow-up
 // question.
 func buildTimerMessageWakePrompt(events []domain.QueueEvent) string {
+	// The loop-position fields (everyMs … final) are what let a repeating check-in end
+	// or pace itself honestly: without them the turn cannot tell its tenth tick from its
+	// last, and says "I'll check again in 10 minutes" on a schedule that has just
+	// retired. All omitempty, so a one-shot message renders as it always did plus
+	// `final: true` — the one fact that is true of every one-shot.
 	type dueMessage struct {
 		TimerID    string `json:"timerId"`
 		Occurrence int    `json:"occurrence,omitempty"`
 		Title      string `json:"title,omitempty"`
 		Message    string `json:"message"`
+		// EveryMs is the repeat cadence; absent on a one-shot.
+		EveryMs int64 `json:"everyMs,omitempty"`
+		// MaxRuns / RemainingRuns: the run cap and how many occurrences are left AFTER
+		// this one under it (an until deadline can end the loop sooner — `final` is the
+		// authoritative last-occurrence signal). Pointer so a genuine 0 still renders.
+		MaxRuns       int  `json:"maxRuns,omitempty"`
+		RemainingRuns *int `json:"remainingRuns,omitempty"`
+		// RepeatUntil is the repeat deadline, RFC3339 UTC.
+		RepeatUntil string `json:"repeatUntil,omitempty"`
+		// WorkflowRunID is the ledger row the timer was linked to, if any.
+		WorkflowRunID string `json:"workflowRunId,omitempty"`
+		// Final is true when no further occurrence of this timer will fire.
+		Final bool `json:"final,omitempty"`
 	}
 	due := make([]dueMessage, 0, len(events))
 	for _, e := range events {
@@ -525,9 +544,23 @@ func buildTimerMessageWakePrompt(events []domain.QueueEvent) string {
 			continue
 		}
 		m := dueMessage{Message: msg, Title: strings.TrimSpace(e.Title)}
-		if e.Target != nil {
-			m.TimerID = e.Target.TimerID
-			m.Occurrence = e.Target.TimerOccurrence
+		if t := e.Target; t != nil {
+			m.TimerID = t.TimerID
+			m.Occurrence = t.TimerOccurrence
+			m.EveryMs = t.TimerEveryMs
+			m.MaxRuns = t.TimerMaxRuns
+			if t.TimerMaxRuns > 0 && t.TimerOccurrence > 0 {
+				left := t.TimerMaxRuns - t.TimerOccurrence
+				if left < 0 || t.TimerFinal {
+					left = 0
+				}
+				m.RemainingRuns = &left
+			}
+			if t.TimerRepeatUntil > 0 {
+				m.RepeatUntil = time.UnixMilli(t.TimerRepeatUntil).UTC().Format(time.RFC3339)
+			}
+			m.WorkflowRunID = strings.TrimSpace(t.WorkflowRunID)
+			m.Final = t.TimerFinal
 		}
 		due = append(due, m)
 	}
@@ -559,7 +592,9 @@ func buildTimerMessageWakePrompt(events []domain.QueueEvent) string {
 		"report them back as events that happened. Where one cannot be done unattended — it " +
 		"needs a confirmation nobody is present to give, or authority you were not granted — " +
 		"say precisely what is blocked and leave it, rather than working around it. You cannot " +
-		"schedule another message from this turn, so do not try to defer or retry one.\n\n" +
+		"schedule another message from this turn, so do not try to defer or retry one. A repeating " +
+		"message's metadata says where its schedule stands: \"final\": true means no further " +
+		"occurrence will fire, so wrap up and report instead of deferring anything to a next check.\n\n" +
 		"Delivery is AT LEAST ONCE. A message interrupted by a restart is delivered again, so " +
 		"this may not be the first attempt. Before any step that is destructive or would " +
 		"duplicate work, check whether it has already been done and say what you found — do not " +

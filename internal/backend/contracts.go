@@ -449,6 +449,14 @@ type TurnContext struct {
 	// extra="forbid", so a backend without the matching contract must never see
 	// the field (omitempty keeps the wire byte-identical when the feature is off).
 	WorkflowState []WorkflowDigest `json:"workflow_state,omitempty"`
+	// ScheduledCheckins are the still-scheduled MESSAGE timers — the ticks of a
+	// check-in loop, each of which will start a turn when due — one pre-formatted
+	// line each, re-read every round. It is what lets a turn woken by something else
+	// (a watcher, an async completion) see that a loop is running and where it
+	// stands, instead of pacing it from memory. Sent ONLY when the endpoint advertises
+	// respond.scheduled_checkins: TurnContext is extra="forbid" server-side, so an
+	// unaware backend would 422 the turn (see App.backendAcceptsScheduledCheckins).
+	ScheduledCheckins []string `json:"scheduled_checkins,omitempty"`
 }
 
 // WorkflowDigest is one bounded, prompt-ready summary of a workflow graph.
@@ -1306,6 +1314,10 @@ type RespondCapsBlock struct {
 	// a handshake says otherwise (App.PromptContext). Delete the gate once no such
 	// deployment is reachable.
 	DisplayContext bool `json:"display_context"`
+	// ScheduledCheckins reports that this backend accepts (and renders)
+	// `turn.scheduled_checkins`. A GATE in the same sense as DisplayContext: the turn
+	// block is extra="forbid", so the CLI withholds the rows until it sees this.
+	ScheduledCheckins bool `json:"scheduled_checkins"`
 }
 
 // CostReportingCaps describes the backend's cost-reporting contract.

@@ -46,8 +46,10 @@ func TestSuperviseTerminalHappyPath(t *testing.T) {
 	if m["terminalId"] != "term_7" || m["watcherId"] == nil || m["watcherId"] == "" {
 		t.Fatalf("result missing terminalId/watcherId: %+v", m)
 	}
-	if !strings.Contains(res.Summary, "supervision is durable") {
-		t.Fatalf("summary must carry the durable-supervision note, got %q", res.Summary)
+	if !strings.Contains(res.Summary, "resumes under the next owner of this project") ||
+		!strings.Contains(res.Summary, "only while a background supervisor is actually running") ||
+		strings.Contains(res.Summary, "supervision is durable") {
+		t.Fatalf("summary must carry the conditional supervision note (persists; after-close only with a running supervisor), got %q", res.Summary)
 	}
 	// Adoption must NOT write an agent_launch saga.
 	if len(st.launches) != 0 {

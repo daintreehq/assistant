@@ -305,6 +305,11 @@ type App struct {
 	// endpoint, so a mismatched answer is simply not believed.
 	backendCaps atomic.Pointer[backendCapsSnapshot]
 
+	// checkins is the scheduled check-in gate's own negotiated capability answer and
+	// its in-flight/backoff state (see backendAcceptsScheduledCheckins). Kept apart
+	// from backendCaps on purpose: that cache opens other features' gates.
+	checkins scheduledCheckinsNegotiation
+
 	// pinnedRunbookIDs are the runbooks the LAUNCH named (`--runbook`, or `runbooks` on
 	// daintree.session.open) and every turn of this session must load. Immutable after
 	// Create: argv and the session-open arguments are both session-constant, so there
@@ -392,7 +397,15 @@ func (a *App) DisplaySize() *prompts.DisplayContext { return a.display.Load() }
 type backendCapsSnapshot struct {
 	baseURL string
 	caps    backend.Capabilities
+	// seq orders snapshots across the caches that hold them (the shared backendCaps
+	// and the scheduled check-in gate's private slot): the higher value is the newer
+	// answer. Stamped from backendCapsSeq when the answer is FILED. Zero (a literal
+	// built in a test) reads as older than any filed answer.
+	seq uint64
 }
+
+// backendCapsSeq issues snapshot sequence numbers; see backendCapsSnapshot.seq.
+var backendCapsSeq atomic.Uint64
 
 // BackendCapabilities fetches the live backend's capability descriptor and caches it
 // for the per-turn readers. Every capability fetch should come through here so the
@@ -421,7 +434,7 @@ func (a *App) BackendCapabilities(ctx context.Context) (backend.Capabilities, er
 	if err != nil {
 		return backend.Capabilities{}, err
 	}
-	a.backendCaps.Store(&backendCapsSnapshot{baseURL: asked, caps: caps})
+	a.backendCaps.Store(&backendCapsSnapshot{baseURL: asked, caps: caps, seq: backendCapsSeq.Add(1)})
 	return caps, nil
 }
 
@@ -869,6 +882,12 @@ func Create(opts CreateOptions) (*App, error) {
 		// Live async futures for the turn context's async-operations block, re-read
 		// every round so the model sees (and never re-issues) its in-flight work.
 		AsyncInvocationLister: store,
+		// Scheduled MESSAGE timers — a check-in loop's ticks — for the turn context's
+		// scheduled_checkins block, re-read every round. The gate is a func for the same
+		// endpoint-pinning reason as the pinned-runbook gate, and it negotiates lazily
+		// only once a session actually holds such a timer.
+		ScheduledTimerLister:            store,
+		BackendAcceptsScheduledCheckins: a.backendAcceptsScheduledCheckins,
 		// Open workflow-graph digests for the turn context's workflow_state block
 		// (nil when DAINTREE_WORKFLOW_INTELLIGENCE=0 — the wire then stays
 		// byte-identical to the pre-feature request).

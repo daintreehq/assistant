@@ -2,8 +2,10 @@ package agent
 
 import (
 	"encoding/json"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/daintreehq/assistant/internal/domain"
 	"github.com/daintreehq/assistant/internal/models"
@@ -84,7 +86,9 @@ const activeAsyncOperationsLimit = 16
 // the LIMIT handed to the store read). The footer is a re-anchoring glance at open
 // work, not a full ledger dump — the newest handful of runs is enough; the model can
 // call workflow.list for the rest. Defined here (not session.go) so the row cap and
-// the query bound are one number in one place.
+// the query bound are one number in one place. The workflow.create/get/list tool
+// descriptions state this number to the model ("the 10 most recently updated open
+// rows"), so change them with it.
 const activeWorkflowRunsLimit = 10
 
 // workflowRunIDPreviewMax bounds how many terminal/watcher ids a single run row
@@ -587,4 +591,172 @@ func cleanWorkflowField(s *string) string {
 func cleanWorkflowFieldStr(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
 	return sliceChars(s, workflowRunFieldMaxRunes)
+}
+
+// scheduledCheckinsLimit caps how many scheduled-check-in rows ride one turn context.
+// Nearest-first, so the rows kept are the ticks about to happen; the rest collapse into
+// one "+N more" tail row pointing at timer.list. The same re-anchoring glance as the
+// workflow rows, not a ledger.
+const scheduledCheckinsLimit = 10
+
+// scheduledCheckinTitleMaxRunes bounds a timer title copied into a check-in row. A bit
+// longer than the workflow fields because the title is the only human-readable handle a
+// check-in row has.
+const scheduledCheckinTitleMaxRunes = 60
+
+// scheduledCheckinRows renders the still-scheduled MESSAGE timers as one line each —
+// the ticks of a check-in loop, which is what a scheduled message becomes when it
+// repeats. Nearest fire first, capped at scheduledCheckinsLimit plus a "+N more" tail.
+// Returns nil when there is nothing to show.
+//
+// Messages only, and that is the whole selection rule. A "message" occurrence is the
+// one timer event that STARTS A TURN, so it is the one a turn woken by something else
+// must know about: "the loop will check again at 06:40, and has 20 runs left" is what
+// keeps a completion wake from pacing the loop itself or promising a check that is not
+// scheduled. An "enqueue" posts an inbox note and a "call_safe_tool" runs one fixed
+// dispatch; neither starts a turn, neither is a loop the model is pacing, and listing
+// them would spend every round's context on rows no turn acts on — timer.list has them.
+//
+// A PURE formatter over untrusted data: the title is model/user text, so it is
+// whitespace-collapsed (no newline can forge a second row or a heading), its double
+// quotes are neutralised so it cannot close its own quoting, and it is rune-capped. Ids
+// are collapsed the same way. Nothing here can panic on a bad row.
+func scheduledCheckinRows(timers []domain.TimerRecord, now int64) []string {
+	var due []domain.TimerRecord
+	for i := range timers {
+		t := timers[i]
+		if t.Status != "scheduled" || t.PayloadType != "message" {
+			continue
+		}
+		due = append(due, t)
+	}
+	if len(due) == 0 {
+		return nil
+	}
+	sort.SliceStable(due, func(i, j int) bool { return due[i].FireAt < due[j].FireAt })
+	extra := 0
+	if len(due) > scheduledCheckinsLimit {
+		extra = len(due) - scheduledCheckinsLimit
+		due = due[:scheduledCheckinsLimit]
+	}
+	out := make([]string, 0, len(due)+1)
+	for i := range due {
+		out = append(out, renderScheduledCheckinRow(due[i], now))
+	}
+	if extra > 0 {
+		out = append(out, "+"+strconv.Itoa(extra)+" more scheduled check-ins — call timer.list")
+	}
+	return out
+}
+
+// renderScheduledCheckinRow formats one scheduled message timer as a single line:
+//
+//	tmr_ab12 "Check the job queue"  next 2026-09-24T06:40:00Z (in 7m)  every 10m  runs 3/30  until 2026-09-24T12:00:00Z  workflow wfr_x
+//
+// A one-shot reads "once" in place of the cadence; a timer already due reads
+// "(due now)"; unbounded/absent fields are simply dropped. Double spaces separate the
+// fragments because the backend joins rows with ", ".
+func renderScheduledCheckinRow(t domain.TimerRecord, now int64) string {
+	var b strings.Builder
+	b.WriteString(collapseID(t.ID))
+	title := strings.ReplaceAll(strings.Join(strings.Fields(t.Title), " "), `"`, "'")
+	if title = sliceChars(title, scheduledCheckinTitleMaxRunes); title != "" {
+		b.WriteString(` "`)
+		b.WriteString(title)
+		b.WriteString(`"`)
+	}
+
+	b.WriteString("  next ")
+	b.WriteString(time.UnixMilli(t.FireAt).UTC().Format(time.RFC3339))
+	if delta := t.FireAt - now; delta > 0 {
+		b.WriteString(" (in ")
+		b.WriteString(compactDurationMs(delta))
+		b.WriteString(")")
+	} else {
+		b.WriteString(" (due now)")
+	}
+
+	if t.RepeatEveryMs != nil && *t.RepeatEveryMs > 0 {
+		b.WriteString("  every ")
+		b.WriteString(compactDurationMs(*t.RepeatEveryMs))
+	} else {
+		b.WriteString("  once")
+	}
+	if t.MaxRuns != nil && *t.MaxRuns > 0 {
+		b.WriteString("  runs ")
+		b.WriteString(strconv.Itoa(t.RunCount))
+		b.WriteString("/")
+		b.WriteString(strconv.Itoa(*t.MaxRuns))
+	} else if t.RunCount > 0 {
+		b.WriteString("  runs ")
+		b.WriteString(strconv.Itoa(t.RunCount))
+	}
+	if t.RepeatUntil != nil && *t.RepeatUntil > 0 {
+		b.WriteString("  until ")
+		b.WriteString(time.UnixMilli(*t.RepeatUntil).UTC().Format(time.RFC3339))
+	}
+	if wf := timerWorkflowRunID(t.TargetJson); wf != "" {
+		b.WriteString("  workflow ")
+		b.WriteString(wf)
+	}
+	return b.String()
+}
+
+// timerWorkflowRunID pulls the linked ledger run id out of a timer's stored target,
+// "" when absent or unreadable — a check-in row is context, and one bad blob must not
+// drop the row.
+func timerWorkflowRunID(targetJSON *string) string {
+	if targetJSON == nil || strings.TrimSpace(*targetJSON) == "" {
+		return ""
+	}
+	var tgt struct {
+		WorkflowRunID string `json:"workflowRunId"`
+	}
+	if err := json.Unmarshal([]byte(*targetJSON), &tgt); err != nil {
+		return ""
+	}
+	return sliceChars(collapseID(tgt.WorkflowRunID), workflowRunFieldMaxRunes)
+}
+
+// collapseID joins an id's whitespace runs so an embedded newline cannot break a
+// one-line row.
+func collapseID(id string) string {
+	return strings.Join(strings.Fields(id), "")
+}
+
+// compactDurationMs renders a positive span as the largest one or two units that
+// describe it — "45s", "7m", "2h05m", "3d4h" — rounding UP to the unit shown so a fire
+// 30 seconds away never reads as "in 0s".
+func compactDurationMs(ms int64) string {
+	if ms <= 0 {
+		return "0s"
+	}
+	secs := (ms + 999) / 1000
+	switch {
+	case secs < 60:
+		return strconv.FormatInt(secs, 10) + "s"
+	case secs < 3600:
+		return strconv.FormatInt((secs+59)/60, 10) + "m"
+	case secs < 86400:
+		mins := (secs + 59) / 60
+		h, m := mins/60, mins%60
+		if m == 0 {
+			return strconv.FormatInt(h, 10) + "h"
+		}
+		return strconv.FormatInt(h, 10) + "h" + pad2(m) + "m"
+	default:
+		hours := (secs + 3599) / 3600
+		d, h := hours/24, hours%24
+		if h == 0 {
+			return strconv.FormatInt(d, 10) + "d"
+		}
+		return strconv.FormatInt(d, 10) + "d" + strconv.FormatInt(h, 10) + "h"
+	}
+}
+
+func pad2(n int64) string {
+	if n < 10 {
+		return "0" + strconv.FormatInt(n, 10)
+	}
+	return strconv.FormatInt(n, 10)
 }

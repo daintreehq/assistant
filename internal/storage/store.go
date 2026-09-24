@@ -646,7 +646,7 @@ func (s *Store) RecoverUnpublishedTimerMessages() (int, error) {
 	// the world it was written for has gone. A crash-and-restart is minutes; anything
 	// older than this is not a delivery worth making.
 	rows, err := s.db.Query(`
-		SELECT id, title, payloadJson, targetJson, runCount, fireAt, repeatEveryMs, status
+		SELECT id, title, payloadJson, targetJson, runCount, fireAt, repeatEveryMs, maxRuns, repeatUntil, status
 		  FROM timers
 		 WHERE payloadType = 'message' AND runCount > 0`)
 	if err != nil {
@@ -658,13 +658,15 @@ func (s *Store) RecoverUnpublishedTimerMessages() (int, error) {
 		runCount               int
 		fireAt                 int64
 		repeatEveryMs          sql.NullInt64
+		maxRuns                sql.NullInt64
+		repeatUntil            sql.NullInt64
 		status                 string
 	}
 	var candidates []pending
 	for rows.Next() {
 		var p pending
 		if err := rows.Scan(&p.id, &p.title, &p.payloadJSON, &p.targetJSON, &p.runCount,
-			&p.fireAt, &p.repeatEveryMs, &p.status); err != nil {
+			&p.fireAt, &p.repeatEveryMs, &p.maxRuns, &p.repeatUntil, &p.status); err != nil {
 			_ = rows.Close()
 			return 0, fmt.Errorf("scan timer message: %w", err)
 		}
@@ -754,6 +756,18 @@ func (s *Store) RecoverUnpublishedTimerMessages() (int, error) {
 		// and approximate for a repeat, which is precisely why the authoritative check
 		// is the one at delivery rather than the window here.
 		target.TimerDueAt = due
+		// Loop position, as fireTimer stamps it. Only fired/done rows reach here and
+		// both are terminal, so a recovered occurrence is always the LAST one.
+		if c.repeatEveryMs.Valid && c.repeatEveryMs.Int64 > 0 {
+			target.TimerEveryMs = c.repeatEveryMs.Int64
+		}
+		if c.maxRuns.Valid && c.maxRuns.Int64 > 0 {
+			target.TimerMaxRuns = int(c.maxRuns.Int64)
+		}
+		if c.repeatUntil.Valid && c.repeatUntil.Int64 > 0 {
+			target.TimerRepeatUntil = c.repeatUntil.Int64
+		}
+		target.TimerFinal = true
 
 		if _, err := s.UpsertEvent(domain.QueuePublishArgs{
 			Source: domain.SourceTimer, Severity: domain.SeverityAttention,

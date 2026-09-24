@@ -849,6 +849,11 @@ func (s *Scheduler) fireTimer(ctx context.Context, rec domain.TimerRecord, now i
 			target.TimerOccurrence = occurrence
 			// The due time the USER chose, carried so the delivery gate can be exact.
 			target.TimerDueAt = rec.FireAt
+			// Where the loop stands, read off the row as it was BEFORE the claim plus the
+			// claim's own verdict: `terminal` is exactly "no further occurrence will
+			// fire", which is the fact a check-in turn needs to end the loop honestly
+			// instead of promising a next tick that is not coming.
+			stampTimerLoopPosition(target, rec, terminal)
 			err := s.deps.Queue.Publish(domain.QueuePublishArgs{
 				Source: domain.SourceTimer, Severity: domain.SeverityAttention,
 				Title: rec.Title, Summary: msg, Target: target,
@@ -1063,13 +1068,27 @@ func rescheduleePatch(rec domain.TimerRecord, now int64) (patch map[string]any, 
 // message branch mutates it. A failure that inherited the marker would satisfy
 // IsTimerMessageWake and be delivered to the model as an instruction the user never
 // wrote. Copying rather than mutating keeps the success path's target intact.
+// stampTimerLoopPosition copies a message timer's schedule shape onto the event target
+// of the occurrence being delivered. final is the claim's terminal verdict. Additive
+// metadata only — the marker that makes the event an instruction is set by the caller.
+func stampTimerLoopPosition(target *domain.EventTarget, rec domain.TimerRecord, final bool) {
+	if rec.RepeatEveryMs != nil && *rec.RepeatEveryMs > 0 {
+		target.TimerEveryMs = *rec.RepeatEveryMs
+	}
+	if rec.MaxRuns != nil && *rec.MaxRuns > 0 {
+		target.TimerMaxRuns = *rec.MaxRuns
+	}
+	if rec.RepeatUntil != nil && *rec.RepeatUntil > 0 {
+		target.TimerRepeatUntil = *rec.RepeatUntil
+	}
+	target.TimerFinal = final
+}
+
 func failureTarget(t *domain.EventTarget) *domain.EventTarget {
 	if t == nil {
 		return nil
 	}
-	out := *t
-	out.TimerMessage = false
-	out.TimerOccurrence = 0
+	out := t.ClearTimerMessage()
 	return &out
 }
 

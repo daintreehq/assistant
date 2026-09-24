@@ -785,10 +785,21 @@ func TestSpawnWatcherLifecycleNoticeSchedulerRunning(t *testing.T) {
 	if !res.Ok {
 		t.Fatalf("expected ok, got %+v", res.Error)
 	}
+	// Watchers are project-scoped and adopted by the next owner (Store.BeginOwnership),
+	// so the note must say the watcher persists — and must never again claim it dies
+	// with the window. But DaemonActive only means THIS process runs a scheduler, not
+	// that a background supervisor exists, so after-close checking must stay
+	// conditional rather than promised.
 	if !strings.Contains(res.Summary, "watcher") ||
-		!strings.Contains(res.Summary, "discarded when you close the assistant") ||
-		!strings.Contains(res.Summary, "does not resume on the next launch") {
-		t.Fatalf("lifecycle note missing: %q", res.Summary)
+		!strings.Contains(res.Summary, "resumes under the next owner of this project") ||
+		!strings.Contains(res.Summary, "only while a background supervisor is actually running") {
+		t.Fatalf("lifecycle note missing its persistence + conditional after-close wording: %q", res.Summary)
+	}
+	for _, stale := range []string{"discarded when you close", "does not resume on the next launch", "session-scoped",
+		"supervision is durable", "the background supervisor adopts it"} {
+		if strings.Contains(res.Summary, stale) {
+			t.Fatalf("lifecycle note still carries the false %q claim: %q", stale, res.Summary)
+		}
 	}
 }
 
@@ -811,7 +822,7 @@ func TestSpawnNoWatcherOmitsLifecycleNote(t *testing.T) {
 	if !res.Ok {
 		t.Fatalf("expected ok, got %+v", res.Error)
 	}
-	if strings.Contains(res.Summary, "discarded when you close the assistant") {
+	if strings.Contains(res.Summary, "NOTE:") {
 		t.Fatalf("lifecycle note should be omitted with no watcher: %q", res.Summary)
 	}
 }

@@ -10,11 +10,15 @@ import (
 	"github.com/daintreehq/assistant/internal/tools"
 )
 
-// durableSupervisionNote is appended to a supervise summary: watchers are
-// project-scoped and keep running after the assistant closes (the background
-// supervisor adopts them). Stated explicitly so the model can promise
-// after-close results honestly.
-const durableSupervisionNote = " NOTE: supervision is durable — the watcher keeps checking after the assistant closes (the background supervisor adopts it) and pauses only if Daintree itself closes."
+// durableSupervisionNote is appended to a supervise/spawn summary. It states exactly
+// what is guaranteed: watchers are project-scoped, so the row persists and the NEXT
+// owner of the project adopts it (Store.BeginOwnership). It deliberately does NOT
+// promise after-close checking. The only signal a tool has is DaemonActive, which
+// means "this process runs a scheduler" — a one-shot can run one without any
+// background supervisor, and an interactive launch can have daemon spawning
+// disabled — so after-close supervision is conditional on a supervisor actually
+// running, and the note says so rather than letting the model promise results.
+const durableSupervisionNote = " NOTE: the watcher is project-scoped — it persists and resumes under the next owner of this project. It keeps checking after the assistant closes only while a background supervisor is actually running; otherwise it resumes when the assistant next opens. Pauses if Daintree itself closes."
 
 type superviseArgs struct {
 	TerminalID         string `json:"terminalId"`
