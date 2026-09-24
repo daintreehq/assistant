@@ -84,7 +84,9 @@ const activeAsyncOperationsLimit = 16
 // the LIMIT handed to the store read). The footer is a re-anchoring glance at open
 // work, not a full ledger dump — the newest handful of runs is enough; the model can
 // call workflow.list for the rest. Defined here (not session.go) so the row cap and
-// the query bound are one number in one place.
+// the query bound are one number in one place. The workflow.create/get/list tool
+// descriptions state this number to the model ("the 10 most recently updated open
+// rows"), so change them with it.
 const activeWorkflowRunsLimit = 10
 
 // workflowRunIDPreviewMax bounds how many terminal/watcher ids a single run row
