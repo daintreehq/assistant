@@ -203,3 +203,29 @@ func TestSendCommandDoesNotRetryAnUnrelatedRefusal(t *testing.T) {
 		t.Fatalf("an unrelated refusal was retried: %d sends", n)
 	}
 }
+
+// verbatim is the opt-out for an agent's own built-in slash command. Daintree appends
+// the handback instruction to the submitted text, so a flagged "/status" would reach
+// the agent as a multi-line prompt and be answered as a question instead of run. The
+// flag itself is the wrapper's: it never reaches Daintree.
+func TestSendCommandVerbatimSendsTheTextUnchanged(t *testing.T) {
+	m := &fakeMCP{connected: true, toolList: sendCatalog(true)}
+	raw := []byte(`{"terminalId":"terminal-a","command":"/status","verbatim":true}`)
+	deps := Deps{MCP: m, AgentHandback: true, IsAgentTerminal: agentOnly("terminal-a")}
+	if res := newTerminalSendCommandTool(deps).Handle(context.Background(), raw, nil); !res.Ok {
+		t.Fatalf("send failed: %+v", res.Error)
+	}
+	if got, want := sentJSON(t, m), `{"command":"/status","terminalId":"terminal-a"}`; got != want {
+		t.Errorf("sent %s, want %s", got, want)
+	}
+}
+
+// Without verbatim a slash command is an ordinary send: a custom command that starts a
+// model turn still asks for the handback its completion detection relies on.
+func TestSendCommandSlashCommandWithoutVerbatimKeepsTheHandback(t *testing.T) {
+	m := &fakeMCP{connected: true, toolList: sendCatalog(true)}
+	runSend(t, Deps{MCP: m, AgentHandback: true, IsAgentTerminal: agentOnly("terminal-a")}, "terminal-a", "/work 123")
+	if got, want := sentJSON(t, m), `{"command":"/work 123","handback":true,"terminalId":"terminal-a"}`; got != want {
+		t.Errorf("sent %s, want %s", got, want)
+	}
+}

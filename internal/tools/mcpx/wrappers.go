@@ -257,6 +257,10 @@ func newCopyTreeInjectTool(deps Deps) tools.Tool {
 type sendCommandArgs struct {
 	TerminalID string `json:"terminalId"`
 	Command    string `json:"command"`
+	// Verbatim submits the text with nothing appended. It is this wrapper's flag and
+	// never reaches Daintree: it only withholds the handback request, which Daintree
+	// honours by appending an instruction to the text.
+	Verbatim bool `json:"verbatim,omitempty"`
 }
 
 var sendCommandSchema = json.RawMessage(`{
@@ -264,7 +268,8 @@ var sendCommandSchema = json.RawMessage(`{
   "additionalProperties": false,
   "properties": {
     "terminalId": { "type": "string", "description": "Terminal to send the command to." },
-    "command": { "type": "string", "description": "Shell command text to type into the terminal and run." }
+    "command": { "type": "string", "description": "Shell command text to type into the terminal and run." },
+    "verbatim": { "type": "boolean", "description": "Submit the text exactly as given, with nothing added. Set it for an agent's own built-in slash command (for example /status or /usage) that must reach the agent unchanged; leave it off for a prompt or a task." }
   },
   "required": ["terminalId", "command"]
 }`)
@@ -298,7 +303,7 @@ func newTerminalSendCommandTool(deps Deps) tools.Tool {
 				deps.Observer.MarkCommandSent(strings.TrimSpace(a.TerminalID), domain.NowMS())
 			}
 			args := map[string]any{"terminalId": a.TerminalID, "command": a.Command}
-			if !sendRequestsHandback(ctx, deps, a.TerminalID) {
+			if a.Verbatim || !sendRequestsHandback(ctx, deps, a.TerminalID) {
 				return terminalSendCommandPassthrough(ctx, deps.MCP, a.TerminalID, a.Command, args)
 			}
 			res := terminalSendCommandPassthrough(ctx, deps.MCP, a.TerminalID, a.Command, withHandback(args))
