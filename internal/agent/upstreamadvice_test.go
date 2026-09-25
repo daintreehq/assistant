@@ -133,3 +133,25 @@ func TestUpstreamFailureAdviceQuotesTheRequestID(t *testing.T) {
 		t.Errorf("advice mentions a request id it does not have: %q", withoutID)
 	}
 }
+
+// Bring your own key: the backend's own sentence names the fix and where to make it, so
+// it is shown behind the registered prefix rather than as a raw "http 400" line.
+func TestUpstreamRefusalsShowTheBackendsSentence(t *testing.T) {
+	for _, code := range []string{backend.CodeUpstreamRequired, backend.CodeInvalidUpstream} {
+		msg := upstreamFailureAdvice(&backend.Error{Code: code, Message: "Choose a provider in Daintree's assistant settings."})
+		if msg != "Model unavailable: Choose a provider in Daintree's assistant settings." {
+			t.Errorf("%s: %q", code, msg)
+		}
+	}
+	caller := &backend.Error{Code: backend.CodeProviderInvalidAPIKey, Param: "X-Daintree-Upstream-Key", Message: "OpenAI rejected your API key."}
+	if msg := upstreamFailureAdvice(caller); msg != "Model unavailable: OpenAI rejected your API key." {
+		t.Errorf("caller key: %q", msg)
+	}
+}
+
+func TestACallerModelFailureShowsTheBackendsSentence(t *testing.T) {
+	be := &backend.Error{Code: backend.CodeUpstreamUnavailable, Param: "X-Daintree-Upstream-Model", Message: "OpenAI does not serve the model 'gpt-typo'."}
+	if msg := upstreamFailureAdvice(be); msg != "Model unavailable: OpenAI does not serve the model 'gpt-typo'." {
+		t.Errorf("model failure: %q", msg)
+	}
+}

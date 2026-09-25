@@ -185,6 +185,19 @@ type AppConfig struct {
 	// user's zero-retention choice from taking effect. Which compliant endpoint sees
 	// someone's source is not a decision a checked-in file should make.
 	Routing backend.Routing
+
+	// Upstream is the caller's own model host, model and API key (bring your own
+	// key), forwarded to the backend on every call so it runs the model calls on the
+	// caller's account. Zero means the backend funds the turn. Daintree sets it from
+	// its assistant settings through DAINTREE_UPSTREAM_PROVIDER / _MODEL / _API_KEY.
+	//
+	// TRUSTED env only, never a project .env: a checked-in file must not be able to
+	// swap in a key of its choosing and read back what the user's turns sent to it.
+	// Dropped whenever a session redirects the backend URL (NoInheritedUpstream) —
+	// the key must not follow a URL a model chose. Unlike the account bearer, a
+	// session-supplied apiKeyFile does NOT keep it: that file replaces who is
+	// CALLING, and says nothing about whether this key may go to the new host.
+	Upstream backend.Upstream
 }
 
 // ConfigOverrides are the explicit (CLI-supplied) overrides. All optional; nil
@@ -205,8 +218,12 @@ type ConfigOverrides struct {
 	// blank values, so writing "" simply falls through to the environment. The caller
 	// that needs this is the MCP server, where a session may redirect an endpoint —
 	// and an inherited bearer must not follow a URL that a model chose.
-	NoInheritedMcpToken  bool
-	NoInheritedAPIKey    bool
+	NoInheritedMcpToken bool
+	NoInheritedAPIKey   bool
+	// NoInheritedUpstream drops the inherited DAINTREE_UPSTREAM_* provider config.
+	// Separate from NoInheritedAPIKey because it is set on ANY backend redirect,
+	// whether or not the session brought its own account key (see Upstream).
+	NoInheritedUpstream  bool
 	BackendURL           *string
 	APIKey               *string
 	Tier                 *string
@@ -609,6 +626,21 @@ func loadConfig(overrides ConfigOverrides, ensureStateDir bool) (AppConfig, erro
 	if overrides.NoInheritedAPIKey && deref(overrides.APIKey) == "" {
 		cfg.APIKey = ""
 	}
+	cfg.Upstream = backend.Upstream{
+		Provider: strings.ToLower(strings.TrimSpace(e.trustedGet("DAINTREE_UPSTREAM_PROVIDER"))),
+		Model:    strings.TrimSpace(e.trustedGet("DAINTREE_UPSTREAM_MODEL")),
+		APIKey:   strings.TrimSpace(e.trustedGet("DAINTREE_UPSTREAM_API_KEY")),
+
+		Sort:           strings.ToLower(strings.TrimSpace(e.trustedGet("DAINTREE_UPSTREAM_SORT"))),
+		DataCollection: strings.ToLower(strings.TrimSpace(e.trustedGet("DAINTREE_UPSTREAM_DATA_COLLECTION"))),
+		ZDR:            strings.ToLower(strings.TrimSpace(e.trustedGet("DAINTREE_UPSTREAM_ZDR"))),
+	}
+	if overrides.NoInheritedUpstream {
+		cfg.Upstream = backend.Upstream{}
+	}
+	if err := cfg.Upstream.Validate(); err != nil {
+		return AppConfig{}, err
+	}
 	// Shape-check it HERE, where the value is resolved, because this is the only place
 	// a human error is still legible. Nobody is prompted for this key any more, so a
 	// bad one arrives via the environment — shell-mangled, smart-quoted, wrapped — and
@@ -730,6 +762,9 @@ func DescribeConfig(cfg AppConfig) map[string]string {
 		"backendUrl":           cfg.BackendURL,
 		"apiKey":               redactSecret(cfg.APIKey),
 		"mcpToken":             redactSecret(cfg.McpToken),
+		"upstreamProvider":     placeholderUnset(cfg.Upstream.Provider),
+		"upstreamModel":        placeholderUnset(cfg.Upstream.Model),
+		"upstreamApiKey":       redactSecret(cfg.Upstream.APIKey),
 		"projectId":            cfg.ProjectID,
 		"windowId":             placeholderUnset(cfg.WindowID),
 		"tier":                 string(cfg.Tier),

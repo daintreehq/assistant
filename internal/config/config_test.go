@@ -36,6 +36,9 @@ func isolatedHome(t *testing.T) string {
 		// every unrelated config test with a message about endpoint routing.
 		"DAINTREE_ROUTING_PRIVACY", "DAINTREE_ROUTING_SORT",
 		"DAINTREE_ROUTING_ONLY", "DAINTREE_ROUTING_IGNORE", "DAINTREE_AGENT_HANDBACK",
+		// Validated at load, like routing.
+		"DAINTREE_UPSTREAM_PROVIDER", "DAINTREE_UPSTREAM_MODEL", "DAINTREE_UPSTREAM_API_KEY",
+		"DAINTREE_UPSTREAM_SORT", "DAINTREE_UPSTREAM_DATA_COLLECTION", "DAINTREE_UPSTREAM_ZDR",
 	} {
 		os.Unsetenv(k)
 	}
@@ -1009,5 +1012,59 @@ func TestStateRootEqualsAnExplicitStateDir(t *testing.T) {
 	}
 	if cfg.StateRoot != cfg.StateDir {
 		t.Errorf("StateRoot %q != StateDir %q for an explicit state dir", cfg.StateRoot, cfg.StateDir)
+	}
+}
+
+// The caller's own model key is TRUSTED env only: a project .env able to set it could
+// point the user's turns at an account of the repository's choosing.
+func TestUpstreamIsTrustedEnvOnly(t *testing.T) {
+	isolatedHome(t)
+	dir := t.TempDir()
+	envBody := "DAINTREE_UPSTREAM_PROVIDER=openai\nDAINTREE_UPSTREAM_API_KEY=sk-from-repo\n"
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(envBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(ConfigOverrides{ProjectPath: &dir})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Upstream.IsSet() {
+		t.Errorf("a project .env set the upstream: %+v", cfg.Upstream.Provider)
+	}
+
+	t.Setenv("DAINTREE_UPSTREAM_PROVIDER", "Baseten")
+	t.Setenv("DAINTREE_UPSTREAM_API_KEY", "bt-user-key")
+	cfg, err = LoadConfig(ConfigOverrides{ProjectPath: &dir})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Upstream.Provider != "baseten" || cfg.Upstream.APIKey != "bt-user-key" {
+		t.Errorf("trusted env was ignored: provider=%q", cfg.Upstream.Provider)
+	}
+	if got := DescribeConfig(cfg)["upstreamApiKey"]; strings.Contains(got, "bt-user-key") {
+		t.Errorf("DescribeConfig leaked the upstream key: %q", got)
+	}
+
+	// A redirected backend must not inherit the key — and a session-supplied account
+	// key (an explicit APIKey, so NoInheritedAPIKey is not set) must not rescue it:
+	// that key replaces who is calling, not which provider key may go to the new host.
+	sessionKey := "sk-test-fakesessionkey1234567890"
+	cfg, err = LoadConfig(ConfigOverrides{ProjectPath: &dir, APIKey: &sessionKey, NoInheritedUpstream: true})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Upstream.IsSet() {
+		t.Errorf("the upstream followed a redirected backend")
+	}
+	if cfg.APIKey != sessionKey {
+		t.Errorf("APIKey = %q, want the session-supplied key kept", cfg.APIKey)
+	}
+}
+
+func TestHalfConfiguredUpstreamFailsAtStartup(t *testing.T) {
+	isolatedHome(t)
+	t.Setenv("DAINTREE_UPSTREAM_PROVIDER", "openrouter")
+	if _, err := LoadConfig(ConfigOverrides{}); err == nil {
+		t.Fatal("a provider without a key loaded")
 	}
 }

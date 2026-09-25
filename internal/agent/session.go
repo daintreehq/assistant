@@ -2485,13 +2485,24 @@ func accountFailureAdvice(be *backend.Error, links AccountLinks) string {
 // supervisor's unattended wake mistake a failed turn for a real answer and record the
 // work as summarized.
 func upstreamFailureAdvice(be *backend.Error) string {
+	// Bring your own key: the rejected credential IS the user's, set in Daintree's
+	// assistant settings, and the backend's message says so and names the host.
+	if (be.IsCallerUpstreamKey() || be.IsCallerUpstreamModel()) && be.Message != "" {
+		return "Model unavailable: " + be.Message
+	}
+	// No provider key yet on a bring-your-own-key deployment, or a broken one. The
+	// backend's sentence already says what to do and where, so it is shown as-is.
+	if (be.Code == backend.CodeUpstreamRequired || be.Code == backend.CodeInvalidUpstream) && be.Message != "" {
+		return "Model unavailable: " + be.Message
+	}
 	switch be.Code {
 	case backend.CodeProviderInvalidAPIKey:
 		// The rejected credential is the BACKEND's, not the user's. This message used to
 		// say "your API key" and send the reader to `/login` to replace a key they have
 		// never held. `/login` is a real command today, which changes nothing here: no
 		// sign-in reaches a credential the deployment owns. The CLI ships no provider
-		// credential at all; the deployment funds every call with its own.
+		// credential; absent a user-supplied DAINTREE_UPSTREAM_* key (handled above by
+		// IsCallerUpstreamKey), the deployment funds every call with its own.
 		return "Model unavailable: the provider rejected the credential this backend spends. That credential belongs to the deployment, not to your account — nothing on this machine changes it, so report it to whoever runs this backend."
 	case backend.CodeProviderInsufficientCredit:
 		return "Model unavailable: the account this backend spends from is out of credit. It is the deployment's account rather than yours, so topping up your own would not help — report it to whoever runs this backend."

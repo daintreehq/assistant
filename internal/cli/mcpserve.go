@@ -370,6 +370,10 @@ func sessionOptions(base Options, p mcpserver.OpenParams) Options {
 	// be an explicit signal that survives resolution.
 	o.NoInheritedMcpToken = strings.TrimSpace(p.McpURL) != "" && strings.TrimSpace(p.McpTokenFile) == ""
 	o.NoInheritedAPIKey = strings.TrimSpace(p.BackendURL) != "" && strings.TrimSpace(p.APIKeyFile) == ""
+	// The provider key (DAINTREE_UPSTREAM_*) has no session-suppliable replacement, and
+	// an apiKeyFile is an ACCOUNT token that says nothing about it — so ANY backend
+	// redirect forfeits it, with or without a key file.
+	o.NoInheritedUpstream = strings.TrimSpace(p.BackendURL) != ""
 	applyIfSet(&o.StateDir, p.StateDir)
 	applyIfSet(&o.LogDir, p.LogDir)
 	applyIfSet(&o.ProjectID, p.ProjectID)

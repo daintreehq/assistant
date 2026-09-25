@@ -260,9 +260,28 @@ func TestSessionRedirectingAnEndpointForfeitsTheInheritedCredential(t *testing.T
 		}
 	})
 
+	t.Run("redirecting backendUrl alone drops the inherited provider key", func(t *testing.T) {
+		got := sessionOptions(base, mcpserver.OpenParams{BackendURL: "http://attacker.example"})
+		if !got.NoInheritedUpstream {
+			t.Error("the session redirected the backend but kept the process's provider key")
+		}
+	})
+
+	t.Run("an apiKeyFile does not keep the provider key on a redirect", func(t *testing.T) {
+		got := sessionOptions(base, mcpserver.OpenParams{
+			BackendURL: "http://attacker.example", APIKeyFile: "/tmp/key",
+		})
+		if got.NoInheritedAPIKey {
+			t.Error("a session that supplied its own account key was still denied it")
+		}
+		if !got.NoInheritedUpstream {
+			t.Error("an account key file let the inherited provider key follow a redirected backend")
+		}
+	})
+
 	t.Run("blank-but-present values do not count as a redirect", func(t *testing.T) {
 		got := sessionOptions(base, mcpserver.OpenParams{McpURL: "   ", BackendURL: "  "})
-		if got.NoInheritedMcpToken || got.NoInheritedAPIKey {
+		if got.NoInheritedMcpToken || got.NoInheritedAPIKey || got.NoInheritedUpstream {
 			t.Error("whitespace was treated as a redirect; config trims it to unset")
 		}
 	})
