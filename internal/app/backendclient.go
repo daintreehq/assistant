@@ -60,6 +60,8 @@ func backendClientConfig(cfg config.AppConfig, ledger *costledger.Ledger, tokenS
 		// of the two nil readings this is, and fails the client closed when the account
 		// layer could not be built at all.
 		TokenSource: credentialSource(cfg, tokenSource),
+		// The caller's own model host and key, when Daintree's settings named one.
+		Upstream: cfg.Upstream,
 		ClientInfo: backend.ClientInfo{
 			Name:     "daintree-cli",
 			Platform: runtime.GOOS,

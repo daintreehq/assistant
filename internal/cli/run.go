@@ -1207,7 +1207,34 @@ func verifyCredentialDoctorCheck(ctx context.Context, a *app.App, base string) D
 	vctx, vcancel := context.WithTimeout(ctx, 3*time.Second)
 	ver, verr := a.Backend.VerifyKey(vctx)
 	vcancel()
-	return credentialVerdictRow(ver, verr, base, a.Config.APIKey)
+	row := credentialVerdictRow(ver, verr, base, a.Config.APIKey)
+	return callerUpstreamVerdict(row, ver, verr, a.Config.Upstream)
+}
+
+// callerUpstreamVerdict rewrites the row's advice when the probe spent the USER's own
+// model key (bring your own key, set in Daintree's assistant settings) rather than the
+// deployment's. The status is unchanged — only who owns the fix differs, and every
+// deployment-key sentence in credentialVerdictRow would send the user to report their
+// own typo to whoever runs the backend.
+func callerUpstreamVerdict(row DoctorCheck, ver backend.KeyVerification, verr error, up backend.Upstream) DoctorCheck {
+	if !up.IsSet() || verr != nil {
+		return row
+	}
+	host := up.Provider
+	switch {
+	case !ver.Valid:
+		row.Detail = "your " + host + " API key was rejected"
+		row.Hint = "Check the key for " + host + " in Daintree's assistant settings."
+	case !ver.IsUsable():
+		row.Detail = "your " + host + " API key is valid but cannot fund a turn"
+		row.Hint = "Top up the " + host + " account the key belongs to, or choose another provider in Daintree's assistant settings."
+	default:
+		row.Detail = "usable · your own " + host + " key"
+		if up.Model != "" {
+			row.Detail += " (" + up.Model + ")"
+		}
+	}
+	return row
 }
 
 // credentialVerdictRow turns one verification answer into the row a human reads.
@@ -1243,6 +1270,16 @@ func credentialVerdictRow(ver backend.KeyVerification, verr error, base, callerK
 		// STATUS is the same for every one of them and only the advice differs.
 		c.Status = StatusFail
 		c.Detail, c.Hint = blockingAccountCopy(verr, callerKey)
+		return c
+	case isUpstreamRefusal(verr):
+		// A bring-your-own-key backend refusing this install outright — no provider
+		// key configured, or a malformed one. Every turn will be refused the same way,
+		// so this is a failure with the backend's own corrective sentence, not "unknown".
+		var be *backend.Error
+		errors.As(verr, &be)
+		c.Status = StatusFail
+		c.Detail = be.Message
+		c.Hint = "Choose a model provider and save its API key in Daintree's assistant settings."
 		return c
 	case verr != nil:
 		c.Status = StatusUnknown
@@ -1640,4 +1677,10 @@ func schemaResetNotice(r *render.Renderer) func(backupPath string) {
 		}
 		r.Line(r.Gray("Previous state backed up to " + backupPath))
 	}
+}
+
+func isUpstreamRefusal(err error) bool {
+	var be *backend.Error
+	return errors.As(err, &be) &&
+		(be.Code == backend.CodeUpstreamRequired || be.Code == backend.CodeInvalidUpstream)
 }

@@ -549,6 +549,9 @@ func Create(opts CreateOptions) (*App, error) {
 	// before the refresh still contains it.
 	redact.RegisterSecret(cfg.APIKey)
 	redact.RegisterSecret(cfg.McpToken)
+	// The user's own model key (bring your own key). Opaque like the account
+	// credential, and it funds model calls — the most expensive thing to leak.
+	redact.RegisterSecret(cfg.Upstream.APIKey)
 
 	store, err := storage.Open(cfg.DBPath, nil)
 	if err != nil {

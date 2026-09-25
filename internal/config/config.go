@@ -185,6 +185,18 @@ type AppConfig struct {
 	// user's zero-retention choice from taking effect. Which compliant endpoint sees
 	// someone's source is not a decision a checked-in file should make.
 	Routing backend.Routing
+
+	// Upstream is the caller's own model host, model and API key (bring your own
+	// key), forwarded to the backend on every call so it runs the model calls on the
+	// caller's account. Zero means the backend funds the turn. Daintree sets it from
+	// its assistant settings through DAINTREE_UPSTREAM_PROVIDER / _MODEL / _API_KEY.
+	//
+	// TRUSTED env only, never a project .env: a checked-in file must not be able to
+	// swap in a key of its choosing and read back what the user's turns sent to it.
+	// Dropped with the deprecated API key when a session redirects the backend URL
+	// (NoInheritedAPIKey), for the same reason — the key must not follow a URL a
+	// model chose.
+	Upstream backend.Upstream
 }
 
 // ConfigOverrides are the explicit (CLI-supplied) overrides. All optional; nil
@@ -609,6 +621,21 @@ func loadConfig(overrides ConfigOverrides, ensureStateDir bool) (AppConfig, erro
 	if overrides.NoInheritedAPIKey && deref(overrides.APIKey) == "" {
 		cfg.APIKey = ""
 	}
+	cfg.Upstream = backend.Upstream{
+		Provider: strings.ToLower(strings.TrimSpace(e.trustedGet("DAINTREE_UPSTREAM_PROVIDER"))),
+		Model:    strings.TrimSpace(e.trustedGet("DAINTREE_UPSTREAM_MODEL")),
+		APIKey:   strings.TrimSpace(e.trustedGet("DAINTREE_UPSTREAM_API_KEY")),
+
+		Sort:           strings.ToLower(strings.TrimSpace(e.trustedGet("DAINTREE_UPSTREAM_SORT"))),
+		DataCollection: strings.ToLower(strings.TrimSpace(e.trustedGet("DAINTREE_UPSTREAM_DATA_COLLECTION"))),
+		ZDR:            strings.ToLower(strings.TrimSpace(e.trustedGet("DAINTREE_UPSTREAM_ZDR"))),
+	}
+	if overrides.NoInheritedAPIKey {
+		cfg.Upstream = backend.Upstream{}
+	}
+	if err := cfg.Upstream.Validate(); err != nil {
+		return AppConfig{}, err
+	}
 	// Shape-check it HERE, where the value is resolved, because this is the only place
 	// a human error is still legible. Nobody is prompted for this key any more, so a
 	// bad one arrives via the environment — shell-mangled, smart-quoted, wrapped — and
@@ -730,6 +757,9 @@ func DescribeConfig(cfg AppConfig) map[string]string {
 		"backendUrl":           cfg.BackendURL,
 		"apiKey":               redactSecret(cfg.APIKey),
 		"mcpToken":             redactSecret(cfg.McpToken),
+		"upstreamProvider":     placeholderUnset(cfg.Upstream.Provider),
+		"upstreamModel":        placeholderUnset(cfg.Upstream.Model),
+		"upstreamApiKey":       redactSecret(cfg.Upstream.APIKey),
 		"projectId":            cfg.ProjectID,
 		"windowId":             placeholderUnset(cfg.WindowID),
 		"tier":                 string(cfg.Tier),

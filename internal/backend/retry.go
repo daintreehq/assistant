@@ -246,6 +246,12 @@ func isRetriable(e *Error) bool {
 	if deterministicUpstreamCodes[e.Code] {
 		return false
 	}
+	// Bring your own key: the backend has attributed this to the user's own key or
+	// the model they typed. Neither changes on a replay — a 404 for a mistyped model
+	// arrives as `upstream_unavailable`, which would otherwise be retried as an outage.
+	if e.IsCallerUpstreamKey() || e.IsCallerUpstreamModel() {
+		return false
+	}
 	// Never reached the backend (DNS failure, connection refused/reset): safe to retry.
 	if e.Code == "connect" {
 		return true

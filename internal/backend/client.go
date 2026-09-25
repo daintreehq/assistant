@@ -50,6 +50,8 @@ type Client struct {
 	onTask   func(TaskTraceInfo)
 	onCost   func(CostEvent)
 	routing  func() Routing
+	// upstream is the caller's own model host and key, forwarded on every call.
+	upstream Upstream
 	// streamIdleTimeout overrides sseIdleTimeout for the respond stream's idle
 	// watchdog. Zero selects the default; tests shrink it to exercise the abort.
 	streamIdleTimeout time.Duration
@@ -70,8 +72,11 @@ type ClientConfig struct {
 	// access token that expires hourly and is refreshed underneath the client. Nil
 	// falls back to APIKey, then to NoTokenSource.
 	TokenSource TokenSource
-	HTTPClient  *http.Client
-	ClientInfo  ClientInfo
+	// Upstream, when set, names the caller's own model host, model and key. The
+	// backend then runs model calls on it rather than on its own key.
+	Upstream   Upstream
+	HTTPClient *http.Client
+	ClientInfo ClientInfo
 	// Retry tunes transient-failure retries for every backend call. The zero value
 	// selects DefaultRetryPolicy (10 attempts settling into a 10–15s poll — the
 	// backend owns provider retries; this covers only the CLI↔backend hop). Set
@@ -297,6 +302,7 @@ func NewClient(cfg ClientConfig) *Client {
 		onTask:   cfg.OnTask,
 		onCost:   cfg.OnCost,
 		routing:  cfg.RoutingPreference,
+		upstream: cfg.Upstream,
 	}
 }
 
@@ -496,17 +502,21 @@ func (c *Client) applyHeaders(req *http.Request, accept, token string) {
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+	c.upstream.apply(req.Header)
 }
 
 // currentSecrets returns the credential values worth masking in text destined for a
 // human. Empty unless the token source opts into TokenScrubber — a source with nothing
 // to protect (NoTokenSource, and the open-door install it represents) costs nothing.
 func (c *Client) currentSecrets() []string {
-	s, ok := c.tokens.(TokenScrubber)
-	if !ok {
-		return nil
+	var secrets []string
+	if c.upstream.APIKey != "" {
+		secrets = append(secrets, c.upstream.APIKey)
 	}
-	return s.Secrets()
+	if s, ok := c.tokens.(TokenScrubber); ok {
+		secrets = append(secrets, s.Secrets()...)
+	}
+	return secrets
 }
 
 // scrubSecrets removes every credential this client has issued from text.
@@ -1367,7 +1377,7 @@ func (c *Client) Health(ctx context.Context) error {
 		return err
 	}
 	if out.Status != "ok" {
-		return &Error{Code: "not_healthy", Message: "backend health: " + out.Status}
+		return &Error{Code: "not_healthy", Message: c.scrubSecrets("backend health: " + out.Status)}
 	}
 	return nil
 }
@@ -1387,7 +1397,7 @@ func (c *Client) Ready(ctx context.Context) error {
 		if out.Error != "" {
 			msg += ": " + out.Error
 		}
-		return &Error{HTTPStatus: 503, Code: "not_ready", Message: msg}
+		return &Error{HTTPStatus: 503, Code: "not_ready", Message: c.scrubSecrets(msg)}
 	}
 	return nil
 }

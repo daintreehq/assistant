@@ -400,3 +400,42 @@ func TestEveryVerificationShapeRenders(t *testing.T) {
 		})
 	}
 }
+
+// With bring-your-own-key the probe spends the USER's key, so the advice must send them
+// to their own settings, never to "whoever runs the backend".
+func TestACallerUpstreamVerdictBlamesTheCallersKey(t *testing.T) {
+	up := backend.Upstream{Provider: "openai", Model: "gpt-6-luna", APIKey: "sk-x"}
+	rejected := backend.KeyVerification{Valid: false, Detail: "OpenAI rejected your API key."}
+	row := callerUpstreamVerdict(credentialVerdictRow(rejected, nil, "https://assistant.daintree.org", ""), rejected, nil, up)
+	if row.Status != StatusFail {
+		t.Errorf("status = %s, want fail", row.Status)
+	}
+	if !strings.Contains(row.Hint, "Daintree's assistant settings") || strings.Contains(row.Hint, "backend-side") {
+		t.Errorf("hint does not send the user to their own key: %q", row.Hint)
+	}
+
+	ok := backend.KeyVerification{Valid: true}
+	row = callerUpstreamVerdict(credentialVerdictRow(ok, nil, "https://assistant.daintree.org", ""), ok, nil, up)
+	if row.Status != StatusOK || !strings.Contains(row.Detail, "your own openai key") {
+		t.Errorf("ok row = %s %q", row.Status, row.Detail)
+	}
+
+	// Without an upstream the deployment copy is untouched.
+	plain := callerUpstreamVerdict(credentialVerdictRow(rejected, nil, "https://assistant.daintree.org", ""), rejected, nil, backend.Upstream{})
+	if !strings.Contains(plain.Hint, "backend-side") {
+		t.Errorf("server-funded copy changed: %q", plain.Hint)
+	}
+}
+
+// A bring-your-own-key backend refusing an install with no provider key refuses every
+// turn, so doctor must fail the row rather than call it unknown.
+func TestAnUpstreamRefusalFailsTheCredentialRow(t *testing.T) {
+	err := &backend.Error{Code: backend.CodeUpstreamRequired, Message: "This server needs your own model provider and API key."}
+	c := credentialVerdictRow(backend.KeyVerification{}, err, "https://assistant.daintree.org", "")
+	if c.Status != StatusFail {
+		t.Fatalf("status = %s, want fail", c.Status)
+	}
+	if !strings.Contains(c.Hint, "assistant settings") {
+		t.Errorf("hint does not say where to fix it: %q", c.Hint)
+	}
+}

@@ -2485,6 +2485,16 @@ func accountFailureAdvice(be *backend.Error, links AccountLinks) string {
 // supervisor's unattended wake mistake a failed turn for a real answer and record the
 // work as summarized.
 func upstreamFailureAdvice(be *backend.Error) string {
+	// Bring your own key: the rejected credential IS the user's, set in Daintree's
+	// assistant settings, and the backend's message says so and names the host.
+	if (be.IsCallerUpstreamKey() || be.IsCallerUpstreamModel()) && be.Message != "" {
+		return "Model unavailable: " + be.Message
+	}
+	// No provider key yet on a bring-your-own-key deployment, or a broken one. The
+	// backend's sentence already says what to do and where, so it is shown as-is.
+	if (be.Code == backend.CodeUpstreamRequired || be.Code == backend.CodeInvalidUpstream) && be.Message != "" {
+		return "Model unavailable: " + be.Message
+	}
 	switch be.Code {
 	case backend.CodeProviderInvalidAPIKey:
 		// The rejected credential is the BACKEND's, not the user's. This message used to
