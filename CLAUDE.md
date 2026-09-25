@@ -35,14 +35,18 @@ backend owns the system prompt, developer instructions, **runbook selection**, m
 choice, prompt assembly, and the utility-model prompts. The CLI executes the local
 tool calls the backend asks for and streams the assistant's text. See `docs/BACKEND.md`.
 
-**The backend owns the upstream PROVIDER credential, and the CLI has none.** Every model
-call — main and utility alike — is funded by a key the SERVER holds; the CLI ships no
-provider credential and asks the user for none. That is separate from the ACCOUNT
+**The backend owns the upstream PROVIDER credential by default.** Unless the user brings
+their own key, every model call — main and utility alike — is funded by a key the SERVER
+holds; the CLI ships no provider credential and asks the user for none. The one exception
+is bring-your-own-key: Daintree may hand over the user's own provider key through the
+trusted-env-only `DAINTREE_UPSTREAM_*` variables, which the CLI forwards as
+`X-Daintree-Upstream-*` headers (never the `Authorization` bearer), and drops whenever an
+`mcp --stdio` session redirects the backend URL. That is separate from the ACCOUNT
 credential below, which says who is calling and not what pays. Model identities that appear in this repo's
 comments are the backend's upstream route ids, not direct provider integrations; where a
 comment names model-specific protocol behaviour, read it as "that model's behaviour when
-reached through the backend's upstream". There is no provider API key anywhere in this
-process.
+reached through the backend's upstream". There is no provider API key in this process
+other than a user-supplied `DAINTREE_UPSTREAM_API_KEY`.
 
 > **You have standing permission to edit the backend at `../assistant-backend`.** Many
 > fixes here are really backend changes — the base/system prompt, developer instructions,
@@ -308,8 +312,9 @@ Two further seams are load-bearing and must stay:
   changes the credential for the same endpoint, one level below.
 
 `POST /v1/daintree/auth/verify` answers for whichever key the request WOULD spend — the
-backend's own upstream credential on every install, because the CLI ships no provider key
-and signing in does not give it one — so it is the one probe that can say "this deployment
+backend's own upstream credential unless the user supplied one through
+`DAINTREE_UPSTREAM_*`, because the CLI ships no provider key and signing in does not give it
+one — so it is the one probe that can say "this deployment
 can actually run a turn" before a turn is spent finding out. `doctor` is its only caller
 (`upstream credential` row), and it branches on the stable `reason`, never on the prose
 `detail`. The CLI must never probe a provider itself. That row always attributes the
@@ -782,11 +787,17 @@ contract + workflow tasks; `=0` disables it; see docs/WORKFLOW_INTELLIGENCE.md) 
 `DAINTREE_AGENT_HANDBACK` (trusted-or-own, ON by default: a prompt sent to a known agent
 carries `handback: true` on `agent.launch` / `terminal.sendCommand` when the host's
 advertised schema accepts it; `=0` sends exactly the pre-feature calls — see
-`internal/tools/handback`).
-(Model/provider variables — every `*_API_KEY` and the `DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL`
-trio — are **backend-only**. The CLI reads none of them and its `AppConfig` carries no
-model or provider fields at all. On a normal install it holds no credential whatsoever;
-the one it CAN hold, `DAINTREE_API_KEY`, it forwards verbatim and never stores.)
+`internal/tools/handback`) ·
+`DAINTREE_UPSTREAM_PROVIDER` / `_MODEL` / `_API_KEY` (+ OpenRouter `_SORT` /
+`_DATA_COLLECTION` / `_ZDR`) (bring your own key — trusted-env ONLY, set by Daintree from its
+assistant settings; forwarded as `X-Daintree-Upstream-*` headers, never the bearer; dropped
+when an `mcp --stdio` session redirects the backend URL; unset means the backend funds the
+turn from its own key).
+(Every other model/provider variable — each `*_API_KEY` and the
+`DAINTREE_{LARGE,MEDIUM,SMALL}_MODEL` trio — is **backend-only**. The CLI reads none of
+them; its `AppConfig` carries no model or provider fields beyond the optional `Upstream`
+above. On a normal install it holds no credential whatsoever; the ones it CAN hold,
+`DAINTREE_API_KEY` and `DAINTREE_UPSTREAM_API_KEY`, it forwards verbatim and never stores.)
 Resolution order: CLI overrides → real process env (snapshotted **before** `.env` loads,
 the trusted-env boundary) → project `.env` → assistant's own `.env` → `DEFAULTS`. All in
 `internal/config`. State lives under `~/.daintree/assistant-cli/` (`state.db`; per-project

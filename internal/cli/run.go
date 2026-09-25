@@ -41,6 +41,10 @@ type Options struct {
 	// never follow a URL a model chose.
 	NoInheritedMcpToken bool
 	NoInheritedAPIKey   bool
+	// NoInheritedUpstream drops the inherited DAINTREE_UPSTREAM_* provider key. Set on
+	// ANY backend redirect: a session's own apiKeyFile replaces the account bearer,
+	// not the provider key, so it cannot vouch for sending that key to a new host.
+	NoInheritedUpstream bool
 	Project             string
 	Tier                string
 	// Offline/AutoApprove/DebugLog are POINTERS: nil means the flag was not passed and
@@ -160,6 +164,7 @@ func overridesFromOptions(opts Options) (config.ConfigOverrides, error) {
 	}
 	o.NoInheritedMcpToken = opts.NoInheritedMcpToken
 	o.NoInheritedAPIKey = opts.NoInheritedAPIKey
+	o.NoInheritedUpstream = opts.NoInheritedUpstream
 	if opts.McpTokenFile != "" {
 		token, err := readMcpTokenFile(opts.McpTokenFile)
 		if err != nil {

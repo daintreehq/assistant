@@ -193,9 +193,10 @@ type AppConfig struct {
 	//
 	// TRUSTED env only, never a project .env: a checked-in file must not be able to
 	// swap in a key of its choosing and read back what the user's turns sent to it.
-	// Dropped with the deprecated API key when a session redirects the backend URL
-	// (NoInheritedAPIKey), for the same reason — the key must not follow a URL a
-	// model chose.
+	// Dropped whenever a session redirects the backend URL (NoInheritedUpstream) —
+	// the key must not follow a URL a model chose. Unlike the account bearer, a
+	// session-supplied apiKeyFile does NOT keep it: that file replaces who is
+	// CALLING, and says nothing about whether this key may go to the new host.
 	Upstream backend.Upstream
 }
 
@@ -217,8 +218,12 @@ type ConfigOverrides struct {
 	// blank values, so writing "" simply falls through to the environment. The caller
 	// that needs this is the MCP server, where a session may redirect an endpoint —
 	// and an inherited bearer must not follow a URL that a model chose.
-	NoInheritedMcpToken  bool
-	NoInheritedAPIKey    bool
+	NoInheritedMcpToken bool
+	NoInheritedAPIKey   bool
+	// NoInheritedUpstream drops the inherited DAINTREE_UPSTREAM_* provider config.
+	// Separate from NoInheritedAPIKey because it is set on ANY backend redirect,
+	// whether or not the session brought its own account key (see Upstream).
+	NoInheritedUpstream  bool
 	BackendURL           *string
 	APIKey               *string
 	Tier                 *string
@@ -630,7 +635,7 @@ func loadConfig(overrides ConfigOverrides, ensureStateDir bool) (AppConfig, erro
 		DataCollection: strings.ToLower(strings.TrimSpace(e.trustedGet("DAINTREE_UPSTREAM_DATA_COLLECTION"))),
 		ZDR:            strings.ToLower(strings.TrimSpace(e.trustedGet("DAINTREE_UPSTREAM_ZDR"))),
 	}
-	if overrides.NoInheritedAPIKey {
+	if overrides.NoInheritedUpstream {
 		cfg.Upstream = backend.Upstream{}
 	}
 	if err := cfg.Upstream.Validate(); err != nil {

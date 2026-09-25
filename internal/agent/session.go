@@ -2501,7 +2501,8 @@ func upstreamFailureAdvice(be *backend.Error) string {
 		// say "your API key" and send the reader to `/login` to replace a key they have
 		// never held. `/login` is a real command today, which changes nothing here: no
 		// sign-in reaches a credential the deployment owns. The CLI ships no provider
-		// credential at all; the deployment funds every call with its own.
+		// credential; absent a user-supplied DAINTREE_UPSTREAM_* key (handled above by
+		// IsCallerUpstreamKey), the deployment funds every call with its own.
 		return "Model unavailable: the provider rejected the credential this backend spends. That credential belongs to the deployment, not to your account — nothing on this machine changes it, so report it to whoever runs this backend."
 	case backend.CodeProviderInsufficientCredit:
 		return "Model unavailable: the account this backend spends from is out of credit. It is the deployment's account rather than yours, so topping up your own would not help — report it to whoever runs this backend."

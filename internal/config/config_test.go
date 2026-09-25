@@ -1045,13 +1045,19 @@ func TestUpstreamIsTrustedEnvOnly(t *testing.T) {
 		t.Errorf("DescribeConfig leaked the upstream key: %q", got)
 	}
 
-	// A redirected backend must not inherit the key.
-	cfg, err = LoadConfig(ConfigOverrides{ProjectPath: &dir, NoInheritedAPIKey: true})
+	// A redirected backend must not inherit the key — and a session-supplied account
+	// key (an explicit APIKey, so NoInheritedAPIKey is not set) must not rescue it:
+	// that key replaces who is calling, not which provider key may go to the new host.
+	sessionKey := "sk-test-fakesessionkey1234567890"
+	cfg, err = LoadConfig(ConfigOverrides{ProjectPath: &dir, APIKey: &sessionKey, NoInheritedUpstream: true})
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
 	if cfg.Upstream.IsSet() {
 		t.Errorf("the upstream followed a redirected backend")
+	}
+	if cfg.APIKey != sessionKey {
+		t.Errorf("APIKey = %q, want the session-supplied key kept", cfg.APIKey)
 	}
 }
 
