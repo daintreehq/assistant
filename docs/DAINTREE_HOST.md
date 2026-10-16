@@ -133,6 +133,28 @@ real process environment (or the assistant's own `.env`), **never** from the bou
 Daintree strips inherited `DAINTREE_*` variables from the shell environment before injecting
 its own, so a stale token in the user's OS environment cannot leak in.
 
+### Runbook search: what Daintree reports about Remote Hosts
+
+Not part of this binary's launch: it gets its runbooks from the backend's own selector, never
+from the runbooks MCP endpoint. The agent CLIs Daintree runs as the assistant (Claude Code,
+Codex, Copilot) are handed `daintree-runbooks` at `https://assistant.daintree.org/v1/daintree/mcp`,
+and that connection carries the caller's Remote Host state as two request headers on every
+POST (assistant-backend `docs/MCP.md#host-state`):
+
+| Header | Value |
+| --- | --- |
+| `Daintree-Hosts` | `none` (no Remote Host configured), `configured` (at least one, none connected with "Accept messages from other machines" on), `connected` (at least one connected with it on) |
+| `Daintree-Lane` | `reachable` when another machine's assistant can message this one as its lane: this machine listens as a Remote Host, so a hub can enroll its assistant. Having hosts of its own makes a machine their hub, not a lane. **Omitted otherwise**, never sent as a "no": the backend reads any other value as a malformed snapshot. |
+
+- **Read once, when the session is provisioned**, and held for it. A host that connects later
+  (a droplet spun up mid-session) counts from the next session.
+- **Coarse state only.** No host names, counts, addresses or ids leave the machine.
+- **Connection config, never a tool argument.** Claude and Copilot get literal `headers` on the
+  `type: "http"` entry; Codex gets an `http_headers` inline table in its `-c` overrides.
+- **Unobserved is unreported.** Where Daintree can't observe its hosts (Remote Hosts not started
+  yet, a read that failed), both headers are left out, and a caller without `Daintree-Hosts`
+  searches the whole catalog.
+
 ### The first line: `SessionDescriptor`
 
 ```json
